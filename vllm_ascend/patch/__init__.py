@@ -670,24 +670,29 @@
 # ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
-#      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#      `vllm.v1.structured_output.StructuredOutputManager`
 #    Why:
 #       V1 structured outputs use one engine-level backend, while `backend=auto`
 #       resolves the backend per request. After one request initializes
 #       `xgrammar`, a later request that resolves to `guidance` can still reach
 #       the initialized `xgrammar` backend and crash during grammar compilation.
+#       Upstream also waits until more than 128 requests before filling
+#       non-speculative grammar bitmasks in parallel, leaving the B=128 Ascend
+#       decode path serial.
 #    How:
 #       Record the first resolved backend on the structured-output config and
 #       reject later requests that resolve to a different backend. Also guard
 #       `grammar_init` so requests that bypass API-side validation fail before
-#       backend grammar compilation.
+#       backend grammar compilation. Lower the Ascend parallel bitmask threshold
+#       to 64 and initialize the fill executor for configurations above it.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/43920
 #       https://github.com/vllm-project/vllm/pull/44401
+#       No upstream PR covers the Ascend bitmask parallel-fill threshold.
 #    Future Plan:
-#       Remove this patch once upstream vLLM either enforces backend consistency
-#       before grammar compilation or safely handles mixed-backend grammar
-#       failures without killing the engine.
+#       Remove the backend-consistency patch once upstream vLLM handles mixed
+#       backends safely. Remove the threshold override when upstream exposes a
+#       platform-specific tuning hook or a threshold validated for Ascend.
 #
 #   2. `vllm.v1.structured_output.backend_outlines.OutlinesGrammar.accept_tokens`
 #    Why:
@@ -1395,19 +1400,26 @@
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
-#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`,
+#      `vllm.v1.worker.gpu.structured_outputs`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #       apply_penalties also fails on large input shape because of the triton kernel limitation.
+#       The generic structured-output worker also allocates pinned staging buffers
+#       and rebuilds the request mapping on every grammar decode step.
 #    How：
 #       override triton ops in vLLM with ascend implementation
 #       re-write apply_penalties kernel with minimum change to support large input shape.
+#       Use AscendStructuredOutputsWorker to reuse pinned bitmask/mapping buffers
+#       and retain the device mapping across unchanged non-speculative decode steps.
 #    Test:
 #       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
+#       Grammar worker coverage: tests/ut/worker/v2/test_structured_outputs.py
 #    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
+#       Let vLLM support triton ops dispatch and reusable structured-output staging.
 #    Future Plan:
-#       Remove this patch when vLLM support the dispatch function.
+#       Remove this patch when vLLM supports the dispatch function and provides
+#       reusable pinned staging/mapping buffers for structured-output workers.
 #
 #   2. `vllm.v1.worker.gpu.metrics.logits.libdevice`
 #    Why:

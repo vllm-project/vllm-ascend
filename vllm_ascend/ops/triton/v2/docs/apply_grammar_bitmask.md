@@ -18,6 +18,12 @@ For each vocabulary block, the kernel selects one of three paths:
 
 Inactive speculative positions skip all vocabulary accesses. An empty mask grid returns without launching a Triton kernel.
 
+## Host-side bitmask path
+
+The Ascend structured-output manager starts parallel bitmask filling above 64 non-speculative requests. Speculative decoding, diffusion, and smaller batches retain the upstream serial or request-specific paths.
+
+The Model Runner V2 worker preallocates pinned host buffers for the packed bitmask and request mapping. Consecutive non-speculative decode steps with an unchanged request set and order reuse the device mapping; every step still copies the new bitmask. A copy-stream event protects host buffers from being overwritten while an earlier asynchronous transfer is pending. Speculative positions and changed request mappings are rebuilt on every step.
+
 ## Semantics
 
 For mask row `r` and vocabulary token `v`:
@@ -35,7 +41,7 @@ logits[mapped_row, v] = logits[mapped_row, v]  if allowed
 logits[mapped_row, v] = -inf                    otherwise
 ```
 
-The implementation preserves the input dtype and only writes blocked positions. The final vocabulary block is protected by `vocab_size`; padding words beyond the logical vocabulary are excluded from the fast-path decisions.
+The implementation preserves the input dtype and allowed logit values, and writes `-inf` at blocked positions. The final vocabulary block is protected by `vocab_size`; padding words beyond the logical vocabulary are excluded from the fast-path decisions.
 
 ## Interface and constraints
 
@@ -59,7 +65,7 @@ The NPU test covers:
 - a smaller vocabulary with a non-aligned tail;
 - fully allowed, fully blocked, alternating, and random masks;
 - inactive speculative positions;
-- non-identity request/position mappings;
+- non-identity request/position mappings, including non-speculative decode;
 - a padded bitmask row stride;
 - BF16 logits.
 
@@ -73,9 +79,9 @@ Run the standalone latency benchmark on an Ascend NPU with:
 
 ```bash
 python benchmarks/benchmark_grammar_bitmask.py \
-  --masks 64 --vocab-size 151936 --block-size 8192
+  --output-dir /tmp/grammar-bitmask-profiles
 ```
 
-The benchmark reports the average device-synchronized latency after warmup.
-Use the same runtime, input tensors, warmup count, and iteration count when comparing
-against another kernel implementation.
+The benchmark exports three profiled device latencies per shape after warmup and
+supports loading a baseline kernel with `--kernel-source`. Use the same runtime,
+input shapes, and mask patterns when comparing implementations.

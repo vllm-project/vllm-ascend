@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import functools
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 from inspect import Signature, signature
 from typing import Any
 
@@ -13,8 +15,11 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output import StructuredOutputManager
 
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
+_ORIGINAL_MANAGER_INIT_ATTR = "_vllm_ascend_original_manager_init"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
+_BITMASK_PARALLEL_THRESHOLD = 64
+_BITMASK_PARALLEL_BATCH_SIZE = 16
 _ORIGINAL_OUTLINES_ACCEPT_ATTR = "_vllm_ascend_original_outlines_accept_tokens"
 _ORIGINAL_XGRAMMAR_COMPILE_JSON_ATTR = "_vllm_ascend_original_xgrammar_compile_json_schema"
 
@@ -108,6 +113,22 @@ def _patch_sampling_params_validation() -> None:
 
 
 def _patch_structured_output_manager() -> None:
+    original_manager_init = StructuredOutputManager.__init__
+    setattr(StructuredOutputManager, _ORIGINAL_MANAGER_INIT_ATTR, original_manager_init)
+
+    @functools.wraps(original_manager_init)
+    def manager_init(self: StructuredOutputManager, vllm_config: Any) -> None:
+        original_manager_init(self, vllm_config)
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.fill_bitmask_parallel_threshold = _BITMASK_PARALLEL_THRESHOLD
+        if self.fill_bitmask_parallel_threshold < max_batch_size:
+            self.fill_bitmask_parallel_batch_size = _BITMASK_PARALLEL_BATCH_SIZE
+            if not hasattr(self, "executor_for_fillmask"):
+                max_workers = max(1, min(multiprocessing.cpu_count() // 2, 8))
+                self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)
+
+    StructuredOutputManager.__init__ = manager_init
+
     original_grammar_init = StructuredOutputManager.grammar_init
     setattr(StructuredOutputManager, _ORIGINAL_GRAMMAR_INIT_ATTR, original_grammar_init)
 

@@ -124,6 +124,54 @@ def test_apply_grammar_bitmask_business_shape():
     assert torch.equal(actual.cpu(), expected)
 
 
+def test_apply_grammar_bitmask_non_spec_decode():
+    """Cover the MASK_STRIDE=1 fast path with non-contiguous request mapping."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(23)
+
+    rows = 5
+    vocab_size = 32017
+    mask_words = (vocab_size + 31) // 32
+    logits = torch.randn(rows, vocab_size, dtype=torch.float32, generator=generator).to(torch.bfloat16)
+    mapping = torch.tensor([4, 0, 3, 1, 2], dtype=torch.int32)
+    cu_num_logits = torch.arange(rows + 1, dtype=torch.int32)
+    bitmask = torch.randint(
+        -(2**31),
+        2**31 - 1,
+        (rows, mask_words),
+        dtype=torch.int32,
+        generator=generator,
+    )
+    bitmask[0].fill_(-1)
+    bitmask[1].zero_()
+    bitmask[2, 0] = 0x55555555
+    bitmask[:, -1] = -1
+
+    bit_values = torch.ones(32, dtype=torch.int64) << torch.arange(32, dtype=torch.int64)
+    blocked = (bitmask.to(torch.int64)[:, :, None] & bit_values[None, None, :]) == 0
+    blocked = blocked.reshape(rows, -1)[:, :vocab_size]
+    expected = logits.clone()
+    mapped = expected.index_select(0, mapping.to(torch.int64))
+    mapped.masked_fill_(blocked, -float("inf"))
+    expected.index_copy_(0, mapping.to(torch.int64), mapped)
+
+    actual = logits.to("npu")
+    _apply_grammar_bitmask_kernel[(rows, triton.cdiv(vocab_size, BLOCK_SIZE))](
+        actual,
+        actual.stride(0),
+        mapping.to("npu"),
+        cu_num_logits.to("npu"),
+        bitmask.to("npu"),
+        bitmask.stride(0),
+        vocab_size,
+        MASK_STRIDE=1,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    torch.npu.synchronize()
+
+    assert torch.equal(actual.cpu(), expected)
+
+
 def test_apply_grammar_bitmask_small_tail_and_strided_mask():
     """Cover tail vocab words, inactive rows, and a padded bitmask stride."""
     generator = torch.Generator(device="cpu")
@@ -168,13 +216,15 @@ def test_apply_grammar_bitmask_small_tail_and_strided_mask():
     expected.index_copy_(0, logit_rows.to(torch.int64), mapped)
 
     actual = logits.to("npu")
+    bitmask_npu = bitmask_storage.to("npu")[:, :mask_words]
+    assert bitmask_npu.stride(0) == padded_mask_words
     _apply_grammar_bitmask_kernel[(rows, triton.cdiv(vocab_size, block_size))](
         actual,
         actual.stride(0),
         mapping.to("npu"),
         cu_num_logits.to("npu"),
-        bitmask.to("npu"),
-        bitmask.stride(0),
+        bitmask_npu,
+        bitmask_npu.stride(0),
         vocab_size,
         MASK_STRIDE=mask_stride,
         BLOCK_SIZE=block_size,

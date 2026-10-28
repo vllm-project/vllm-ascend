@@ -241,3 +241,67 @@ def test_failed_first_backend_does_not_lock_manager(monkeypatch):
 
     assert isinstance(manager.backend, FakeXgrammarBackend)
     assert getattr(manager, patch_structured_output._BACKEND_ATTR) == "xgrammar"
+
+
+def make_manager_config(max_num_seqs: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(distributed_executor_backend="mp"),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        model_config=SimpleNamespace(skip_tokenizer_init=True, is_diffusion=False),
+        structured_outputs_config=SimpleNamespace(
+            reasoning_parser_plugin="",
+            reasoning_parser="",
+            enable_in_reasoning=False,
+        ),
+        num_speculative_tokens=0,
+    )
+
+
+def test_parallel_bitmask_fill_starts_above_64_requests():
+    manager = StructuredOutputManager(make_manager_config(128))
+    try:
+        assert manager.fill_bitmask_parallel_threshold == 64
+        assert manager.fill_bitmask_parallel_batch_size == 16
+        assert manager.executor_for_fillmask is not None
+
+        class FakeGrammar:
+            def is_terminated(self):
+                return False
+
+            def fill_bitmask(self, bitmask, index):
+                bitmask[index].fill_(index + 1)
+
+        class FakeBackend:
+            def allocate_token_bitmask(self, max_num_masks):
+                import torch
+
+                return torch.zeros(max_num_masks, 4, dtype=torch.int32)
+
+            def destroy(self):
+                pass
+
+        manager.backend = FakeBackend()
+        requests = {
+            str(index): SimpleNamespace(
+                structured_output_request=SimpleNamespace(
+                    grammar=FakeGrammar(),
+                    reasoning_ended=True,
+                ),
+                sampling_params=SimpleNamespace(structured_outputs=SimpleNamespace()),
+            )
+            for index in range(65)
+        }
+        request_ids = list(requests)
+        parallel = manager.grammar_bitmask(requests, request_ids, {}).copy()
+        manager.fill_bitmask_parallel_threshold = 128
+        serial = manager.grammar_bitmask(requests, request_ids, {})
+        assert (parallel == serial).all()
+    finally:
+        manager.clear_backend()
+
+
+def test_parallel_bitmask_fill_executor_is_not_created_at_64_requests():
+    manager = StructuredOutputManager(make_manager_config(64))
+    assert manager.fill_bitmask_parallel_threshold == 64
+    assert not hasattr(manager, "executor_for_fillmask")
+    manager.clear_backend()

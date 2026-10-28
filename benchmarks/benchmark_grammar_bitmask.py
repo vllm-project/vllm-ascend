@@ -30,8 +30,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     torch.npu.set_device(0)
     torch.manual_seed(14160)
-    for rows in [1, 16, 256]:
-        for vocab in [32000, 152064, 256001]:
+    for rows in [1, 16, 64, 128, 256]:
+        for vocab in [32000, 151936, 152064, 256001]:
             words = triton.cdiv(vocab, 32)
             for pattern in ["allowed", "blocked", "random", "mostly_allowed"]:
                 masks = torch.randint(-(2**31), 2**31 - 1, (rows, words), dtype=torch.int32)
