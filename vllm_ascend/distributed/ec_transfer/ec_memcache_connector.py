@@ -206,9 +206,10 @@ class ECMemcacheConnector(ECConnectorBase):
     # load-or-save decision for an individual feature. It first probes the exact
     # cache in a batch and records only original-image mm_hash hits in
     # ``_mm_hash_hits``. When similarity matching is enabled, exact misses are
-    # then passed to the matcher to precompute/reuse pHash state and prewarm the
-    # corresponding resized-tensor keys. The per-feature decision is deferred to
-    # ``update_state_after_alloc``, which runs after scheduler allocation.
+    # then passed to the matcher to reuse cached pHash state, compute missing
+    # pHash metadata, and prewarm keys for already-persisted candidates. A query
+    # with no pHash is not persisted here; final persistence is deferred to
+    # ``update_state_after_alloc``.
     #
     # A cache miss is a normal prewarm result rather than an availability error,
     # so this method always returns True. ``num_computed_tokens`` is retained for
@@ -244,7 +245,9 @@ class ECMemcacheConnector(ECConnectorBase):
     #      resized tensors, run SSIM, and verify that the winning candidate's
     #      embedding still exists in memcache.
     #   4. Any missing prerequisite, threshold miss, or backend failure falls
-    #      back to saving the current feature after it has been computed.
+    #      back to saving the current feature after it has been computed. Before
+    #      queueing that save, persist and index its resized tensor so the image
+    #      can become a candidate only for future requests, not for itself.
     #
     # The result is accumulated in ``_mm_hashes_need_loads`` or
     # ``_mm_hashes_need_saves`` and later transferred to the worker by
@@ -283,6 +286,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="phash_unavailable",
+                feature=feature.data,
             )
             return
         candidate_mm_hashes_by_hamming = cache_matcher.find_resized_mm_hashes_by_hamming(
@@ -292,6 +296,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="no_hamming_candidate",
+                feature=feature.data,
             )
             return
 
@@ -311,12 +316,14 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="similarity_match_exception",
+                feature=feature.data,
             )
             return
         if ssim_matched_mm_hash is None:
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="ssim_threshold_not_met",
+                feature=feature.data,
             )
             return
         try:
@@ -333,6 +340,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="similar_embedding_unavailable",
+                feature=feature.data,
             )
             return
         self._record_similarity_hit(current_image_mm_hash, ssim_matched_mm_hash)
@@ -351,7 +359,25 @@ class ECMemcacheConnector(ECConnectorBase):
             similar_mm_hash,
         )
 
-    def _record_similarity_miss(self, mm_hash: str, *, reason: str) -> None:
+    def _record_similarity_miss(
+        self,
+        mm_hash: str,
+        *,
+        reason: str,
+        feature: Any | None = None,
+    ) -> None:
+        # Persist before the image enters the save set. Matching is already
+        # complete at this point, so the newly indexed tensor cannot become a
+        # candidate for this same matching attempt.
+        cache_matcher = self._cache_matcher
+        if feature is not None and cache_matcher is not None:
+            try:
+                cache_matcher.persist_missed_resized_tensor(mm_hash, feature)
+            except Exception:
+                logger.exception(
+                    "EC missed resized tensor persistence failed: mm_hash=%s",
+                    mm_hash,
+                )
         self._miss_count += 1
         self._mm_hashes_need_saves.add(mm_hash)
         logger.debug("EC similarity match miss: mm_hash=%s reason=%s", mm_hash, reason)

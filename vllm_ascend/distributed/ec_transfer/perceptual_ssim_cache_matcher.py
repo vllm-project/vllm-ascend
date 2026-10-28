@@ -80,9 +80,12 @@ class PhashSSIMCacheMatcher:
         # matches are ranked once when written, so the first qualified entry is
         # always the best known match for the image.
         self.similarity_cache: dict[str, SimilarityCacheItem] = {}
-        # Reverse pHash lookup containing complete resized-tensor keys. Each
-        # key carries the original mm_hash and the per-image grid, so recalled
-        # tensors no longer require a separate metadata map.
+        # Reverse pHash lookup containing complete resized-tensor keys. A key
+        # is registered when its pHash is computed; the corresponding Memcache
+        # value is written only after final matching marks the image as a save
+        # miss. Read paths tolerate registered keys whose values are absent.
+        # Each key carries the original mm_hash and the per-image grid, so
+        # recalled tensors no longer require a separate metadata map.
         self.phash_to_resized_mm_hashes: dict[int, list[str]] = {}
         # Configured equal-width bands recall pHashes without scanning the reverse
         # map. Exact-only matching leaves this index empty for its lifetime.
@@ -189,7 +192,13 @@ class PhashSSIMCacheMatcher:
         exact_match_missing_mm_hashes: list[str],
         exact_match_missing_features: list[Any],
     ) -> None:
-        """Prewarm all keys needed by cached SSIM hits and pHash candidates."""
+        """Prewarm keys for cached matches without persisting query tensors.
+
+        A query with no local pHash is registered in the local reverse index,
+        but its resized tensor is intentionally not persisted yet. Memcache
+        persistence happens after final matching, and only for a final save
+        miss.
+        """
         if len(exact_match_missing_mm_hashes) != len(exact_match_missing_features):
             raise ValueError(
                 "batch_ensure_similarity_cache_available requires the same number of mm_hashes "
@@ -205,9 +214,10 @@ class PhashSSIMCacheMatcher:
         ) = self._classify_similarity_cache_entries(exact_match_missing_mm_hashes)
 
         mm_hash_to_feature_map = dict(zip(exact_match_missing_mm_hashes, exact_match_missing_features))
-        # Phash match failed, calculate phash and save to memcache and cache
+        # Phash match failed: calculate and register the pHash metadata, but
+        # do not put the query tensor into Memcache before final matching.
         if phash_match_failed_mm_hash_list:
-            self._compute_and_store_missing_phashes(
+            self._compute_and_cache_missing_phashes(
                 phash_match_failed_mm_hash_list,
                 mm_hash_to_feature_map,
             )
@@ -272,12 +282,12 @@ class PhashSSIMCacheMatcher:
                     phash_match_failed_list.append(mm_hash)
         return ssim_exist_list, mm_hash_to_phash_list, phash_match_failed_list
 
-    def _compute_and_store_missing_phashes(
+    def _compute_and_cache_missing_phashes(
         self,
         phash_match_failed_list: list[str],
         mm_hash_to_feature: dict[str, Any],
     ) -> None:
-        """Compute missing pHashes, then persist their resized pixel tensors."""
+        """Compute missing pHashes and publish local recall indexes only."""
         phash_match_failed_features = [mm_hash_to_feature[mm_hash].data for mm_hash in phash_match_failed_list]
         if len(phash_match_failed_list) <= _PARALLEL_SIMILARITY_COMPUTE_THRESHOLD:
             logger.debug(
@@ -285,7 +295,7 @@ class PhashSSIMCacheMatcher:
                 len(phash_match_failed_list),
             )
             for mm_hash, feature in zip(phash_match_failed_list, phash_match_failed_features):
-                self._compute_phash_and_save_resized_tensors(mm_hash, feature)
+                self._compute_phash_and_cache_metadata(mm_hash, feature)
         else:
             logger.debug(
                 "EC missing pHash compute: size=%d mode=parallel workers=%d",
@@ -297,7 +307,7 @@ class PhashSSIMCacheMatcher:
             )
             futures = [
                 self._similarity_compute_executor.submit(
-                    self._compute_phash_and_save_resized_tensors,
+                    self._compute_phash_and_cache_metadata,
                     mm_hash,
                     feature,
                 )
@@ -309,7 +319,7 @@ class PhashSSIMCacheMatcher:
             for future in futures:
                 future.result()
 
-    def _compute_phash_and_save_resized_tensors(
+    def _compute_phash_and_cache_metadata(
         self,
         mm_hash: str,
         feature: Any,
@@ -325,7 +335,66 @@ class PhashSSIMCacheMatcher:
         image_phash = compute_phash(resized_tensor, grid, merge_size=self._merge_size)
         if image_phash is None:
             return
+        resized_key = self._tensor_store.get_resized_key(
+            mm_hash,
+            grid,
+            resized_tensor.shape,
+            resized_tensor.dtype,
+        )
+        with self._similarity_state_lock:
+            self._register_resized_key(image_phash, resized_key)
+            if mm_hash not in self.similarity_cache:
+                self.similarity_cache[mm_hash] = SimilarityCacheItem(
+                    phash=image_phash,
+                    ssim_similar_items=OrderedDict(),
+                )
+                self._evict_similarity_cache_if_needed()
+
+    def _register_resized_key(self, image_phash: int, resized_key: str) -> None:
+        """Register a resized key in pHash indexes; must not write Memcache.
+
+        Must be called while holding ``self._similarity_state_lock``.
+        """
+        candidate_resized_keys = self.phash_to_resized_mm_hashes.get(image_phash)
+        if candidate_resized_keys is None:
+            candidate_resized_keys = []
+            self.phash_to_resized_mm_hashes[image_phash] = candidate_resized_keys
+            if self._config.max_hamming > 0:
+                for band in bands(image_phash):
+                    self._phash_band_index.setdefault(band, set()).add(image_phash)
+        if resized_key not in candidate_resized_keys:
+            candidate_resized_keys.append(resized_key)
+
+    def persist_missed_resized_tensor(
+        self,
+        mm_hash: str,
+        current_feature: Any,
+    ) -> None:
+        """Persist a resized tensor for an image that missed L2.
+
+        Called only after matching has completed. Its local key may already be
+        registered from ensure-time pHash prewarming; persistence now supplies
+        the Memcache value for future requests.
+        """
+        image_phash = self.get_cached_phash(mm_hash)
+        resized_tensor = extract_resized_tensor(current_feature)
+        grid = extract_image_grid(current_feature)
+        if resized_tensor is None or grid is None:
+            logger.debug(
+                "EC missed resized tensor skipped: current=%s reason=no_resized_or_grid",
+                mm_hash,
+            )
+            return
+        if image_phash is None:
+            image_phash = compute_phash(resized_tensor, grid, merge_size=self._merge_size)
+            if image_phash is None:
+                logger.debug(
+                    "EC missed resized tensor skipped: current=%s reason=phash_unavailable",
+                    mm_hash,
+                )
+                return
         if not self._tensor_store.put(mm_hash, resized_tensor, grid):
+            logger.warning("EC missed resized tensor put failed: mm_hash=%s", mm_hash)
             return
         resized_key = self._tensor_store.get_resized_key(
             mm_hash,
@@ -334,15 +403,7 @@ class PhashSSIMCacheMatcher:
             resized_tensor.dtype,
         )
         with self._similarity_state_lock:
-            candidate_resized_keys = self.phash_to_resized_mm_hashes.get(image_phash)
-            if candidate_resized_keys is None:
-                candidate_resized_keys = []
-                self.phash_to_resized_mm_hashes[image_phash] = candidate_resized_keys
-                if self._config.max_hamming > 0:
-                    for band in bands(image_phash):
-                        self._phash_band_index.setdefault(band, set()).add(image_phash)
-            if resized_key not in candidate_resized_keys:
-                candidate_resized_keys.append(resized_key)
+            self._register_resized_key(image_phash, resized_key)
             if mm_hash not in self.similarity_cache:
                 self.similarity_cache[mm_hash] = SimilarityCacheItem(
                     phash=image_phash,

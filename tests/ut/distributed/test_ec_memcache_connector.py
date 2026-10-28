@@ -227,6 +227,7 @@ def test_update_state_after_alloc_uses_cached_ssim_match() -> None:
     assert connector._mm_hash_to_store_key == {"query": "candidate"}
     assert connector._similarity_hit_count == 1
     connector._cache_matcher.get_cached_phash.assert_not_called()
+    connector._cache_matcher.persist_missed_resized_tensor.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -255,10 +256,19 @@ def test_update_state_after_alloc_records_similarity_miss(
         matcher.find_and_cache_matched_ssim.return_value = match_result
     request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
 
-    with patch.object(connector, "_record_similarity_miss", wraps=connector._record_similarity_miss) as record:
+    operation_order: list[str] = []
+    matcher.persist_missed_resized_tensor.side_effect = lambda *_: operation_order.append("persist")
+
+    def record_miss(mm_hash: str, **kwargs):
+        operation_order.append("record")
+        connector._record_similarity_miss(mm_hash, **kwargs)
+
+    with patch.object(connector, "_record_similarity_miss", side_effect=record_miss) as record:
         connector.update_state_after_alloc(request, 0)
 
-    record.assert_called_once_with("query", reason=expected_reason)
+    record.assert_called_once_with("query", reason=expected_reason, feature="query-data")
+    matcher.persist_missed_resized_tensor.assert_called_once_with("query", "query-data")
+    assert operation_order == ["persist", "record"]
     assert connector._mm_hashes_need_saves == {"query"}
     assert connector._mm_hashes_need_loads == set()
 
