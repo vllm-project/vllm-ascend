@@ -1,5 +1,6 @@
-# Diagnostic only: both Decode nodes use eager; do not compare its performance with FULL_DECODE_ONLY.
-test_name: "MiniMax-M3-w8a8-PP-prefix90-PD-diag-eager-local-cache"
+# 16k/1k, prefix caching OFF, 220 prompts, concurrency 22.
+# Prefill = --enforce-eager ; Decode = FULL_DECODE_ONLY (official A3 PD recipe).
+test_name: "MiniMax-M3-w8a8-PP-prefix0-16k-PD-full-decode-only"
 model: "Eco-Tech/MiniMax-M3-w8a8-0626"
 num_nodes: 3
 npu_per_node: 16
@@ -236,14 +237,26 @@ templates:
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
 
 benchmarks:
+  perf_prefix_0_warm_up:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_MiniMax_M3_w8a8_0626
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 22
+    max_out_len: 1024
+    batch_size: 8
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+
   perf_prefix_0:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_MiniMax_M3_w8a8_0626
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 20
+    num_prompts: 220
     max_out_len: 1024
-    batch_size: 5
+    batch_size: 22
     request_rate: 0
-    baseline: 11
+    baseline: 0
     threshold: 0.97
