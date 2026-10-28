@@ -57,6 +57,7 @@ from vllm.v1.worker.utils import extract_layer_index
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.transfer_backend import ensure_mooncake_backend
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -1247,6 +1248,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
+        ensure_mooncake_backend(vllm_config, type(self).__name__)
         self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
