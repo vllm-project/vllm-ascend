@@ -1,5 +1,4 @@
-# Rename to the assigned PR number after opening the draft PR.
-pr: 0
+pr: 20122
 entries:
   - category: performance
     hardware: [A2, A3]
