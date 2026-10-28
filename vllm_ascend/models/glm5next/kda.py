@@ -204,7 +204,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(
         self,
