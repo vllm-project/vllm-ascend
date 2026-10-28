@@ -90,6 +90,17 @@ def test_boolean_mask_write_covers_true_positions():
     assert dirty.take() == [(1, 3), (7, 8)]
 
 
+def test_multi_dimensional_boolean_key_refreshes_the_whole_buffer():
+    # ``arr[arr > 0] = v`` is a legal write that no row index describes. The
+    # data is already written when the tracker sees the key, so it must fall
+    # back to a full refresh rather than raise.
+    dirty = _DirtyRows(4)
+
+    dirty.mark(np.zeros((4, 2), dtype=bool))
+
+    assert dirty.take() == [(0, 4)]
+
+
 def test_repeated_marking_never_loses_rows():
     dirty = _DirtyRows(16)
 
@@ -192,6 +203,16 @@ def test_scattered_numpy_writes_reach_the_device_shadow():
     assert buf._uva[1].eq(5).all()
     assert buf._uva[6].eq(3).all()
     assert buf._uva[0].eq(0).all()
+
+
+def test_multi_dimensional_boolean_write_reaches_the_device_shadow():
+    buf = _fake_buffer(4)
+    mask = np.array([[True, False], [False, False], [False, True], [False, False]])
+
+    buf.np[mask] = 5
+    buf.uva(4)
+
+    assert buf._uva.tolist() == [[5, 0], [0, 0], [0, 5], [0, 0]]
 
 
 def test_torch_view_write_reaches_the_device_shadow():
