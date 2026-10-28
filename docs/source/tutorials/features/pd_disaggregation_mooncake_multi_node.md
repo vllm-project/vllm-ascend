@@ -282,7 +282,7 @@ The complete driver mount includes `driver/topo/950`. All host mount sources mus
 For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. The `/lib/route.conf` mount depends on the CANN version:
 
 - **CANN 9.2.0 and later:** This file is no longer a dependency; omit the mount.
-- **CANN 9.1.0 and 9.1.1:** Device-only UB does not require this file. For Host UB, mount it unless the driver can provide the routing information through procfs; initialization fails if neither source is available.
+- **CANN 9.1.0 and 9.1.1:** The default UB P/D configuration above uses device-only endpoints and does not require this mount. If you explicitly enable Host UB (`ub_ctp:host`), mount the file unless the driver can provide the routing information through procfs.
 
 If needed, generate the file on the host first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`. Host RoCE uses the separate endpoint files described above.
 
