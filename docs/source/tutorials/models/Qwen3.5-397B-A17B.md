@@ -1328,31 +1328,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: benchmark the latency of a single batch of requests.
-- `serve`: benchmark online serving throughput.
-- `throughput`: benchmark offline inference throughput.
-
-Take `serve` as an example:
-
-```shell
-export VLLM_USE_MODELSCOPE=True
-
-vllm bench serve \
-  --model Eco-Tech/Qwen3.5-397B-A17B-w8a8 \
-  --served-model-name qwen3.5 \
-  --dataset-name random \
-  --random-input-len 200 \
-  --num-prompts 200 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./
-```
-
-After several minutes, you can get the performance evaluation result.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
