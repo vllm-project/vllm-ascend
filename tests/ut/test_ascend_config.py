@@ -161,7 +161,7 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
-        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (0, 1), (1, 1), (0, 2), (1, 2)):
             with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
                 clear_ascend_config()
                 config = VllmConfig()
@@ -173,7 +173,7 @@ class TestAscendConfig(TestBase):
                     },
                     "scheduler_config": {"recompute_scheduler_enable": False},
                 }
-                if otp_size > 1 or mlp_size > 0:
+                if otp_size > 1 or mlp_size > 1:
                     with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
                         init_ascend_config(config)
                 else:
@@ -214,7 +214,7 @@ class TestAscendConfig(TestBase):
 
         self.assertEqual(config.kvpp_config.size, 1)
         self.assertFalse(config.xlite_graph_config.enabled)
-        self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 1)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
         self.assertFalse(config.rl_config.enabled)
 
@@ -1313,6 +1313,19 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
+    def test_finegrained_tp_config_defaults_to_one(self):
+        # 1 is vLLM's "size 1 = no sharding" default; every knob starts disabled.
+        config = FinegrainedTPConfig()
+        self.assertEqual(
+            (
+                config.oproj_tensor_parallel_size,
+                config.lmhead_tensor_parallel_size,
+                config.embedding_tensor_parallel_size,
+                config.mlp_tensor_parallel_size,
+            ),
+            (1, 1, 1, 1),
+        )
+
     def _oproj_tp_vllm_config(
         self,
         max_num_batched_tokens=8192,
@@ -1369,7 +1382,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         self.assertEqual(config.oproj_tensor_parallel_size, 2)
         # 300 reqs x decode_query_len 2 (spec window) = 600 > 512: disabled with a warning.
         config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
         # An explicit capture size that covers the step keeps the knob on.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
         config._validate_preconditions(
@@ -1390,8 +1403,8 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # The step bound is knob-independent, so an oversized step disables both knobs together.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
         config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
-        self.assertEqual(config.mlp_tensor_parallel_size, 0)
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
+        self.assertEqual(config.mlp_tensor_parallel_size, 1)
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
