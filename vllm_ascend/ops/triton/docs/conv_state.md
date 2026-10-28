@@ -2,11 +2,11 @@
 
 ## Description
 
-- **Function**: Packs the active requests' convolution states from a strided persistent cache into contiguous temporary storage, or writes the updated states back. The public entry point is `copy_conv_state` in `vllm_ascend/ops/triton/kda/conv_state.py`. The GLM `causal_conv1d` wrapper uses it before and after the AscendC convolution when the state view is non-contiguous; contiguous states bypass both copies. The operator owns the private Triton kernel, stride derivation, tile size, and launch-grid policy.
+- **Function**: Packs the active requests' convolution states from a strided persistent cache into contiguous temporary storage, or writes the updated states back. The public entry point is `copy_conv_state` in `vllm_ascend/ops/triton/kda/conv_state.py`. The GLM `causal_conv1d` wrapper uses it before and after the AscendC convolution for unsupported state layouts, such as channel-strided views. Page- and row-strided states with positive strides and contiguous channels bypass both copies. The operator owns the private Triton kernel, stride derivation, tile size, and launch-grid policy.
 - **Formula**: For request `r`, state row `s`, and channel `d`:
     - `slot = cache_indices[r]` and `active = (0 <= slot < cache.shape[0]) and (query_start_loc[r + 1] > query_start_loc[r])`.
     - With `state_len, dim = cache.shape[1:]`, the cache element offset is `slot * cache.stride(0) + s * cache.stride(1) + d * cache.stride(2)`; the packed offset is `(r * state_len + s) * dim + d`. All strides are in elements, and the operator also derives the index stride from `cache_indices`.
-    - Packing (`write_back=False`) copies active states and fills inactive requests with zero. It sets `packed_indices[r] = r` for active requests and `-1` otherwise.
+    - Packing (`write_back=False`) copies active states and fills inactive requests with zero. It sets `packed_indices[r] = r` for active requests and `requests` otherwise, selecting the dedicated final null slot.
     - Writeback (`write_back=True`) copies packed values into active cache slots only. It preserves inactive slots, physical-page padding, and `packed_indices`.
 - **Algorithm flow**:
     1. Derive requests, state dimensions, and strides from the tensors. Return without a launch for an empty request batch. Internally split each state row into `ceil(dim / 256)` channel tiles and launch `min(requests * state_len * ceil(dim / 256), 65535)` programs. These tuning choices are implementation details, not public API arguments.
@@ -48,10 +48,12 @@ All parameters are required; `write_back` is keyword-only. The function mutates 
 
 ## Test Cases
 
-The existing `test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages` calls the public tensor API and covers both state layouts with `[4, 6, 384]` FP32 cache views, physical-page gaps, negative/out-of-range slots, a zero-length request, and unchanged backing storage outside the updated states. Its deterministic integer-valued FP32 data makes every copied value exactly representable. The test does not reproduce the operator's launch-grid formula; no additional test cases are introduced by this API refactor.
+`test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages` calls the public tensor API and covers both state layouts with `[4, 6, 384]` FP32 cache views, physical-page gaps, negative/out-of-range slots, a zero-length request, and unchanged backing storage outside the updated states. These two parameterized cases retain the original copy assertions.
 
-This is pure data movement: the correctness criterion is exact copied values and exact zero padding (`rtol=0`, `atol=0` for an independent reference). The existing test uses `torch.testing.assert_close` with its default tolerances. Historical A3 validation and its hardware scope are recorded in PR #17010; this document does not claim a new device run.
+`test_conv_state_copy_padding_and_graph_replay` extracts copy regressions from the former convolution tests. Its eight cases cover FP16/BF16, page-strided/channel-strided layouts, and eager/graph execution. Eight requests transition through full, padded, empty and reactivated batches while slot indices change in place. Packing must map the first active request to row zero and inactive requests to the dedicated null slot. Direct updates to packed rows exercise writeback masking without importing FLA. A CPU reference checks packed values, indices and the entire backing allocation exactly, including unused pages, physical gaps and the reserved null row.
+
+The file contains ten cases, all calling `copy_conv_state` directly. It no longer imports the FLA convolution wrapper. The original two cases retain their existing `assert_close` tolerances; the extracted regressions use exactly representable values and `rtol=0`, `atol=0`. Historical A3 validation is recorded in PR #17010 and does not establish hardware validation for the extracted cases.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_copy_conv_state.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_copy_conv_state.py
 ```

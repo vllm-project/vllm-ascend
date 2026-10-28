@@ -63,9 +63,10 @@ Final output dtypes are unchanged: quantized output is INT8 with FP32 scales, an
 
 ## Test Cases
 
-[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains eight cases:
+[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains twelve cases:
 
 - Quantized correctness: FP16 `[1, 4096]` and BF16 `[65, 14336]`, each with both group-list modes. The BF16 case includes zero-token experts and multiple token rows.
+- MoE-derived correctness: four BF16 inputs `[2, 256]`, `[384, 4096]`, `[198, 4096]`, and `[2, 2048]`, using INT64 expert counts in count mode. These preserve the SwiGLU input shapes from the former W8A8 AllGather tests, with deterministic valid routing counts and empty experts. They directly test this kernel rather than the dispatcher/GMM/combine pipeline; NPU validation of these four extracted cases is pending.
 - Non-quantized correctness: FP16 and BF16 `[9, 4096]`, including a zero-token expert.
 - Invalid metadata: unsupported `group_list_type` and unsupported group-list dtype.
 

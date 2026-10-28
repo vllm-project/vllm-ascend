@@ -36,6 +36,21 @@ def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     return quantized, scale
 
 
+def _assert_quantized_result(x, actual, actual_scale):
+    swiglu_ref = _swiglu_reference(x)
+    expected, expected_scale = _dynamic_quant_reference(swiglu_ref)
+    scale_rtol, scale_atol = SCALE_TOLERANCES[x.dtype]
+
+    assert actual.shape == swiglu_ref.shape
+    assert actual.dtype == torch.int8
+    assert actual_scale.shape == (x.shape[0],)
+    assert actual_scale.dtype == torch.float32
+    torch.testing.assert_close(actual_scale.cpu(), expected_scale, rtol=scale_rtol, atol=scale_atol)
+    # The kernel casts through the input dtype before converting to int8.
+    # Permit one quantization bin of error relative to the FP32 reference.
+    torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=0, atol=1)
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
@@ -63,18 +78,32 @@ def test_swiglu_quant_correctness(shape, dtype, group_counts, group_list_dtype, 
         group_list = group_list.cumsum(dim=0)
 
     actual, actual_scale = swiglu_quant(x, group_list, group_list_type=group_list_type)
-    swiglu_ref = _swiglu_reference(x)
-    expected, expected_scale = _dynamic_quant_reference(swiglu_ref)
-    scale_rtol, scale_atol = SCALE_TOLERANCES[dtype]
+    _assert_quantized_result(x, actual, actual_scale)
 
-    assert actual.shape == swiglu_ref.shape
-    assert actual.dtype == torch.int8
-    assert actual_scale.shape == (shape[0],)
-    assert actual_scale.dtype == torch.float32
-    torch.testing.assert_close(actual_scale.cpu(), expected_scale, rtol=scale_rtol, atol=scale_atol)
-    # The kernel casts through the input dtype before converting to int8.
-    # Permit one quantization bin of error relative to the FP32 reference.
-    torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=0, atol=1)
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize(
+    ("shape", "group_counts"),
+    [
+        pytest.param((2, 256), [1, 1] + [0] * 6, id="moe-small"),
+        pytest.param((384, 4096), [6] * 64, id="moe-large"),
+        pytest.param((198, 4096), [25] * 6 + [24] * 2, id="moe-irregular-tokens"),
+        pytest.param((2, 2048), [1, 1] + [0] * 62, id="moe-empty-experts"),
+    ],
+)
+@torch.inference_mode()
+def test_swiglu_quant_moe_routed_shapes(shape, group_counts):
+    # Extracted from the W8A8 AllGather cases: GMM1 produces
+    # [tokens * top_k, 2 * intermediate_size], with INT64 expert counts.
+    torch.manual_seed(42)
+    x = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    group_list = torch.tensor(group_counts, dtype=torch.int64, device=DEVICE)
+
+    actual, actual_scale = swiglu_quant(x, group_list, group_list_type=1)
+    _assert_quantized_result(x, actual, actual_scale)
 
 
 @pytest.mark.skipif(
