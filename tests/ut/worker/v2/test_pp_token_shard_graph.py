@@ -126,10 +126,24 @@ def test_capture_and_replay_preserve_mixed_layout_and_outgoing_bank_shape(monkey
         assert output["hidden_states"].data_ptr() == pointer
         torch.testing.assert_close(output["hidden_states"], torch.arange(shard_rows * 2).reshape(shard_rows, 2) + 1.0)
 
-    monkeypatch.setattr(ModelCudaGraphManager, "release_graphs", lambda *args: None)
+    manager.graphs = {"captured": object()}
+    manager._graphs_captured = True
+    capture_descs = {CUDAGraphMode.FULL: [SimpleNamespace(num_tokens=8)]}
+    manager._capture_descs = capture_descs
+    manager.breakable_cg_runner = None
+    output_buffer = manager.pp_output_buffer
+    pointers = {key: tensor.data_ptr() for key, tensor in output_buffer.backing.items()}
     manager.release_graphs()
-    assert manager.pp_output_buffer is None
-    assert manager.intermediate_tensors is None
+    assert not manager.graphs
+    assert not manager._graphs_captured
+    assert manager._capture_descs is capture_descs
+    assert manager.needs_capture()
+    assert manager.pp_output_buffer is output_buffer
+    assert manager.intermediate_tensors is output_buffer.active
+    manager.capture(_GrowingResidualBank(), state, None, state.pp_input_buffer.active, None, [], None)
+    assert manager.pp_output_buffer is output_buffer
+    assert {key: tensor.data_ptr() for key, tensor in output_buffer.backing.items()} == pointers
+    assert output_buffer.backing["residual"].shape == (4, 3, 2)
 
 
 def test_capture_failure_restores_layout_callback(monkeypatch):

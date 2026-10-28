@@ -290,12 +290,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             if metadata is not None:
                 metadata.finish()
 
-    def release_graphs(self) -> None:
-        super().release_graphs()
-        if self.pp_output_buffer is not None:
-            self.intermediate_tensors = None
-            self.pp_output_buffer = None
-
 
 class ModelWithContext(nn.Module):
     """Define a wrapper model to inject forward context.
