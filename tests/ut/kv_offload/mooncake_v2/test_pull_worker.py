@@ -696,8 +696,14 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
         )
 
 
-def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
-    thread = make_thread(num_speculative_tokens=2)
+@pytest.mark.parametrize(
+    "num_speculative_tokens,num_speculative_blocks,local_blocks,checkpoint",
+    [(2, 2, [1, 2, 3, 4], 2), (5, 0, [7], 7)],
+)
+def test_compute_mamba_state_selects_pre_speculative_local_block(
+    num_speculative_tokens, num_speculative_blocks, local_blocks, checkpoint
+) -> None:
+    thread = make_thread(num_speculative_tokens=num_speculative_tokens)
 
     result = thread._compute_group_block_ids(
         "request",
@@ -706,19 +712,19 @@ def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
         0,
         16,
         16,
-        [1, 2, 3, 4],
-        [1, 2, 3, 4],
+        local_blocks,
+        local_blocks,
         [8, 9, 10],
         32,
         31,
         0,
         1,
         1,
-        make_mamba_spec(),
+        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
         0,
     )
 
-    assert result == [(0, [2], [10])]
+    assert result == [(0, [checkpoint], [10])]
 
 
 def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
@@ -928,28 +934,43 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
 @pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize("worker_rank", [1, 2, 3])
+@pytest.mark.parametrize("recoverssm", [False, True])
 def test_mamba_equal_tp_address_generation_transfers_each_cache(
-    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, recoverssm
 ) -> None:
     tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
     remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
+    shapes = [(3, 16), (2, 4, 4)]
+    dtypes: tuple[torch.dtype, ...] = (torch.float16, torch.float32)
+    local_bases, remote_bases = [1000, 2000], [5000, 6000]
+    strides, block_lens = [128, 256], [96, 128]
+    expected_src, expected_dst = [1128, 2256], [5256, 6512]
+    if recoverssm:
+        shapes += [(2, 6, 4), (2, 6, 8)]
+        dtypes += (torch.float32, torch.float16)
+        local_bases += [3000, 4000]
+        remote_bases += [7000, 8000]
+        strides += [256, 256]
+        block_lens += [192, 192]
+        expected_src += [3256, 4256]
+        expected_dst += [7512, 8512]
     thread = make_thread(
         tp_size=local_tp,
         tp_rank=tp_rank,
         pcp_size=local_pcp,
         pcp_rank=pcp_rank,
-        kv_caches_base_addr=[[1000, 2000]],
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
+        kv_caches_base_addr=[local_bases],
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
     )
     remote = make_pp_metadata(
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
         pcp_tp_base_addrs={
             pcp: {
-                tp: [[5000, 6000]] if tp * remote_pcp + pcp == worker_rank else [[7000, 8000]]
+                tp: [remote_bases] if tp * remote_pcp + pcp == worker_rank else [[base + 2000 for base in remote_bases]]
                 for tp in range(remote_tp)
             }
             for pcp in range(remote_pcp)
@@ -958,9 +979,8 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
-
     thread._append_mamba_transfer_addresses(
-        make_mamba_spec(),
+        replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes),
         remote_pcp_rank,
         remote_tp_rank,
         remote_tp,
@@ -970,10 +990,9 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
         dst,
         lengths,
     )
-
-    assert src == [1128, 2256]
-    assert dst == [5256, 6512]
-    assert lengths == [96, 128]
+    assert src == expected_src
+    assert dst == expected_dst
+    assert lengths == block_lens
 
 
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
