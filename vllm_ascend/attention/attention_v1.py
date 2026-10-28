@@ -271,7 +271,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.utils import (  # noqa: E402 - sectioned/lazy import (port layout)
     MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE,
     is_minimax_m3_fp8_kv_cache,
-    vllm_version_is,
 )
 
 logger = logging.getLogger(__name__)
