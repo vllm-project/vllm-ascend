@@ -1932,6 +1932,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
     ) -> None:
         metadata_cache = self.common_ratio_to_sas_metadata
         assert metadata_cache is not None
+        assert self.num_actual_tokens is not None
         num_reqs = common_attn_metadata.num_reqs
         num_actual_reqs = req.num_actual_reqs
         query_start_loc, seq_lens = req.query_start_loc, req.seq_lens
