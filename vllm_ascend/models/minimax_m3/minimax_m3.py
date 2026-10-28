@@ -112,6 +112,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseBackend,
     AscendMiniMaxM3SparseImpl,
     AscendMiniMaxM3SparseMetadata,
+    _get_minimax_m3_dense_backend,
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
@@ -927,6 +928,9 @@ class MiniMaxM3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+        # Preserve upstream selection and its implementation; specialize only
+        # the standard backend's M3 mixed-KV block declaration before planning.
+        self.attn.attn_backend = _get_minimax_m3_dense_backend(self.attn.attn_backend)
 
     def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q_shape = q.shape

@@ -35,10 +35,7 @@ def ngram_spec_decode_kernel(
 
         # ── Filter phase ────────────────────────────────────────────────
         s_off = tl.arange(0, max_new_tokens)
-        sampled_vals = tl.load(
-            sampled_ptr + batch_idx * max_new_tokens + s_off,
-            care_padding=False,
-        )
+        sampled_vals = tl.load(sampled_ptr + batch_idx * max_new_tokens + s_off)
 
         if discard != 0:
             filtered = tl.full([max_new_tokens], -1, tl.int32)
@@ -119,7 +116,6 @@ def ngram_spec_decode_kernel(
                         tok_j = tl.load(
                             token_ids_ptr + row_off + gp,
                             mask=gp < nt,
-                            care_padding=False,
                         )
                         if NUM_BLOCKS > 1:
                             # Extract S_tail[max_n - n_val + j] via masked selection.
@@ -167,7 +163,6 @@ def ngram_spec_decode_kernel(
                 token_ids_ptr + row_off + draft_start + d_off,
                 mask=can_copy,
                 other=-1,
-                care_padding=False,
             )
             tl.store(draft_token_ids_ptr + batch_idx * k + d_off, draft_vals)
             # Draft tokens copied from the sequence are real (>= 0) token ids, so
