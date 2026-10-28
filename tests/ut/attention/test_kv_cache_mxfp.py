@@ -109,7 +109,6 @@ def test_cyclic_copy_moves_all_four_payloads_with_nonzero_offset(ratio):
     assert (backing[:offset] == 91).all() and (backing[-guard:] == 91).all()
 
 
-@pytest.mark.parametrize("ratio", [1, 2, 8])
 @pytest.mark.parametrize("case", ["raw_short", "pitch_short", "raw_stride", "bad_v_dim", "bad_k_dim"])
 def test_invalid_views_fail_before_as_strided(case):
     raw = torch.zeros(2 * 270336, dtype=torch.int8)

@@ -15,9 +15,6 @@ def test_use_v2_model_runner_is_driven_by_ascend_default():
     assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
 
 
-@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
-@pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.parametrize("prefill_context_parallel_size", [1, 2])
 @pytest.mark.parametrize("method", ["eagle3", "mtp", "dspark"])
 @pytest.mark.parametrize("enable_sp", [False, True])
 def test_native_v2_spec_pp_validation(method, enable_sp):

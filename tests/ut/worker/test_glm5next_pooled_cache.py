@@ -4,7 +4,6 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
@@ -131,7 +130,6 @@ def _make_plan(num_blocks=3, main_head_size=4):
     return config, groups, plan
 
 
-@pytest.mark.parametrize("offset", [0, 64])
 def test_padded_page_layout_rejected_without_tail_caches():
     # A standalone MTP runner has the same attention specs but no recurrent
     # state caches, so no state view needs the padded page stride.
