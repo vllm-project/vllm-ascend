@@ -215,8 +215,7 @@ are not interchangeable.
 | `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
 | `--reasoning-parser` | Separates reasoning from the final answer. Use `glm47` for all examples on this page. |
-
-`--safetensors-load-strategy prefetch` reads checkpoint files into the operating system page cache before workers load them. It can help with network or high-latency storage and needs sufficient host memory; it does not preload weights into NPU memory. See [vLLM weight-loading options](https://docs.vllm.ai/en/latest/configuration/engine_args/#--safetensors-load-strategy).
+| `--safetensors-load-strategy prefetch` | Reads checkpoint files into the operating system page cache before workers load them. It can help with network or high-latency storage and needs sufficient host memory; it does not preload weights into NPU memory. See [vLLM weight-loading options](https://docs.vllm.ai/en/latest/configuration/engine_args/#--safetensors-load-strategy). |
 
 ### 5.1 Single-Node Online Deployment
 
