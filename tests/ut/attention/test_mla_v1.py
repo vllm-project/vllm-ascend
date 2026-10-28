@@ -1908,8 +1908,8 @@ class TestAscendMLAImpl(TestBase):
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
         # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.31.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.31.0")
+        # v0.32.0 keeps a separate gate and a two-shard projection.
+        gate_fused = not vllm_version_is("0.32.0")
 
         impl = self._rebuild_impl()
 
@@ -3645,7 +3645,7 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="gate-fused QKV-A layout is vLLM main only",
 )
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
