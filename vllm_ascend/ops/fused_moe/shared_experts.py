@@ -23,7 +23,12 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.logger import logger
-from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
+from vllm.model_executor.layers.activation import (
+    SiluAndMul,
+    SiluAndMulWithClamp,
+    SituAndMul,
+    SwigluOAIAndMul,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -175,22 +180,21 @@ class AscendSharedExperts:
             )
             self._megamoe_shared_fusion_disabled = True
             return
-        # The operator applies the routed activation to the shared experts too,
-        # so only the standard SiluAndMul pairing can be fused.
-        activation = getattr(self.moe_layer, "activation", "silu")
-        routed_activation = activation.name.lower() if hasattr(activation, "name") else str(activation)
-        if (
-            routed_activation != "silu"
-            or isinstance(self.layer.act_fn, SituAndMul)
-            or not isinstance(self.layer.act_fn, SiluAndMul)
-        ):
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported for shared activation %s "
-                "with routed activation %s; keeping the separate shared-expert forward.",
-                type(self.layer.act_fn).__name__,
-                routed_activation,
+        # The operator exposes a single global activation/activation_params
+        # pair that it applies to the shared experts too, so fusion is only
+        # valid when the shared activation is the *same function* as the
+        # routed one: equal activation type AND equal activation params
+        # (e.g. SituAndMul beta/linear_beta, SwiGLU-OAI alpha/beta/limit).
+        # Parameterized activations of the same class but different params
+        # (or an unbounded shared SiluAndMul under a clamped routed swiglu)
+        # must keep the separate shared-expert forward.
+        routed_activation = self._routed_megamoe_activation_signature()
+        shared_activation = self._shared_megamoe_activation_signature()
+        if shared_activation is None or shared_activation != routed_activation:
+            self._disable_megamoe_shared_fusion(
+                f"shared activation {type(self.layer.act_fn).__name__} {shared_activation} "
+                f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
             )
-            self._megamoe_shared_fusion_disabled = True
             return
         # Sequence-parallel shared experts rely on split/gather layouts that
         # the fused operator does not reproduce.
@@ -203,6 +207,74 @@ class AscendSharedExperts:
             (self.layer.down_proj, "w2"),
         ):
             self._wrap_linear_for_megamoe_fusion(linear, slot)
+
+    def _routed_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+        """Canonical ``(name, params)`` of the activation the operator executes.
+
+        Mirrors :func:`select_mega_moe_activation_kwargs`: whatever kwargs this
+        builds are the ones actually bound into the CANN MegaMoe call, so this
+        — not the raw ``FusedMoEConfig.activation`` tag — is the function the
+        shared experts must equal. ``None`` marks an activation the operator
+        cannot represent (GELU variants, swiglustep, ...), which always keeps
+        the separate shared-expert forward.
+        """
+        moe_config = self.moe_config
+        activation = getattr(moe_config, "activation", "silu")
+        name = str(getattr(activation, "value", activation)).lower()
+        clamp = moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None
+        if name == "situ":
+            params = {"beta": 1.0 if moe_config.activation_situ_beta is None else moe_config.activation_situ_beta}
+            if moe_config.activation_situ_linear_beta is not None:
+                params["linear_beta"] = moe_config.activation_situ_linear_beta
+            return ("situglu", params)
+        if name in ("swigluoai", "swigluoai_uninterleave"):
+            params = {
+                "alpha": 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha,
+                "beta": 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta,
+            }
+            if clamp is not None:
+                params["clamp"] = clamp
+            return ("swigluoai", params)
+        if name == "silu":
+            params = {"alpha": 1.0, "beta": 0.0}
+            if clamp is not None:
+                params["clamp"] = clamp
+            return ("silu", params)
+        return None
+
+    def _shared_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+        """Canonical ``(name, params)`` of the shared expert's activation module.
+
+        ``None`` when the activation has no MegaMoe counterpart (GELU variants,
+        unknown custom activations) or its standalone Ascend semantics cannot
+        be reproduced by the operator's single global activation.
+        """
+        act_fn = self.layer.act_fn
+        if isinstance(act_fn, SituAndMul):
+            params = {"beta": act_fn.beta}
+            if act_fn.linear_beta is not None:
+                params["linear_beta"] = act_fn.linear_beta
+            return ("situglu", params)
+        if isinstance(act_fn, SiluAndMulWithClamp):
+            params = {"alpha": getattr(act_fn, "alpha", 1.0), "beta": getattr(act_fn, "beta", 0.0)}
+            limit = getattr(act_fn, "swiglu_limit", None)
+            if limit is not None and limit > 0:
+                params["clamp"] = limit
+            return ("silu", params)
+        if isinstance(act_fn, SiluAndMul):
+            return ("silu", {"alpha": 1.0, "beta": 0.0})
+        # vLLM's SwigluOAIAndMul hardcodes (up + 1); model-private look-alikes
+        # (e.g. MiniMaxM3SwiGLUOAI) carry alpha/beta/limit as attributes.
+        if isinstance(act_fn, SwigluOAIAndMul) or (hasattr(act_fn, "alpha") and hasattr(act_fn, "limit")):
+            params = {
+                "alpha": act_fn.alpha,
+                "beta": getattr(act_fn, "beta", 1.0),
+            }
+            limit = getattr(act_fn, "limit", None)
+            if limit is not None and limit > 0:
+                params["clamp"] = limit
+            return ("swigluoai", params)
+        return None
 
     def _wrap_linear_for_megamoe_fusion(self, linear: torch.nn.Module, slot: str) -> None:
         """Rebuild the shared weight right after its linear is processed.
