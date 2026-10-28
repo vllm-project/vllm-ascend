@@ -6,10 +6,13 @@ import logging
 from typing import Any
 
 from vllm_ascend.observability.ms_metrics.handlers.common import (
+    METRIC_LEVEL_DETAIL,
     MetricSpec,
     MetricType,
+    invoke_original,
     metric_enabled,
     record_metric,
+    record_observation,
     register_metrics,
     safe_recording,
 )
@@ -86,4 +89,27 @@ def eplb_do_update_hotness_handler(original_func, worker, *args, **kwargs):
                             "layer": str(layer_index),
                         },
                     )
+    return result
+
+
+_TRANSFER_SPEC = MetricSpec(
+    "eplb:expert_weight_transfer:duration",
+    MetricType.HISTOGRAM,
+    (),
+    level=METRIC_LEVEL_DETAIL,
+)
+
+
+def eplb_expert_weight_transfer_handler(original_func, loader, *args, **kwargs):
+    """Wall clock of ``D2DExpertWeightLoader.asyn_expert_weight_transfer``."""
+    result, elapsed_ms = invoke_original(original_func, (loader, *args), kwargs)
+    record_observation(
+        _eplb_metrics_recorders,
+        "eplb_weight_transfer",
+        (_TRANSFER_SPEC,),
+        _TRANSFER_SPEC,
+        elapsed_ms,
+        {},
+        "eplb_weight_transfer",
+    )
     return result

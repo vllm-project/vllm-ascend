@@ -82,10 +82,12 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
         "eplb_metrics.yaml",
+        "rl_lifecycle_metrics.yaml",
+        "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 12
+    assert len(config) == 24
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -134,7 +136,7 @@ def test_provider_entry_point_loads_without_metric_core(monkeypatch):
 
 
 def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     _install_provider_api(
         monkeypatch,
         MetricType=metric_type,
@@ -150,6 +152,8 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
+        "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
@@ -163,7 +167,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 2
+    assert len(config_paths) == 4
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -185,7 +189,7 @@ def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
 
 
 def test_eplb_handler_records_rank_zero_hotness(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
@@ -227,7 +231,7 @@ def test_eplb_handler_records_rank_zero_hotness(monkeypatch):
 
 
 def test_eplb_handler_registers_metrics_once_per_recorder(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     first_metrics = Mock()
     current_metrics = [first_metrics]
     _install_provider_api(
@@ -260,7 +264,7 @@ def test_eplb_handler_registers_metrics_once_per_recorder(monkeypatch):
 
 
 def test_eplb_handler_skips_nonzero_rank(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
@@ -275,7 +279,7 @@ def test_eplb_handler_skips_nonzero_rank(monkeypatch):
 
 
 def test_eplb_handler_skips_when_recorder_unavailable(monkeypatch, caplog):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     _install_provider_api(
         monkeypatch,
         MetricType=metric_type,
@@ -302,7 +306,7 @@ def test_eplb_handler_skips_when_recorder_unavailable(monkeypatch, caplog):
 
 
 def test_eplb_handler_given_metric_failure_then_preserves_inference_result(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     metrics = Mock()
     metrics.get_or_create_metric.side_effect = RuntimeError("registry unavailable")
     _install_provider_api(
@@ -351,7 +355,7 @@ def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(mon
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
     common = _load_source("test_metric_level_common", "handlers/common.py")
@@ -382,7 +386,7 @@ def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(mon
 def test_set_metric_level_rejects_unknown_value(monkeypatch):
     _install_provider_api(
         monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: None,
     )
     common = _load_source("test_metric_level_reject", "handlers/common.py")
@@ -397,7 +401,7 @@ def test_eplb_handler_skips_recording_when_level_off(monkeypatch, caplog):
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
     handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_level_off", "eplb")
@@ -416,7 +420,7 @@ def test_eplb_handler_skips_higher_level_series_until_level_rises(monkeypatch):
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
     handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_level_rise", "eplb")
@@ -448,3 +452,30 @@ def test_eplb_handler_skips_higher_level_series_until_level_rises(monkeypatch):
     assert metrics.get_or_create_metric.call_count == 9
     recorded_names = [call.args[0] for call in metrics.record_metric.call_args_list]
     assert recorded_names.count("eplb:expert_hotness:imbalance") == 4
+
+
+def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_schedule_execute_symbol_hooks", "schedule_execute")
+    common = sys.modules[_COMMON_MODULE]
+    common.set_metric_level("basic")
+
+    assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
+    metrics.record_metric.assert_not_called()
+
+    output = type("Output", (), {"preempted_req_ids": {"req-a", "req-b"}})()
+    assert handlers.schedule_preempt_handler(lambda scheduler: output, object()) is output
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"reason": "scheduled"}
+    assert metrics.record_metric.call_args.kwargs["value"] == 2.0
+
+    lifecycle = _load_feature_handlers(monkeypatch, "test_rl_lifecycle_symbol_hooks", "rl_lifecycle")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
+    assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"

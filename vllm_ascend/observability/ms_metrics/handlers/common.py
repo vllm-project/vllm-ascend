@@ -14,7 +14,8 @@ Runtime config sets it from ``metrics.level``.
 
 import contextlib
 import logging
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,8 +38,10 @@ __all__ = [
     "MetricSpec",
     "MetricType",
     "get_metric_level",
+    "invoke_original",
     "metric_enabled",
     "record_metric",
+    "record_observation",
     "register_metrics",
     "safe_recording",
     "set_metric_level",
@@ -95,6 +98,34 @@ def register_metrics(
         )
     recorders[recorder_key] = (metrics, active_level)
     return metrics
+
+
+def invoke_original(original_func: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[Any, float]:
+    """Call the wrapped function and return ``(result, elapsed_ms)``.
+
+    The elapsed time is omitted when the call raises, so a failed inference
+    step is not recorded as a successful sample.
+    """
+    started = time.perf_counter()
+    result = original_func(*args, **kwargs)
+    return result, (time.perf_counter() - started) * 1000.0
+
+
+def record_observation(
+    recorders: dict[str, Any],
+    recorder_key: str,
+    specs: Iterable[MetricSpec],
+    spec: MetricSpec,
+    value: float,
+    labels: dict[str, str],
+    feature: str,
+) -> None:
+    """Register ``specs`` and record one observation when the level allows it."""
+    if not metric_enabled(spec):
+        return
+    with safe_recording(feature):
+        metrics = register_metrics(specs, recorders, recorder_key)
+        record_metric(metrics, spec, value, labels)
 
 
 def record_metric(
