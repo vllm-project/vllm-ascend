@@ -246,7 +246,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --max-num-batched-tokens 10240 \
         --served-model-name dsv4 \
         --gpu-memory-utilization 0.9 \
-        --api-server-count 1 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
         --tensor-parallel-size 4 \
@@ -3076,7 +3075,7 @@ This section verifies basic inference functionality for all deployment modes. Fo
 
 Once your server is started, you can query the model with input prompts:
 
-Replace `<node0_ip>` and `<port>` with the IP address and port of the API server. For Prefill/Decode (PD) disaggregated deployments, use the proxy's IP address and port instead.
+Replace `<node0_ip>` and `<port>` with the IP address and port of the API server for the single-node deployment in Section 5.1. For the PD separation deployment in Section 5.2 or the KV Cache Pool deployment in Section 5.3, use the proxy's IP address and port, since requests are routed through the proxy to the Prefill and Decode instances.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
