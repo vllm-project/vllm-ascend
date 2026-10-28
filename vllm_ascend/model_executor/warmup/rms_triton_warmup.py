@@ -43,18 +43,36 @@ def _variance_epsilon(model_config) -> float:
 def collect_triton_rms_warmup_block_m_values() -> list[int]:
     """``BLOCK_M`` constexpr values selected by ``triton_q_rms``.
 
-    ``BLOCK_M = min(ROW_BLOCK_SIZE, cdiv(total_batch, num_vectorcore))``, so every
-    integer in ``[1, ROW_BLOCK_SIZE]`` must be JIT-compiled once.
+    The live kernel floors to a power of two, so only these five values are
+    JIT keys. Warming ``range(1, 17)`` would re-compile 1/2/4/8 and waste
+    launches on 3/5/6/7/9-15.
     """
-    return list(range(1, _ROW_BLOCK_SIZE + 1))
+    values = []
+    block_m = 1
+    while block_m <= _ROW_BLOCK_SIZE:
+        values.append(block_m)
+        block_m *= 2
+    return values
 
 
 @torch.inference_mode()
-def triton_rms_warmup(worker: NPUWorker) -> None:
-    """JIT ``triton_q_rms`` kernels before the first real call."""
+def triton_rms_warmup(worker: NPUWorker, assume_used: bool = False) -> None:
+    """JIT ``triton_q_rms`` kernels before the first real call.
+
+    ``assume_used`` is for construct-time early warmup: ``model_runner.attn_groups``
+    does not exist yet. The regular ``kernel_warmup`` call leaves it False.
+    """
     if not HAS_TRITON:
         return
-    if not _model_uses_triton_q_rms(worker.model_runner):
+    try:
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            join_early_kernel_warmup,
+        )
+
+        join_early_kernel_warmup("rms")
+    except ImportError:
+        pass
+    if not assume_used and not _model_uses_triton_q_rms(worker.model_runner):
         return
 
     try:
@@ -72,8 +90,7 @@ def triton_rms_warmup(worker: NPUWorker) -> None:
     variance_epsilon = _variance_epsilon(worker.vllm_config.model_config)
     num_vectorcore = max(get_vectorcore_num(), 1)
 
-    # Choose shapes so ``triton_q_rms`` selects each ``BLOCK_M`` value:
-    # ``BLOCK_M = min(16, cdiv(total_batch, num_vectorcore))``.
+    # Choose shapes so ``triton_q_rms`` selects each power-of-two ``BLOCK_M``.
     # Use ``head_num=1`` so ``bs * head_num == total_batch``.
     for block_m in block_m_values:
         total_batch = block_m * num_vectorcore

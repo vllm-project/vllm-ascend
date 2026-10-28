@@ -25,7 +25,7 @@ torch_npu.npu_sparse_attention_score(
 
 ## Constraints
 
-- Platform: Ascend 950
+- Platform: Ascend 950PR&950DT 系列产品平台
 - `block_size = 128`
 - GQA is supported (`num_heads` must be divisible by `num_key_value_heads`).
 - FP8 input requires a dequantization scale.

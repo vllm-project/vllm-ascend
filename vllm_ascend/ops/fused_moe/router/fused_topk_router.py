@@ -22,6 +22,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
@@ -163,7 +164,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
-                    input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
+                    input_ids = prepare_finalize.all_gather_input_ids(input_ids)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
                 if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:
@@ -176,7 +177,10 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             else:
                 input_ids = None
                 tid2eid_ones = None
-            if self.bias_vl is not None and input_ids is not None:
+            fused_vision_hash = self.bias_vl is not None and get_current_hardware_profile().supports(
+                HardwareCapability.MOE_GATING_TOP_K_HASH_VISION
+            )
+            if self.bias_vl is not None and input_ids is not None and not fused_vision_hash:
                 topk_weights, topk_ids = select_deepseek_v4_vision_experts(
                     router_logits=router_logits,
                     input_ids=input_ids,
@@ -191,10 +195,16 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 return topk_weights.to(torch.float32), topk_ids.to(
                     torch.int32 if indices_type is None else indices_type
                 )
+            bias_vl = self.bias_vl
+            if bias_vl is not None and bias_vl.dtype != router_logits.dtype:
+                bias_vl = bias_vl.to(router_logits.dtype)
+            text_bias = self.e_score_correction_bias
+            if text_bias is not None and text_bias.dtype != router_logits.dtype:
+                text_bias = text_bias.to(router_logits.dtype)
             topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
                 x=router_logits,
                 k=self.top_k,
-                bias=self.e_score_correction_bias,
+                bias=text_bias,
                 input_ids=input_ids,
                 tid2eid=tid2eid_ones,
                 k_group=topk_group,
@@ -202,13 +212,15 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 routed_scaling_factor=self.routed_scaling_factor,
                 eps=1e-20,
                 group_select_mode=1,
-                # The hash custom op currently rejects renorm != 0. Apply
-                # norm_topk_prob in Python below before returning to MoE compute.
+                # The hash custom op currently accepts only renorm=0.
                 renorm=0,
                 norm_type=2,
                 out_flag=False,
+                bias_vl=bias_vl,
+                image_sentinel_lo=self.image_sentinel_lo,
+                image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
             )
-            return topk_weights, topk_ids
+            return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
             self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)

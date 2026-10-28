@@ -140,6 +140,18 @@ public:
             .ExtendCfgInfo("opFile.value", "scatter_nd_update_sk");
         this->AICore().AddConfig("ascend910b", aicoreConfigArch22);
         this->AICore().AddConfig("ascend910_93", aicoreConfigArch22);
+
+        // arch35 (ascend950) regbase 配置：kernel 入口为 scatter_nd_update_sk_apt，
+        // dtype/format 继承顶层声明，tiling 由 ScatterNdUpdateSkTilingRegbase 注册分发
+        OpAICoreConfig aicoreConfigArch35;
+        aicoreConfigArch35.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(false)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .PrecisionReduceFlag(true)
+            .ExtendCfgInfo("opFile.value", "scatter_nd_update_sk_apt");
+        this->AICore().AddConfig("ascend950", aicoreConfigArch35);
     }
 };
 

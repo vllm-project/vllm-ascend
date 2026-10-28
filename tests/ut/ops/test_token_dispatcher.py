@@ -136,15 +136,14 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         # Mock get_ascend_config()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.get_mc2_comm_alg = MagicMock()
-        mock_ascend_config.get_mc2_comm_alg.return_value = ""
+        mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.eplb_config = MagicMock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_ascend_config.combine_quant_mode = 0
         self.ascend_config_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config", return_value=mock_ascend_config
         )
-        self.mock_ascend_config = self.ascend_config_patch.start()
+        self.ascend_config_patch.start()
         self.ascend_config_utils_patch = patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config)
         self.ascend_config_utils_patch.start()
         # Keep a handle so individual tests can set combine_quant_mode.
@@ -206,8 +205,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertNotIn("x_active_mask", kwargs)
 
     def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
-        self.mock_skip_allreduce.return_value = False
-        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -221,7 +218,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             mc2_mask=mc2_mask,
         )
 
-        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["global_bs"], 0)
         self.assertIs(kwargs["x_active_mask"], mc2_mask)
@@ -313,7 +310,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_CUMSUM)
 
     def test_get_combine_mc_kwargs_with_quant(self):
-        hidden_states = torch.randn(10, 128)
+        hidden_states = torch.randn(10, 128, dtype=torch.bfloat16)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
@@ -344,6 +341,8 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.moe_expert_num = len(expert_map)
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
+        self.assertIs(kwargs["expert_scales"], topk_weights)
+        self.assertEqual(kwargs["expert_scales"].dtype, torch.float32)
 
     def test_get_combine_mc_kwargs_combine_quant_mode_forces_quant_mode(self):
         # When additional_config.combine_quant_mode is non-zero (here 4), the
@@ -981,6 +980,62 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
+
+    def test_lora_context_without_adapter_skips_lora_index_collectives(self):
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True),
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(8, 16, dtype=torch.bfloat16),
+            topk_weights=torch.rand(8, 4),
+            topk_ids=torch.randint(0, 4, (8, 2)).long(),
+            expert_map=torch.tensor([0, 1, 2, 3]),
+            quant_type=QuantType.NONE,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_preprocess,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_postprocess,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input)
+
+        mock_preprocess.assert_not_called()
+        mock_all2all.assert_not_called()
+        mock_postprocess.assert_not_called()
+
+    def test_lora_context_with_active_adapter_runs_lora_index_collectives(self):
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False),
+                split_lora_indices=torch.zeros(8, dtype=torch.long),
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(8, 16, dtype=torch.bfloat16),
+            topk_weights=torch.rand(8, 4),
+            topk_ids=torch.randint(0, 4, (8, 2)).long(),
+            expert_map=torch.tensor([0, 1, 2, 3]),
+            quant_type=QuantType.NONE,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_preprocess,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_postprocess,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input)
+
+        mock_preprocess.assert_called_once()
+        mock_all2all.assert_called_once()
+        mock_postprocess.assert_called_once()
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):

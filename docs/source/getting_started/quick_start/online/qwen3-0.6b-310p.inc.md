@@ -30,22 +30,25 @@ You can query the model list:
 
 <!-- doctest: quickstart-300i-duo-online-model-list -->
 ```bash
-curl http://localhost:8000/v1/models | python3 -m json.tool
+curl --fail http://localhost:8000/v1/models
 ```
 
 You can also send a prompt to the model:
 
 <!-- doctest: quickstart-300i-duo-online-completion -->
 ```bash
-curl http://localhost:8000/v1/completions \
+curl --fail http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "Qwen/Qwen3-0.6B",
         "prompt": "Beijing is a",
-        "max_completion_tokens": 5,
+        "max_tokens": 5,
         "temperature": 0
-    }' | python3 -m json.tool
+    }'
 ```
+
+Confirm that the response contains nonempty generated text in `choices[0].text`.
+An error response or an empty completion does not confirm successful inference.
 
 vLLM is running as a background process. You can use `kill -2 $VLLM_PID` to stop it gracefully, which is similar to pressing `Ctrl+C` for a foreground vLLM process:
 

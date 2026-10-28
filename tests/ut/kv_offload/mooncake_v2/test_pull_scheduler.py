@@ -10,31 +10,43 @@ import msgspec
 import pytest
 import torch
 import zmq
-from vllm.v1.request import RequestStatus
+from vllm.sampling_params import SamplingParams
+from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
+    DONE_RECVING_MSG,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
 )
 
-from .helpers import make_blocks, make_full_spec, make_mamba_spec, make_request, make_transfer_metadata
+from .helpers import (
+    make_blocks,
+    make_circular_spec,
+    make_full_spec,
+    make_mamba_spec,
+    make_request,
+    make_transfer_metadata,
+)
 
 
 def make_sending_thread(
-    metadata: dict[int | tuple[int, int], object] | None = None,
+    metadata: dict[int | tuple[int, ...], object] | None = None,
     *,
     tp_size: int = 1,
     pp_size: int = 1,
+    pcp_size: int = 1,
     dcp_size: int = 1,
+    use_kv_pp: bool = False,
 ) -> MooncakeSchedulerSendingThread:
     return MooncakeSchedulerSendingThread(
         host="127.0.0.1",
@@ -43,8 +55,9 @@ def make_sending_thread(
         metadata=metadata or {0: make_transfer_metadata()},  # type: ignore[arg-type]
         tp_size=tp_size,
         pp_size=pp_size,
-        pcp_size=1,
+        pcp_size=pcp_size,
         dcp_size=dcp_size,
+        use_kv_pp=use_kv_pp,
         ready_event=threading.Event(),
     )
 
@@ -55,6 +68,7 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler.num_speculative_tokens = 0
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
+    scheduler.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     scheduler.group_block_size = [16]
     scheduler.group_unique_specs = [[make_full_spec()]]
     scheduler.engine_id = "engine-p"
@@ -80,9 +94,10 @@ def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == first.layer_names
     assert pp_metadata.block_shapes == first.block_shapes
-    assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000]]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[2000]]
-    assert pp_metadata.metadata_by_tp_rank[1].te_rpc_port == 9001
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].kv_caches_base_addr == [[1000]]
+    assert tp_metadata[1].kv_caches_base_addr == [[2000]]
+    assert tp_metadata[1].te_rpc_port == 9001
 
 
 def test_sending_thread_merges_layer_split_metadata_by_name() -> None:
@@ -107,17 +122,18 @@ def test_sending_thread_merges_layer_split_metadata_by_name() -> None:
         block_size_scales=[[1], [1]],
     )
 
-    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2, use_kv_pp=True)
     decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
 
     assert decoded.use_kv_pp is True
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == ["layer.0", "layer.1", "layer.2"]
     assert pp_metadata.layer_block_sizes == [16, 16, 16]
-    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 2]
-    assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000], [], [3000]]
-    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [1, 2]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[], [2000], [4000]]
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].layer_indices == [0, 2]
+    assert tp_metadata[0].kv_caches_base_addr == [[1000], [], [3000]]
+    assert tp_metadata[1].layer_indices == [1, 2]
+    assert tp_metadata[1].kv_caches_base_addr == [[], [2000], [4000]]
 
 
 def test_sending_thread_rejects_layer_split_with_dcp() -> None:
@@ -129,8 +145,8 @@ def test_sending_thread_rejects_layer_split_with_dcp() -> None:
         base_addrs=[[2000]],
     )
 
-    with pytest.raises(ValueError, match="LayerSplit cannot be combined with DCP"):
-        make_sending_thread({0: tp0, 1: tp1}, tp_size=2, dcp_size=2)
+    with pytest.raises(ValueError, match="KVPP cannot be combined with DCP"):
+        make_sending_thread({0: tp0, 1: tp1}, tp_size=2, dcp_size=2, use_kv_pp=True)
 
 
 def test_sending_thread_aligns_different_tp_layer_orders() -> None:
@@ -160,9 +176,10 @@ def test_sending_thread_aligns_different_tp_layer_orders() -> None:
 
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == ["layer.0", "layer.1"]
-    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 1]
-    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [0, 1]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].layer_indices == [0, 1]
+    assert tp_metadata[1].layer_indices == [0, 1]
+    assert tp_metadata[1].kv_caches_base_addr == [
         [3000],
         [4000],
     ]
@@ -179,8 +196,60 @@ def test_sending_thread_accepts_pp_aware_keys() -> None:
     assert decoded.metadata_by_pp_rank[1].layer_names == ["pp1.layer"]
 
 
+def test_sending_thread_groups_kvpp_layers_across_all_pcp_tp_workers() -> None:
+    metadata: dict[int | tuple[int, ...], object] = {}
+    for pcp_rank, tp_rank, kvpp_rank in ((0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)):
+        metadata[(0, pcp_rank, tp_rank)] = make_transfer_metadata(
+            te_rpc_port=9000 + kvpp_rank,
+            local_ip=f"10.0.{pcp_rank}.{tp_rank + 1}",
+            layer_names=[f"layer.{kvpp_rank}", "mtp.layer"],
+            base_addrs=[[1000 + kvpp_rank * 1000], [9000 + kvpp_rank * 100]],
+            handshake_port=5000 + kvpp_rank,
+        )
+
+    thread = make_sending_thread(metadata, tp_size=2, pcp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    pp_metadata = decoded.metadata_by_pp_rank[0]
+    assert decoded.use_kv_pp
+    assert pp_metadata.layer_names == ["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"]
+    assert set(pp_metadata.metadata_by_pcp_rank) == {0, 1}
+    for pcp_rank, tp_rank, kvpp_rank in ((0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)):
+        worker_metadata = pp_metadata.metadata_by_pcp_rank[pcp_rank].metadata_by_tp_rank[tp_rank]
+        assert worker_metadata.layer_indices == [kvpp_rank, 4]
+        assert worker_metadata.kv_caches_base_addr[kvpp_rank] == [1000 + kvpp_rank * 1000]
+        assert worker_metadata.kv_caches_base_addr[4] == [9000 + kvpp_rank * 100]
+
+
+def test_sending_thread_uses_configured_kvpp_when_worker_layers_match() -> None:
+    metadata: dict[int | tuple[int, ...], object] = {
+        (0, pcp_rank, tp_rank): make_transfer_metadata(
+            te_rpc_port=9000 + pcp_rank * 2 + tp_rank,
+            base_addrs=[[1000 + pcp_rank * 2000 + tp_rank * 1000]],
+        )
+        for pcp_rank in range(2)
+        for tp_rank in range(2)
+    }
+
+    thread = make_sending_thread(metadata, tp_size=2, pcp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    assert decoded.use_kv_pp
+
+
+def test_sending_thread_rejects_layer_split_when_kvpp_is_disabled() -> None:
+    tp0 = make_transfer_metadata(layer_names=["layer.0"])
+    tp1 = make_transfer_metadata(layer_names=["layer.1"], te_rpc_port=9001)
+
+    with pytest.raises(ValueError, match="different KV-cache layers while KVPP is disabled"):
+        make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+
+
 def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
     metadata = make_transfer_metadata()
+    with pytest.raises(ValueError, match="incomplete PCP ranks"):
+        make_sending_thread({(0, 0, 0): metadata}, pcp_size=2)
+
     with pytest.raises(ValueError, match="incomplete TP ranks"):
         make_sending_thread({0: metadata}, tp_size=2)
 
@@ -189,18 +258,61 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
         make_sending_thread({0: metadata, 1: mismatched}, tp_size=2)
 
 
-def test_sending_thread_handles_early_and_normal_completion_once() -> None:
+def test_sending_thread_handles_completion_once() -> None:
     thread = make_sending_thread()
-
-    thread._handle_finished_request("early")
-    assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("early", time.time())
-    assert thread.get_and_clear_finished_requests() == {"early"}
 
     thread.add_delayed_request("normal", time.time())
     thread._handle_finished_request("normal")
     thread._handle_finished_request("normal")
     assert thread.get_and_clear_finished_requests() == {"normal"}
+    assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("normal")
+    assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_sending_thread_ignores_unknown_completion() -> None:
+    thread = make_sending_thread()
+
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == set()
+    thread.add_delayed_request("unknown", time.time())
+    assert thread.get_and_clear_finished_requests() == set()
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == {"unknown"}
+
+
+def test_sending_thread_acks_duplicate_and_unknown_completion() -> None:
+    thread = make_sending_thread()
+    thread.add_delayed_request("normal", time.time())
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = [
+        [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id))]
+        for request_id in ("normal", "normal", "unknown")
+    ] + [KeyboardInterrupt()]
+
+    with pytest.raises(KeyboardInterrupt):
+        thread._run_busy_loop(sock)
+
+    assert sock.send_multipart.call_args_list == [call((b"consumer", b"", ACK_MSG))] * 3
+    assert thread.get_and_clear_finished_requests() == {"normal"}
+
+
+def test_sending_thread_does_not_retain_completed_request_ids() -> None:
+    thread = make_sending_thread()
+
+    for index in range(100):
+        request_id = f"request-{index}"
+        thread.add_delayed_request(request_id, time.time())
+        thread._handle_finished_request(request_id)
+        assert thread.get_and_clear_finished_requests() == {request_id}
+        thread._handle_finished_request(request_id)
+
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+    assert not getattr(thread, "finished_request_ids", set())
+    assert not getattr(thread, "early_finished_requests", set())
 
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,6 +331,9 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     assert thread.get_and_clear_finished_requests() == {"expired"}
     assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("expired")
+    assert thread.get_and_clear_finished_requests() == set()
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
@@ -383,14 +498,20 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler._sending_thread.add_delayed_request.assert_called_once()
 
 
-def test_update_connector_output_routes_worker_completion_and_scheduler_ack() -> None:
+@pytest.mark.parametrize("failed", [False, True])
+def test_update_connector_output_routes_worker_completion_and_scheduler_ack(failed: bool) -> None:
     scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
     scheduler._recving_thread = MagicMock()
     scheduler._sending_thread = MagicMock()
     scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
     scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
     scheduler._reqs_need_send["request-p"] = time.time()
-    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None)
+    output = SimpleNamespace(
+        finished_recving={"request-d"},
+        finished_sending=None,
+        failed_recving={"request-d"} if failed else set(),
+    )
 
     scheduler.update_connector_output(output)  # type: ignore[arg-type]
 
@@ -415,6 +536,9 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
     scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
     assert scheduler._needs_prefill_token_truncation() is True
+
+    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    assert scheduler._needs_prefill_token_truncation() is False
 
 
 def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
@@ -477,21 +601,22 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread._handle_finished_request.assert_called_once_with("request-p")
 
 
-def test_recving_run_requeues_failed_completion() -> None:
+def test_recving_run_discards_failed_completion_and_cleans_queue() -> None:
     ready_event = threading.Event()
     thread = MooncakeSchedulerRecvingThread(ready_event)
     request = ("10.0.0.1", 6000, "request-p")
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [request, _StopLoop()]
-    thread.request_queue = request_queue
+    thread.request_queue.put(request)
+    thread.request_queue.put(None)
+    # Pending work after the stop sentinel must also be cleared on exit.
+    thread.request_queue.put(("10.0.0.2", 6000, "pending"))
     thread._send_done_recving = MagicMock(side_effect=RuntimeError("network error"))  # type: ignore[method-assign]
 
-    with pytest.raises(_StopLoop):
-        thread.run()
+    thread.run()
 
     assert ready_event.is_set()
-    request_queue.put.assert_called_once_with(request)
-    request_queue.task_done.assert_called_once_with()
+    thread._send_done_recving.assert_called_once_with(*request)
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
 
 
 def test_set_worker_metadata_starts_only_one_producer_sending_thread(
@@ -501,10 +626,11 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
     scheduler.side_channel_host = "127.0.0.1"
     scheduler.side_channel_port = 6000
-    scheduler.tp_size = 1
+    scheduler.tp_size = 2
     scheduler.pp_size = 1
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
+    scheduler.ascend_config.kvpp_config.size = 2
     created: list[MagicMock] = []
 
     def make_fake_thread(*args, **_kwargs):
@@ -527,6 +653,7 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     scheduler.set_xfer_handshake_metadata_from_workers(metadata)
 
     thread_cls.assert_called_once()
+    assert thread_cls.call_args.args[-2] is True
     created[0].start.assert_called_once_with()
 
 
@@ -537,3 +664,188 @@ def test_set_worker_metadata_is_ignored_on_consumer() -> None:
     scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
 
     assert scheduler._sending_thread is None
+
+
+@pytest.fixture
+def prefix_connector():
+    result = MooncakePullConnector.__new__(MooncakePullConnector)
+    result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
+    result.connector_scheduler.need_truncate = True
+    return result
+
+
+def make_prefix_request(num_tokens, params, use_embeds=False):
+    request = Request(
+        request_id="prefill",
+        prompt_token_ids=None if use_embeds else list(range(num_tokens)),
+        prompt_embeds=torch.zeros(num_tokens, 4) if use_embeds else None,
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+    )
+    request.kv_transfer_params = params
+    return request
+
+
+@pytest.mark.parametrize("num_tokens", [512, 513, 514])
+@pytest.mark.parametrize("use_embeds", [False, True])
+def test_truncation_precedes_prefix_lookup(prefix_connector, num_tokens, use_embeds):
+    request = make_prefix_request(num_tokens, {"do_remote_decode": True}, use_embeds)
+
+    # Scheduler.add_request calls this facade before querying the prefix cache.
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == num_tokens - 1
+    assert len(request.all_token_ids) == num_tokens - 1
+    if use_embeds:
+        assert request.prompt_embeds.shape[0] == num_tokens - 1
+    else:
+        assert request.prompt_token_ids == list(range(num_tokens - 1))
+    assert request.max_tokens == 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
+
+    # A warm cache can return only complete blocks before the final token.
+    # In particular, raw 513 must yield a 384-token hit, not 512.
+    local_hit = ((request.num_prompt_tokens - 1) // 128) * 128
+    assert local_hit == {512: 384, 513: 384, 514: 512}[num_tokens]
+    assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
+    assert request.num_prompt_tokens - local_hit > 0
+
+    # Reentry/preemption must not remove another token.
+    prefix_connector.on_new_request(request)
+    assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
+    assert request.num_prompt_tokens == num_tokens - 1
+
+
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}])
+def test_non_producer_requests_are_not_truncated(prefix_connector, params):
+    request = make_prefix_request(513, params)
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == 513
+    assert len(request.all_token_ids) == 513
+    assert request.max_tokens == 8
+    if params and params.get("do_remote_prefill"):
+        assert prefix_connector.get_num_new_matched_tokens(request, 128) == (384, True)
+        assert request.num_prompt_tokens == 513
+
+
+@pytest.mark.parametrize("need_truncate,num_tokens", [(False, 513), (True, 1)])
+def test_truncation_guards(prefix_connector, need_truncate, num_tokens):
+    prefix_connector.connector_scheduler.need_truncate = need_truncate
+    request = make_prefix_request(num_tokens, {"do_remote_decode": True})
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == num_tokens
+    assert request.max_tokens == 8
+    assert "_p_side_truncated" not in request.kv_transfer_params
+
+
+def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
+    request = make_prefix_request(513, {"do_remote_decode": True})
+    # Protect against reintroducing the late mutation, after a 512-token hit.
+    assert prefix_connector.get_num_new_matched_tokens(request, 512) == (0, False)
+    assert request.num_prompt_tokens == 513
+    assert len(request.all_token_ids) == 513
+
+
+def test_recving_thread_does_not_requeue_failed_notification() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.add_request("10.0.0.1", 6000, "failed")
+    thread.add_request("10.0.0.2", 6000, "healthy")
+    thread.request_queue.put(None)
+    thread._send_done_recving = MagicMock(side_effect=[RuntimeError("unreachable"), None])
+
+    thread.run()
+
+    assert thread._send_done_recving.call_args_list == [
+        call("10.0.0.1", 6000, "failed"),
+        call("10.0.0.2", 6000, "healthy"),
+    ]
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_wakes_idle_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    socket = MagicMock()
+    context = MagicMock()
+    cleanup_threads = []
+    socket.close.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+    context.destroy.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+
+    def send_done(*args):
+        thread.remote_sockets["tcp://10.0.0.1:6000"].append(socket)
+        thread.zmq_context = context
+        thread.stop_event.set()
+
+    thread._send_done_recving = MagicMock(side_effect=send_done)
+    thread.add_request("10.0.0.1", 6000, "first")
+    thread.add_request("10.0.0.1", 6000, "pending")
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    thread.shutdown()
+
+    socket.close.assert_called_once_with(linger=0)
+    context.destroy.assert_called_once_with(linger=0)
+    assert cleanup_threads == [thread.ident, thread.ident]
+    assert not thread.remote_sockets
+    assert thread.zmq_context is None
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+    assert thread._send_done_recving.call_count == 1
+
+
+def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_sending_thread()
+    socket = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = socket
+    monkeypatch.setattr(pull_scheduler, "zmq_ctx", MagicMock(return_value=context))
+
+    def recv():
+        thread.stop_event.wait(timeout=5)
+        raise zmq.Again()  # type: ignore[attr-defined]
+
+    socket.recv_multipart.side_effect = recv
+    thread.add_delayed_request("pending", time.time())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    context.__exit__.assert_called_once()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+
+
+def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = MagicMock()
+    scheduler._recving_thread = MagicMock()
+    scheduler._reqs_need_recv["recv"] = MagicMock()
+    scheduler._reqs_need_send["send"] = time.time()
+    scheduler._reqs_in_batch.add("recv")
+    scheduler._reqs_recv_info["recv"] = ("10.0.0.1", 6000, "remote")
+    connector = MooncakePullConnector.__new__(MooncakePullConnector)
+    connector.connector_scheduler = scheduler
+
+    connector.shutdown()
+
+    scheduler._sending_thread.shutdown.assert_called_once()
+    scheduler._recving_thread.shutdown.assert_called_once()
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_need_send
+    assert not scheduler._reqs_in_batch
+    assert not scheduler._reqs_recv_info

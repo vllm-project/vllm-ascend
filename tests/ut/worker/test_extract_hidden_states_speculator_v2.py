@@ -22,6 +22,24 @@ from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 
 
+def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
+    vllm_config = cast(
+        Any,
+        SimpleNamespace(speculative_config=SimpleNamespace(method="extract_hidden_states", enforce_eager=None)),
+    )
+    device = torch.device("cpu")
+
+    def fake_speculator(config, target_device):
+        return config, target_device
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator",
+        fake_speculator,
+    )
+
+    assert init_speculator(vllm_config, device) == (vllm_config, device)
+
+
 class _RecordingModel(torch.nn.Module):
     def forward(self, *, hidden_states: torch.Tensor) -> None:
         self.hidden_states = hidden_states.clone()
@@ -35,24 +53,6 @@ def test_init_requires_greedy_draft_sampling():
 
     with pytest.raises(ValueError, match="only supports draft_sample_method='greedy'"):
         ExtractHiddenStatesSpeculator(vllm_config, torch.device("cpu"))
-
-
-def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
-    vllm_config = cast(
-        Any,
-        SimpleNamespace(speculative_config=SimpleNamespace(method="extract_hidden_states")),
-    )
-    device = torch.device("cpu")
-
-    def fake_speculator(config, target_device):
-        return config, target_device
-
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator",
-        fake_speculator,
-    )
-
-    assert init_speculator(vllm_config, device) == (vllm_config, device)
 
 
 def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):

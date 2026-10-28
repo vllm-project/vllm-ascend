@@ -122,7 +122,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
 
         # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
-        self.need_expert_scale = self.need_shared_expert_args or self.mc2_comm_alg == "hierarchy"
+        self.need_expert_scale = self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -138,7 +138,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
-        # use global_bs=0 (uniform mode) and pass mc2_mask to improve performance.
+        # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
@@ -521,7 +521,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             all2all_lora_indices(
                 self.lora_context,
                 output_splits=output_splits,
@@ -595,7 +595,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_out_tokens=num_out_tokens,
         )
 
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             preprocess_lora_indices(
                 self.lora_context,
                 topk_ids=topk_ids,
@@ -690,7 +690,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 global_input_tokens, global_input_tokens_local_experts_indices
             )
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             postprocess_lora_indices(
                 self.lora_context,
                 reversed_permutation_mapping=reversed_global_input_permutation_mapping,

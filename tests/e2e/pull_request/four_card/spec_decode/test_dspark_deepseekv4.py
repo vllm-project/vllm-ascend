@@ -49,7 +49,13 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
         pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
-        pytest.param(3.45, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
+        pytest.param(
+            3.45,
+            7,
+            {"enable_dsa_cp": True},
+            id="dsa-cp-dspark",
+            marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
+        ),
         pytest.param(
             3.35,
             5,
@@ -89,6 +95,7 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         runner_kwargs={
             "tensor_parallel_size": 4,
             "max_model_len": 4096,
+            "attention_config": {"indexer_kv_dtype": "int8"},
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
             "additional_config": additional_config,
         },

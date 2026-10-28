@@ -30,6 +30,7 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
@@ -40,8 +41,9 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
 )
+from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -67,36 +69,54 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
-    sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
+    dsv4_skips_indexer_topk,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.32.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.32.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
+else:
+    from transformers import DeepseekV4Config
+
+sequence_parallel_chunk = sp_shard
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -116,10 +136,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        self.dtype = get_dsv4_attn_kv_dtype(vllm_config)
-        if self.dtype == torch.float8_e4m3fn:
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
+        # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
+        # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
+        cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -320,7 +339,18 @@ class DeepseekV4MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
+        # vLLM main folded `num_hash_layers` into the per-layer `mlp_layer_types`;
+        # judge Hash-MoE per layer (it need not be a contiguous prefix) and fall
+        # back to the legacy count on the v0.32.0 lane, which has no
+        # `mlp_layer_types`.
+        if is_draft_layer:
+            self.hash = False
+        else:
+            mlp_layer_types = getattr(config, "mlp_layer_types", None)
+            if mlp_layer_types is not None:
+                self.hash = layer_idx < len(mlp_layer_types) and mlp_layer_types[layer_idx] == "hash_moe"
+            else:
+                self.hash = layer_idx < getattr(config, "num_hash_layers", 0)
         self.gate.bias_vl = None
         if getattr(config, "vision_n_layers", 0) > 0:
             self.gate.bias_vl = nn.Parameter(
@@ -331,14 +361,14 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # MC2 dispatch/combine fails
+            # in the dummy profile run if a token repeats an expert id
+            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+
             self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
-                    config.vocab_size,
-                    config.num_experts_per_tok,
-                    dtype=torch.int32,
-                ),
+                token_to_expert,
                 requires_grad=False,
             )
             self.gate.e_score_correction_bias = None
@@ -386,15 +416,6 @@ class DeepseekV4MoE(nn.Module):
         if hidden_states_fp32 is not None:
             hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
 
-        # Chunk the hidden states so they aren't replicated across TP ranks.
-        # This avoids duplicate computation in self.experts.
-        # TODO: We can replace the all_reduce at the end of attn with a
-        # reduce_scatter instead of chunking here.
-        if self.is_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
-            if hidden_states_fp32 is not None:
-                hidden_states_fp32 = sequence_parallel_chunk(hidden_states_fp32)
-
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoEFactory class
             router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
@@ -436,10 +457,7 @@ class DeepseekV4MoE(nn.Module):
         else:
             final_hidden_states = fused_moe_out
 
-        if self.is_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
-            final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1 and fused_moe_out_is_tuple:
+        if not self.is_sequence_parallel and self.tp_size > 1 and fused_moe_out_is_tuple:
             # Legacy tuple outputs are reduced here. Tensor outputs from the
             # upstream MoERunner have already gone through its final reduction.
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
@@ -473,6 +491,8 @@ class DeepseekV4Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        reduce_results: bool = True,
+        need_gather_q_kv: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -542,6 +562,7 @@ class DeepseekV4Attention(nn.Module):
             self.n_groups * config.o_lora_rank,
             self.dim,
             bias=False,
+            reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.wo_b",
             return_bias=False,
@@ -549,11 +570,17 @@ class DeepseekV4Attention(nn.Module):
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
 
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
+            rope_theta = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            rope_theta = config.rope_theta
             rope_groups = ["default"]
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
+        yarn_rope_parameters = config.rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -561,10 +588,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            scaling_factor=yarn_rope_parameters.get("factor", 1.0),
+            base=rope_theta,
+            beta_fast=yarn_rope_parameters.get("beta_fast", 32),
+            beta_slow=yarn_rope_parameters.get("beta_slow", 1),
             rope_groups=rope_groups,
         )
 
@@ -581,16 +608,9 @@ class DeepseekV4Attention(nn.Module):
         # only, leaving impl-level references stale.
         skip_topk = False
         if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
+            pp_group = get_pp_group()
+            pp_start_layer, _ = get_pp_indices(config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+            skip_topk = dsv4_skips_indexer_topk(config, config_layer_idx, pp_start_layer)
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -616,11 +636,13 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.bfloat16
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=k_dtype,
+            dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )
@@ -660,6 +682,7 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
+            need_gather_q_kv=need_gather_q_kv,
         )
 
     def forward(
@@ -671,7 +694,7 @@ class DeepseekV4Attention(nn.Module):
         return self.dsa_attn(positions, hidden_states, llama_4_scaling)
 
 
-class DeepseekV2DecoderLayer(nn.Module):
+class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -684,17 +707,39 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
+        if not vllm_version_is("0.32.0"):
+            # vLLM #61392 folded `compress_ratios` into `layer_types`; the
+            # Ascend helpers and the KV-store metadata still index the legacy
+            # field, so restore it.
+            if getattr(config, "compress_ratios", None) is None:
+                # `vllm.transformers_utils.deepseek_v4_utils` only exists on
+                # main (added by #61392), so keep the import lazy.
+                from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+
+                compress_ratios = get_compress_ratios(config)
+                if compress_ratios:
+                    config.compress_ratios = list(compress_ratios)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
+        yarn_rope_parameters = config.rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
+        max_position_embeddings = yarn_rope_parameters.get(
+            "original_max_position_embeddings", config.max_position_embeddings
+        )
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
+        self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
+        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = DeepseekV4Attention
 
@@ -706,6 +751,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            reduce_results=not self.use_sequence_parallel_moe,
+            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -760,13 +807,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states.clone()
+        full_num_tokens = positions.shape[0]
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
+
+        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
+
+        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+            hidden_states = sp_reduce_scatter(hidden_states)
+
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states, hidden_states_fp32 = self.rms_norm_cast(hidden_states)
@@ -783,6 +840,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    # vLLM #50514 validates and relays the model's existing PP aux payload.
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -791,6 +851,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
+        self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -820,9 +881,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
+            lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        # Decoder layers run in order, so their OTP collectives can reuse the
+        # same address-stable scratch storage during profiling and graph replay.
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers:
+            if isinstance(layer, DeepseekV4DecoderLayer):
+                impl = layer.self_attn.dsa_attn.dsa_attn.impl
+                if not isinstance(impl, AscendDSAImpl):
+                    continue
+                impl._oproj_buffer_pool = self._oproj_buffer_pool
+                impl.reserve_oproj_buffers(torch.device(self.device), vllm_config.model_config.dtype)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -865,19 +936,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        self._mtp_hidden_buffer = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                hc_dim,
+        self._mtp_hidden_buffer: torch.Tensor | None = None
+        if (
+            get_pp_group().is_last_rank
+            and spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
+        ):
+            # Bind the buffer before compilation: lazy allocation in forward
+            # can leave FULL graph replay writing a different tensor from the
+            # model-owned residual restored for the replicated PCP draft.
+            self._mtp_hidden_buffer = torch.empty(
+                (vllm_config.scheduler_config.max_num_batched_tokens, hc_dim),
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
-            if get_pp_group().is_last_rank and needs_mtp_hidden_states
-            else None
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -914,6 +986,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             PPTransportDataType.AUX_HIDDEN_STATES,
         )
 
+        if self.use_sequence_parallel_moe:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
+            hidden_states = sp_shard(hidden_states)
+            # Non-first PP ranks receive None input_ids (the embedding was
+            # done upstream); only shard on the rank that owns the tokens.
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
+
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
         llama_4_scaling: torch.Tensor | None
@@ -937,14 +1019,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 input_ids=input_ids,
             )
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states.mean(dim=1))
-
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+                aux_hidden_state = hidden_states.mean(dim=1)
+                if self.use_sequence_parallel_moe:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[: positions.shape[0]]
+                aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
+            # The next PP rank expects full-sequence hidden states; undo the
+            # sequence sharding applied above before crossing the PP boundary.
+            if self.use_sequence_parallel_moe:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -955,6 +1039,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 PPTransportDataType.AUX_HIDDEN_STATES,
                 aux_hidden_states,
             )
+
+        if self.use_sequence_parallel_moe:
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+
+        # Stash pre-hc_head residual for the MTP draft (captured copy_).
+        if self._mtp_hidden_buffer is not None:
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
@@ -1045,7 +1137,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if isinstance(layer, PPMissingLayer):
                 continue
 
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, DeepseekV4DecoderLayer)
             if isinstance(layer.mlp, DeepseekV4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
@@ -1073,6 +1165,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -1169,16 +1267,30 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
+            # Hash-router layers route text tokens through ``tid2eid`` and keep
+            # ``e_score_correction_bias`` unset, but the checkpoint still ships
+            # a router bias for them. Skip it instead of raising a KeyError.
+            if name.endswith(".gate.e_score_correction_bias") and name not in params_dict:
+                continue
+
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

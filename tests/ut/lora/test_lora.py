@@ -319,3 +319,64 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+
+
+def test_single_lora_mask_follows_token_mapping() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper._token_lora_indices = torch.tensor([0, -1, 0, -1])
+    wrapper._single_lora_mask = torch.empty(4, 1, dtype=torch.bfloat16)
+    wrapper.indices_len = [4, 0, 0, 0]
+    with patch.object(PunicaWrapperBase, "_update_base_metadata"):
+        wrapper._update_base_metadata(Mock(), [], 1, 100)
+    torch.testing.assert_close(
+        wrapper._single_lora_mask,
+        torch.tensor([[1], [0], [1], [0]], dtype=torch.bfloat16),
+    )
+
+
+@pytest.mark.parametrize("use_buffer", [False, True])
+def test_add_lora_linear_skips_no_lora_batch(use_buffer: bool) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.no_lora = True
+    wrapper._wrapper_id = 0
+    wrapper.add_shrink = Mock()
+    wrapper.add_expand = Mock()
+    x = torch.randn(2, 4, dtype=torch.bfloat16)
+    y = torch.randn(2, 5, dtype=torch.bfloat16)
+    original = y.clone()
+    lora_a = (torch.randn(1, 1, 2, 4, dtype=torch.bfloat16),)
+    lora_b = (torch.randn(1, 1, 5, 2, dtype=torch.bfloat16),)
+    buffer = (torch.empty(2, 2, dtype=torch.float32),) if use_buffer else None
+
+    with patch("vllm_ascend.lora.punica_npu.lora_linear") as linear:
+        wrapper.add_lora_linear(y, x, lora_a, lora_b, 1.0, (5,), buffer=buffer)
+
+    linear.assert_not_called()
+    wrapper.add_shrink.assert_not_called()
+    wrapper.add_expand.assert_not_called()
+    torch.testing.assert_close(y, original)
+
+
+@pytest.mark.parametrize("add_inputs", [True, False])
+def test_packed_single_lora_matmul(add_inputs: bool) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper._single_lora_mask = torch.tensor([[1], [0], [1]], dtype=torch.bfloat16)
+    x = torch.randn(3, 4, dtype=torch.bfloat16)
+    y = torch.randn(3, 5, dtype=torch.bfloat16)
+    original = y.clone()
+    lora_a = tuple(torch.randn(1, 1, 2, 4, dtype=torch.bfloat16) for _ in range(2))
+    lora_b = (
+        torch.randn(1, 1, 3, 2, dtype=torch.bfloat16),
+        torch.randn(1, 1, 2, 2, dtype=torch.bfloat16),
+    )
+    packed_a = torch.cat(lora_a, dim=2)
+    packed_b = torch.zeros(1, 1, 4, 5, dtype=torch.bfloat16)
+    packed_b[0, 0, :2, :3] = lora_b[0][0, 0].T
+    packed_b[0, 0, 2:, 3:] = lora_b[1][0, 0].T
+
+    wrapper._lora_linear_matmul(y, x, lora_a, lora_b, 0.5, (3, 2), packed_a, packed_b, add_inputs)
+    delta = (x @ packed_a[0, 0].T).mul(wrapper._single_lora_mask)
+    expected = delta.mul(0.5) @ packed_b[0, 0]
+    if add_inputs:
+        expected.add_(original)
+    torch.testing.assert_close(y, expected)

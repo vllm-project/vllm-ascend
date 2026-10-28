@@ -36,10 +36,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -53,6 +51,14 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.32.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.32.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
+else:
+    from transformers import DeepseekV4Config
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -96,6 +102,37 @@ def _is_mxfp8_dynamic(linear) -> bool:
     return isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
 
 
+# The indexer K cache dtype each Ascend part implements. A5 quantizes to fp8
+# inside ``indexer_compress_epilog_v2``; A3's scatter
+# (``npu_scatter_nd_update_sk``) only takes int8 updates. Same shape as
+# ``DSA_INDEXER_KV_DTYPES`` in ``vllm/v1/attention/backends/mla/indexer.py``.
+_A5_INDEXER_KV_DTYPES = ("fp8",)
+_A3_INDEXER_KV_DTYPES = ("int8",)
+
+
+def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """Resolve the DeepSeek V4 indexer K cache dtype.
+
+    The indexer K cache has no bf16 write path, so ``indexer_kv_dtype="auto"``
+    resolves to the dtype this part implements and any other request is rejected
+    up front, instead of failing later with a cryptic ACLNN dtype mismatch.
+    """
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        supported, default_kv_dtype, expected_dtype = _A5_INDEXER_KV_DTYPES, "fp8", torch.float8_e4m3fn
+    else:
+        supported, default_kv_dtype, expected_dtype = _A3_INDEXER_KV_DTYPES, "int8", torch.int8
+    indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
+    if indexer_kv_dtype not in supported:
+        raise ValueError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
+            f"indexer on this platform (expected one of {supported})."
+        )
+    # The compute dtype the indexer kernels expect. Do not derive it from
+    # upstream's ``STR_DTYPE_TO_TORCH_DTYPE``: that table maps ``"fp8"`` to the
+    # storage dtype ``torch.uint8``, not ``torch.float8_e4m3fn``.
+    return expected_dtype
+
+
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def __init__(
         self,
@@ -108,22 +145,13 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            self.dtype = torch.float8_e4m3fn
-            if not is_a5_bf16_kv_enabled(vllm_config):
-                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
-        ratio_kwargs = (
-            {"compress_ratio": self.compress_ratio}
-            if vllm_version_is("0.28.0")
-            else {"tokens_per_state": self.compress_ratio}
-        )
+        ratio_kwargs = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
@@ -223,7 +251,7 @@ class AscendIndexerOps:
             query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
-            quant_mode=2,
+            quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
             cu_seqlens_q=metadata.qli_cu_seqlens_q,
             seqused_k=metadata.qli_seqused_k,
             cmp_residual_k=metadata.qli_cmp_residual_k,
@@ -314,11 +342,7 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        k_dtype = (
-            torch.float8_e4m3fn
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-            else torch.int8
-        )
+        k_dtype = get_indexer_k_dtype(vllm_config)
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache

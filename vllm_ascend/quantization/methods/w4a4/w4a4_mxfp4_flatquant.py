@@ -23,7 +23,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
 
-from ..base import AscendLinearScheme
+from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
 from .w4a4_flatquant import solve_kronecker_decompose
 
@@ -100,16 +100,14 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
 
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-        tp_rank: int | None = 0,
-    ) -> torch.Tensor:
-        original_dtype = x.dtype
-        input_shape = x.shape
-        in_features = input_shape[-1]
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        in_features = x.shape[-1]
         left_dim = layer.left_trans.shape[0]
         right_dim = layer.right_trans.shape[0]
         if left_dim * right_dim != in_features:
@@ -117,14 +115,46 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
                 f"FlatQuant transform matrices dimension mismatch: "
                 f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
             )
-        x_reshaped = x.view(-1, left_dim, right_dim)
-        x_quantized_fp4, pertoken_scale = torch_npu.npu_kronecker_quant(
-            x_reshaped,
+        quantized_x, pertoken_scale = torch_npu.npu_kronecker_quant(
+            x.view(-1, left_dim, right_dim),
             layer.left_trans,
             layer.right_trans,
             layer.aclnn_clip_ratio,
             dst_dtype=torch_npu.float4_e2m1fn_x2,
         )
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        if isinstance(x, PreparedLinearInput):
+            x_quantized_fp4 = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            original_dtype = x.output_dtype
+            input_shape = None
+        else:
+            original_dtype = x.dtype
+            input_shape = x.shape
+            in_features = input_shape[-1]
+            left_dim = layer.left_trans.shape[0]
+            right_dim = layer.right_trans.shape[0]
+            if left_dim * right_dim != in_features:
+                raise ValueError(
+                    f"FlatQuant transform matrices dimension mismatch: "
+                    f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
+                )
+            x_quantized_fp4, pertoken_scale = torch_npu.npu_kronecker_quant(
+                x.view(-1, left_dim, right_dim),
+                layer.left_trans,
+                layer.right_trans,
+                layer.aclnn_clip_ratio,
+                dst_dtype=torch_npu.float4_e2m1fn_x2,
+            )
 
         output = torch_npu.npu_quant_matmul(
             x_quantized_fp4,
@@ -139,7 +169,8 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             x2_dtype=torch_npu.float4_e2m1fn_x2,
             group_sizes=[1, 1, self.group_size],
         )
-        output = output.view(*input_shape[:-1], -1)
+        if input_shape is not None:
+            output = output.view(*input_shape[:-1], -1)
         return output
 
     def process_weights_after_loading(self, layer):

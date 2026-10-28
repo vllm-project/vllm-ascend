@@ -127,9 +127,21 @@ class PyHcclCommunicator:
             stream.synchronize()
             del data
 
+    def close(self) -> None:
+        """Destroy the native communicator at most once."""
+        if not self.available:
+            return
+        self.available = False
+        with torch.npu.device(self.device):
+            # Collectives may have been submitted on an explicit stream.
+            torch.npu.synchronize(self.device)
+            self.hccl.hcclCommDestroy(self.comm)
+
     def all_reduce(self, in_tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None) -> torch.Tensor:
         if self.disabled:
             return None
+        if not self.available:
+            raise RuntimeError("HCCL communicator is closed")
         # hccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
@@ -155,6 +167,8 @@ class PyHcclCommunicator:
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
+        if not self.available:
+            raise RuntimeError("HCCL communicator is closed")
         assert tensor.device == self.device, (
             f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
         )

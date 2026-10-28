@@ -18,7 +18,7 @@ Source: `vllm_ascend/ops/triton/fla/l2norm.py` (host wrapper: `l2norm_fwd`).
   3. Kernel side: loop over the `NUM_CHUNKS` chunks. For each chunk, compute `row_idx = base_row + chunk * MBLOCK + arange(0, MBLOCK)` and the row mask `row_idx < M`; out-of-range rows are masked on both load and store, so an arbitrary `T` is supported.
   4. Kernel side: load the `[MBLOCK, N]` tile (masked, `other=0.0`), cast to fp32, compute `square_sum = sum(x * x, axis=1)`, then `rsqrt(square_sum + eps)`, multiply the tile by the per-row reciprocal norm and store it back to `Y` with the same mask.
   5. Host side: reshape the output back to the original input shape.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products.
 
 ## Parameters
 

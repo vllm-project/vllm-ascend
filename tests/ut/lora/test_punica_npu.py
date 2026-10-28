@@ -25,10 +25,18 @@ from vllm_ascend.lora import lora_ops
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
 
-def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
+def _make_wrapper(
+    *,
+    is_prefill=False,
+    no_lora=False,
+    device_type=AscendDeviceType.A2,
+    capturing=False,
+) -> PunicaWrapperNPU:
     wrapper = object.__new__(PunicaWrapperNPU)
     wrapper.is_prefill = is_prefill
     wrapper.no_lora = no_lora
+    wrapper.ascend_device_type = device_type
+    wrapper._in_graph_mode = Mock(return_value=capturing)
     wrapper.bgmv_shrink = Mock()
     wrapper.bgmv_expand = Mock()
     wrapper.bgmv_expand_slice = Mock()
@@ -62,13 +70,21 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
             return_value=get_hardware_profile(device_type),
         ),
+        patch(
+            "vllm_ascend.lora.punica_npu.get_ascend_device_type",
+            return_value=device_type,
+        ),
         patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes") as refresh,
     ):
         wrapper = PunicaWrapperNPU(
             8,
             2,
             torch.device("cpu"),
-            lora_config=SimpleNamespace(max_lora_rank=max_lora_rank),
+            lora_config=SimpleNamespace(
+                max_lora_rank=max_lora_rank,
+                max_loras=2,
+                fully_sharded_loras=False,
+            ),
         )
     refresh.assert_called_once()
     if expect_torch_ops:
@@ -113,6 +129,71 @@ def test_decode_always_invokes_bgmv() -> None:
     assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([0, 1]))
 
 
+@pytest.mark.parametrize(
+    ("is_prefill", "capturing", "device_type", "expected"),
+    [
+        (False, True, AscendDeviceType._310P, False),
+        (False, False, AscendDeviceType._310P, False),
+        (True, True, AscendDeviceType._310P, False),
+        (True, False, AscendDeviceType._310P, True),
+        (True, True, AscendDeviceType.A2, True),
+        (True, False, AscendDeviceType.A2, True),
+    ],
+)
+def test_use_sgmv_selects_kernel_by_phase_device_and_capture(is_prefill, capturing, device_type, expected) -> None:
+    wrapper = _make_wrapper(is_prefill=is_prefill, device_type=device_type, capturing=capturing)
+    assert wrapper._use_sgmv() is expected
+
+
+def test_prefill_falls_back_to_bgmv_during_graph_capture_on_310p() -> None:
+    wrapper = _make_wrapper(is_prefill=True, device_type=AscendDeviceType._310P, capturing=True)
+    y = torch.zeros(2, 8)
+    x = torch.ones(2, 4)
+    weights = torch.ones(2, 8, 4)
+    wrapper._apply_shrink(y, x, weights, 1.0)
+    wrapper._apply_expand(y, x, weights, 0, 8, True)
+    wrapper.sgmv_shrink.assert_not_called()
+    wrapper.sgmv_expand_slice.assert_not_called()
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_called_once()
+    assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([0, 1]))
+
+
+def test_prefill_keeps_sgmv_when_eager_on_310p() -> None:
+    wrapper = _make_wrapper(is_prefill=True, device_type=AscendDeviceType._310P, capturing=False)
+    y = torch.zeros(2, 8)
+    x = torch.ones(2, 4)
+    weights = torch.ones(2, 8, 4)
+    wrapper._apply_shrink(y, x, weights, 1.0)
+    wrapper._apply_expand(y, x, weights, 0, 8, True)
+    wrapper.sgmv_shrink.assert_called_once()
+    wrapper.sgmv_expand_slice.assert_called_once()
+    wrapper.bgmv_shrink.assert_not_called()
+    wrapper.bgmv_expand_slice.assert_not_called()
+
+
+def test_add_lora_embedding_falls_back_to_bgmv_during_graph_capture_on_310p() -> None:
+    wrapper = _make_wrapper(is_prefill=True, device_type=AscendDeviceType._310P, capturing=True)
+    wrapper.add_lora_embedding(torch.zeros(2, 8), torch.ones(2, 8), torch.ones(2, 8, 8))
+    wrapper.sgmv_expand.assert_not_called()
+    wrapper.bgmv_expand.assert_called_once()
+
+
+def test_in_graph_mode_reflects_stream_capture_state() -> None:
+    wrapper = _make_wrapper()
+    with patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=lambda: True), create=True):
+        assert PunicaWrapperNPU._in_graph_mode(wrapper) is True
+    with patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=lambda: False), create=True):
+        assert PunicaWrapperNPU._in_graph_mode(wrapper) is False
+
+
+def test_in_graph_mode_returns_false_when_stream_query_unavailable() -> None:
+    wrapper = _make_wrapper()
+    broken_query = Mock(side_effect=RuntimeError("stream query unsupported"))
+    with patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=broken_query), create=True):
+        assert PunicaWrapperNPU._in_graph_mode(wrapper) is False
+
+
 def test_add_shrink_and_expand_walk_slices_with_offsets() -> None:
     wrapper = _make_wrapper(is_prefill=False)
     wrapper._apply_shrink = Mock()
@@ -146,15 +227,17 @@ def test_add_lora_embedding_prefill_uses_sgmv_expand() -> None:
     wrapper.bgmv_expand.assert_not_called()
 
 
-def test_add_lora_linear_allocates_fp32_buffer_when_missing() -> None:
+def test_lora_linear_kernel_allocates_fp32_buffer_when_missing() -> None:
     wrapper = _make_wrapper()
+    wrapper._lora_shrink_buffers = {}
+    wrapper._max_num_batched_tokens = 8
     wrapper.add_shrink = Mock()
     wrapper.add_expand = Mock()
     x = torch.ones(3, 8)
     y = torch.zeros(3, 16)
     a = (torch.ones(2, 4, 8),)
     b = (torch.ones(2, 16, 4),)
-    wrapper.add_lora_linear(y, x, a, b, 1.0, (16,))
+    wrapper._lora_linear_kernel(y, x, a, b, 1.0, (16,))
     buffer = wrapper.add_shrink.call_args.args[0]
     assert len(buffer) == 1
     assert buffer[0].shape == (3, 4)

@@ -26,6 +26,7 @@ def _compute_slot_mapping_kernel(
     PAD_ID: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
+    IS_CIRCULAR: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
 
@@ -49,7 +50,10 @@ def _compute_slot_mapping_kernel(
         offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
-        if TOTAL_CP_WORLD_SIZE == 1:
+        if IS_CIRCULAR:
+            block_indices = tl.full((TILE_BLOCK_SIZE,), 0, tl.int32)
+            slot_offsets = pos % block_size
+        elif TOTAL_CP_WORLD_SIZE == 1:
             block_indices = pos // block_size
             slot_offsets = pos - block_indices * block_size
         else:
@@ -79,6 +83,8 @@ def _compute_slot_mapping_kernel(
             relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        if IS_CIRCULAR:
+            slot_ids = tl.where(pos >= 0, slot_ids, PAD_ID)
         if TOTAL_CP_WORLD_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
@@ -94,6 +100,7 @@ def _compute_slot_mapping_request(
     block_table_stride,
     block_size,
     slot_mapping_ptr,
+    is_circular,
     KV_CACHE_BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_KV_BLOCK: tl.constexpr,
     TOTAL_CP_WORLD_SIZE: tl.constexpr,
@@ -110,8 +117,8 @@ def _compute_slot_mapping_request(
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
         if TOTAL_CP_WORLD_SIZE == 1:
-            block_indices = pos // block_size
-            slot_offsets = pos - block_indices * block_size
+            block_indices = tl.where(is_circular, 0, pos // block_size)
+            slot_offsets = pos % block_size
         else:
             virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
             virtual_block_indices = pos // virtual_block_size
@@ -139,6 +146,7 @@ def _compute_slot_mapping_request(
             relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
         if TOTAL_CP_WORLD_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
@@ -154,23 +162,22 @@ def _compute_slot_mapping_fused_groups_kernel(
     slot_mapping_addrs_ptr,
     block_table_strides_ptr,
     block_sizes_ptr,
+    is_circular_ptr,
+    HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
     PARALLEL_TILES: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
-    program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS * PARALLEL_TILES + 1
-    group_idx = program_idx // programs_per_group
-    group_program_idx = program_idx - group_idx * programs_per_group
+    group_idx = tl.program_id(0)
+    group_program_idx = tl.program_id(1)
 
     block_table_addr = tl.load(block_table_addrs_ptr + group_idx)
     slot_mapping_addr = tl.load(slot_mapping_addrs_ptr + group_idx)
     block_table_ptr = tl.cast(block_table_addr, tl.pointer_type(tl.int32))
     slot_mapping_ptr = tl.cast(slot_mapping_addr, tl.pointer_type(tl.int32))
 
-    if group_program_idx == programs_per_group - 1:
+    if group_program_idx == tl.num_programs(1) - 1:
         for i in range(num_tokens, max_num_tokens, TILE_BLOCK_SIZE):
             offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
             tl.store(
@@ -186,6 +193,7 @@ def _compute_slot_mapping_fused_groups_kernel(
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
+    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
     row_offset = req_idx * block_table_stride
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(
@@ -196,8 +204,8 @@ def _compute_slot_mapping_fused_groups_kernel(
         offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
-        block_indices = pos // block_size
-        slot_offsets = pos - block_indices * block_size
+        block_indices = tl.where(is_circular, 0, pos // block_size)
+        slot_offsets = pos % block_size
 
         INT32_MAX = 2147483647
         valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
@@ -211,6 +219,7 @@ def _compute_slot_mapping_fused_groups_kernel(
         relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
@@ -224,23 +233,22 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     slot_mapping_addrs_ptr,
     block_table_strides_ptr,
     block_sizes_ptr,
+    is_circular_ptr,
+    HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
     SMALL_TILE_BLOCK_SIZE: tl.constexpr,
     SMALL_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
     LARGE_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
-    program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS + 1
-    group_idx = program_idx // programs_per_group
-    group_program_idx = program_idx - group_idx * programs_per_group
+    group_idx = tl.program_id(0)
+    req_idx = tl.program_id(1)
 
     block_table_addr = tl.load(block_table_addrs_ptr + group_idx)
     slot_mapping_addr = tl.load(slot_mapping_addrs_ptr + group_idx)
     block_table_ptr = tl.cast(block_table_addr, tl.pointer_type(tl.int32))
     slot_mapping_ptr = tl.cast(slot_mapping_addr, tl.pointer_type(tl.int32))
 
-    if group_program_idx == NUM_REQS:
+    if req_idx == tl.num_programs(1) - 1:
         for i in range(num_tokens, max_num_tokens, 1024):
             offsets = i + tl.arange(0, 1024)
             tl.store(
@@ -250,11 +258,11 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             )
         return
 
-    req_idx = group_program_idx
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
+    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
     request_tokens = end_idx - start_idx
     if request_tokens <= SMALL_TILE_BLOCK_SIZE:
         _compute_slot_mapping_request(
@@ -266,6 +274,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             block_table_stride,
             block_size,
             slot_mapping_ptr,
+            is_circular,
             1,
             1,
             1,
@@ -285,6 +294,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             block_table_stride,
             block_size,
             slot_mapping_ptr,
+            is_circular,
             1,
             1,
             1,
@@ -334,11 +344,12 @@ def compute_slot_mapping_fused_groups(
     min_block_size,
     *,
     pad_id,
+    is_circular_ptr=None,
 ):
     tile_block_size, parallel_tiles = _select_slot_mapping_launch_config(num_reqs, num_tokens)
     block_table_window_size = _next_power_of_2((tile_block_size + min_block_size - 1) // min_block_size + 1)
     if num_reqs > 1 and tile_block_size < 1024:
-        _compute_slot_mapping_fused_groups_adaptive_kernel[(group_count * (num_reqs + 1),)](
+        _compute_slot_mapping_fused_groups_adaptive_kernel[(group_count, num_reqs + 1)](
             num_tokens,
             max_num_tokens,
             query_start_loc_ptr,
@@ -347,15 +358,16 @@ def compute_slot_mapping_fused_groups(
             slot_mapping_addrs_ptr,
             block_table_strides_ptr,
             block_sizes_ptr,
+            is_circular_ptr,
+            HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
-            NUM_REQS=num_reqs,
             SMALL_TILE_BLOCK_SIZE=tile_block_size,
             SMALL_BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
             LARGE_BLOCK_TABLE_WINDOW_SIZE=_next_power_of_2((1024 + min_block_size - 1) // min_block_size + 1),
         )
     else:
         programs_per_group = num_reqs * parallel_tiles + 1
-        _compute_slot_mapping_fused_groups_kernel[(group_count * programs_per_group,)](
+        _compute_slot_mapping_fused_groups_kernel[(group_count, programs_per_group)](
             num_tokens,
             max_num_tokens,
             query_start_loc_ptr,
@@ -364,9 +376,98 @@ def compute_slot_mapping_fused_groups(
             slot_mapping_addrs_ptr,
             block_table_strides_ptr,
             block_sizes_ptr,
+            is_circular_ptr,
+            HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
-            NUM_REQS=num_reqs,
             TILE_BLOCK_SIZE=tile_block_size,
             PARALLEL_TILES=parallel_tiles,
             BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
         )
+
+
+@triton.jit(do_not_specialize=["replay_window"])
+def _pad_replayed_slots_kernel(
+    query_start_loc_ptr,  # [num_reqs + 1], int32
+    positions_ptr,  # [num_tokens], int64
+    replay_start_ptr,  # [max_num_reqs], int32; 0 = this req does not replay
+    slot_mapping_addrs_ptr,  # [group_count], uint64: slot_mapping.gpu of each group
+    cacheable_groups_ptr,  # [NUM_GROUPS], int32: indices of the cacheable groups
+    replay_window,  # The one window every replaying group agrees on
+    PAD_ID: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    TILE_BLOCK_SIZE: tl.constexpr,
+):
+    """Pad the replayed positions of the cacheable groups.
+
+    A request that hits a prefix cache keeps the hit's blocks, which are still
+    shared with every other request that hit the same prefix, so their KV must
+    not be written again -- the write would not be wrong, it would be a
+    *different* value landing in a block other requests read. The replayed
+    tokens are recomputed only to rebuild the sliding-window group, whose KV
+    does not survive in the prefix cache, so that group is the one that has to
+    keep its slots.
+
+    This runs after every group's slot mapping is final, so it covers the
+    context-parallel layouts too without knowing anything about them.
+    """
+    req_idx = tl.program_id(0)
+    replay_start = tl.load(replay_start_ptr + req_idx)
+    # Guarding on the start rather than on the upper bound alone is what keeps
+    # a request that is not replaying -- whose replay_start is 0 -- from having
+    # its first window of tokens padded. A start below zero is malformed (the
+    # scheduler derives it from a hit count), and padding around it would write
+    # the window into positions that belong to this request, so it takes the
+    # same exit rather than shifting the interval left.
+    if replay_start <= 0:
+        return
+    write_end = replay_start + replay_window
+    start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
+    for i in range(start_idx, end_idx, TILE_BLOCK_SIZE):
+        offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
+        mask = offsets < end_idx
+        pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
+        replayed = mask & (pos >= replay_start) & (pos < write_end)
+        for group_offset in tl.static_range(NUM_GROUPS):
+            group_idx = tl.load(cacheable_groups_ptr + group_offset)
+            slot_mapping_ptr = tl.cast(
+                tl.load(slot_mapping_addrs_ptr + group_idx),
+                tl.pointer_type(tl.int32),
+            )
+            tl.store(slot_mapping_ptr + offsets, PAD_ID, mask=replayed)
+
+
+def pad_replayed_slot_mapping(
+    num_reqs,
+    query_start_loc_ptr,
+    positions_ptr,
+    replay_start_ptr,
+    slot_mapping_addrs_ptr,
+    cacheable_groups_ptr,
+    replay_window,
+    *,
+    pad_id,
+    tile_block_size: int = 1024,
+):
+    """Overwrite the replayed slots of every cacheable group with ``pad_id``.
+
+    Launched once per step that replays at all, over every request in the batch:
+    ``replay_start_ptr`` carries 0 for the requests that are not replaying, and
+    those programs return immediately. ``cacheable_groups_ptr`` empty means
+    there is nothing to pad, which is the configuration where every group opted
+    out of prefix caching.
+    """
+    num_groups = cacheable_groups_ptr.shape[0]
+    if num_reqs == 0 or num_groups == 0:
+        return
+    _pad_replayed_slots_kernel[(num_reqs,)](
+        query_start_loc_ptr,
+        positions_ptr,
+        replay_start_ptr,
+        slot_mapping_addrs_ptr,
+        cacheable_groups_ptr,
+        replay_window,
+        PAD_ID=pad_id,
+        NUM_GROUPS=num_groups,
+        TILE_BLOCK_SIZE=tile_block_size,
+    )

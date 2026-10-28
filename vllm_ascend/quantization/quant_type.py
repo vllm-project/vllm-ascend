@@ -35,3 +35,13 @@ class QuantType(Enum):
     W4A8MXFP = 6  # W is MXFP4, A is MXFP8
     W8A8FP = 7  # W and A are FP8
     W4A16MXFP = 8  # W is MXFP4, A is BF16 or FP16
+
+
+# Quant types whose weight layouts the A5 MegaMoe (FUSED_MC2) operator supports.
+A5_SUPPORT_MEGA_MOE_QUANT_TYPES = frozenset(
+    {
+        QuantType.W4A4MXFP,
+        QuantType.W4A8MXFP,
+        QuantType.W8A8MXFP,
+    }
+)

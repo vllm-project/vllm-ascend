@@ -24,9 +24,9 @@ if find $1 -type f -name "MlaPrologV2_*json" -print0 | grep -q .; then
     find $1 -type f -name "MlaPrologV2_*json" -print0 | xargs -0 sed -i 's/FormatAgnostic/FormatDefault/g'
 fi
 
-if find $1 -type f -name "MlaPrologV3_*json" -print0 | grep -q .; then
-    echo "Found MlaPrologV3_*json files, performing sed operation..."
-    find $1 -type f -name "MlaPrologV3_*json" -print0 | xargs -0 sed -i 's/FormatAgnostic/FormatDefault/g'
+if find $1 -type f -name "MlaPrologV3K3_*json" -print0 | grep -q .; then
+    echo "Found MlaPrologV3K3_*json files, performing sed operation..."
+    find $1 -type f -name "MlaPrologV3K3_*json" -print0 | xargs -0 sed -i 's/FormatAgnostic/FormatDefault/g'
 fi
 
 if find $1 -type f -name "GroupedMatmulSwigluQuant_*json" -print0 | grep -q .; then

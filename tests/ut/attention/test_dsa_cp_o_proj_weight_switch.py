@@ -11,7 +11,7 @@ import torch
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl, DSACPMetadata
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
@@ -57,15 +57,27 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
         impl._o_proj_weight_switch_enabled = False
         return impl
 
-    def test_enablement_is_not_gated_by_hardware_family(self):
+    def test_enablement_is_limited_to_a5(self):
         profile = MagicMock()
         profile.supports.return_value = False
         tp_group = SimpleNamespace(world_size=2, rank_in_group=0)
         layer = self._OProj()
         with (
             patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_config",
+                return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=True),
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.is_a5_bf16_kv_enabled",
+                return_value=False,
+            ),
+            patch(
                 "vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_full_o_proj",
                 return_value=True,
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.is_950",
+                side_effect=(False, True),
             ),
             patch("vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group", return_value=tp_group),
             patch(
@@ -77,33 +89,42 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
                 return_value=SimpleNamespace(),
             ),
         ):
-            impl = AscendDSACPImpl(
-                n_heads=2,
-                scale=1.0,
-                n_local_heads=1,
-                q_lora_rank=1,
-                o_lora_rank=1,
-                head_dim=2,
-                rope_head_dim=1,
-                nope_head_dim=1,
-                n_groups=2,
-                n_local_groups=1,
-                window_size=1,
-                compress_ratio=1,
-                wq_a=object(),
-                wq_b=object(),
-                wkv=object(),
-                q_norm=object(),
-                kv_norm=object(),
-                swa_cache_layer=SimpleNamespace(prefix="swa"),
-                wo_a=layer,
-                wo_b=layer,
-                eps=1e-6,
-                attn_sink=torch.empty(2),
-            )
+            impls = [
+                AscendDSACPImpl(
+                    n_heads=2,
+                    scale=1.0,
+                    n_local_heads=1,
+                    q_lora_rank=1,
+                    o_lora_rank=1,
+                    head_dim=2,
+                    rope_head_dim=1,
+                    nope_head_dim=1,
+                    n_groups=2,
+                    n_local_groups=1,
+                    window_size=1,
+                    compress_ratio=1,
+                    wq_a=layer,
+                    wq_b=layer,
+                    wkv=layer,
+                    q_norm=object(),
+                    kv_norm=object(),
+                    swa_cache_layer=SimpleNamespace(prefix="swa"),
+                    wo_a=layer,
+                    wo_b=layer,
+                    eps=1e-6,
+                    attn_sink=torch.empty(2),
+                )
+                for _ in range(2)
+            ]
 
-        self.assertTrue(impl.enable_dsa_cp_full_o_proj)
-        profile.supports.assert_called_once_with(HardwareCapability.FP8_ATTENTION)
+        self.assertFalse(impls[0].enable_dsa_cp_full_o_proj)
+        self.assertTrue(impls[1].enable_dsa_cp_full_o_proj)
+        for impl in impls:
+            self.assertTrue(impl.multistream_dsv4_dsa_overlap)
+            self.assertIs(impl.cv_wq_a.linear, layer)
+            self.assertIs(impl.cv_wkv.linear, layer)
+            self.assertIs(impl.cv_wq_b.linear, layer)
+        self.assertEqual(profile.supports.call_args_list, [unittest.mock.call(HardwareCapability.FP8_ATTENTION)] * 2)
 
     def test_get_weight_switch_method_unwraps_adapter_and_rejects_unsupported(self):
         layer = self._OProj()
@@ -114,118 +135,6 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
         layer.quant_method = object()
         with self.assertRaisesRegex(RuntimeError, "weight-switch capable"):
             AscendDSACPImpl._get_weight_switch_method(layer)
-
-    def test_split_full_hidden_states_for_cp_uses_metadata_range(self):
-        hidden_states = torch.arange(32).reshape(8, 4)
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=4,
-            local_end=6,
-            tokens_per_rank=2,
-            num_tokens_pad=8,
-        )
-
-        local_hidden_states = AscendDSACPImpl._split_full_hidden_states_for_cp(hidden_states, cp_metadata)
-
-        torch.testing.assert_close(local_hidden_states, hidden_states[4:6])
-
-    def test_split_full_hidden_states_for_cp_pads_unaligned_input(self):
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=6,
-            local_end=8,
-            tokens_per_rank=2,
-            num_tokens_pad=8,
-        )
-
-        hidden_states = torch.arange(28).reshape(7, 4)
-        local_hidden_states = AscendDSACPImpl._split_full_hidden_states_for_cp(hidden_states, cp_metadata)
-
-        torch.testing.assert_close(local_hidden_states[0], hidden_states[-1])
-        torch.testing.assert_close(local_hidden_states[1], torch.zeros(4, dtype=hidden_states.dtype))
-
-    def test_split_full_hidden_states_for_cp_rejects_oversized_input(self):
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=4,
-            local_end=6,
-            tokens_per_rank=2,
-            num_tokens_pad=8,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "exceeds its TP-aligned metadata"):
-            AscendDSACPImpl._split_full_hidden_states_for_cp(torch.empty(9, 4), cp_metadata)
-
-    def test_gather_cp_output_restores_rank_ordered_full_state(self):
-        impl = self._make_impl()
-        local_output = torch.arange(8).reshape(2, 4)
-        gathered_output = torch.arange(16).reshape(4, 4)
-        impl.tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=2,
-            local_end=4,
-            tokens_per_rank=2,
-            num_tokens_pad=4,
-        )
-
-        output = impl._gather_cp_output(local_output, cp_metadata)
-
-        impl.tp_group.all_gather.assert_called_once_with(local_output, dim=0)
-        self.assertIs(output, gathered_output)
-
-    def test_gather_cp_output_preserves_already_restored_full_state(self):
-        impl = self._make_impl()
-        impl.tp_group = SimpleNamespace(all_gather=MagicMock())
-        full_output = torch.arange(16).reshape(4, 4)
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=2,
-            local_end=4,
-            tokens_per_rank=2,
-            num_tokens_pad=4,
-        )
-
-        output = impl._gather_cp_output(full_output, cp_metadata)
-
-        impl.tp_group.all_gather.assert_not_called()
-        self.assertIs(output, full_output)
-
-    def test_gather_cp_output_removes_tp_padding(self):
-        impl = self._make_impl()
-        full_output = torch.arange(16).reshape(4, 4)
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=2,
-            local_end=4,
-            tokens_per_rank=2,
-            num_tokens_pad=4,
-        )
-
-        output = impl._gather_cp_output(full_output, cp_metadata, num_output_tokens=3)
-
-        torch.testing.assert_close(output, full_output[:3])
-
-    def test_gather_cp_output_rejects_wrong_full_size(self):
-        impl = self._make_impl()
-        impl.tp_group = SimpleNamespace(all_gather=MagicMock(return_value=torch.empty(3, 4)))
-        cp_metadata = DSACPMetadata(
-            local_query_start_loc=torch.tensor([0, 2]),
-            local_seq_lens=torch.tensor([2]),
-            local_start=0,
-            local_end=2,
-            tokens_per_rank=2,
-            num_tokens_pad=4,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "gathered output does not match"):
-            impl._gather_cp_output(torch.empty(2, 4), cp_metadata)
 
     def test_enable_o_proj_switch_initializes_both_layers_once_with_cloned_local_storage(self):
         impl = self._make_impl()
@@ -292,3 +201,44 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
 
         self.assertEqual(impl.wo_a.weight.data_ptr(), local_ptrs[0])
         self.assertEqual(impl.wo_b.weight.data_ptr(), local_ptrs[1])
+
+    def test_restore_tp_heads_preserves_inverse_rope_with_hardware_fallback(self):
+        for supports_negate in (False, True):
+            for tp_size, skip_all_to_all in ((1, False), (2, False), (2, True)):
+                with self.subTest(supports_negate=supports_negate, tp_size=tp_size, skip=skip_all_to_all):
+                    impl = self._make_impl()
+                    impl.tp_size = tp_size
+                    impl.nope_head_dim, impl.head_dim = 2, 4
+                    output = torch.randn(3, 2, 4)
+                    sin = torch.randn(3, 2)
+                    cos = torch.randn(3, 2)
+                    metadata = SimpleNamespace(
+                        req_metadata=SimpleNamespace(
+                            cp_metadata=SimpleNamespace(local_sin={"layer": sin}, local_cos={"layer": cos})
+                        )
+                    )
+                    with (
+                        patch("vllm_ascend.attention.context_parallel.dsa_cp.get_current_hardware_profile") as profile,
+                        patch("torch.ops._C_ascend.inplace_partial_rotary_mul", create=True) as rotary,
+                        patch("vllm_ascend.attention.context_parallel.dsa_cp.restore_tp_heads") as restore,
+                    ):
+                        profile.return_value.supports.return_value = supports_negate
+                        result = impl._restore_tp_head_layout(output, "layer", metadata, skip_all_to_all)
+
+                    profile.return_value.supports.assert_called_once_with(
+                        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN
+                    )
+                    rotary.assert_called_once()
+                    args, kwargs = rotary.call_args
+                    self.assertEqual(args[0].data_ptr(), output.data_ptr())
+                    self.assertIs(args[1], cos)
+                    self.assertEqual(kwargs["partial_slice"], [2, 4])
+                    self.assertEqual(kwargs["rotary_mode"], "interleave")
+                    effective_sin = -args[2] if kwargs["negate_sin"] else args[2]
+                    torch.testing.assert_close(effective_sin, -sin)
+                    if tp_size == 1 or skip_all_to_all:
+                        restore.assert_not_called()
+                        self.assertIs(result, output)
+                    else:
+                        restore.assert_called_once_with(output, impl.tp_group)
+                        self.assertIs(result, restore.return_value)

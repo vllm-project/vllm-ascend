@@ -9,14 +9,14 @@ def test_service_profiling_symbols_yaml():
     entries = yaml.safe_load(profiling_config.SERVICE_PROFILING_SYMBOLS_YAML)
     symbols = {entry["symbol"] for entry in entries}
 
-    assert len(entries) == 76
-    assert len(symbols) == 75
+    assert len(entries) == 75
+    assert len(symbols) == 74
     assert {
         "vllm.entrypoints.openai.completion.serving:OpenAIServingCompletion.create_completion",
         "vllm.entrypoints.openai.chat_completion.serving:OpenAIServingChat.create_chat_completion",
         "vllm.v1.engine.async_llm:AsyncLLM.generate",
         "vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule",
-        "vllm_ascend.worker.model_runner_v1:NPUModelRunner._model_forward",
+        "vllm_ascend.worker.v1.model_runner:NPUModelRunner._model_forward",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnector.start_load_kv",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.get_num_new_matched_tokens",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.update_state_after_alloc",

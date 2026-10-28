@@ -126,7 +126,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
 
     @patch("vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P))
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_is_310p):
+    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_profile):
         mock_npu_format_cast.side_effect = lambda x, fmt: x
 
         layer = MagicMock()

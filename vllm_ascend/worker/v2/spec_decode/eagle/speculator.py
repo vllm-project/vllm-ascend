@@ -19,26 +19,24 @@
 from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
-class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
-    """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
+class AscendEagleSpeculator(AscendTargetDependentARSpeculator, EagleSpeculator):
+    """Ascend Eagle speculator: the NPU loop from AscendTargetDependentARSpeculator
     layered on upstream EagleSpeculator (flat/GQA attention)."""
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         # EAGLE draft models are dense even when the target is an MoE model.
-        # Reusing the target's EP/EPLB flags makes VllmConfig validate the
-        # draft as an expert model and fail because the draft has no experts.
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=replace(
-                self.vllm_config.parallel_config,
-                pipeline_parallel_size=1,
-                enable_expert_parallel=False,
-                enable_eplb=False,
-            ),
+        # The base swaps in the draft model config without re-validating it;
+        # the draft-only settings on top turn EP/EPLB off (no experts).
+        draft_vllm_config = super()._create_draft_vllm_config()
+        draft_vllm_config.parallel_config = replace(
+            draft_vllm_config.parallel_config,
+            prefill_context_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
         )
+        return draft_vllm_config

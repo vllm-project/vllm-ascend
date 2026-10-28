@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     tensor_storage_key,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -104,12 +105,13 @@ def collect_configured_register_regions(
             )
 
     for tensor_config in kv_cache_config.kv_cache_tensors:
-        if not tensor_config.layers:
+        layer_names = get_kv_cache_tensor_layers(tensor_config)
+        if not layer_names:
             continue
 
         cache_tensors: list[torch.Tensor] = []
-        for layer_name in tensor_config.layers:
-            cache_tensors.extend(as_kv_cache_tensors(kv_caches.get(layer_name)))
+        for layer_name in layer_names:
+            cache_tensors.extend(cache for cache in as_kv_cache_tensors(kv_caches.get(layer_name)) if cache.numel() > 0)
 
         caches_by_storage: dict[int, list[torch.Tensor]] = {}
         for cache in cache_tensors:

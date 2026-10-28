@@ -17,9 +17,17 @@
 #
 import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as cudagraph_module
 import vllm.v1.worker.gpu.spec_decode.dflash.speculator as speculator_module
+import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as speculator2_module
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+    _selector_walk_kernel_ascend,
+)
 
 cudagraph_module.build_attn_metadata = build_attn_metadata
 speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
+
+# triton-ascend cannot lower tldevice.log1p in the upstream selector walk;
+# swap in the algebraically equivalent log(1 - u) variant.
+speculator2_module._selector_walk_kernel = _selector_walk_kernel_ascend
