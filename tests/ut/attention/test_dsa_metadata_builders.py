@@ -377,7 +377,7 @@ class TestDSAMetadataBuilders(TestCase):
             with self.subTest(role=role, ratio=ratio):
                 cls = getattr(dsa_v1, f"AscendDSA{role}MetadataBuilder")
                 builders = [make_builder(cls, ratio), make_builder(cls, ratio)]
-                shared = {}
+                shared: dict[Any, Any] = {}
                 results = []
                 for builder in builders:
                     builder._device_metadata_enabled = True
@@ -429,7 +429,7 @@ class TestDSAMetadataBuilders(TestCase):
         for role, ratio in (("State", 4), ("SWA", 0), ("Attention", 4), ("Attention", 128), ("Indexer", 4)):
             for prefill, sharded in ((True, False), (False, True), (False, False)):
                 with self.subTest(role=role, ratio=ratio, prefill=prefill, sharded=sharded):
-                    shared = {}
+                    shared: dict[Any, Any] = {}
                     results = []
                     global_common = self.common.replace(causal=True, seq_lens=torch.tensor([10], dtype=torch.int32))
                     context = SimpleNamespace(
@@ -538,7 +538,7 @@ class TestDSAMetadataBuilders(TestCase):
             global_slot_mappings=[torch.tensor([40, 41]), torch.tensor([80, 81])],
             hidden_restore_idx=torch.tensor([0, 1]),
         )
-        shared = {}
+        shared: dict[Any, Any] = {}
         results = []
         for group in range(2):
             builder = make_builder(dsa_cp.AscendDSAPCPSWAMetadataBuilder)
@@ -589,7 +589,7 @@ class TestDSAMetadataBuilders(TestCase):
                 query_start_loc_cpu=torch.tensor([0, 0]),
             )
         )
-        shared = {}
+        shared: dict[Any, Any] = {}
         result = builder.build(
             0,
             self.common,
