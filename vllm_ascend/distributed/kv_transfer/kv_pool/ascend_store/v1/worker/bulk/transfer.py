@@ -8,7 +8,7 @@ from itertools import repeat
 import numpy as np
 
 from ...infrastructure.configuration.topology import KVPoolTopology
-from ...infrastructure.mapping import BulkMapping
+from ...infrastructure.mapping import LocalTable, local_addresses, local_lengths
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
 
@@ -22,23 +22,19 @@ class BulkBackendArguments:
     sizes: list[list[int]]
 
 
-def bind_bulk_sizes(mappings: dict[int, BulkMapping]) -> dict[int, tuple[tuple[int, ...], ...]]:
+def bind_bulk_sizes(mappings: dict[int, LocalTable]) -> dict[int, tuple[tuple[int, ...], ...]]:
     """Convert fixed segment lengths once; each Backend call gets independent lists."""
     return {
         group_id: tuple(
-            tuple(
-                np.broadcast_to(
-                    part.local_segments.segment_lengths_bytes, part.local_segments.block_zero_segment_addresses.shape
-                ).tolist()
-            )
-            for part in mapping.local_layout.partitions
+            tuple(np.broadcast_to(local_lengths(segments), segments["bases"].shape).tolist())
+            for segments in mapping.values()
         )
         for group_id, mapping in mappings.items()
     }
 
 
 def materialize_bulk_arguments(
-    mappings: dict[int, BulkMapping], batch: KVTransferBatch, sizes_by_group: dict[int, tuple[tuple[int, ...], ...]]
+    mappings: dict[int, LocalTable], batch: KVTransferBatch, sizes_by_group: dict[int, tuple[tuple[int, ...], ...]]
 ) -> BulkBackendArguments:
     """Select full local payloads and produce the Bulk Backend's final lists."""
     keys: list[str] = []
@@ -53,7 +49,7 @@ def materialize_bulk_arguments(
             if group.transfer_candidate_mask is None
             else group.transfer_candidate_mask.reshape(len(group.keys_by_partition), record_count)
         )
-        for partition_index, partition in enumerate(mappings[group.group_id].local_layout.partitions):
+        for partition_index, segments in enumerate(mappings[group.group_id].values()):
             indices = None
             if masks is not None:
                 selected_count = np.count_nonzero(masks[partition_index])
@@ -64,8 +60,7 @@ def materialize_bulk_arguments(
             ids = group.local_block_ids if indices is None else group.local_block_ids[indices]
             partition_keys = group.keys_by_partition[partition_index]
             keys.extend(partition_keys if indices is None else (partition_keys[i] for i in indices))
-            segments = partition.local_segments
-            addresses.extend(segments.addresses(ids).tolist())
+            addresses.extend(local_addresses(segments, ids).tolist())
             sizes = sizes_by_group[group.group_id][partition_index]
             lengths.extend(list(sizes) for _ in repeat(None, len(ids)))
     return BulkBackendArguments(keys, addresses, lengths)

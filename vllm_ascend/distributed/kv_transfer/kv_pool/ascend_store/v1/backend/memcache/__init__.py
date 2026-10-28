@@ -3,7 +3,6 @@
 from ...infrastructure.configuration.naming import KeyNamingConfig
 from ..naming import WireKeyBuilder
 from .backend import MemcacheBackend
-from .layout import create_object_layout
 
 
 def create_key_builder(config: KeyNamingConfig) -> WireKeyBuilder:
@@ -26,4 +25,4 @@ def _full_key_prefix(model_name: str, group_id: int, num_groups: int, pp_rank: i
     return f"{model_name}{group_tag}{pp_tag}@"
 
 
-__all__ = ["MemcacheBackend", "create_key_builder", "create_object_layout"]
+__all__ = ["MemcacheBackend", "create_key_builder"]

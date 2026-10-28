@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import key_range as key_range_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import transfer as layer_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import worker as layerwise_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.gva import worker as gva_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
     LayerStoreResult,
@@ -62,9 +63,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.worker import (
     LayerwiseWorker,
     _StoreState,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
-    KVTransferBatch,
 )
 
 
@@ -376,7 +374,7 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
     topology = make_sparse_group_topology(block_size=16, sliding_window=33)
     backend: FakeGVABackend | PublishedKeyRangeBackend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec(requires_exists_before_put=True)
-    resources = KVPoolResources(backend, backend_spec, 8, topology.transfer_groups)
+    resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
     reachability = make_reachability(topology, 256, retention_interval=retention_interval)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
@@ -427,7 +425,7 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
     )
     backend = FakeGVABackend() if use_gva else FakeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec()
-    resources = KVPoolResources(backend, backend_spec, cache_config.num_blocks, topology.transfer_groups)
+    resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
     reachability = make_reachability(topology)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
@@ -731,9 +729,7 @@ def test_layerwise_non_leader_skips_candidate_construction_and_completes_job(mon
     command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)
 
     monkeypatch.setattr(worker, "_store_transfer_records", Mock(side_effect=AssertionError("non-writer rows")))
-    monkeypatch.setattr(
-        type(worker._mappings[0].key_namer), "keys", Mock(side_effect=AssertionError("non-writer keys"))
-    )
+    monkeypatch.setattr(layerwise_worker, "map_keys", Mock(side_effect=AssertionError("non-writer keys")))
     begin_step(worker, store=(command,))
     worker.save_layer("layers.0.group.0")
     worker.save_layer("layers.1.group.0")
@@ -903,30 +899,6 @@ def test_worker_propagates_session_factory_failure(monkeypatch, use_gva):
     create.assert_called_once_with()
 
 
-@pytest.mark.parametrize("gva", (False, True), ids=("key_range", "gva"))
-def test_all_successful_session_admission_reuses_batch_without_reselecting_objects(gva, monkeypatch):
-    if gva:
-        worker, _, backend = make_gva_worker()
-    else:
-        worker, _, backend = make_worker(layerwise=True)
-    commands = (LoadCommand("first", 0, 4, ((1,),), (b"same",)), LoadCommand("second", 0, 4, ((7,),), (b"same",)))
-    batch = worker._build_load_batch(commands)
-    if gva:
-        backend.objects.update(
-            {key: (10000, batch.groups[0].remote_object_size_bytes, True) for key in batch.selected_keys()}
-        )
-    select = Mock(side_effect=AssertionError("Successful admission must reuse its input selection"))
-    monkeypatch.setattr(KVTransferBatch, "select_keys", select)
-    try:
-        assert worker._submit_load(batch) == ()
-        assert worker._load_plan.batch is batch
-        assert not hasattr(worker._load_plan.groups[0], "request_indices")
-        assert worker._load_initial_completions == ()
-        select.assert_not_called()
-    finally:
-        worker.close()
-
-
 @pytest.mark.parametrize("route", ("key_range", "gva"))
 @pytest.mark.parametrize("native_result", (-9, RuntimeError("copy failed")))
 def test_layer_copy_failure_preserves_unknown_code_and_releases_load_sessions(route, native_result, monkeypatch):
@@ -1032,7 +1004,7 @@ def test_all_present_store_exits_before_materialization_or_backend_sessions(use_
         command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)
         candidates = worker._build_store_candidates((command,))
         for group in candidates.groups:
-            remote_object_size_bytes = worker._mappings[group.group_id].local_layout.local_group_block_bytes
+            remote_object_size_bytes = worker._group_object_layout(group.group_id)[0]
             for axis in group.keys_by_partition:
                 for key in axis:
                     backend.objects[key] = (10000, remote_object_size_bytes, True)

@@ -11,7 +11,13 @@ from vllm.logger import logger
 
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
-from ...infrastructure.mapping import BulkMapping
+from ...infrastructure.mapping import (
+    LocalTable,
+    build_lookup_keys,
+    build_mappings,
+    map_keys,
+    select_layers,
+)
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability, checkpoint_companion_indices
 from ...infrastructure.resources import KVPoolResources
@@ -51,7 +57,7 @@ from .transfer import (
 )
 
 
-class BulkWorker(KVPoolWorker[BulkMapping]):
+class BulkWorker(KVPoolWorker):
     """Own Bulk business operations, pending results and independent Load/Store execution."""
 
     def __init__(
@@ -91,22 +97,34 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
             source_ready_event_factory=source_ready_event_factory,
         )
 
-    def _bind_mappings(self, registration: dict[str, Any]) -> None:
-        self._mappings = {
-            group_id: BulkMapping(
-                self._topology,
-                registration["base_addresses"],
-                registration["block_lengths"],
-                registration["block_strides"],
-                registration["layer_entry_offsets"],
-                group_id=group_id,
-                kv_cache_layout=self._kv_cache_layout,
-                kv_caches=self._resources.kv_caches,
+    def _bind_mappings(self) -> None:
+        # Resources retains the caller's tensors through executor drain and unregister.
+        kv_caches = self._resources.kv_caches
+        if kv_caches is None:
+            raise RuntimeError("KV tensors must be retained before binding Bulk mappings")
+        self._local: dict[int, LocalTable] = {}
+        physical_layer_ids_by_partition = {}
+        for group_id, group in self._groups.items():
+            keys, local, _ = build_mappings(
+                self._topology, kv_caches, group_id=group_id, kv_cache_layout=self._kv_cache_layout
             )
-            for group_id in self._groups
+            if not any(len(segments["bases"]) for segments in local.values()):
+                raise ValueError("KV cache group has no registered memory entries")
+            self._keys[group_id] = keys
+            self._lookup_key_parts[group_id] = build_lookup_keys(self._topology, group_id)
+            self._local[group_id] = local
+            layers_by_pp = select_layers(group, self._topology.consumer_pipeline_partitions)
+            physical_layer_ids_by_partition[group_id] = tuple(
+                tuple(layer.physical_layer_id for layer in layers_by_pp[pp_rank]) for pp_rank, _, _ in keys
+            )
+        self._bulk_sizes = bind_bulk_sizes(self._local)
+        self._bulk_object_layouts = {
+            group_id: (sum(sum(lengths) for lengths in sizes), physical_layer_ids_by_partition[group_id])
+            for group_id, sizes in self._bulk_sizes.items()
         }
 
-        self._bulk_sizes = bind_bulk_sizes(self._mappings)
+    def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
+        return self._bulk_object_layouts[group_id]
 
     def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         if self._load_executor is None:
@@ -179,18 +197,20 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         for command in commands:
             if isinstance(command, CheckpointStoreCommand):
                 request_rows = self._checkpoint_rows(command)
-                for group_id, mapping in self._mappings.items():
+                for group_id in self._groups:
                     rows = request_rows.get(group_id)
                     if rows is None:
                         rows = empty_store_transfer_records()
                     transfer_records_by_group[group_id].append(rows)
-                    keys_by_group[group_id].append(mapping.key_namer.keys(rows[1]))
+                    keys_by_group[group_id].append(
+                        tuple(map_keys(parts, rows[1]) for parts in self._keys[group_id].values())
+                    )
                 continue
 
             masks = self._reachability.select_for_store(
                 command.block_hashes, command.end_token, command.num_prompt_tokens
             )
-            for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
+            for (group_id, group), mask in zip(self._groups.items(), masks, strict=True):
                 if group_id in self._state_group_ids:
                     rows = empty_store_transfer_records()
                 else:
@@ -198,8 +218,8 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                         command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
-                        block_size=mapping.local_layout.group_block_size,
-                        hash_block_size=mapping.local_layout.hash_block_size,
+                        block_size=group.block_size,
+                        hash_block_size=self._topology.hash_block_size,
                         start_token=command.start_token,
                         mask=mask,
                     )
@@ -207,7 +227,9 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                     if selection is not None:
                         rows = (rows[0][selection], rows[1][selection], rows[2][selection])
                 transfer_records_by_group[group_id].append(rows)
-                keys_by_group[group_id].append(mapping.key_namer.keys(rows[1]))
+                keys_by_group[group_id].append(
+                    tuple(map_keys(parts, rows[1]) for parts in self._keys[group_id].values())
+                )
         return StoreTransferCandidates(
             tuple(
                 StoreGroupTransferCandidates(
@@ -346,4 +368,4 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         return _store_completions(selected, evidence)
 
     def _materialize_bulk_arguments(self, batch: KVTransferBatch) -> BulkBackendArguments:
-        return materialize_bulk_arguments(self._mappings, batch, self._bulk_sizes)
+        return materialize_bulk_arguments(self._local, batch, self._bulk_sizes)

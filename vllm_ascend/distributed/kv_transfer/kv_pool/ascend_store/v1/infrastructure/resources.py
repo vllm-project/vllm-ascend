@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import logger
@@ -35,7 +35,6 @@ class KVPoolResources:
         self,
         backend: KVStoreBackend,
         backend_spec: BackendSpec,
-        num_blocks: int,
         groups: tuple[KVPoolGroupTopology, ...],
         *,
         align_shared_storage: bool = False,
@@ -43,7 +42,6 @@ class KVPoolResources:
         self.backend = backend
         self.backend_spec = backend_spec
         self._backend_sessions: ObjectSessions | None = None
-        self.num_blocks = num_blocks
         self._groups = groups
         self._align_shared_storage = align_shared_storage
         self._registered_regions: tuple[tuple[int, int], ...] = ()
@@ -99,14 +97,14 @@ class KVPoolResources:
     def executors_stopped(self) -> bool:
         return all(executor.stopped for executor in self._executors or ())
 
-    def prepare_kv_caches(self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]) -> dict[str, Any]:
+    def prepare_kv_caches(self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]) -> None:
         if self._closed:
             raise RuntimeError("KV resources are closed")
         if self._binding_started:
             raise RuntimeError("KV caches are already bound")
         self._binding_started = True
         self.kv_caches = kv_caches
-        return self._extract_kv_layout(kv_caches)
+        self._registered_regions = self._collect_registered_regions(kv_caches)
 
     def register_kv_buffers(self) -> None:
         """Acquire registrations only after the Worker has bound its mappings."""
@@ -141,49 +139,29 @@ class KVPoolResources:
         self.kv_caches = None
         self._closed = True
 
-    def _extract_kv_layout(
-        self,
-        kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]],
-    ) -> dict[str, Any]:
-        base_addresses: dict[int, list[int]] = {}
-        block_lengths: dict[int, list[int]] = {}
-        block_strides: dict[int, list[int]] = {}
-        layer_entry_offsets: dict[int, list[int]] = {}
+    def _collect_registered_regions(
+        self, kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]]
+    ) -> tuple[tuple[int, int], ...]:
+        """Cover each view's actual storage span, including gaps excluded from payloads."""
         registered_regions: dict[int, tuple[int, int]] = {}
-
         for group in self._groups:
-            bases: list[int] = []
-            lengths: list[int] = []
-            strides: list[int] = []
-            layer_offsets = [0]
             for layer in group.layers:
                 for layer_name in layer.layer_names:
                     cache_or_caches = kv_caches[layer_name]
-                    caches = (cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else tuple(cache_or_caches)
+                    caches = (cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else cache_or_caches
                     for cache in caches:
                         # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
                         if not cache.numel():
                             continue
-                        assert cache.shape[0] % self.num_blocks == 0, (
-                            "The external block size must be an integer multiple of the kernel block size."
-                        )
-                        block_scale = cache.shape[0] // self.num_blocks
-                        block_length = cache[0].numel() * cache.element_size() * block_scale
-                        block_stride = cache.stride(0) * cache.element_size() * block_scale
                         address = cache.data_ptr()
-                        bases.append(address)
-                        lengths.append(block_length)
-                        strides.append(block_stride)
-                        # Payload lengths exclude padding; registration must still cover the last kernel block.
                         element_size = cache.element_size()
-                        kernel_block_span = element_size + sum(
-                            (size - 1) * stride * element_size
-                            for size, stride in zip(cache.shape[1:], cache.stride()[1:], strict=True)
-                        )
                         region_end = (
                             address
-                            + (self.num_blocks * block_scale - 1) * cache.stride(0) * element_size
-                            + kernel_block_span
+                            + element_size
+                            + sum(
+                                (size - 1) * stride * element_size
+                                for size, stride in zip(cache.shape, cache.stride(), strict=True)
+                            )
                         )
                         storage_key = cache.untyped_storage().data_ptr()
                         previous = registered_regions.get(storage_key)
@@ -192,26 +170,11 @@ class KVPoolResources:
                             if previous is not None
                             else (address, region_end)
                         )
-                layer_offsets.append(len(bases))
-            base_addresses[group.group_id] = bases
-            block_lengths[group.group_id] = lengths
-            block_strides[group.group_id] = strides
-            layer_entry_offsets[group.group_id] = layer_offsets
-
         if self._align_shared_storage:
-            # Hybrid tensor views can start inside a larger allocation. Native GVA
-            # registration needs an aligned start, independently of object offsets.
+            # GVA registration alignment is independent of payload and object offsets.
             for storage_key, (start, end) in registered_regions.items():
                 aligned_start = start // _GVA_REGISTRATION_ALIGNMENT * _GVA_REGISTRATION_ALIGNMENT
                 if aligned_start < storage_key:
                     raise ValueError("Shared KV storage cannot satisfy the GVA alignment boundary")
                 registered_regions[storage_key] = aligned_start, end
-
-        registration: dict[str, Any] = {
-            "base_addresses": base_addresses,
-            "block_lengths": block_lengths,
-            "block_strides": block_strides,
-            "layer_entry_offsets": layer_entry_offsets,
-        }
-        self._registered_regions = tuple(registered_regions.values())
-        return registration
+        return tuple(registered_regions.values())

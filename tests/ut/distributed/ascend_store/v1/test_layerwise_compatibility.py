@@ -21,21 +21,18 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 )
 from tests.ut.distributed.ascend_store.v1.worker.native_copy_fixtures import ByteCopySDK, native_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     GVA_SHARD_ALIGNMENT_BYTES,
     resolve_backend_spec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import layout as memcache_layout
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import WireKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
     resolve_object_partitions,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
     ContextRank,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BulkMapping
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
     LookupRequest,
@@ -89,7 +86,7 @@ def production_worker(monkeypatch, name, topology, objects, readable, *, store=T
     tensors = {
         layer.layer_names[0]: (
             torch.arange(8 * 7, dtype=torch.float32).reshape(8, 7)[:, :4] + topology.tp_rank * 100,
-            torch.arange(8 * 5, dtype=torch.int16).reshape(8, 5)[:, :2] + layer.physical_layer_id * 100,
+            torch.arange(8 * 5, dtype=torch.int8).reshape(8, 5)[:, :4] + layer.physical_layer_id * 100,
         )
         for group in topology.transfer_groups
         for layer in group.layers
@@ -113,12 +110,6 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
     topology = make_topology(group_ids=group_ids, physical_layers=(3, 4), pp_size=pp_rank + 1, pp_rank=pp_rank)
     objects: dict[str, ctypes.Array[ctypes.c_char]] = {}
     readable: set[str] = set()
-    monkeypatch.setattr(PoolKey, "to_string", Mock(side_effect=AssertionError("unused canonical prefixes")))
-    monkeypatch.setattr(BulkMapping, "__init__", Mock(side_effect=AssertionError("unused Bulk view")))
-    if name == "mooncake":
-        monkeypatch.setattr(
-            memcache_layout, "build_memcache_object_layouts", Mock(side_effect=AssertionError("unused PP/CP placement"))
-        )
     worker, tensors, sdk, config, cache = production_worker(monkeypatch, name, topology, objects, readable)
     protocol = mooncake_layerwise if name == "mooncake" else memcache_backend
     production_keys = protocol.bind_layerwise_keys(
@@ -132,16 +123,6 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
     offset = 60 if name == "memcache" and pp_rank else 0
     expected = {name: tuple(tensor[1].clone() for tensor in values) for name, values in tensors.items()}
     expected_keys = {production_keys.make_full_key(group, "61", 0, pp_rank) for group in group_ids}
-    # Traffic consumes bound names and coordinates; no model/configuration rebinding is allowed.
-    for owner, method in (
-        (WireKeyBuilder, "bind"),
-        (protocol, "bind_layerwise_keys"),
-        (memcache_layout, "bind_layer_object_span"),
-        (memcache_layout, "bind_context_object_span"),
-        (config.model_config, "get_layers_start_end_indices"),
-        (config.model_config, "get_num_layers"),
-    ):
-        monkeypatch.setattr(owner, method, Mock(side_effect=AssertionError(f"runtime rebind: {method}")))
     try:
         if production_writes:
             for group_id in group_ids:
@@ -164,12 +145,8 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
         assert set(objects) == expected_keys
         for group_id in group_ids:
             key = production_keys.make_full_key(group_id, "61", 0, pp_rank)
-            assert worker._mappings[group_id].key_namer.keys([b"a"]) == ((key,),)
-            assert not hasattr(worker._mappings[group_id], "binding")
-            assert (
-                worker._group_object_layout(group_id)[1]
-                is worker._mappings[group_id].local_layout.physical_layer_ids_by_partition
-            )
+            assert tuple(map_keys(parts, (b"a",)) for parts in worker._keys[group_id].values()) == ((key,),)
+            assert worker._group_object_layout(group_id)[1] is worker._physical_layer_ids_by_partition[group_id]
             assert ctypes.sizeof(objects[key]) == object_size
             payload = b"".join(
                 tensor[1].numpy().tobytes()

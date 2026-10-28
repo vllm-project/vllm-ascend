@@ -330,40 +330,25 @@ class FakeResources(KVPoolResources):
         backend_spec: BackendSpec,
         topology: KVPoolTopology,
     ) -> None:
-        super().__init__(backend, backend_spec, 8, topology.transfer_groups)
+        super().__init__(backend, backend_spec, topology.transfer_groups)
         self._topology = topology
         self.closed = False
 
     def prepare_kv_caches(self, kv_caches):
-        # This fixture publishes synthetic addresses without backing tensor storage.
-        self.kv_caches = (
-            {
-                name: torch.empty_strided((8, 4, 2, 1), (16, 2, 1, 1), dtype=torch.float32)
-                for group in self._topology.transfer_groups
-                for name in group.layer_names
-            }
-            if self._topology.tp_partition.tp_mismatch
-            else None
-        )
-        base_addresses = {}
-        block_lengths = {}
-        block_strides = {}
-        layer_entry_offsets = {}
+        # Keep real views alive so both routes bind the same address geometry.
+        self.kv_caches = {}
         for group in self._topology.transfer_groups:
-            group_id = group.group_id
-            base_addresses[group_id] = [
-                1000 + group_id * 10000 + layer.physical_layer_id * 1000 for layer in group.layers
-            ]
-            block_lengths[group_id] = [32] * len(group.layers)
-            block_strides[group_id] = [64] * len(group.layers)
-            layer_entry_offsets[group_id] = list(range(len(group.layers) + 1))
-        registration: dict[str, Any] = {
-            "base_addresses": base_addresses,
-            "block_lengths": block_lengths,
-            "block_strides": block_strides,
-            "layer_entry_offsets": layer_entry_offsets,
-        }
-        return registration
+            for name in group.layer_names:
+                if group.uses_align_state:
+                    cache = torch.empty_strided((64, 8), (16, 1), dtype=torch.float32)
+                else:
+                    heads = 2 if self._topology.tp_partition.tp_mismatch else max(8 // group.block_size, 1)
+                    cache = torch.empty_strided(
+                        (64, group.block_size, heads, 1),
+                        (max(16, group.block_size * heads), heads, 1, 1),
+                        dtype=torch.float32,
+                    )
+                self.kv_caches[name] = cache
 
     def close(self) -> None:
         if self._backend_sessions is not None:

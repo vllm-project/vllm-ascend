@@ -51,16 +51,12 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
 
     topology = make_topology(physical_layers=(4, 5))
     registration_backend = FakeBackend()
-    resources = KVPoolResources(registration_backend, make_gva_spec(), 8, topology.groups)
+    resources = KVPoolResources(registration_backend, make_gva_spec(), topology.groups)
     caches = {layer_name: torch.empty((8, 4), dtype=torch.float32) for layer_name in topology.groups[0].layer_names}
-    registration = register_caches(resources, caches)
-
-    assert registration["base_addresses"] == {0: [cache.data_ptr() for cache in caches.values()]}
-    assert registration["block_lengths"] == {0: [16, 16]}
-    assert registration["block_strides"] == {0: [16, 16]}
-    assert registration["layer_entry_offsets"] == {0: [0, 1, 2]}
-    assert "object_offsets" not in registration and "object_sizes" not in registration
+    register_caches(resources, caches)
+    assert resources.kv_caches is caches
     assert registration_backend.calls[-1][0] == "register_buffer"
+    resources.close()
 
 
 def test_gva_readability_changes_only_after_publication() -> None:
@@ -111,7 +107,9 @@ def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
         assert worker._copy_load_layer(layer_id)[0].failures == ()
     copies = [call for call in store.calls if call[0] == "copy"]
     assert [call[1] for call in copies] == [(1000, 2000), (1032, 2032)]
-    assert [call[2] for call in copies] == [(1064, 1192), (2064, 2192)]
+    assert [call[2] for call in copies] == [
+        tuple(cache[block].data_ptr() for block in (1, 3)) for cache in worker._resources.kv_caches.values()
+    ]
     assert [call[3] for call in copies] == [(32, 32), (32, 32)]
     sessions.finish_load([first, second])
     assert store.calls[-1] == ("release", (first, second))
@@ -205,7 +203,7 @@ def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> Non
     backend = FakeGVABackend()
     topology = make_topology(physical_layers=(0,))
     backend_spec = make_gva_spec()
-    resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
+    resources = KVPoolResources(backend, backend_spec, topology.groups)
     worker = GVALayerwiseWorker(
         topology,
         resources,

@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import mapping
 
 
 @dataclass
@@ -19,7 +20,7 @@ class MappingCase:
     layout: str
     head_slices: int
 
-    def bind(self, module=mapping, *, group_id=None):
+    def bind(self, module, *, group_id=None):
         options = {} if group_id is None else {"group_id": group_id}
         # Snapshot compatibility belongs only to the paired benchmark fixture.
         bind = getattr(module, "bind_mapping", module.BulkMapping)
@@ -28,7 +29,7 @@ class MappingCase:
         )
         return module.BulkMapping(binding) if hasattr(module, "bind_mapping") else binding
 
-    def bind_layers(self, module=mapping, *, group_id=None, **options):
+    def bind_layers(self, module, *, group_id=None, **options):
         if "topology" not in inspect.signature(module.LayerwiseMapping).parameters:
             # Compare complete initialization, including the historical local
             # binding, instead of timing only the old Layerwise view constructor.
@@ -102,11 +103,17 @@ def make_case(
     group = SimpleNamespace(
         group_id=3,
         block_size=block_size,
+        kv_cache_spec=FullAttentionSpec(block_size=block_size, num_kv_heads=heads, head_size=vector, dtype=torch.int32),
         uses_align_state=False,
         layers=tuple(layer_facts),
         key_metadata=KeyMetadata("mapping-test", tp_rank // replicas, 0, pp_rank, 3),
     )
     topology = SimpleNamespace(
+        pp_partition=SimpleNamespace(global_layer_count=None),
+        cp_partition=SimpleNamespace(object_shard_count=1, shard_alignment_bytes=1),
+        stage_layer_start=0,
+        stage_layer_count=len(layers),
+        object_shard_index=0,
         transfer_groups=(group,),
         groups=(group,),
         hash_block_size=block_size,
@@ -161,6 +168,9 @@ def make_hybrid_case(
     )
     attention = case.topology.transfer_groups[0]
     attention.key_metadata.cache_family = "c16"
+    attention.kv_cache_spec = AscendMLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=3, dtype=torch.int32, tokens_per_state=16
+    )
     entry_addresses, entry_block_payload_bytes, entry_block_strides_bytes, layer_entry_boundaries = [], [], [], [0]
     layers = []
     for layer in state_layers:
@@ -179,6 +189,9 @@ def make_hybrid_case(
     state = SimpleNamespace(
         group_id=9,
         block_size=32,
+        kv_cache_spec=MambaSpec(
+            block_size=32, shapes=((2, 3), (2, 3)), dtypes=(torch.int16, torch.float32), page_size_padded=66
+        ),
         uses_align_state=True,
         layers=tuple(layers),
         key_metadata=KeyMetadata("mapping-test", tp_rank, 0, pp_rank, 9, cache_family="mamba"),

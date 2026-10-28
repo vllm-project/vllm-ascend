@@ -89,16 +89,14 @@ def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_
     group = replace(base.groups[0], layers=resolve_group_layers(list(names), base_layer_count=2))
     topology = replace(base, groups=(group,))
     backend = TensorBytesBackend()
-    resources = KVPoolResources(
-        backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
-    )
+    resources = KVPoolResources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
         reachability=make_reachability(topology, 64),
         source_ready_event_factory=FakeEvent,
     )
-    caches = {name: torch.zeros((8, 2, 4, 1, 1), dtype=torch.float32) for name in names}
+    caches = {name: torch.zeros((8, 4, 1, 2), dtype=torch.float32) for name in names}
     try:
         worker.bind_kv_caches(caches)
         assert backend.registered_regions == [
@@ -600,7 +598,7 @@ def test_bulk_async_load_consumes_finished_batches_once_and_preserves_late_notif
 
 
 @pytest.mark.parametrize(
-    ("topology", "expected_ranks", "expected_addresses", "expected_sizes"),
+    ("topology", "expected_ranks", "expected_offsets", "expected_sizes"),
     (
         (
             make_topology(
@@ -612,7 +610,7 @@ def test_bulk_async_load_consumes_finished_batches_once_and_preserves_late_notif
                 key_slices_per_rank=2,
             ),
             (2, 3),
-            ((1128, 1136, 1144, 1152), (1132, 1140, 1148, 1156)),
+            ((0, 8, 16, 24), (4, 12, 20, 28)),
             ((4, 4, 4, 4), (4, 4, 4, 4)),
         ),
         (
@@ -625,7 +623,7 @@ def test_bulk_async_load_consumes_finished_batches_once_and_preserves_late_notif
                 key_slices_per_rank=1,
             ),
             (2,),
-            ((1128,),),
+            ((0,),),
             ((32,),),
         ),
     ),
@@ -633,7 +631,7 @@ def test_bulk_async_load_consumes_finished_batches_once_and_preserves_late_notif
 def test_tp_mismatch_bulk_binds_effective_keys_to_exact_local_slices(
     topology,
     expected_ranks,
-    expected_addresses,
+    expected_offsets,
     expected_sizes,
 ) -> None:
     backend = FakeBackend()
@@ -645,7 +643,8 @@ def test_tp_mismatch_bulk_binds_effective_keys_to_exact_local_slices(
     assert tuple(f"@head_or_tp_rank:{rank}@" in key for key, rank in zip(put_call[1], expected_ranks, strict=True)) == (
         True,
     ) * len(expected_ranks)
-    assert put_call[2] == expected_addresses
+    block_base = resources.kv_caches["layers.0.group.0"][2].data_ptr()
+    assert put_call[2] == tuple(tuple(block_base + offset for offset in row) for row in expected_offsets)
     assert put_call[3] == expected_sizes
     assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [2] * len(expected_ranks)
 
@@ -728,9 +727,7 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
             expected_entries.append(values)
         caches[name] = tuple(entries)
         expected[name] = tuple(expected_entries)
-    resources = KVPoolResources(
-        backend, make_backend_spec(layerwise_access=None), num_cache_blocks, topology.transfer_groups
-    )
+    resources = KVPoolResources(backend, make_backend_spec(layerwise_access=None), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
@@ -818,23 +815,22 @@ def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group
     topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
     worker, _, _ = make_worker(topology=topology)
     events = []
-    key_type = type(worker._mappings[0].key_namer)
-    key_group_ids = {id(binding.key_namer): group_id for group_id, binding in worker._mappings.items()}
-    make_rows, make_keys = bulk_module.store_transfer_records, key_type.keys
+    key_group_ids = {parts: group_id for group_id, keys in worker._keys.items() for parts in keys.values()}
+    make_rows, make_keys = bulk_module.store_transfer_records, bulk_module.map_keys
 
     def rows(end_token, hashes, local_block_ids, **kwargs):
         events.append(("rows", tuple(local_block_ids)))
         return make_rows(end_token, hashes, local_block_ids, **kwargs)
 
     def keys(naming, hashes):
-        events.append(("keys", key_group_ids[id(naming)]))
+        events.append(("keys", key_group_ids[naming]))
         return make_keys(naming, hashes)
 
     def reject_unused_empty_rows():
         raise AssertionError("Present ordinary groups must not allocate fallback empty rows")
 
     monkeypatch.setattr(bulk_module, "store_transfer_records", rows)
-    monkeypatch.setattr(key_type, "keys", keys)
+    monkeypatch.setattr(bulk_module, "map_keys", keys)
     monkeypatch.setattr(bulk_module, "empty_store_transfer_records", reject_unused_empty_rows)
     command = RangeStoreCommand("request", 0, 4, ((1,), (), (), (7,)), (b"a",), 4, 17)
     try:
@@ -859,8 +855,8 @@ def test_bulk_registration_does_not_reassemble_reachability_or_checkpoint_policy
     try:
         worker.bind_kv_caches({"cache": object()})
         assert worker._reachability is reachability
-        assert tuple(worker._mappings) == (0, 1)
-        for mapping in worker._mappings.values():
+        assert tuple(worker._local) == (0, 1)
+        for mapping in worker._local.values():
             assert not hasattr(mapping, "reachability")
             assert not hasattr(mapping, "checkpoint_policy")
             assert not hasattr(mapping, "fine_grained_lookup")
@@ -877,9 +873,7 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
 ) -> None:
     topology = make_sparse_group_topology(block_size=16, sliding_window=33)
     backend = TensorBytesBackend()
-    resources = KVPoolResources(
-        backend, make_backend_spec(requires_exists_before_put=True), 8, topology.transfer_groups
-    )
+    resources = KVPoolResources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
@@ -887,7 +881,7 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
         source_ready_event_factory=FakeEvent,
     )
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
-    cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 2, 16, 1, 1)
+    cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 16, 1, 2)
     caches = {group.layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups}
     source_blocks = ((), (1, 2, 3, 4, 5, 6), (), (1, 2, 3, 4, 5, 6))
     try:
@@ -943,7 +937,7 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     topology = replace(topology, groups=(attention, state))
     backend = TensorBytesBackend()
     resources = KVPoolResources(
-        backend, make_backend_spec(layerwise_access=None, requires_exists_before_put=True), 8, topology.groups
+        backend, make_backend_spec(layerwise_access=None, requires_exists_before_put=True), topology.groups
     )
     worker = BulkWorker(
         topology,
@@ -1049,13 +1043,14 @@ def test_ordinary_bulk_worker_owns_lookup_load_store_rows_and_ranges() -> None:
     assert not worker.collect_load_result().failed_locations
     worker.end_step()
     get_call = next(call for call in backend.calls if call[0] == "get")
-    assert get_call[2] == ((1128, 2128), (1192, 2192))
+    caches = tuple(resources.kv_caches.values())
+    assert get_call[2] == tuple(tuple(cache[block].data_ptr() for cache in caches) for block in (2, 3))
     assert get_call[3] == ((32, 32), (32, 32))
 
     completion = store_one(worker, RangeStoreCommand("store", 4, 6, ((2, 3),), (b"a", b"b"), 6, 17))
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert put_call[1][0].endswith("@62")
-    assert put_call[2:] == (((1192, 2192),), ((32, 32),))
+    assert put_call[2:] == ((tuple(cache[3].data_ptr() for cache in caches),), ((32, 32),))
     (evidence,) = completion.evidence.transfer_evidence
     assert evidence.source.local_block_id == 3
     assert evidence.source.physical_layer_ids == (0, 1)
@@ -1085,7 +1080,10 @@ def test_sparse_hybrid_groups_keep_original_identity_through_public_worker(put_r
     get_call = next(call for call in backend.calls if call[0] == "get")
     assert ["@group:1@" in key for key in get_call[1]] == [True, True, False, False]
     assert ["@group:3@" in key for key in get_call[1]] == [False, False, True, True]
-    assert get_call[2] == ((11704,), (11768,), (33984,), (34048,))
+    caches = tuple(resources.kv_caches.values())
+    assert get_call[2] == tuple(
+        (cache[block].data_ptr(),) for cache, ids in zip(caches, ((11, 12), (31, 32)), strict=True) for block in ids
+    )
     assert get_call[3] == ((32,), (32,), (32,), (32,))
 
     backend.calls.clear()
@@ -1134,14 +1132,16 @@ def test_hybrid_bulk_worker_owns_fine_lookup_load_range_and_checkpoint_store(mon
     get_call = next(call for call in backend.calls if call[0] == "get")
     assert ["@group:0@" in key for key in get_call[1]] == [True, False]
     assert ["@group:1@" in key for key in get_call[1]] == [False, True]
-    assert get_call[2] == ((1192,), (12448,))
+    attention, state = resources.kv_caches.values()
+    expected_addresses = ((attention[3].data_ptr(),), (state[7].data_ptr(),))
+    assert get_call[2] == expected_addresses
     assert get_call[3] == ((32,), (32,))
 
     backend.calls.clear()
     range_completion = store_one(worker, RangeStoreCommand("range", 0, 8, ((3,), (7,)), (b"a", b"b"), 8, 17))
     range_put = next(call for call in backend.calls if call[0] == "put")
     assert len(range_put[1]) == 1 and "@group:0@" in range_put[1][0]
-    assert range_put[2:] == (((1192,),), ((32,),))
+    assert range_put[2:] == (expected_addresses[:1], ((32,),))
     assert [item.source.group_id for item in range_completion.evidence.transfer_evidence] == [0]
 
     backend.calls.clear()
@@ -1152,7 +1152,7 @@ def test_hybrid_bulk_worker_owns_fine_lookup_load_range_and_checkpoint_store(mon
     checkpoint_put = next(call for call in backend.calls if call[0] == "put")
     assert ["@group:0@" in key for key in checkpoint_put[1]] == [True, False]
     assert ["@group:1@" in key for key in checkpoint_put[1]] == [False, True]
-    assert checkpoint_put[2:] == (((1192,), (12448,)), ((32,), (32,)))
+    assert checkpoint_put[2:] == (expected_addresses, ((32,), (32,)))
     assert [item.source.group_id for item in checkpoint_completion.evidence.transfer_evidence] == [0, 1]
     assert [item.source.physical_layer_ids for item in checkpoint_completion.evidence.transfer_evidence] == [(0,), (1,)]
 
@@ -1206,7 +1206,7 @@ def test_consumer_pipeline_store_keeps_key_memory_and_layer_provenance_atomic() 
     assert ["@pp_rank:0@" in exists_call[1][0], "@pp_rank:1@" in exists_call[1][1]] == [True, True]
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1 and "@pp_rank:1@" in put_call[1][0]
-    assert put_call[2] == ((3064, 4064),)
+    assert put_call[2] == (tuple(resources.kv_caches[f"layers.{layer}.group.0"][1].data_ptr() for layer in (2, 3)),)
     assert put_call[3] == ((32, 32),)
     (evidence,) = completion.evidence.transfer_evidence
     assert evidence.source.physical_layer_ids == (2, 3)
@@ -1228,7 +1228,7 @@ def test_ordinary_bulk_partitions_writers_after_candidate_filtering() -> None:
 
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1 and put_call[1][0].endswith("@64")
-    assert put_call[2] == ((1256,),)
+    assert put_call[2] == ((resources.kv_caches["layers.0.group.0"][4].data_ptr(),),)
     assert completion.evidence.transfer_evidence[0].source.local_block_id == 4
 
     worker.close()
@@ -1245,7 +1245,8 @@ def test_dcp_bulk_keeps_every_row_of_its_distinct_key_shard() -> None:
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 2
     assert all("@dcp:1@" in key for key in put_call[1])
-    assert put_call[2] == ((1064,), (1128,))
+    cache = resources.kv_caches["layers.0.group.0"]
+    assert put_call[2] == ((cache[1].data_ptr(),), (cache[2].data_ptr(),))
     assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [1, 2]
 
     worker.close()

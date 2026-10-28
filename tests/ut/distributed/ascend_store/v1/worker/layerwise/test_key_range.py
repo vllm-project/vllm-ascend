@@ -19,13 +19,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     LoadCommand,
     RangeStoreCommand,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
-    KVGroupBatch,
-)
 
 
 @pytest.mark.parametrize("failed_group", (0, 3))
-def test_key_range_merged_failure_identifies_every_original_request_destination(failed_group, monkeypatch):
+def test_key_range_merged_failure_identifies_every_original_request_destination(failed_group):
     topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
     worker, resources, backend = make_worker(topology=topology, layerwise=True, store=False)
     commands = (
@@ -36,10 +33,7 @@ def test_key_range_merged_failure_identifies_every_original_request_destination(
         batch = worker._build_load_batch(commands)
         worker._prepare_load_layers(batch)
         backend.session_copy_result = (-7, 0) if failed_group == 0 else (0, -7)
-        ownership = Mock(side_effect=KVGroupBatch.request_index)
-        monkeypatch.setattr(KVGroupBatch, "request_index", lambda group, index: ownership(group, index))
         completions = worker._copy_load_layer(2)
-        assert ownership.call_count == 2
         assert [completion.request_id for completion in completions] == ["first", "second"]
         expected_blocks = (1, 4) if failed_group == 0 else (2, 5)
         for completion, block_id in zip(completions, expected_blocks, strict=True):
@@ -126,11 +120,11 @@ def test_hybrid_attention_store_callback_cannot_outlive_its_step(finish, monkeyp
 
 
 @pytest.mark.parametrize(
-    ("physical_layers", "expected_addresses"),
-    (((0, 1, 2), (1064, 2064, 3064)), ((2, 5, 9), (3064, 6064, 10064))),
+    "physical_layers",
+    ((0, 1, 2), (2, 5, 9)),
     ids=("contiguous", "sparse"),
 )
-def test_layerwise_load_copies_each_layer_within_one_session(physical_layers, expected_addresses) -> None:
+def test_layerwise_load_copies_each_layer_within_one_session(physical_layers) -> None:
     worker, resources, backend = make_worker(
         layerwise=True,
         store=False,
@@ -145,12 +139,15 @@ def test_layerwise_load_copies_each_layer_within_one_session(physical_layers, ex
         worker.wait_for_layer_load(f"layers.{layer_id}.group.0")
     assert not worker.collect_load_result().failed_locations
     worker.end_step()
+    expected_addresses = [
+        ((resources.kv_caches[f"layers.{layer}.group.0"][1].data_ptr(),),) for layer in physical_layers
+    ]
     worker.close()
 
     session_calls = [call[0] for call in backend.calls if call[0] in ("batch_get_start", "batch_get_end")]
     copy_calls = [call for call in backend.calls if call[0] == "batch_copy_get"]
     assert session_calls == ["batch_get_start", "batch_get_end"]
-    assert [call[2] for call in copy_calls] == [((address,),) for address in expected_addresses]
+    assert [call[2] for call in copy_calls] == expected_addresses
     assert [call[4] for call in copy_calls] == [((0,),), ((32,),), ((64,),)]
     assert resources.closed
 

@@ -9,13 +9,12 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from tests.ut.distributed.ascend_store import test_layerwise_keys as legacy_cases
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import memcache, mooncake
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.naming import (
     resolve_key_naming_config,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.local_layout import (
-    ObjectPartitionCoordinate,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 
 
 @pytest.mark.parametrize("backend,legacy", ((memcache, memcache_backend), (mooncake, mooncake_layerwise)))
@@ -47,18 +46,19 @@ def test_resolved_codec_matches_legacy_and_snapshots_all_inputs(backend, legacy,
     with patch.object(legacy, "bind_layerwise_keys", side_effect=AssertionError("legacy config adapter")):
         builder = backend.create_key_builder(facts)
         for group in range(group_count):
-            coordinates = tuple(
-                ObjectPartitionCoordinate(stage, 0, head) for stage in reversed(range(pp_size)) for head in (1, 0)
-            )
             for lookup_heads in (0, 1, 2):
-                naming = builder.bind(group, coordinates, lookup_head_count=lookup_heads)
-                assert naming.keys((b"a", "b")) == tuple(
-                    tuple(expected.make_full_key(group, value, pos.head_rank, pos.pp_rank) for value in ("61", "b"))
-                    for pos in coordinates
+                expected_lookup = tuple((key,) for key in expected.make_hit_check_keys(group, "61", lookup_heads))
+                assert (
+                    tuple(map_keys(parts, (b"a",)) for parts in builder.lookup_parts(group, lookup_heads))
+                    == expected_lookup
                 )
-                assert naming.lookup_keys((b"a",)) == tuple(
-                    (key,) for key in expected.make_hit_check_keys(group, "61", lookup_heads)
-                )
+            for stage in reversed(range(pp_size)):
+                for head in (1, 0):
+                    for dcp_rank in (0, 3):
+                        metadata = KeyMetadata("model", head, dcp_rank, stage, group)
+                        assert map_keys(builder(metadata), (b"a", "b")) == tuple(
+                            expected.make_full_key(group, value, head, stage) for value in ("61", "b")
+                        )
 
 
 @pytest.mark.parametrize("backend,legacy", ((memcache, memcache_backend), (mooncake, mooncake_layerwise)))
@@ -92,9 +92,9 @@ def test_runtime_only_joins_precompiled_parts(backend, legacy, pp_size, group_co
         monkeypatch.setattr(backend, name, fail)
     monkeypatch.setattr(backend, "create_key_builder", fail)
     monkeypatch.setattr(legacy, "bind_layerwise_keys", fail)
-    bound = builder.bind(group, (ObjectPartitionCoordinate(stage, 0, 1),), lookup_head_count=2)
-    assert bound.keys((b"a", "61")) == ((key, key),)
-    assert bound.lookup_keys((b"a",)) == lookup
+    parts = builder(KeyMetadata("model", 1, 0, stage, group))
+    assert map_keys(parts, (b"a", "61")) == (key, key)
+    assert tuple(map_keys(parts, (b"a",)) for parts in builder.lookup_parts(group, 2)) == lookup
     fail.assert_not_called()
 
 
@@ -141,8 +141,8 @@ def test_mooncake_identity_normalizes_cache_size_and_group_representation():
     assert represented == facts
     builder = mooncake.create_key_builder(facts)
     for group in (0, 1):
-        naming = builder.bind(group, (ObjectPartitionCoordinate(1, 0, 1),), lookup_head_count=2)
-        assert naming.keys(("a",)) == ((expected.make_full_key(group, "a", 1, 1),),)
+        parts = builder(KeyMetadata("model", 1, 0, 1, group))
+        assert map_keys(parts, ("a",)) == (expected.make_full_key(group, "a", 1, 1),)
     changed = mooncake.create_key_builder(replace(facts, speculative_hash="different-draft"))
     assert changed.prefixes_by_group_stage != builder.prefixes_by_group_stage
 
@@ -157,9 +157,12 @@ def test_memcache_does_not_read_unused_layout_identity():
         group_block_sizes=(16, 32),
         requires_layout_identity=False,
     )
-    naming = memcache.create_key_builder(facts).bind(1, (ObjectPartitionCoordinate(1, 0, 1),), lookup_head_count=1)
-    assert naming.keys(("a",)) == (("model@1@pp1@a@1",),)
-    assert naming.lookup_keys(("a",)) == (("model@1@pp0@a@0",), ("model@1@pp1@a@0",))
+    builder = memcache.create_key_builder(facts)
+    assert map_keys(builder(KeyMetadata("model", 1, 0, 1, 1)), ("a",)) == ("model@1@pp1@a@1",)
+    assert tuple(map_keys(parts, ("a",)) for parts in builder.lookup_parts(1, 1)) == (
+        ("model@1@pp0@a@0",),
+        ("model@1@pp1@a@0",),
+    )
 
 
 @pytest.mark.parametrize(

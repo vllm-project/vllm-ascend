@@ -25,7 +25,17 @@ def bulk_arguments(mapping, keys, local_block_ids, *, selected_keys=None, sizes_
         None if selected_keys is None else np.asarray(selected_keys, dtype=np.bool_),
         physical_layer_ids_by_partition=local.physical_layer_ids_by_partition,
     )
-    mappings = {local.group_id: mapping}
+    # Feed the retained legacy byte-oracle cases into the new numeric Bulk inputs.
+    mappings = {
+        local.group_id: {
+            (part.coordinate.pp_rank, part.coordinate.dcp_rank, part.coordinate.head_rank): {
+                "bases": part.local_segments.block_zero_segment_addresses,
+                "block_strides": part.local_segments.group_block_strides_bytes,
+                "lengths": part.local_segments.segment_lengths_bytes,
+            }
+            for part in local.partitions
+        }
+    }
     if sizes_by_group is None:
         sizes_by_group = bind_bulk_sizes(mappings)
     result = materialize_bulk_arguments(mappings, KVTransferBatch(("request",), (group,)), sizes_by_group)

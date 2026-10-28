@@ -37,6 +37,28 @@ import numpy as np
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
 from tests.ut.distributed.ascend_store.v1.worker.bulk.argument_fixtures import bulk_arguments
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
+    build_key_range_remote,
+    build_lookup_keys,
+    build_mappings,
+    map_keys,
+    select_layers,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.transfer import (
+    bind_bulk_sizes,
+    materialize_bulk_arguments,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.key_range import (
+    bind_key_range_layouts,
+    materialize_group_layer_ranges,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
+    make_layer_transfer_group,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
+    KVGroupBatch,
+    KVTransferBatch,
+)
 
 _WARMUP_CALLS = 5
 
@@ -174,6 +196,71 @@ def layer_workload(layer_mapping, bulk_work):
     return keys_and_prepare, prepared_layers, keys_prepare_all_layers
 
 
+def current_workloads(case, bound, row_count, mask_kind):
+    key_table, local, layers = bound
+    hashes = tuple(index.to_bytes(4, "little") for index in range(row_count))
+    ids = np.zeros(row_count, dtype=np.uint64)
+    mask = (
+        None
+        if mask_kind == "full"
+        else np.asarray(
+            [mask_kind == "mixed" and i % 3 != 1 for i in range(len(key_table) * row_count)], dtype=np.bool_
+        )
+    )
+    group = case.topology.transfer_groups[0]
+    by_pp = select_layers(group, case.topology.consumer_pipeline_partitions)
+    memberships = tuple(tuple(layer.physical_layer_id for layer in by_pp[pp]) for pp, _, _ in local)
+    sizes = bind_bulk_sizes({3: local})
+    remote = build_key_range_remote(local) if layers is not None else None
+    layouts = bind_key_range_layouts({3: local}, {3: layers}, {3: remote})[3] if layers is not None else None
+
+    def keys():
+        return tuple(map_keys(parts, hashes) for parts in key_table.values())
+
+    def batch(names):
+        return KVGroupBatch(
+            3,
+            ids,
+            names,
+            np.array((0, row_count), dtype=np.intp),
+            tuple(layer.physical_layer_id for layer in group.layers),
+            sum(sizes[3][0]),
+            mask,
+            physical_layer_ids_by_partition=memberships,
+        )
+
+    def bulk(names):
+        result = materialize_bulk_arguments({3: local}, KVTransferBatch(("request",), (batch(names),)), sizes)
+        return result.keys, result.addresses, result.sizes
+
+    names = keys()
+    bulk_runs = (lambda: bulk(keys()), lambda: bulk(names))
+    if layouts is None:
+        return bulk_runs, None
+
+    def prepare():
+        value = batch(keys())
+        return make_layer_transfer_group(value, selected_keys=value.selected_keys())
+
+    def sweep(selection):
+        return [
+            (
+                [
+                    key
+                    for native in layouts[layer]
+                    for key in selection.selected_keys[
+                        selection.selected_transfer_slices_by_partition[native.partition_index]
+                    ]
+                ],
+                *materialize_group_layer_ranges(layouts[layer], selection),
+            )
+            for layer in (item.physical_layer_id for item in group.layers)
+        ]
+
+    prepared = prepare()
+    return bulk_runs, (prepare, lambda: sweep(prepared), lambda: sweep(prepare()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True)
@@ -221,20 +308,33 @@ def main():
         if args.routes and name not in args.routes:
             continue
         case = make_case(layers=tuple(range(32)), block_size=128, vector=16, blocks=1, fill=False, **options)
-        before, after = case.bind(baseline), case.bind()
-        assert getattr(before, "naming", before).lookup_keys(["a", "b"]) == after.key_namer.lookup_keys(["a", "b"])
+        before = case.bind(baseline)
+        bind_current = lambda case=case: build_mappings(
+            case.topology, case.caches, group_id=3, kv_cache_layout=case.layout
+        )
+        after = bind_current()
+        assert getattr(before, "key_namer", getattr(before, "naming", before)).lookup_keys(["a", "b"]) == tuple(
+            map_keys(parts, ("a", "b")) for parts in build_lookup_keys(case.topology, 3)
+        )
         result = {
             "route": name,
             "bulk_binding": measure(
-                lambda case=case: case.bind(baseline), case.bind, args.samples, args.target_sample_ms
+                lambda case=case: case.bind(baseline), bind_current, args.samples, args.target_sample_ms
             ),
         }
         if args.layerwise:
             before_layer = case.bind_layers(baseline)
-            after_layer = case.bind_layers()
+
+            def bind_current_layer(case=case):
+                tables = build_mappings(
+                    case.topology, case.caches, group_id=3, kv_cache_layout=case.layout, layerwise=True
+                )
+                return tables, build_key_range_remote(tables[1])
+
+            after_layer, _ = bind_current_layer()
             result["layer_binding"] = measure(
                 lambda case=case: case.bind_layers(baseline),
-                case.bind_layers,
+                bind_current_layer,
                 args.samples,
                 args.target_sample_ms,
             )
@@ -246,17 +346,17 @@ def main():
             ("empty", 0, "full"),
             ("single_row", 1, "full"),
         ):
-            old_bulk, new_bulk = (
-                bulk_workload(before, transfer_record_count, mask_kind),
-                bulk_workload(after, transfer_record_count, mask_kind),
+            old_bulk = bulk_workload(before, transfer_record_count, mask_kind)
+            new_bulk, new_layer = current_workloads(
+                case, after_layer if args.layerwise else after, transfer_record_count, mask_kind
             )
-            assert old_bulk[4]() == new_bulk[4]()
+            assert old_bulk[4]() == new_bulk[0]()
             measurements = {
-                "bulk_keys_arguments": measure(old_bulk[4], new_bulk[4], args.samples, args.target_sample_ms),
-                "bulk_arguments_only": measure(old_bulk[5], new_bulk[5], args.samples, args.target_sample_ms),
+                "bulk_keys_arguments": measure(old_bulk[4], new_bulk[0], args.samples, args.target_sample_ms),
+                "bulk_arguments_only": measure(old_bulk[5], new_bulk[1], args.samples, args.target_sample_ms),
             }
             if args.layerwise:
-                old_layer, new_layer = layer_workload(before_layer, old_bulk), layer_workload(after_layer, new_bulk)
+                old_layer = layer_workload(before_layer, old_bulk)
                 assert selection_signature(old_layer[0]()) == selection_signature(new_layer[0]())
                 assert old_layer[1]() == new_layer[1]()
                 assert old_layer[2]() == new_layer[2]()

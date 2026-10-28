@@ -12,11 +12,17 @@ from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
+from ...backend.naming import WireKeyBuilder
 from ...infrastructure.configuration.topology import KVPoolTopology
-from ...infrastructure.mapping import LayerwiseMapping
-from ...infrastructure.mapping.layerwise import LayerPartitionLayout
-from ...infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
-from ...infrastructure.mapping.object_naming import KeyBuilder
+from ...infrastructure.mapping import (
+    LayerTable,
+    LocalSegmentData,
+    LocalTable,
+    RemoteTable,
+    build_key_range_remote,
+    local_addresses,
+    local_lengths,
+)
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..transfer.batch import KVTransferBatch
@@ -45,8 +51,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
-        key_builder: KeyBuilder | None = None,
-        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
+        key_builder: WireKeyBuilder | None = None,
     ) -> None:
         backend = cast(KeyRangeBackend, resources.backend)
         sessions = backend.create_sessions()
@@ -63,14 +68,14 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
             key_builder=key_builder,
-            remote_object_layout_factory=remote_object_layout_factory,
         )
 
         self._attention_store_layers = _attention_store_layer_ids(topology) if store_enabled else frozenset()
 
-    def _bind_mappings(self, registration: dict[str, Any]) -> None:
-        super()._bind_mappings(registration)
-        self._key_range_layouts = bind_key_range_layouts(self._mappings)
+    def _bind_mappings(self) -> None:
+        super()._bind_mappings()
+        self._remote = {group_id: build_key_range_remote(local) for group_id, local in self._local.items()}
+        self._key_range_layouts = bind_key_range_layouts(self._local, self._layer_slices, self._remote)
 
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._load_plan = prepare_layer_transfer(batch, self._layer_memberships)
@@ -147,7 +152,9 @@ class KeyRangeArguments:
 class KeyRangeLayout:
     """Worker-owned native scalar templates for a bound layer partition."""
 
-    layout: LayerPartitionLayout
+    partition_index: int
+    segments: LocalSegmentData
+    segment_slice: slice
     sizes: tuple[int, ...]
     offsets: tuple[int, ...]
 
@@ -155,26 +162,23 @@ class KeyRangeLayout:
 KeyRangeLayouts = dict[int, dict[int, tuple[KeyRangeLayout, ...]]]
 
 
-def bind_key_range_layouts(mappings: dict[int, LayerwiseMapping]) -> KeyRangeLayouts:
-    return {
-        group_id: {
-            layer_id: tuple(
-                KeyRangeLayout(
-                    layout,
-                    tuple(
-                        np.broadcast_to(
-                            layout.local_segments.segment_lengths_bytes,
-                            layout.local_segments.block_zero_segment_addresses.shape,
-                        ).tolist()
-                    ),
-                    tuple(layout.remote_segment_offsets_bytes.tolist()),
+def bind_key_range_layouts(
+    local: dict[int, LocalTable], layers: dict[int, LayerTable], remote: dict[int, RemoteTable]
+) -> KeyRangeLayouts:
+    result = {}
+    for group_id, partitions in local.items():
+        by_layer: dict[int, list[KeyRangeLayout]] = {}
+        for index, ((pp, _, _), segments) in enumerate(partitions.items()):
+            for layer_id, selected in layers[group_id][pp].items():
+                if selected.start == selected.stop:
+                    continue
+                sizes = np.broadcast_to(local_lengths(segments, selected), (selected.stop - selected.start,))
+                offsets = remote[group_id][pp]["offsets"][selected]
+                by_layer.setdefault(layer_id, []).append(
+                    KeyRangeLayout(index, segments, selected, tuple(sizes.tolist()), tuple(offsets.tolist()))
                 )
-                for layout in layouts
-            )
-            for layer_id, layouts in mapping.layer_layouts.items()
-        }
-        for group_id, mapping in mappings.items()
-    }
+        result[group_id] = {layer: tuple(layouts) for layer, layouts in by_layer.items()}
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,12 +214,10 @@ def materialize_group_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for native in layouts:
-        layout = native.layout
-        ids = group.selected_local_block_ids_by_partition[layout.partition_index]
+        ids = group.selected_local_block_ids_by_partition[native.partition_index]
         if not len(ids):
             continue
-        segments = layout.local_segments
-        addresses.extend(segments.addresses(ids).tolist())
+        addresses.extend(local_addresses(native.segments, ids, native.segment_slice).tolist())
         sizes.extend(list(native.sizes) for _ in repeat(None, len(ids)))
         offsets.extend(list(native.offsets) for _ in repeat(None, len(ids)))
     return addresses, sizes, offsets

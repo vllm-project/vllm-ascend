@@ -6,7 +6,6 @@ import logging
 import threading
 from concurrent.futures import BrokenExecutor, wait
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -32,6 +31,7 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.resources_fixtures impo
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
     make_gva_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -48,12 +48,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     KVPoolResources,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_base
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import KeyRangeLayerwiseWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
+    KeyRangeLayerwiseWorker,
+    key_range,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
     TransferSource,
 )
@@ -66,9 +69,7 @@ def test_worker_mapping_failure_precedes_registration_and_closes_backend(monkeyp
     backend = RecordingBackend()
     topology, resources = make_resources(backend, physical_layers=(0,))
     caches = make_caches(topology)
-    monkeypatch.setattr(
-        worker_base.BulkMapping, "__init__", MagicMock(side_effect=RuntimeError("mapping binding failed"))
-    )
+    monkeypatch.setattr(bulk_worker, "build_mappings", MagicMock(side_effect=RuntimeError("mapping binding failed")))
     worker = BulkWorker(topology, resources, reachability=make_reachability(topology))
     with pytest.raises(RuntimeError, match="mapping binding failed"):
         worker.bind_kv_caches(caches)
@@ -78,30 +79,58 @@ def test_worker_mapping_failure_precedes_registration_and_closes_backend(monkeyp
     assert resources.kv_caches is None
 
 
+def test_bulk_binding_uses_retained_tensors_without_consuming_registration_tables(monkeypatch):
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend, physical_layers=(0,))
+    caches = make_caches(topology)
+    prepare = resources.prepare_kv_caches
+
+    def prepare_without_tables(kv_caches):
+        prepare(kv_caches)
+        return {}
+
+    monkeypatch.setattr(resources, "prepare_kv_caches", prepare_without_tables)
+    worker = BulkWorker(topology, resources, reachability=make_reachability(topology), store_enabled=False)
+    try:
+        worker.bind_kv_caches(caches)
+        assert resources.kv_caches is caches
+        begin_step(worker, load=(LoadCommand("request", 0, 4, ((3,),), (b"a",)),))
+        worker.start_load()
+        assert not worker.collect_load_result().failed_block_ids
+        worker.end_step()
+        get_call = next(call for call in backend.calls if call[0] == "get")
+        assert get_call[2:] == (((next(iter(caches.values()))[3].data_ptr(),),), ((16,),))
+    finally:
+        worker.close()
+    assert resources.kv_caches is None
+    assert [call[0] for call in backend.calls if "region" in call[0]] == ["register_region", "unregister_region"]
+
+
 def test_invalid_tp_tensor_geometry_fails_before_native_registration() -> None:
     topology = make_topology(physical_layers=(0,), tp_mismatch=True)
     backend = RecordingBackend()
-    resources = KVPoolResources(backend, make_backend_spec(), 8, topology.transfer_groups)
+    resources = KVPoolResources(backend, make_backend_spec(), topology.transfer_groups)
     worker = BulkWorker(topology, resources, reachability=make_reachability(topology))
-    with pytest.raises(ValueError, match="block/token/head/vector tensor"):
+    with pytest.raises(RuntimeError, match="unflatten.*sizes.*multiply"):
         worker.bind_kv_caches(make_caches(topology))
     assert backend.calls == [("backend_close",)]
     assert resources.kv_caches is None
 
 
 @pytest.mark.parametrize("phase", ("naming", "object_layout"))
-def test_layerwise_capability_binding_failure_precedes_registration_and_closes_backend(phase):
+def test_layerwise_capability_binding_failure_precedes_registration_and_closes_backend(phase, monkeypatch):
     backend = RecordingBackend()
     topology = make_topology(physical_layers=(0,))
-    resources = KVPoolResources(backend, make_backend_spec(), 8, topology.groups)
+    resources = KVPoolResources(backend, make_backend_spec(), topology.groups)
     fail = Mock(side_effect=RuntimeError("capability binding failed"))
     worker = KeyRangeLayerwiseWorker(
         topology,
         resources,
         reachability=make_reachability(topology),
-        key_builder=SimpleNamespace(bind=fail) if phase == "naming" else None,
-        remote_object_layout_factory=fail if phase == "object_layout" else None,
+        key_builder=fail if phase == "naming" else None,
     )
+    if phase == "object_layout":
+        monkeypatch.setattr(key_range, "build_key_range_remote", fail)
     with pytest.raises(RuntimeError, match="capability binding failed"):
         worker.bind_kv_caches(make_caches(topology))
     fail.assert_called_once()
@@ -115,7 +144,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     backend = RecordingBackend()
     backend.put_result = RuntimeError("put failed after address handoff")
     backend_spec = make_backend_spec(layerwise_access=None)
-    resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
+    resources = KVPoolResources(backend, backend_spec, topology.groups)
     cleanup = Mock()
     resources.bind_execution_cleanup(cleanup)
     worker = BulkWorker(
@@ -590,11 +619,8 @@ def test_store_admission_copies_only_missing_unique_keys_and_releases_all_jobs(
             source_block = 3 if scenario == "partial_hit" else 1
             assert len(copies) == (2 if layerwise else 1)
             assert all(len(call[1]) == 1 for call in copies)
-            addresses: list[tuple[tuple[int, ...], ...]] = [
-                ((1000 + source_block * 64,),),
-                ((2000 + source_block * 64,),),
-            ]
-            expected_addresses = addresses if layerwise else [((1000 + source_block * 64, 2000 + source_block * 64),)]
+            row = tuple(cache[source_block].data_ptr() for cache in resources.kv_caches.values())
+            expected_addresses = [((address,),) for address in row] if layerwise else [(row,)]
             assert [call[2] for call in copies] == expected_addresses
             assert events and all(event.recorded and event.synchronized for event in events)
         worker.end_step()
@@ -623,9 +649,11 @@ def test_store_admission_preserves_missing_rows_in_each_group(layerwise) -> None
         selected_keys = (candidates[1], candidates[2])
         copies = [call for call in backend.calls if call[0] == ("batch_copy_put" if layerwise else "put")]
         assert [call[1] for call in copies] == [selected_keys] * (2 if layerwise else 1)
-        expected_addresses: list[tuple[tuple[int, ...], ...]] = (
-            [((1128,), (11192,)), ((2128,), (12192,))] if layerwise else [((1128, 2128), (11192, 12192))]
+        rows = tuple(
+            tuple(resources.kv_caches[f"layers.{layer}.group.{group}"][block].data_ptr() for layer in (0, 1))
+            for group, block in ((0, 2), (1, 3))
         )
+        expected_addresses = [tuple((row[layer],) for row in rows) for layer in (0, 1)] if layerwise else [rows]
         assert [call[2] for call in copies] == expected_addresses
         assert worker.take_released_store_job_ids() == {17}
         worker.end_step()
@@ -687,7 +715,7 @@ def test_checkpoint_store_uses_exact_state_source_after_admission() -> None:
         completion = store_one(worker, command)
         put_call = next(call for call in backend.calls if call[0] == "put")
         assert len(put_call[1]) == 1 and "@group:1@" in put_call[1][0]
-        assert put_call[2:] == (((12448,),), ((32,),))
+        assert put_call[2:] == (((resources.kv_caches["layers.1.state"][7].data_ptr(),),), ((32,),))
         (evidence,) = completion.evidence.transfer_evidence
         assert (evidence.source.group_id, evidence.source.local_block_id) == (1, 7)
         assert evidence.result_code == 0
@@ -695,3 +723,48 @@ def test_checkpoint_store_uses_exact_state_source_after_admission() -> None:
     finally:
         worker.close()
     assert resources.closed
+
+
+@pytest.mark.parametrize("target_pp", (None, (1, 0, 3)), ids=("execution_pp", "consumer_pp"))
+def test_lookup_requires_every_remote_partition_even_when_local_keys_are_present(target_pp):
+    topology = make_topology(
+        group_ids=(1, 3),
+        physical_layers=(2, 3),
+        pp_size=2,
+        pp_rank=1,
+        tp_size=2,
+        tp_rank=1,
+        tp_mismatch=True,
+        key_rank_count=4,
+        key_slices_per_rank=2,
+        dcp_size=2,
+        dcp_rank=1,
+        consumer_pipeline_partitions=target_pp,
+    )
+    worker, _, backend = make_worker(topology=topology, store=False)
+    request = LookupRequest(0, 8, (1, 3), (b"a", b"b"))
+    pp_size = len(target_pp) if target_pp else topology.pp_size
+    expected = [
+        tuple(
+            PoolKey(
+                replace(group.key_metadata, pp_rank=pp, dcp_rank=dcp, head_or_tp_rank=head), value.hex()
+            ).to_string()
+            for pp in range(pp_size)
+            for dcp in range(2)
+            for head in range(4)
+            for value in (b"a", b"b")
+        )
+        for group in topology.transfer_groups
+    ]
+    try:
+        assert worker.lookup(request).available_end_token == 8
+        assert [call[1] for call in backend.calls if call[0] == "exists"] == expected
+        # This remote rank is absent from every local Key/Local table.
+        assert all((0, 0, 0) not in keys for keys in worker._keys.values())
+        for missing_hash_index, available_end in ((1, 4), (0, 0)):
+            presence = [1] * len(expected[0])
+            presence[missing_hash_index] = 0
+            backend.presence = presence
+            assert worker.lookup(request).available_end_token == available_end
+    finally:
+        worker.close()

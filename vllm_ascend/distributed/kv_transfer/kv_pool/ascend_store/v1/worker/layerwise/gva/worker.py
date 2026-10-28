@@ -10,10 +10,16 @@ from vllm.logger import logger
 
 from .....attention_fence import reset_attention_compute_start_gate
 from ....backend import GVABackend, GVAObjectSessions, GVARegion
+from ....backend.naming import WireKeyBuilder
 from ....infrastructure.configuration.topology import KVPoolTopology
-from ....infrastructure.mapping import LayerwiseMapping
-from ....infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
-from ....infrastructure.mapping.object_naming import KeyBuilder
+from ....infrastructure.mapping import (
+    LayerTable,
+    LocalTable,
+    RemoteTable,
+    build_gva_remote,
+    local_addresses,
+    local_lengths,
+)
 from ....infrastructure.reachability import HybridReachability, UnitaryReachability
 from ....infrastructure.resources import KVPoolResources
 from ...transfer.batch import KVGroupBatch, KVTransferBatch
@@ -43,8 +49,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
-        key_builder: KeyBuilder | None = None,
-        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
+        key_builder: WireKeyBuilder | None = None,
         store_collective: StoreCollective | None = None,
     ) -> None:
         backend = cast(GVABackend, resources.backend)
@@ -61,12 +66,18 @@ class GVALayerwiseWorker(LayerwiseWorker):
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
             key_builder=key_builder,
-            remote_object_layout_factory=remote_object_layout_factory,
         )
 
         self._shared_writes = (
             SharedGVAWrites(self._store_writers, store_collective) if store_collective is not None else None
         )
+
+    def _bind_mappings(self) -> None:
+        super()._bind_mappings()
+        self._remote = {
+            group_id: build_gva_remote(self._topology, local, self._layer_slices[group_id])
+            for group_id, local in self._local.items()
+        }
 
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
@@ -84,7 +95,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
         if not plan.groups:
             return _layer_load_completions(plan, layer_id, 0)
         try:
-            remote, local, sizes = materialize_layer_gva(self._mappings, plan, layer_id)
+            remote, local, sizes = materialize_layer_gva(self._local, self._layer_slices, self._remote, plan, layer_id)
             result_code = self._gva_backend.copy_from_gva(remote, local, sizes)
         except Exception as error:
             logger.error(
@@ -102,7 +113,9 @@ class GVALayerwiseWorker(LayerwiseWorker):
         source_handed_off = False
         plan = self._prepared_store_plan()
         try:
-            remote_addresses, local_addresses, sizes = materialize_layer_gva(self._mappings, plan, layer_id)
+            remote_addresses, local_addresses, sizes = materialize_layer_gva(
+                self._local, self._layer_slices, self._remote, plan, layer_id
+            )
             source_ready_event.synchronize()
             source_handed_off = True
             result_code = self._gva_backend.copy_to_gva(remote_addresses, local_addresses, sizes)
@@ -162,7 +175,9 @@ __all__ = ("GVALayerwiseWorker",)
 
 
 def materialize_layer_gva(
-    mappings: dict[int, LayerwiseMapping],
+    local: dict[int, LocalTable],
+    layers: dict[int, LayerTable],
+    remote: dict[int, RemoteTable],
     plan: LayerTransferPlan,
     layer_id: int,
 ) -> tuple[list[int], list[int], list[int]]:
@@ -171,23 +186,25 @@ def materialize_layer_gva(
     remote_object_bases_by_group = plan.remote_object_bases_by_group
     assert remote_object_bases_by_group is not None
     remote_addresses: list[int] = []
-    local_addresses: list[int] = []
+    selected_addresses: list[int] = []
     sizes: list[int] = []
     for group in plan.groups_by_layer[layer_id]:
-        for layout in mappings[group.group_id].layer_layouts.get(layer_id, ()):
-            partition_index = layout.partition_index
+        for partition_index, ((pp, _, _), segments) in enumerate(local[group.group_id].items()):
+            selected = layers[group.group_id][pp].get(layer_id)
+            if selected is None or selected.start == selected.stop:
+                continue
             ids = group.selected_local_block_ids_by_partition[partition_index]
             if not len(ids):
                 continue
             bases = remote_object_bases_by_group[group.group_id][
                 group.selected_transfer_slices_by_partition[partition_index]
             ]
-            segments = layout.local_segments
-            local = segments.addresses(ids)
+            addresses = local_addresses(segments, ids, selected)
             # Remote addition previously used Python integers. Preserve that
             # range instead of silently wrapping large GVA sums to uint64.
-            remote = np.add(bases[:, None], layout.remote_segment_offsets_bytes[None, :], dtype=object)
-            remote_addresses.extend(remote.ravel().tolist())
-            local_addresses.extend(local.ravel().tolist())
-            sizes.extend(np.broadcast_to(segments.segment_lengths_bytes, local.shape).ravel().tolist())
-    return remote_addresses, local_addresses, sizes
+            offsets = remote[group.group_id][pp]["offsets"][selected]
+            remote_rows = np.add(bases[:, None], offsets[None, :], dtype=object)
+            remote_addresses.extend(remote_rows.ravel().tolist())
+            selected_addresses.extend(addresses.ravel().tolist())
+            sizes.extend(np.broadcast_to(local_lengths(segments, selected), addresses.shape).ravel().tolist())
+    return remote_addresses, selected_addresses, sizes

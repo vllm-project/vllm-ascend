@@ -15,12 +15,19 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import ObjectSessions
+from ...backend.naming import WireKeyBuilder
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.execution.session import Session
-from ...infrastructure.mapping import LayerwiseMapping
-from ...infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
-from ...infrastructure.mapping.object_naming import KeyBuilder
+from ...infrastructure.mapping import (
+    LayerTable,
+    LocalTable,
+    RemoteTable,
+    build_lookup_keys,
+    build_mappings,
+    map_keys,
+    select_layers,
+)
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
@@ -67,7 +74,7 @@ class _StoreState:
     errors_by_key: dict[str, Exception] = field(default_factory=dict)
 
 
-class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
+class LayerwiseWorker(KVPoolWorker):
     """Own request and layer scheduling; Backend owns the remote object lifecycle."""
 
     def __init__(
@@ -82,11 +89,9 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         layerwise_prefetch_layers: int = 2,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
-        key_builder: KeyBuilder | None = None,
-        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
+        key_builder: WireKeyBuilder | None = None,
     ) -> None:
         self._key_builder = key_builder
-        self._remote_object_layout_factory = remote_object_layout_factory
         self._load_plan: LayerTransferPlan | None = None
         self._store_plan: LayerTransferPlan | None = None
         self._backend_sessions = backend_sessions
@@ -118,29 +123,47 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             source_ready_event_factory=source_ready_event_factory,
         )
 
-    def _bind_mappings(self, registration: dict[str, Any]) -> None:
-        self._mappings = {
-            group_id: LayerwiseMapping(
+    def _bind_mappings(self) -> None:
+        kv_caches = self._resources.kv_caches
+        if kv_caches is None:
+            raise RuntimeError("KV tensors must be retained before binding Layerwise mappings")
+        self._local: dict[int, LocalTable] = {}
+        self._layer_slices: dict[int, LayerTable] = {}
+        self._remote: dict[int, RemoteTable] = {}
+        self._physical_layer_ids_by_partition = {}
+        for group_id, group in self._groups.items():
+            keys, local, layer_slices = build_mappings(
                 self._topology,
-                registration["base_addresses"],
-                registration["block_lengths"],
-                registration["block_strides"],
-                registration["layer_entry_offsets"],
+                kv_caches,
                 group_id=group_id,
                 kv_cache_layout=self._kv_cache_layout,
-                kv_caches=self._resources.kv_caches,
                 key_builder=self._key_builder,
-                remote_object_layout_factory=self._remote_object_layout_factory,
+                layerwise=True,
             )
-            for group_id in self._groups
-        }
-
-        self._layer_memberships = bind_layer_memberships(self._mappings)
+            if not any(len(segments["bases"]) for segments in local.values()):
+                raise ValueError("KV cache group has no registered memory entries")
+            assert layer_slices is not None
+            self._keys[group_id] = keys
+            self._local[group_id] = local
+            self._layer_slices[group_id] = layer_slices
+            head_count = (
+                self._topology.tp_size if group.uses_align_state else self._topology.tp_partition.key_rank_count
+            )
+            self._lookup_key_parts[group_id] = (
+                build_lookup_keys(self._topology, group_id)
+                if self._key_builder is None
+                else self._key_builder.lookup_parts(group_id, head_count)
+            )
+            layers_by_pp = select_layers(group, self._topology.consumer_pipeline_partitions)
+            self._physical_layer_ids_by_partition[group_id] = tuple(
+                tuple(layer.physical_layer_id for layer in layers_by_pp[pp]) for pp, _, _ in keys
+            )
+        self._layer_memberships = bind_layer_memberships(self._local, self._layer_slices)
 
     def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
-        mapping = self._mappings[group_id]
-        # Admission excludes TP mismatch and target-PP splitting: each group has one local object axis.
-        return mapping.remote_object_layouts[0].size_bytes, mapping.local_layout.physical_layer_ids_by_partition
+        # Admission excludes TP mismatch and target-PP splitting: one local object per group.
+        remote = next(iter(self._remote[group_id].values()))
+        return remote["size_bytes"], self._physical_layer_ids_by_partition[group_id]
 
     @abstractmethod
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
@@ -239,7 +262,9 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
                 zip(self._topology.transfer_group_ids, self._store_transfer_records(command), strict=True)
             ):
                 transfer_records_by_group[group_index].append(rows)
-                keys_by_group[group_index].append(self._mappings[group_id].key_namer.keys(rows[1]))
+                keys_by_group[group_index].append(
+                    tuple(map_keys(parts, rows[1]) for parts in self._keys[group_id].values())
+                )
         return StoreTransferCandidates(
             tuple(
                 StoreGroupTransferCandidates(
@@ -259,8 +284,8 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
                 command.end_token,
                 command.block_hashes,
                 command.block_ids_by_group[group_id],
-                block_size=self._mappings[group_id].local_layout.group_block_size,
-                hash_block_size=self._mappings[group_id].local_layout.hash_block_size,
+                block_size=self._groups[group_id].block_size,
+                hash_block_size=self._topology.hash_block_size,
                 start_token=command.start_token,
                 mask=mask,
             )

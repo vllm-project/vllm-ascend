@@ -132,7 +132,28 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         layerwise = importlib.import_module(package + ".worker.layerwise")
         worker_type = layerwise.GVALayerwiseWorker if route == "gva" else layerwise.KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=make_reachability(topology), store_enabled=False)
-    if "topology" in inspect.signature(mapping.LayerwiseMapping).parameters:
+    if hasattr(mapping, "build_mappings"):
+        # Bound numeric fixtures match historical synthetic addresses; no KV bytes are read.
+        segments = {
+            "bases": np.asarray(registration_arrays[0][0], dtype=np.uint64),
+            "lengths": np.asarray((_SEGMENT_BYTES,), dtype=np.uint64),
+            "block_strides": np.asarray((_SEGMENT_BYTES,), dtype=np.uint64),
+        }
+        worker._local = {0: {(0, 0, 0): segments}}
+        if route == "bulk":
+            transfer = importlib.import_module(package + ".worker.bulk.transfer")
+            worker._bulk_sizes = transfer.bind_bulk_sizes(worker._local)
+        else:
+            transfer = importlib.import_module(package + ".worker.layerwise.transfer")
+            worker._layer_slices = {0: {0: {layer: slice(2 * layer, 2 * layer + 2) for layer in range(_LAYERS)}}}
+            worker._layer_memberships = transfer.bind_layer_memberships(worker._local, worker._layer_slices)
+            worker._remote = {0: mapping.build_key_range_remote(worker._local[0])}
+            if route == "key_range":
+                key_range = importlib.import_module(package + ".worker.layerwise.key_range")
+                worker._key_range_layouts = key_range.bind_key_range_layouts(
+                    worker._local, worker._layer_slices, worker._remote
+                )
+    elif "topology" in inspect.signature(mapping.LayerwiseMapping).parameters:
         worker._bind_mappings(
             dict(
                 zip(
@@ -244,6 +265,13 @@ def phase_operations(worker, batch, route, package):
         def all_layer_arguments():
             return tuple(
                 materialize(worker._key_range_layouts, worker._load_plan, layer, worker._load_key_merges[layer])
+                for layer in range(_LAYERS)
+            )
+    elif route == "gva" and hasattr(worker, "_local"):
+
+        def all_layer_arguments():
+            return tuple(
+                materialize(worker._local, worker._layer_slices, worker._remote, worker._load_plan, layer)
                 for layer in range(_LAYERS)
             )
     else:

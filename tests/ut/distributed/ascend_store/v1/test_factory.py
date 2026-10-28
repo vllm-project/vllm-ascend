@@ -42,13 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
     resolve as configuration,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
-    BulkMapping,
-    LayerwiseMapping,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.object_layout import (
-    build_default_object_layouts,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
     LookupRequest,
@@ -120,20 +114,15 @@ def test_backend_supplied_binders_are_resolved_before_registration_and_applied_o
     config, cache = configuration_case
     topology = make_topology(physical_layers=(0,))
     backend = FakeBackend()
-    names = SimpleNamespace(
-        keys=lambda _hashes: (("custom-wire-key",),), lookup_keys=lambda _hashes: (("custom-wire-key",),)
-    )
-    bind_names = Mock(return_value=names)
-    make_names = Mock(return_value=SimpleNamespace(bind=bind_names))
-    bind_objects = Mock(wraps=build_default_object_layouts)
-    make_objects = Mock(return_value=bind_objects)
+    builder = Mock(return_value=("custom-wire-", ""))
+    builder.lookup_parts = Mock(return_value=(("custom-wire-", ""),))
+    make_names = Mock(return_value=builder)
     spec = BackendSpec(
         "custom",
         lambda *_args, **_kwargs: backend,
         LayerwiseAccessKind.KEY_RANGE,
         False,
         layerwise_key_factory=make_names,
-        layerwise_layout_factory=make_objects,
     )
     pool = make_pool_config(topology, "custom", use_layerwise=True)
     monkeypatch.setattr(factory_module, "resolve_kv_pool_config", lambda *_: pool)
@@ -142,28 +131,19 @@ def test_backend_supplied_binders_are_resolved_before_registration_and_applied_o
     worker = factory_module.create_kv_pool_worker(config, cache)
     try:
         make_names.assert_called_once()
-        make_objects.assert_called_once_with(topology)
-        bind_names.assert_not_called()
-        bind_objects.assert_not_called()
+        builder.assert_not_called()
         caches = {
             layer.layer_names[0]: (torch.zeros(8, 4), torch.zeros(8, 4)) for layer in topology.transfer_groups[0].layers
         }
         worker.bind_kv_caches(caches)
-        local = worker._mappings[0].local_layout
-        bind_names.assert_called_once_with(
-            0,
-            tuple(source.coordinate for source in local.partitions),
-            lookup_head_count=topology.tp_partition.key_rank_count,
-        )
-        bind_objects.assert_called_once_with(local)
-        assert worker._mappings[0].key_namer is names
-        assert worker._mappings[0].key_namer.keys((b"a",)) == (("custom-wire-key",),)
+        builder.assert_called_once_with(topology.groups[0].key_metadata)
+        builder.lookup_parts.assert_called_once_with(0, topology.tp_partition.key_rank_count)
+        assert tuple(map_keys(parts, (b"a",)) for parts in worker._keys[0].values()) == (("custom-wire-61",),)
     finally:
         worker.close()
 
 
-@pytest.mark.parametrize("phase", ("naming", "object_layout"))
-def test_binding_policy_resolution_failure_does_not_create_backend(configuration_case, monkeypatch, phase):
+def test_binding_policy_resolution_failure_does_not_create_backend(configuration_case, monkeypatch):
     config, cache = configuration_case
     topology = make_topology(physical_layers=(0,))
     pool = make_pool_config(topology, "custom", use_layerwise=True)
@@ -174,8 +154,7 @@ def test_binding_policy_resolution_failure_does_not_create_backend(configuration
         create_backend,
         LayerwiseAccessKind.KEY_RANGE,
         False,
-        layerwise_key_factory=fail_policy if phase == "naming" else None,
-        layerwise_layout_factory=fail_policy if phase == "object_layout" else None,
+        layerwise_key_factory=fail_policy,
     )
     monkeypatch.setattr(factory_module, "resolve_kv_pool_config", lambda *_: pool)
     monkeypatch.setattr(factory_module, "resolve_worker_topology", lambda *_: topology)
@@ -453,14 +432,14 @@ def factory_worker(monkeypatch, name, layerwise, topology, objects):
         for layer in group.layers:
             # Two entries per physical layer, with different payload sizes and page padding.
             caches[layer.layer_names[0]] = (
-                (torch.arange(8 * 7, dtype=torch.float32).reshape(8, 7) + group.group_id * 100)[:, :4],
-                (torch.arange(8 * 5, dtype=torch.int16).reshape(8, 5) + layer.physical_layer_id * 100)[:, :2],
+                (torch.arange(8 * 7, dtype=torch.float32).reshape(8, 7) + group.group_id * 100)[:, :4].view(8, 4, 1, 1),
+                (torch.arange(8 * 5, dtype=torch.int8).reshape(8, 5) + layer.physical_layer_id * 100)[:, :4].view(
+                    8, 4, 1, 1
+                ),
             )
     worker.bind_kv_caches(caches)
-    assert all(
-        isinstance(mapping, LayerwiseMapping if layerwise else BulkMapping) for mapping in worker._mappings.values()
-    )
-    assert not hasattr(worker, "_layer_mappings") and not hasattr(worker, "_bulk_mappings")
+    assert tuple(worker._local) == topology.transfer_group_ids
+    assert not hasattr(worker, "_mappings")
     return worker, caches, sdk
 
 
@@ -508,18 +487,18 @@ def test_factory_default_keys_share_complete_objects(
         assert all(completion.evidence.succeeded for completion in completions)
         assert writer.take_released_store_job_ids() == {17}
         writer.end_step()
-        keys = {mapping.key_namer.keys((b"a",))[0][0] for mapping in writer._mappings.values()}
+        keys = {map_keys(next(iter(parts.values())), (b"a",))[0] for parts in writer._keys.values()}
         assert set(objects) == keys
         assert all(ctypes.sizeof(value) == 40 for value in objects.values())
         assert all(f"@pp_rank:{pp_rank}@" in key for key in keys)
         assert all(f"@dcp:{dcp_rank}@" in key for key in keys)
-        for group_id, mapping in writer._mappings.items():
+        for group_id, key_parts in writer._keys.items():
             expected_bytes = b"".join(
                 tensor[1].numpy().tobytes()
                 for layer in topology.groups[group_id].layers
                 for tensor in source[layer.layer_names[0]]
             )
-            assert objects[mapping.key_namer.keys((b"a",))[0][0]].raw == expected_bytes
+            assert objects[map_keys(next(iter(key_parts.values())), (b"a",))[0]].raw == expected_bytes
     finally:
         writer.close()
     assert write_sdk.closed
@@ -529,7 +508,7 @@ def test_factory_default_keys_share_complete_objects(
         for tensors in destination.values():
             for tensor in tensors:
                 tensor.fill_(-1)
-        assert {mapping.key_namer.keys((b"a",))[0][0] for mapping in reader._mappings.values()} == keys
+        assert {map_keys(next(iter(parts.values())), (b"a",))[0] for parts in reader._keys.values()} == keys
         if pp_rank == 0:
             assert reader.lookup(LookupRequest(0, 4, (0, 3), (b"a",))).available_end_token == 4
         target_ids = tuple((6,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
@@ -621,7 +600,7 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     completion = store_one(worker, RangeStoreCommand("store", 0, 4, ((7,), (99,)), (b"a",), 4, 17))
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1 and "@group:0@" in put_call[1][0]
-    assert put_call[2:] == (((1448,),), ((32,),))
+    assert put_call[2:] == (((resources.kv_caches["layers.0.attention"][7].data_ptr(),),), ((32,),))
     assert [item.source.group_id for item in completion.evidence.transfer_evidence] == [0]
     assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [7]
 

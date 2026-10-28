@@ -65,26 +65,25 @@ class RecordingBackend(FakeBackend):
 def make_caches(topology, *, shared_storage: bool = False):
     layer_names = topology.groups[0].layer_names
     if not shared_storage:
-        return {layer_name: torch.empty((8, 4), dtype=torch.float32) for layer_name in layer_names}
-    storage = torch.empty((8 * len(layer_names), 4), dtype=torch.float32)
+        return {layer_name: torch.empty((8, 4, 1, 1), dtype=torch.float32) for layer_name in layer_names}
+    storage = torch.empty((8 * len(layer_names), 4, 1, 1), dtype=torch.float32)
     return {layer_name: storage[index * 8 : (index + 1) * 8] for index, layer_name in enumerate(layer_names)}
 
 
 def make_resources(backend: RecordingBackend, *, physical_layers=(0, 1)):
     topology = make_topology(physical_layers=physical_layers)
-    resources = KVPoolResources(backend, make_backend_spec(layerwise_access=None), 8, topology.groups)
+    resources = KVPoolResources(backend, make_backend_spec(layerwise_access=None), topology.groups)
     return topology, resources
 
 
 def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
-    resources = KVPoolResources(backend, backend_spec, 8, topology.groups)
+    resources = KVPoolResources(backend, backend_spec, topology.groups)
     worker = BulkWorker(topology, resources, reachability=make_reachability(topology, 64), store_enabled=False)
     worker.bind_kv_caches(make_caches(topology))
     worker.close()
 
 
 def register_caches(resources, caches):
-    registration = resources.prepare_kv_caches(caches)
+    resources.prepare_kv_caches(caches)
     resources.register_kv_buffers()
-    return registration

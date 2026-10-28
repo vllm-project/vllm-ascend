@@ -58,18 +58,35 @@ def test_gva_registration_alignment_does_not_change_mapping_payload() -> None:
     alignment = 2 * 1024 * 1024
     topology = make_topology(physical_layers=(0,))
     backend = RecordingBackend()
-    resources = KVPoolResources(backend, make_gva_spec(), 8, topology.transfer_groups, align_shared_storage=True)
+    resources = KVPoolResources(backend, make_gva_spec(), topology.transfer_groups, align_shared_storage=True)
     storage = torch.empty(2 * alignment, dtype=torch.uint8)
     aligned_offset = -storage.data_ptr() % alignment
     view_offset = aligned_offset + 64
     cache = storage[view_offset : view_offset + 32].view(8, 4)
-    registration = resources.prepare_kv_caches({topology.groups[0].layer_names[0]: cache})
+    resources.prepare_kv_caches({topology.groups[0].layer_names[0]: cache})
     assert backend.calls == []
-    assert registration["base_addresses"] == {0: [cache.data_ptr()]}
-    assert registration["block_lengths"] == {0: [4]}
+    assert resources.kv_caches[topology.groups[0].layer_names[0]] is cache
     resources.register_kv_buffers()
     assert backend.calls == [("register_region", storage.data_ptr() + aligned_offset, 96)]
     resources.close()
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_registration_covers_strided_aliases_without_registering_unrelated_storage(reverse):
+    backend = RecordingBackend()
+    topology, resources = make_resources(backend)
+    storage = torch.empty(200, dtype=torch.int16)
+    first = storage.as_strided((3, 2, 2), (25, 8, 2), storage_offset=7)
+    second = storage.as_strided((2, 3), (30, 3), storage_offset=80)
+    names = topology.groups[0].layer_names
+    tensors = (second, first) if reverse else (first, second)
+    caches = dict(zip(names, tensors, strict=True))
+    register_caches(resources, caches)
+    # First view starts at element 7; the second view's last element is 116.
+    assert backend.calls == [("register_region", storage.data_ptr() + 14, 220)]
+    assert resources.kv_caches is caches
+    resources.close()
+    assert resources.kv_caches is None
 
 
 @pytest.mark.parametrize("empty_first", (False, True))
@@ -80,24 +97,18 @@ def test_resources_skip_empty_rope_views_in_registration(empty_first, use_gva) -
     resources = KVPoolResources(
         backend,
         make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA if use_gva else None),
-        8,
         topology.transfer_groups,
     )
     nope_cache = torch.empty((8, 4), dtype=torch.float32)
     rope_cache = torch.empty((8, 4, 0), dtype=torch.float32)
     caches = (rope_cache, nope_cache) if empty_first else (nope_cache, rope_cache)
 
-    registration = register_caches(resources, {topology.groups[0].layer_names[0]: caches})
+    register_caches(resources, {topology.groups[0].layer_names[0]: caches})
 
     address = nope_cache.data_ptr()
     region_size = nope_cache.numel() * nope_cache.element_size()
-    block_size_bytes = nope_cache[0].numel() * nope_cache.element_size()
     assert backend.calls == [("register_region", address, region_size)]
-    assert registration["base_addresses"] == {0: [address]}
-    assert registration["block_lengths"] == {0: [block_size_bytes]}
-    assert registration["block_strides"] == {0: [block_size_bytes]}
-    assert registration["layer_entry_offsets"] == {0: [0, 1]}
-    assert "object_sizes" not in registration and "object_offsets" not in registration
+    assert resources.kv_caches[topology.groups[0].layer_names[0]] is caches
     resources.close()
     assert backend.calls[-2:] == [("unregister_region", address, region_size), ("backend_close",)]
 

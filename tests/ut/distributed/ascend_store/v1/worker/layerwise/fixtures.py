@@ -19,9 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import GVA_REVOKE_UNCONFIRMED
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import integer_result, integer_results
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
-    LayerwiseMapping,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
 )
@@ -197,15 +195,10 @@ def make_gva_binding(local_block_ids: tuple[int, ...] = (1, 3)):
     topology = make_topology()
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
-    registration = resources.prepare_kv_caches({"cache": object()})
-    mapping = LayerwiseMapping(
-        topology,
-        *(registration[name] for name in ("base_addresses", "block_lengths", "block_strides", "layer_entry_offsets")),
-    )
     # Exercise Worker copy methods without starting background executors.
     worker = GVALayerwiseWorker(topology, resources, reachability=make_reachability(topology))
-    worker._bind_mappings(registration)
-    mapping = worker._mappings[0]
+    resources.prepare_kv_caches({"cache": object()})
+    worker._bind_mappings()
     sessions = worker._backend_sessions
 
     hashes = tuple(f"h{index}" for index in range(len(local_block_ids)))
@@ -216,10 +209,10 @@ def make_gva_binding(local_block_ids: tuple[int, ...] = (1, 3)):
     group = KVGroupBatch(
         0,
         ids,
-        mapping.key_namer.keys(hashes),
+        tuple(map_keys(parts, hashes) for parts in worker._keys[0].values()),
         request_transfer_record_boundaries,
         (0, 1),
-        mapping.local_layout.local_group_block_bytes,
+        worker._group_object_layout(0)[0],
     )
     assert backend.native_store is not None
     return worker, KVTransferBatch(("request",), (group,), (17,)), backend.native_store, sessions

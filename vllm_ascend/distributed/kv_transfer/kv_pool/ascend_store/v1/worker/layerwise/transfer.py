@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...infrastructure.mapping import LayerwiseMapping
+from ...infrastructure.mapping import LayerTable, LocalTable
 from ..transfer.batch import IndexArray, KVGroupBatch, KVTransferBatch, UInt64Array
 from ..transfer.completion import LoadCompletion, TransferEvidence, _load_completions
 
@@ -58,14 +58,16 @@ ObjectBaseResolver = Callable[[KVGroupBatch, tuple[str, ...]], np.ndarray]
 LayerMemberships = dict[int, dict[int, tuple[int, tuple[int, ...]]]]
 
 
-def bind_layer_memberships(mappings: dict[int, LayerwiseMapping]) -> LayerMemberships:
-    return {
-        group_id: {
-            layer_id: (group_id, tuple(layout.partition_index for layout in layouts))
-            for layer_id, layouts in mapping.layer_layouts.items()
-        }
-        for group_id, mapping in mappings.items()
-    }
+def bind_layer_memberships(local: dict[int, LocalTable], layers: dict[int, LayerTable]) -> LayerMemberships:
+    memberships = {}
+    for group_id, partitions in local.items():
+        by_layer: dict[int, list[int]] = {}
+        for index, (pp, _, _) in enumerate(partitions):
+            for layer_id, selected in layers[group_id][pp].items():
+                if selected.start != selected.stop:
+                    by_layer.setdefault(layer_id, []).append(index)
+        memberships[group_id] = {layer: (group_id, tuple(indices)) for layer, indices in by_layer.items()}
+    return memberships
 
 
 def prepare_layer_transfer(
