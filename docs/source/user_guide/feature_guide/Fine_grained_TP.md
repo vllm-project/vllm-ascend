@@ -213,7 +213,7 @@ After the instance starts, check which knobs passed startup validation:
 
 ## Configuration Parameters
 
-All knobs live under `finegrained_tp_config` inside `--additional-config`. Size semantics follow vLLM's `tensor_parallel_size`: `1` (the default) means no sharding — the knob is disabled — and only values greater than `1` enable sharding.
+All knobs live under `finegrained_tp_config` inside `--additional-config`. The default `1` disables a knob.
 
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
