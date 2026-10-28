@@ -281,15 +281,15 @@ def pytest_model_cases() -> list[Any]:
 # lanes - main@9f9da5562 run 38186343470, main@8194eceae run 38325024027,
 # main@75bfb7622 runs 38657430708 and 38679145716. The failing case's lane is the
 # vLLM *main* pairing on two of those days and the vLLM v0.30.0 pairing on the
-# others, and `vllm_ascend/distributed/weight_transfer/` is byte-identical on `main`
-# and on this branch, so this is not specific to one branch. A fix is proposed in
-# #18763; drop the skip and re-enable the `packed` parametrization once it lands.
-# Until then `main` is likely to need the same skip.
+# others. At those failing revisions the transfer code was byte-identical on
+# main and the tested branch, so the failure was not branch-specific. PR #19127 enables
+# a dedicated four-layer Qwen3.5 HCCL cross-chunk regression. Keep this general
+# model/IPC matrix skipped until its individual packed lanes have native
+# model/graph validation; one targeted case does not cover them all.
 PACKED_LANE_SKIP_REASON = (
-    "packed weight transfer is flaky: the receive buffer of a chunk is filled and "
-    "loaded on different NPU streams, so the layerwise reload can read tensors "
-    "retained from an earlier chunk without ordering against their allocation "
-    "(#18726; fix proposed in #18763)"
+    "general packed model lanes remain disabled after the cross-chunk reload "
+    "failures in #18726; PR #19127 validates a dedicated four-layer Qwen3.5 HCCL "
+    "regression, while other model/IPC packed lanes still need native validation"
 )
 
 
