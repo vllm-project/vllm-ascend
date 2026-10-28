@@ -1,0 +1,7 @@
+pr: 20082
+entries:
+  - category: bugfix
+    text: >-
+      Avoided Triton-Ascend unordered lock workspaces in structured-output
+      grammar-bitmask and min-token stop-logit processing, preventing a
+      device-task timeout without serializing asynchronous launches.

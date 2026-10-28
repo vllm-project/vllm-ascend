@@ -16,6 +16,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+"""[Role] Apply structured-output grammar masks to mapped logit rows.
+[Invariants] Each active mapped row/block owns its complete writeback region.
+[Timeouts & Locks] Contiguous store masks avoid unordered locks; no Host sync.
+[Side-Effect Policy] Updates only active logits on the caller's stream.
+"""
+
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import (
@@ -74,10 +80,16 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        store_mask = position_is_active & (block_offset < vocab_size)
+        logits = tl.load(
+            logits_ptr + logits_idx * logits_stride + block_offset,
+            mask=store_mask,
+            other=0.0,
+        )
         tl.store(
             logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
+            tl.where(blocked, -float("inf"), logits),
+            mask=store_mask,
         )
 
 
