@@ -1,0 +1,8 @@
+pr: 20085
+entries:
+  - category: performance
+    text: >-
+      Reduced the cost of Model Runner V2 penalty statistics for longer prompts
+      by removing prompt-bit atomic OR operations and optimizing initialization
+      and bitmap packing. Large-vocabulary short prompts can still be slower
+      than the previous implementation.
