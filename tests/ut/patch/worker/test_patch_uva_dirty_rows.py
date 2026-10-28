@@ -9,29 +9,33 @@ step. The tracker must stay O(1) for the contiguous-prefix writes and still
 copy scattered writes correctly.
 """
 
+from unittest import mock
+
 import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.patch.worker import patch_uva as patch_uva_module
 from vllm_ascend.patch.worker.patch_uva import (
-    MonitoredNumPyArray,
-    MonitoredTorchTensor,
     UvaBufferWrapper,
     _DirtyRows,
 )
 
 
-def _fake_buffer(rows: int, cols: int = 2, dtype=torch.int32) -> UvaBufferWrapper:
-    """A wrapper backed by two CPU tensors, so no NPU is required."""
-    buf = UvaBufferWrapper.__new__(UvaBufferWrapper)
-    buf._cpu = torch.zeros((rows, cols), dtype=dtype)
-    buf._np = buf._cpu.numpy()
-    buf._dirty = _DirtyRows(rows)
-    buf._uva = torch.zeros((rows, cols), dtype=dtype)
-    buf._use_real_uva = False
-    buf._cpu_view = MonitoredTorchTensor(buf._cpu, buf._dirty.mark)
-    buf._np_view = MonitoredNumPyArray(buf._np, buf._dirty.mark)
-    return buf
+def _make_uva_buffer(rows: int, cols: int = 2, dtype: torch.dtype = torch.int32) -> UvaBufferWrapper:
+    """Build a real wrapper on CPU: the UT has no NPU and no pinned allocator."""
+    pinned_zeros = torch.zeros
+
+    def _unpinned_zeros(*args, **kwargs):
+        kwargs["pin_memory"] = False
+        return pinned_zeros(*args, **kwargs)
+
+    with (
+        mock.patch.object(patch_uva_module, "is_uva_available", lambda: False),
+        mock.patch.object(patch_uva_module, "_zeros_on_npu", torch.zeros_like),
+        mock.patch.object(torch, "zeros", _unpinned_zeros),
+    ):
+        return UvaBufferWrapper((rows, cols), dtype)
 
 
 class _FailingDevice:
@@ -198,7 +202,7 @@ def test_empty_negative_step_slice_marks_nothing():
 
 
 def test_numpy_write_reaches_the_device_shadow():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
 
     buf.np[2:5] = 7
     buf.uva(8)
@@ -209,7 +213,7 @@ def test_numpy_write_reaches_the_device_shadow():
 
 
 def test_scattered_numpy_writes_reach_the_device_shadow():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
 
     buf.np[6] = 3
     buf.np[1] = 5
@@ -221,7 +225,7 @@ def test_scattered_numpy_writes_reach_the_device_shadow():
 
 
 def test_multi_dimensional_boolean_write_reaches_the_device_shadow():
-    buf = _fake_buffer(4)
+    buf = _make_uva_buffer(4)
     mask = np.array([[True, False], [False, False], [False, True], [False, False]])
 
     buf.np[mask] = 5
@@ -231,7 +235,7 @@ def test_multi_dimensional_boolean_write_reaches_the_device_shadow():
 
 
 def test_torch_view_write_reaches_the_device_shadow():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
 
     buf.cpu[3] = torch.tensor([1, 2], dtype=torch.int32)
     buf.uva(8)
@@ -241,7 +245,7 @@ def test_torch_view_write_reaches_the_device_shadow():
 
 
 def test_uint64_shadow_copies_through_int64_storage():
-    buf = _fake_buffer(4, cols=1, dtype=torch.uint64)
+    buf = _make_uva_buffer(4, cols=1, dtype=torch.uint64)
 
     buf.np[0:2] = np.array([[2**63 + 1], [7]], dtype=np.uint64)
     buf.uva(4)
@@ -251,7 +255,7 @@ def test_uint64_shadow_copies_through_int64_storage():
 
 
 def test_repeated_sync_only_copies_new_rows():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
 
     buf.np[0:2] = 4
     buf.uva(8)
@@ -263,7 +267,7 @@ def test_repeated_sync_only_copies_new_rows():
 
 
 def test_failed_copy_leaves_the_remaining_rows_dirty():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
     buf.np[5] = 9
     buf.np[1] = 3
 
@@ -293,7 +297,7 @@ def test_empty_index_list_marks_nothing():
 
 
 def test_empty_index_write_is_a_noop():
-    buf = _fake_buffer(8)
+    buf = _make_uva_buffer(8)
 
     buf.np[[]] = 1
     buf.uva(8)
