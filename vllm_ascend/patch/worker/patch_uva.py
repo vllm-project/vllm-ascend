@@ -134,6 +134,12 @@ class _DirtyRows:
         self._prefix = self._size
 
     def _mark_rows(self, rows: np.ndarray) -> None:
+        if rows.size == 0:
+            # ``arr[[]] = v`` writes nothing. NumPy accepts the empty list (it
+            # infers an integer index), but ``np.asarray([])`` here is float64
+            # and would raise on the mask; an empty multi-dimensional boolean
+            # mask selects no elements either, so both are no-ops.
+            return
         if rows.dtype == np.bool_ and rows.ndim > 1:
             # ``arr[arr > 0] = v`` selects elements, not rows, and NumPy has
             # already performed that write by the time we get here. Refresh

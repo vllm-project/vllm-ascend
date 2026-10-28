@@ -278,3 +278,24 @@ def test_failed_copy_leaves_the_remaining_rows_dirty():
 
     assert buf._uva[1].eq(3).all()
     assert buf._uva[5].eq(9).all()
+
+
+def test_empty_index_list_marks_nothing():
+    # ``arr[[]] = v`` is a valid no-op write in NumPy; ``np.asarray([])`` is
+    # float64, so the tracker must not try to use it as an index.
+    dirty = _DirtyRows(8)
+
+    dirty.mark([])
+    # An empty multi-dimensional boolean mask selects no elements either.
+    dirty.mark(np.zeros((0, 2), dtype=bool))
+
+    assert dirty.take() == []
+
+
+def test_empty_index_write_is_a_noop():
+    buf = _fake_buffer(8)
+
+    buf.np[[]] = 1
+    buf.uva(8)
+
+    assert buf._uva.eq(0).all()
