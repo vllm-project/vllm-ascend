@@ -3555,7 +3555,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     patch.object(module.torch.npu, "current_device", return_value=5),
                 ):
                     worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-                backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
+                backend.assert_called_once_with(
+                    "127.0.0.1", device_name="5" if local_pp > 1 else None, protocol="ascend"
+                )
                 self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
                 self.assertEqual(worker.handshake_port, 5000)
 
@@ -3725,7 +3727,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     patch.object(module.torch.npu, "current_device", return_value=5) as current_device,
                 ):
                     worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-                get_te.assert_called_once_with("127.0.0.1", device_name=expected_device)
+                get_te.assert_called_once_with("127.0.0.1", device_name=expected_device, protocol="ascend")
                 if pp_size == 1:
                     current_device.assert_not_called()
                 else:

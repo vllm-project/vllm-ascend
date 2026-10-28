@@ -9,6 +9,7 @@ import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_connector as v1
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 
 
 @pytest.mark.parametrize("module", [v1, d2rh])
@@ -50,6 +51,7 @@ def make_worker(worker_cls, role):
     worker._use_request_level_recv_errors = True
     worker.engine_id = "engine"
     worker.engine = object()
+    worker.transfer_te = global_te
     worker.te_rpc_port = 1234
     worker.handshake_port = 1235
     worker.side_channel_host = "127.0.0.1"
