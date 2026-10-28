@@ -1,8 +1,0 @@
-pr: 19370
-entries:
-  - category: config
-    text: >-
-      Removed the MemCache DP initialization barrier and the
-      memcache_dp_init_barrier connector option. MemCache workers no longer
-      wait for DP peers after store initialization; remove this option from
-      deployment configurations.
