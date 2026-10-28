@@ -110,6 +110,19 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
+### token_logprob
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Alert when selected-token logprob stays below threshold (garbled / nonsense) |
+| `min_logprob` | float | `-15.0` | Fire when a selected-token logprob is **strictly below** this value |
+| `min_tokens` | int | `1` | Minimum scored tokens before alerting |
+| `consecutive_hits` | int | `3` | Required consecutive below-threshold tokens |
+
+Guard computes selected-token logprobs from stashed pre-sample logits after
+sampling. Clients do **not** need to set ``SamplingParams.logprobs``; results
+are detection-only and are never written into the user-facing response.
+
 Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
 path launches a non-blocking host copy of that gate and waits in
 ``check_deferred``. On a hit only, bad rows / ``logits_indices`` / ``finite_kind``

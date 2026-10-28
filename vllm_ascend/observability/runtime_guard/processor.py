@@ -496,6 +496,15 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
         if result.input_batch is not None:
             self._last_input_batch = result.input_batch
+        # Hook 2b: token_logprob from Guard-stashed logits (no API SamplingParams.logprobs).
+        # Must run before logits tensor reuse / async after-sample deferral.
+        self._soft_fail(
+            "check_token_logprob",
+            lambda: self.check_token_logprob(
+                sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
+                req_ids=result.req_ids_output_copy,
+            ),
+        )
         # Hook 3: mark_finished
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
@@ -554,6 +563,33 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
         self._soft_fail("check_before_sample", _run)
+
+    def check_token_logprob(
+        self,
+        *,
+        sampled_token_ids: Any,
+        req_ids: list[str] | None = None,
+    ) -> None:
+        """After-sample: score selected-token logprobs from stashed pre-sample logits.
+
+        Does not require ``SamplingParams.logprobs`` and does not attach logprobs
+        to the user-facing response. Soft-fail wrapper is applied by the caller.
+        """
+        # Lazy import avoids hooks ↔ processor cycle (hooks imports SamplePhaseResult).
+        from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
+
+        logits = take_pre_sample_logits(self.runner)
+        if logits is None:
+            return
+        if not bool(self.runtime_config.detector_get("token_logprob", "enabled", False)):
+            return
+
+        for alert in self.detectors.check_token_logprob(
+            logits=logits,
+            sampled_token_ids=sampled_token_ids,
+            req_ids=req_ids,
+        ):
+            self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
     def check_after_sample(
         self,

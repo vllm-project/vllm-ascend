@@ -30,12 +30,15 @@ from vllm_ascend.observability.runtime_guard.detector.base import (
 )
 from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
 from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+from vllm_ascend.observability.runtime_guard.detector.token_logprob import TokenLogprobDetector
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
 from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager, has_nonempty_sampled_row
 from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.observability.runtime_guard.state import Incident, RequestGuardStore
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
 logger = init_logger_ascend(__name__)
@@ -81,11 +84,16 @@ class DetectorManager:
             runtime_config=runtime_config,
             runner=runner,
         )
+        self._token_logprob_det = TokenLogprobDetector(
+            runtime_config=runtime_config,
+            runner=runner,
+        )
         self._registry = DetectorRegistry()
         for det in (
             self._spec_det,
             self._token_repeat_det,
             self._logits_finite_det,
+            self._token_logprob_det,
         ):
             self._registry.register(det)
 
@@ -153,11 +161,17 @@ class DetectorManager:
         return bool(self._spec_det.enabled)
 
     def any_after_sample_cpu_enabled(self) -> bool:
-        """``token_repeat`` (not logits_finite)."""
+        """``token_repeat`` (not logits_finite / token_logprob)."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
         return bool(self._token_repeat_det.enabled)
+
+    def token_logprob_enabled(self) -> bool:
+        """True when Guard should stash logits and score selected-token logprobs."""
+        if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
+            return bool(self._runtime_config.detector_get("token_logprob", "enabled", False))
+        return bool(self._token_logprob_det.enabled)
 
     def check_after_spec(
         self,
@@ -268,3 +282,23 @@ class DetectorManager:
             skip_req_ids=skip,
         )
         return []
+
+    def check_token_logprob(
+        self,
+        *,
+        logits: "torch.Tensor | None",
+        sampled_token_ids: Any,
+        req_ids: list[str] | None = None,
+    ) -> list[Incident]:
+        """Score selected-token logprobs from Guard-stashed logits (no API logprobs)."""
+        if self._gated("token_logprob"):
+            return []
+        if logits is None:
+            return []
+        skip = RequestGuardStore.get().stopped_req_ids()
+        return self._token_logprob_det.check_from_logits(
+            logits=logits,
+            sampled_token_ids=sampled_token_ids,
+            req_ids=req_ids,
+            skip_req_ids=skip,
+        )

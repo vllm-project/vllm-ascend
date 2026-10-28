@@ -847,6 +847,7 @@ class RuntimeConfig:
             "spec_acceptance": "spec",
             "token_repeat": "token_repeat",
             "logits_finite": "logits_finite",
+            "token_logprob": "token_logprob",
         }
         names: list[str] = []
         for section in RuntimeConfig.DETECTOR_SECTIONS:

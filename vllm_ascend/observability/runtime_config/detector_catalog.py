@@ -30,6 +30,7 @@ from vllm_ascend.observability.runtime_config.schema import (
 )
 from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
 from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+from vllm_ascend.observability.runtime_guard.detector.token_logprob import TokenLogprobDetector
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
 
 # Registration order = DETECTOR_SECTIONS order.
@@ -37,6 +38,7 @@ REGISTERED_DETECTOR_TYPES: tuple[type, ...] = (
     SpecAcceptanceDetector,
     TokenRepeatDetector,
     LogitsFiniteDetector,
+    TokenLogprobDetector,
 )
 
 
