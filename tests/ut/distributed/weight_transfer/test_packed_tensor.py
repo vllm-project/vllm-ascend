@@ -229,6 +229,30 @@ def test_packed_cross_chunk_event_orders_loader_and_tracks_clones(num_buffers):
         )
 
 
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_ready_events_are_reused_by_slot(num_buffers):
+    streams = [_FakeNpuStream() for _ in range(num_buffers)]
+    events = [MagicMock() for _ in streams]
+    chunks = 3 * num_buffers + 1
+    with (
+        patch.object(torch.npu, "Stream", side_effect=streams),
+        patch.object(torch.npu, "Event", side_effect=events) as create_event,
+    ):
+        packed_broadcast_consumer(
+            iter((str(i), ([1], torch.float32)) for i in range(chunks)),
+            _make_group_mock(),
+            0,
+            lambda weights: None,
+            1,
+            num_buffers,
+        )
+    assert create_event.call_count == num_buffers
+    for slot, event in enumerate(events):
+        expected_records = sum(i % num_buffers == slot for i in range(chunks))
+        assert event.record.call_count == expected_records
+        assert all(call.args == (streams[slot],) for call in event.record.call_args_list)
+
+
 def test_packed_tracking_does_not_retain_clones_released_by_loader():
     """Tracking helpers must not accidentally mask a missing lifetime record."""
     released = []

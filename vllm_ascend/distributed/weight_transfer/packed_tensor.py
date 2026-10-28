@@ -236,6 +236,7 @@ def packed_broadcast_consumer(
         stream.wait_stream(caller_stream)
     buffer_idx = 0
     previous_ready = None
+    ready_events = [torch.npu.Event() for _ in streams]
     reader_streams = (*streams, caller_stream)
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
@@ -295,7 +296,9 @@ def packed_broadcast_consumer(
                 post_unpack_func(weights)
                 # The callback can queue derived-state writes as well as clone
                 # reads, so record completion only after it has returned.
-                previous_ready = torch.npu.Event()
+                # Slot reuse starts with a stream drain, completing its prior
+                # record before this event is recorded for another chunk.
+                previous_ready = ready_events[buffer_idx]
                 previous_ready.record(streams[buffer_idx])
 
             # Move to the next buffer
