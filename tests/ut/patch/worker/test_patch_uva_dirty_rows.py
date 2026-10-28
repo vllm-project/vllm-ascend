@@ -387,6 +387,13 @@ def test_numpy_explicit_inplace_dunder_reaches_the_device_shadow():
     assert torch.equal(buf._uva, buf._cpu)
 
 
+def test_mirrors_report_their_length():
+    buf = _make_uva_buffer(8)
+
+    assert len(buf.np) == 8
+    assert len(buf.cpu) == 8
+
+
 def test_uint64_shadow_copies_through_int64_storage():
     buf = _make_uva_buffer(4, cols=1, dtype=torch.uint64)
 
