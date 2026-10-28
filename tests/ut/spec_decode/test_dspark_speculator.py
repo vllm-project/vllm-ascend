@@ -293,3 +293,39 @@ def test_dspark_sampling_uses_replicated_backbone_output(monkeypatch, replicated
 
     assert spec._run_model(3, None, None, None) is replicated
     broadcast.assert_called_once_with(local, local, 3, replicated_pcp=replicated_pcp)
+
+
+@pytest.mark.parametrize("num_reqs", [0, 1, 3, 8])
+def test_lmhead_tp_probabilistic_sampling_trims_before_cache(monkeypatch, num_reqs):
+    """Only real rows reach the fixed-size probability cache after collectives."""
+    import vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils as lmhead_utils
+
+    monkeypatch.setattr(lmhead_utils, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_max_num_logits", lambda reqs, steps: reqs * steps)
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.max_num_reqs = 8
+    spec.num_speculative_steps = 7
+    spec.speculative_config = SimpleNamespace(draft_sample_method="probabilistic")
+    spec.use_local_argmax_reduction = False
+    spec.enable_adaptive_verification = False
+    spec._lmhead_tp_validate_draft_sampling()
+    weight = torch.randn(4, 11)
+    inputs = []
+
+    def compute_logits(hidden):
+        inputs.append(hidden)
+        return hidden @ weight
+
+    model = SimpleNamespace(compute_draft_logits=compute_logits)
+    spec._lmhead_tp_wrap_draft_logits(model)
+    hidden = torch.randn(num_reqs * 7, 4)
+    logits = model.compute_draft_logits(hidden)
+    assert inputs[0].shape == (56, 4)
+    torch.testing.assert_close(inputs[0][: len(hidden)], hidden)
+    assert torch.count_nonzero(inputs[0][len(hidden) :]) == 0
+    cache = torch.empty(num_reqs, 7, 11)
+    cache.copy_(logits.reshape(num_reqs, 7, 11))
+    torch.testing.assert_close(cache.flatten(0, 1), hidden @ weight)
+    with pytest.raises(ValueError, match="group-agreed"):
+        model.compute_draft_logits(torch.randn(57, 4))

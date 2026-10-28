@@ -12,7 +12,8 @@ from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead
 class LmheadTPDraftSamplingMixin:
     """Group-aligned draft LM-head sampling for lmhead TP (V1 parity): pad
     the greedy hidden states to the ``lmhead_tp_max_num_logits`` capacity and
-    trim back; probabilistic sampling (fixed-size buffers) is rejected at init."""
+    trim back. Speculators that trim logits before sampling may opt into
+    probabilistic sampling without exposing padding rows to fixed-size buffers."""
 
     # Attributes injected by the hosting speculator; annotated for standalone
     # mypy analysis.
@@ -26,6 +27,7 @@ class LmheadTPDraftSamplingMixin:
     # they opt out and are rejected at construction (DSpark:
     # compute_draft_logits, DFlash2: get_top_k_tokens on the sharded head).
     _lmhead_tp_sample_draft_supported = True
+    _lmhead_tp_probabilistic_sampling_supported = False
 
     def _lmhead_tp_max_num_logits(self) -> int:
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
@@ -40,7 +42,10 @@ class LmheadTPDraftSamplingMixin:
                 "sampling does not go through sample_draft, so the "
                 "group-aligned row padding cannot be applied."
             )
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if (
+            self.speculative_config.draft_sample_method == "probabilistic"
+            and not self._lmhead_tp_probabilistic_sampling_supported
+        ):
             raise NotImplementedError(
                 "lmhead TP does not support draft_sample_method='probabilistic': "
                 "the gumbel path writes into fixed-size draft buffers that cannot "
