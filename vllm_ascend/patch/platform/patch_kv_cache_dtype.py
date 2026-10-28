@@ -74,9 +74,9 @@ _CACHE_DTYPE_WITH_ASCEND = typing.Literal[
 
 
 def _apply_kv_cache_dtype_int8_patch() -> None:
-    """Register Ascend KV dtypes, or widen the Literal on older vLLM.
+    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"`` and ``"mxfp8"``.
 
-    On older vLLM, a pydantic dataclass caches its schema at class-build
+    A pydantic dataclass caches its core schema / validator at class-build
     time from the field annotations. Mutating the annotation alone is not
     enough; the schema must be rebuilt. Three places hold the old Literal:
 
@@ -96,14 +96,6 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     call multiple times / across plugin entry points (the ``force`` flag
     rebuilds even though ``__pydantic_complete__`` is already True).
     """
-    # New vLLM validates against the live registry instead of the Literal.
-    registry = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
-    if registry is not None:
-        for dtype in ("int8", "mxfp8"):
-            if dtype not in registry:
-                registry.append(dtype)
-        return
-
     # Idempotency: if int8 is already accepted, nothing to do.
     existing_args = getattr(_ORIG_CACHE_DTYPE, "__args__", ())
     if "int8" in existing_args and "mxfp8" in existing_args:

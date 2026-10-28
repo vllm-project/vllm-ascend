@@ -6,7 +6,7 @@ injects ``fp8 -> torch.float8_e4m3fn`` into ``STR_DTYPE_TO_TORCH_DTYPE`` in
 place, so Ascend's MLA/DSA kernels get native float8 instead of upstream's
 ``torch.uint8`` raw bytes).
 
-On vllm builds without a registered FP8 handler this patch reproduces
+On vllm builds that lack ``register_kv_cache_dtype`` this patch reproduces
 that effect directly: it mutates
 ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
 ``torch.float8_e4m3fn`` in the live per-process dict, so the call sites in
@@ -19,8 +19,10 @@ Worker process — the launcher's platform patch does not propagate to the
 workers' fresh interpreters. It is applied before model loading, which is
 when ``kv_cache_dtype_str_to_dtype`` is called.
 
-An existing FP8 handler remains authoritative. If no handler is registered,
-the fallback is still needed even when the registration API is available.
+On vllm builds that *do* provide ``register_kv_cache_dtype`` (kvquant_27 /
+future main) this patch is a no-op: the eager handler import in
+``vllm_ascend/worker/worker.py`` already flipped the dtype, so we must not
+touch the dict again (idempotency, and to avoid masking the handler path).
 
 Worker-side dtype Literal widening: the launcher's platform patches
 (``patch/platform/patch_kv_cache_dtype.py`` and
@@ -44,20 +46,27 @@ import vllm.utils.torch_utils as _torch_utils
 
 def _apply_fp8_kv_cache_dtype_flip() -> None:
     try:
-        from vllm.config.cache import get_kv_cache_dtype_handler
+        from vllm.config.cache import register_kv_cache_dtype  # noqa: F401
     except ImportError:
-        pass
-    else:
-        if get_kv_cache_dtype_handler("fp8") is not None:
-            return
-    _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
+        # No pluggable mechanism: flip the dtype in place to match what
+        # Fp8AscendHandler.torch_dtype() would have injected.
+        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
+        # int8 already maps to torch.int8 upstream; nothing to flip.
+        return
+
+    # Pluggable mechanism present: the handler import in worker.py already
+    # injected fp8 -> float8_e4m3fn. Leave the dict untouched so the handler
+    # path stays the source of truth (and so is_quantized/quant_mode queries
+    # routed through the handler remain consistent).
+    return
 
 
 def _widen_cache_dtype_literal_for_worker() -> None:
     """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"``/``"mxfp8"`` in the worker.
 
-    Mirrors the platform patch: extend the live registry on new vLLM,
-    or widen the Literal and rebuild the schema on older versions.
+    Mirrors ``patch/platform/patch_kv_cache_dtype.py``: update the module-level
+    Literal, the ``CacheConfig`` annotation and dataclass field type, then
+    rebuild the pydantic schema.
 
     Fork trap: the worker is forked from the main process, where the platform
     patch has already widened ``vllm.config.cache.CacheDType`` and rebuilt
@@ -74,15 +83,6 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     import pydantic.dataclasses as _pdc
     from vllm.config import cache as _cache_mod
     from vllm.config.cache import CacheConfig
-
-    # Preserve the new registry and its open-ended CacheConfig annotation.
-    registry = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
-    if registry is not None:
-        for dtype in ("int8", "mxfp8"):
-            if dtype not in registry:
-                registry.append(dtype)
-        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("mxfp8", torch.float8_e4m3fn)
-        return
 
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
     missing = tuple(d for d in ("int8", "mxfp8") if d not in existing_args)
