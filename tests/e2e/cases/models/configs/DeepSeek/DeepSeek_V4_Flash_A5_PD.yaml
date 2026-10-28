@@ -139,7 +139,7 @@ templates:
       #- '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
 
 benchmarks:
-  per_TPOT50_128k_1_prefie_warmup:
+  perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
@@ -151,3 +151,13 @@ benchmarks:
     request_rate: 0
     baseline: 1
     threshold: 0.95
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 131072
+    temperature: 1.0
+    batch_size: 200
+    baseline: 87.4
+    threshold: 5
