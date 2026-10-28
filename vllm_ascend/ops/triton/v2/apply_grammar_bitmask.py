@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import (
@@ -102,10 +103,18 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            stream = None
+            if num_programs > 1 and not torch.npu.is_current_stream_capturing():
+                stream = torch.npu.current_stream()
+                # The Triton-Ascend launcher initializes generated lock
+                # workspace with a host copy that is not ordered on the compute
+                # stream. Finish earlier lock users before this launch, then
+                # wait for grammar before a later lock-bearing kernel starts.
+                stream.synchronize()
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.
-            return _apply_grammar_bitmask_kernel_impl[(num_programs,)](
+            result = _apply_grammar_bitmask_kernel_impl[(num_programs,)](
                 logits_ptr,
                 logits_stride,
                 logits_indices_ptr,
@@ -120,6 +129,9 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 BLOCK_SIZE=BLOCK_SIZE,
                 multibuffer=False,
             )
+            if stream is not None:
+                stream.synchronize()
+            return result
 
         return launch
 
