@@ -271,12 +271,19 @@ class UvaBufferWrapper:
     def _sync_dirty_rows(self) -> None:
         if self._use_real_uva:
             return
-        for start, stop in self._dirty.take():
+        runs = self._dirty.take()
+        for index, (start, stop) in enumerate(runs):
             # A slice of the pinned host buffer is still pinned, so the copy
             # stays asynchronous without an intermediate staged tensor.
-            _int64_storage(self._uva[start:stop]).copy_(
-                _int64_storage(self._cpu[start:stop]), non_blocking=True
-            )
+            try:
+                _int64_storage(self._uva[start:stop]).copy_(_int64_storage(self._cpu[start:stop]), non_blocking=True)
+            except Exception:
+                # take() has already reset the tracker, so put the ranges that
+                # were not refreshed back to keep a failed sync retryable
+                # instead of leaving the device copy silently stale.
+                for pending_start, pending_stop in runs[index:]:
+                    self._dirty.mark(slice(pending_start, pending_stop))
+                raise
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         """Get the device data of the buffer.
