@@ -155,5 +155,20 @@ __aicore__ inline void Softmax(const LocalTensor<float>& scores, const LocalTens
   }
   PipeBarrier<PIPE_V>();
 }
+// Brcb reads eight compact probabilities and writes eight broadcast blocks.
+// Do not narrow the complete repeat count before splitting it into ISA batches.
+__aicore__ inline void BroadcastScores(const LocalTensor<float>& dst, const LocalTensor<float>& src,
+                                      uint32_t alignedCount) {
+  constexpr uint32_t elementsPerBlock = 8;
+  constexpr uint32_t elementsPerRepeat = elementsPerBlock * elementsPerBlock;
+  constexpr uint32_t maxRepeats = 255;
+  const uint32_t repeats = alignedCount / elementsPerBlock;
+  for (uint32_t done = 0; done < repeats;) {
+    const uint32_t batch = repeats - done > maxRepeats ? maxRepeats : repeats - done;
+    Brcb(dst[done * elementsPerRepeat], src[done * elementsPerBlock], static_cast<uint8_t>(batch), {1, MOV_8});
+    done += batch;
+  }
+  PipeBarrier<PIPE_V>();
+}
 }  // namespace AttnResFwd::CooperativeRegBase
 #endif

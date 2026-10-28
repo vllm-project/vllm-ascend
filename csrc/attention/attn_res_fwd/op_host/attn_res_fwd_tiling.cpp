@@ -169,7 +169,10 @@ uint64_t AttnResFwdTiling::EstimateUbComputeBytes(bool resident) const
         ub += static_cast<uint64_t>(1) * HAlignBf16 * sizeof(uint16_t); // outQue
     }
     ub += static_cast<uint64_t>(3) * HAlignFp32 * sizeof(float); // scoreWeight + vRow + outFp32
-    ub += static_cast<uint64_t>(metaAlign) * sizeof(float); // vecMeta
+    // A5's generic softmax loads complete registers, including the masked tail.
+    const uint32_t scoreElems = compileInfo_.regBase && B > 2U * ELEM_PER_REP_FP32 ?
+        AlignUpU32(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
+    ub += static_cast<uint64_t>(scoreElems) * sizeof(float); // vecMeta
     const uint32_t scratchElems = compileInfo_.supportsCooperative && !compileInfo_.regBase ?
         std::max(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
     ub += static_cast<uint64_t>(scratchElems) * sizeof(float); // metaSoftmax; arch22 Brcb needs 256B.

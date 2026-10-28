@@ -54,6 +54,9 @@ def require_cooperative_custom_operator():
         (1, 8, 1538, True, True, True, True, True),
         (1, 63, 1024, True, True, True, True, True),
         (1, 127, 1024, True, True, True, True, True),
+        (1, 2039, 1, True, False, True, False, True),
+        (1, 2040, 1, True, False, True, False, True),
+        (1, 2041, 32, True, False, True, False, True),
     ],
 )
 @torch.inference_mode()

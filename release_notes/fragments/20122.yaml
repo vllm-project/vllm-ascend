@@ -18,3 +18,8 @@ entries:
       Added a RegBase cooperative AttnResFwd path with residual-row parallel
       scoring, one readiness barrier for full-row outputs, double-buffered
       output reads, and a UB-budgeted H-split fallback.
+  - category: bugfix
+    hardware: [A5]
+    text: >-
+      Fixed AttnResFwd softmax handling for large candidate banks, broadcast
+      repeat overflow, and extreme-negative score padding in legacy paths.
