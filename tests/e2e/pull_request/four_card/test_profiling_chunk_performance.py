@@ -4,8 +4,9 @@ Measures Time-To-First-Token (TTFT) on 64k-token prefill requests with
 profiling_chunk_config enabled. The test runs against Qwen3-30B-A3B
 served with PP=2, TP=2 (4 NPU cards total).
 
-The same scenario is executed with Short Request First (SRF) disabled and
-enabled. An additional run enables asynchronous scheduling.
+The scenario runs on Model Runner V2, with Short Request First (SRF)
+disabled and enabled. An additional MRV2 run enables asynchronous
+scheduling (profiling_chunk with async scheduling requires Model Runner V2).
 
 Test flow:
   1. Create an LLM engine with profiling_chunk_config enabled.
@@ -39,13 +40,14 @@ BASELINE_TTFT_S = 5.45
 
 
 @pytest.mark.parametrize(
-    ("enable_srf", "enable_async_scheduling"),
+    ("use_v2_model_runner", "enable_srf", "enable_async_scheduling"),
     [
-        pytest.param(False, False, id="sync"),
-        pytest.param(True, False, id="sync-SRF"),
-        # The async case shares the synchronous baseline for now; tighten it once
+        pytest.param("1", False, False, id="MRV2"),
+        pytest.param("1", True, False, id="MRV2-SRF"),
+        # Async scheduling with profiling_chunk requires Model Runner V2.
+        # The async case shares the MRV2 baseline for now; tighten it once
         # the first CI measurements are available.
-        pytest.param(False, True, id="async"),
+        pytest.param("1", False, True, id="MRV2-async"),
     ],
 )
 @patch.dict(
@@ -57,47 +59,53 @@ BASELINE_TTFT_S = 5.45
 )
 @wait_until_npu_memory_free()
 def test_profiling_chunk_ttft_performance(
+    use_v2_model_runner: str,
     enable_srf: bool,
     enable_async_scheduling: bool,
 ) -> None:
-    scenario_name = "sync+SRF" if enable_srf else "sync"
+    runner_name = "MRV2" if use_v2_model_runner == "1" else "MRV1"
+    scenario_name = f"{runner_name}+SRF" if enable_srf else runner_name
     if enable_async_scheduling:
-        scenario_name = "async"
+        scenario_name = f"{scenario_name}+async"
 
-    with VllmRunner(
-        MODEL,
-        max_model_len=70000,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
-        block_size=128,
-        enable_expert_parallel=True,
-        enable_prefix_caching=False,
-        gpu_memory_utilization=0.9,
-        max_num_batched_tokens=12288,
-        distributed_executor_backend="mp",
-        enforce_eager=True,
-        async_scheduling=enable_async_scheduling,
-        additional_config={
-            "scheduler_config": {
-                "profiling_chunk_config": {
-                    "enabled": True,
-                    "smooth_factor": 0.9,
+    # Keep all other runtime settings identical across cases.
+    with (
+        patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": use_v2_model_runner}),
+        VllmRunner(
+            MODEL,
+            max_model_len=70000,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            block_size=128,
+            enable_expert_parallel=True,
+            enable_prefix_caching=False,
+            gpu_memory_utilization=0.9,
+            max_num_batched_tokens=12288,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+            async_scheduling=enable_async_scheduling,
+            additional_config={
+                "scheduler_config": {
+                    "profiling_chunk_config": {
+                        "enabled": True,
+                        "smooth_factor": 0.9,
+                    },
+                    "short_request_first_config": {
+                        "enabled": enable_srf,
+                    },
                 },
-                "short_request_first_config": {
-                    "enabled": enable_srf,
-                },
+                "enable_cpu_binding": False,
             },
-            "enable_cpu_binding": False,
-        },
-        hf_overrides={
-            "rope_parameters": {
-                "rope_type": "yarn",
-                "rope_theta": 1000,
-                "factor": 5,
-                "original_max_position_embeddings": 262144,
-            }
-        },
-    ) as vllm_model:
+            hf_overrides={
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "rope_theta": 1000,
+                    "factor": 5,
+                    "original_max_position_embeddings": 262144,
+                }
+            },
+        ) as vllm_model,
+    ):
         # With max_tokens=1, total latency ≈ prefill time ≈ TTFT
         prompts = [INPUT_64K_TOKENS]
 

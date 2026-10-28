@@ -139,10 +139,6 @@ Configure Mooncake as described in the [Mooncake layerwise guide](mooncake_layer
 
 Mooncake layerwise pooling requires `load_async=false` (loads are submitted layer by layer) and does not enable cross-layer reuse of persistent owner caches. It was validated on a single node with TP8, Model Runner V2, and eager execution; PP, PCP, and DCP were not part of that validation.
 
-Each owner waits for the layer's pool load to complete before starting its KVPP broadcast. Attention and the broadcast worker share the completion signal until the next step binds metadata. This ordering also applies when the store is a child of `MultiConnector`.
-
-KVPP Mooncake objects use a separate topology namespace: ordinary replicated cache objects have different layer ranges and cannot be reused by KVPP. Enabling KVPP therefore starts a separate pool cache. Existing Mooncake restrictions on PCP, DCP, and producer/consumer topology mismatch still apply.
-
 ### Combining Connectors
 
 Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector`.

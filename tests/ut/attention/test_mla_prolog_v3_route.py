@@ -803,17 +803,10 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
     assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
-@pytest.mark.parametrize(
-    "num_decode,padding,layerwise",
-    [(0, 0, False), (0, 3, False), (2, 0, False), (2, 3, False), (2, 0, True)],
-)
-def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding, layerwise):
+@pytest.mark.parametrize("num_decode", [0, 2])
+@pytest.mark.parametrize("padding", [0, 3])
+def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding):
     impl = _make_impl()
-    order = []
-    if layerwise:
-        impl.layerwise_kv_cache_hook = SimpleNamespace(
-            layerwise=True, wait_for_layer=lambda name: order.append(("broadcast", name))
-        )
     num_prefill = 3
     total_tokens = num_decode + num_prefill + padding
     qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
@@ -843,8 +836,6 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     )
 
     def fake_prolog(**kwargs):
-        if layerwise:
-            order.append(("prolog", impl.layer_name))
         tokens = kwargs["token_x"].shape[0]
         return (
             torch.zeros(tokens, impl.num_heads * NOPE_DIM),
@@ -862,17 +853,9 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
         patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
         patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
         patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
-        patch.object(
-            mla_v1, "wait_for_kv_layer_from_connector", side_effect=lambda name: order.append(("load", name))
-        ) as wait_load,
     ):
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
-    wait_load.assert_called_once_with(impl.layer_name)
-    if layerwise:
-        assert order == [("load", impl.layer_name), ("broadcast", impl.layer_name)] + [("prolog", impl.layer_name)] * (
-            1 + bool(num_decode)
-        )
     assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
     assert (decode is not None) == bool(num_decode)
