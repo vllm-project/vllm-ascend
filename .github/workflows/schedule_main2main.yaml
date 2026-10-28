@@ -17,8 +17,6 @@
 name: Main2Main
 
 on:
-  schedule:
-    - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       target_commit:
@@ -29,6 +27,10 @@ on:
         description: 'opencode model name (default: deepseek/deepseek-flash)'
         required: false
         default: 'deepseek/deepseek-flash'
+      runner:
+        description: 'A3 16-card NPU runner label (linux-aarch64-a3-16-sh-001 or linux-aarch64-a3-800i-16)'
+        required: false
+        default: 'linux-aarch64-a3-16-sh-001'
 
 permissions:
   contents: write
@@ -185,7 +187,9 @@ jobs:
 
   main2main:
     needs: [resolve-source, ensure-csrc-cache]
-    runs-on: linux-aarch64-a3-16-sh-001
+    # Defaults to the original a3 16-card pool; dispatch can switch to another
+    # equivalent A3 16-card pool (same SoC, image and FLA/mooncake wheels).
+    runs-on: ${{ inputs.runner || 'linux-aarch64-a3-16-sh-001' }}
     timeout-minutes: 2880
     concurrency:
       group: main2main
