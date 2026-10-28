@@ -549,6 +549,9 @@ def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantiz
         reference = source
     columns = gathered[:, table.head_start : table.head_start + table.part_n_hash_cols].long()
     owned = (columns >= table.vocab_start_idx) & (columns < table.vocab_end_idx)
-    rows = reference[torch.where(owned, columns - table.vocab_start_idx, 0)]
+    # The lookup gathers rows of the *shard* by local index; mirror that on the
+    # matching slice of the reference table (global id = start + local index).
+    shard = reference[table.vocab_start_idx : table.vocab_end_idx]
+    rows = shard[torch.where(owned, columns - table.vocab_start_idx, 0)]
     expected = torch.where(owned.unsqueeze(-1), rows, torch.zeros(1, dtype=reference.dtype))
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
