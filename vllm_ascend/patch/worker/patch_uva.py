@@ -226,8 +226,10 @@ class MonitoredNumPyArray:
         self._array = array
         # ``np.frombuffer`` over a read-only memoryview, not ``array.view()``:
         # a plain read-only view can have its writeable flag turned back on
-        # whenever the base stays writeable, which it has to here.
-        self._readonly = np.frombuffer(memoryview(array).toreadonly(), dtype=array.dtype).reshape(array.shape)
+        # whenever the base stays writeable, which it has to here. Build the
+        # memoryview from ``array.data`` because mypy does not treat ``ndarray``
+        # itself as a buffer.
+        self._readonly = np.frombuffer(array.data.toreadonly(), dtype=array.dtype).reshape(array.shape)
         self._callback = callback
 
     _OWN_FIELDS = ("_array", "_readonly", "_callback")
