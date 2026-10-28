@@ -142,9 +142,10 @@ class MooncakeBaseConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.side_channel_host = get_ip()
+        # Use the serving index, which survives dense-engine DP rank reset.
         self.side_channel_port = (
             self.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * self.tp_size * self.pp_size * self.pcp_size
+            + vllm_config.parallel_config.data_parallel_index * self.tp_size * self.pp_size * self.pcp_size
         )
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index

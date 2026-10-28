@@ -40,6 +40,7 @@ def _make_engine():
     engine.model = MagicMock()
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
+    engine._last_hccl_update_info = {}
     return engine
 
 
@@ -329,3 +330,53 @@ def test_worker_loads_on_assigned_device_in_both_modes(packed):
     with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer", side_effect=receive):
         engine.receive_weights(info)
     assert engine.model.load_weights.call_args.args[0][0][0] == "w"
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("reuse_metadata", [False, True])
+def test_worker_receives_two_updates(packed, reuse_metadata):
+    engine = _make_engine()
+    engine._init_info = HCCLWeightTransferInitInfo(
+        master_address="host", master_port=1234, rank_offset=1, world_size=2, packed=packed
+    )
+    engine.model_update_group = MagicMock()
+    full = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[1]])
+    empty = HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[])
+    received = []
+
+    def receive(**kwargs):
+        received.extend(list(kwargs["iterator"]))
+
+    with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer", side_effect=receive):
+        engine.receive_weights(full)
+        engine.receive_weights(empty if reuse_metadata else full)
+
+    if packed:
+        assert received == [("w", ([1], torch.float32))] * 2
+    else:
+        assert engine.model_update_group.broadcast.call_count == 2
+        assert engine.model.load_weights.call_count == 2
+
+
+def test_worker_metadata_is_per_model_and_cleared_on_reinit():
+    engine = _make_engine()
+    engine.parallel_config = SimpleNamespace(data_parallel_index=0, world_size=1, rank=0)
+    init = HCCLWeightTransferInitInfo(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    full = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[1]])
+    empty = HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[])
+    with patch.object(engine, "_stateless_init_process_group", return_value=MagicMock()):
+        engine.init_transfer_engine(init)
+        original_model = engine.model
+        engine.receive_weights(full)
+        engine.model = MagicMock()
+        engine.receive_weights(empty)
+        engine.model.load_weights.assert_not_called()
+        engine.model = original_model
+        engine.receive_weights(empty)
+        assert original_model.load_weights.call_count == 2
+        engine.init_transfer_engine(init)
+        engine.receive_weights(empty)
+        assert original_model.load_weights.call_count == 2
+        engine.model_update_group.broadcast.reset_mock()
+        engine.receive_weights(full)
+        engine.model_update_group.broadcast.assert_called_once()

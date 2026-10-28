@@ -78,7 +78,6 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
-    vllm_version_is,
 )
 
 # isort: off
@@ -1628,16 +1627,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
-    def __init__(  # type: ignore[misc]
-        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-    ):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         assert vllm_config.kv_transfer_config is not None
-        if vllm_version_is("0.31.0"):
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-        else:
-            # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
-            # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
-            super().__init__(vllm_config, role, kv_cache_config)
+        # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
+        # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
+        super().__init__(vllm_config, role, kv_cache_config)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
@@ -1650,16 +1644,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
-    ############################################################
-    # Scheduler Side Methods
-    ############################################################
-
-    if not vllm_version_is("0.31.0"):
-
-        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
-            # vLLM main's scheduler uses this for skip_zeroing_group_ids.
-            # Mooncake restores the request's own transfer blocks.
-            return self._kv_cache_config.transfer_group_ids
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # vLLM main's scheduler uses this for skip_zeroing_group_ids.
+        # Mooncake restores the request's own transfer blocks.
+        return self._kv_cache_config.transfer_group_ids
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
@@ -1792,10 +1780,11 @@ class MooncakeConnectorScheduler:
             * vllm_config.parallel_config.pipeline_parallel_size
         )
 
-        # Handshake base port
+        # Use the serving index, which survives dense-engine DP rank reset.
+        # Keep scheduler metadata and worker handshake ports consistent.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
@@ -2221,10 +2210,11 @@ class MooncakeConnectorWorker:
         self._use_request_level_recv_errors = self._is_hma_required or len(kv_cache_config.kv_cache_groups) > 1
         self._layer_specs = self._build_layer_specs_from_kv_cache_config(kv_cache_config)
 
-        # Handshake base port
+        # Use the serving index, which survives dense-engine DP rank reset.
+        # Keep scheduler metadata and worker handshake ports consistent.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size

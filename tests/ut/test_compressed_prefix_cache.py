@@ -34,8 +34,8 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
-# the v0.31.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# the v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 else:
     from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform

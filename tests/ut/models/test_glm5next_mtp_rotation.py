@@ -86,7 +86,7 @@ def test_mtp_transforms_target_and_recycled_hidden_states(use_rotation):
 def test_rotation_is_gated_by_checkpoint(quant_description, expected):
     config = SimpleNamespace(hidden_size=4)
     quant_config = SimpleNamespace(quant_description=quant_description) if quant_description is not None else None
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=config), quant_config=quant_config)
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config), quant_config=quant_config)
     with (
         patch.object(mtp_module, "Glm5NextMultiTokenPredictor", return_value=nn.Module()),
         patch.object(Glm5NextMTP, "set_moe_parameters"),
