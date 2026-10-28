@@ -19,13 +19,13 @@
 from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
-class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
-    """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
+class AscendEagleSpeculator(AscendTargetDependentARSpeculator, EagleSpeculator):
+    """Ascend Eagle speculator: the NPU loop from AscendTargetDependentARSpeculator
     layered on upstream EagleSpeculator (flat/GQA attention)."""
 
     def _create_draft_vllm_config(self) -> VllmConfig:

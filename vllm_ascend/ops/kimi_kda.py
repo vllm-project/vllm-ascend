@@ -436,8 +436,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             .contiguous()
         )
         # vLLM main (#62326) keeps the parameter object by default and drops
-        # `prefer_copy`; v0.31.0 still requires `prefer_copy=True`.
-        if vllm_version_is("0.31.0"):
+        # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
+        if vllm_version_is("0.32.0"):
             replace_parameter(
                 self,
                 _PACKED_CONV_WEIGHT_NAME,

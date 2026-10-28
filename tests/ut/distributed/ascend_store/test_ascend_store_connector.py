@@ -92,6 +92,7 @@ class TestLookupKeyServer(unittest.TestCase):
             calls["count"] += 1
             if calls["count"] == 1:
                 return [
+                    b"lookup",
                     (64).to_bytes(4, "big"),
                     b"groups",
                     (0).to_bytes(4, "big"),
@@ -111,7 +112,7 @@ class TestLookupKeyServer(unittest.TestCase):
 
         target()
 
-        mock_socket.send.assert_called_once_with((0).to_bytes(4, "big"))
+        mock_socket.send.assert_called_once_with(b"\x00")
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -785,6 +786,53 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             )
 
             self.assertFalse(connector.prepare_mamba_state_copy(MagicMock()))
+
+
+def _scheduler_connector(backend="mooncake", use_layerwise=False):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector._role = KVConnectorRole.SCHEDULER
+    connector.backend_name = backend
+    connector.use_layerwise = use_layerwise
+    scheduler = MagicMock()
+    scheduler.load_specs = {"req-a": object()}
+    scheduler.sending_events = {}
+    scheduler.sending_blocks = {}
+    scheduler._loading_req_ids = set()
+    scheduler.reset_store.return_value = True
+    connector.connector_scheduler = scheduler
+    connector._kv_cache_events = MagicMock()
+    return connector
+
+
+class TestAscendStoreResetCache(unittest.TestCase):
+    def test_scheduler_mooncake_clears_refs_and_resets_store(self):
+        connector = _scheduler_connector()
+        self.assertTrue(connector.reset_cache())
+        self.assertEqual(connector.connector_scheduler.load_specs, {})
+        self.assertIsNone(connector._kv_cache_events)
+        connector.connector_scheduler.reset_store.assert_called_once_with()
+
+    def test_worker_role_returns_none(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector._role = KVConnectorRole.WORKER
+        connector.backend_name = "mooncake"
+        connector.use_layerwise = False
+        self.assertIsNone(connector.reset_cache())
+
+    def test_mooncake_layerwise_returns_false(self):
+        connector = _scheduler_connector(use_layerwise=True)
+        self.assertFalse(connector.reset_cache())
+        connector.connector_scheduler.reset_store.assert_not_called()
+        self.assertIn("req-a", connector.connector_scheduler.load_specs)
+
+    def test_other_backend_returns_none(self):
+        connector = _scheduler_connector(backend="memcache")
+        self.assertIsNone(connector.reset_cache())
+        connector.connector_scheduler.reset_store.assert_not_called()
 
 
 if __name__ == "__main__":

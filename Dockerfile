@@ -32,7 +32,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.31.0
+ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
@@ -140,5 +140,16 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
     python3 -m pip cache purge
+
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    git clone https://github.com/MinghuasLab/flash-attention-npu.git /tmp/flash-attention-npu && \
+    cd /tmp/flash-attention-npu && \
+    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git submodule update --init --recursive && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    python3 setup.py install && \
+    cd /workspace && \
+    rm -rf /tmp/flash-attention-npu
 
 CMD ["/bin/bash"]
