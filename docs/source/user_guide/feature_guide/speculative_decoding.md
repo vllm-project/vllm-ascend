@@ -409,6 +409,9 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
 ```
 
 Both the plain and convolutional LiLiCorr checkpoint variants are supported.
+Standard tensor parallelism is supported. Fine-grained embedding/LM head TP
+and PCP vocabulary weight sharding are currently unsupported; the candidate
+path requires the standard TP vocabulary layout.
 Use the checkpoint's own `dflash_config` values for candidate top-k and
 convolution geometry; these values are part of the trained model and should
 not be tuned at serving time.

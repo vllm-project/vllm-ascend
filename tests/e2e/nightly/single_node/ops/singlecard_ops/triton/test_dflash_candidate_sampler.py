@@ -10,6 +10,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 
 @pytest.mark.parametrize("use_triton", [False, True])
@@ -147,3 +148,66 @@ def test_probabilistic_candidate_walk_matches_proposal_distribution(temperature)
     # Independent draws from the same q agree with probability sum(q**2).
     agreement = (tokens == target_tokens).float().mean().cpu()
     torch.testing.assert_close(agreement, expected.square().sum(), atol=0.025, rtol=0.0)
+
+
+@pytest.mark.parametrize("temperature", [0.5, 1.0, 2.0])
+def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(temperature):
+    """Each second-step proposal and cache must depend on the sampled predecessor."""
+    num_reqs, steps, topk = 8192, 2, 2
+    device = torch.device("npu")
+    sampler = CandidateSampler(num_reqs, steps, topk, device)
+    start = torch.tensor([0.0, 0.5])
+    transitions = torch.tensor([[1.0, -0.5], [-1.0, 0.5]])
+    scores = torch.stack((start.expand(topk, topk), transitions)).expand(num_reqs, -1, -1, -1).contiguous()
+    candidates = torch.tensor([[0, 1], [2, 3]]).expand(num_reqs, -1, -1).contiguous()
+    tokens = torch.empty(num_reqs, steps, dtype=torch.int64, device=device)
+    logits = torch.full((num_reqs, steps, 4), -float("inf"), device=device)
+    sampler.sample(
+        candidates.to(device),
+        scores.to(device),
+        num_reqs,
+        torch.tensor([10, 11], device=device).repeat(num_reqs),
+        torch.arange(num_reqs, dtype=torch.int32, device=device).repeat_interleave(steps),
+        torch.full((num_reqs,), temperature, device=device),
+        torch.arange(num_reqs, dtype=torch.int64, device=device),
+        tokens,
+        logits,
+        use_fp64=False,
+    )
+    tokens = tokens.cpu()
+    joint_index = tokens[:, 0] * topk + tokens[:, 1] - 2
+    observed = torch.bincount(joint_index, minlength=topk * topk).float().view(topk, topk) / num_reqs
+    expected = (start / temperature).softmax(-1)[:, None] * (transitions / temperature).softmax(-1)
+    torch.testing.assert_close(observed, expected, atol=0.025, rtol=0.0)
+    cached = logits.cpu()
+    torch.testing.assert_close(cached[:, 0, :2], start.expand(num_reqs, -1))
+    torch.testing.assert_close(cached[:, 1, 2:], transitions[tokens[:, 0]])
+    assert torch.isneginf(cached[:, 0, 2:]).all()
+    assert torch.isneginf(cached[:, 1, :2]).all()
+
+    # Feed the actual walk and its sparse q into verification. A fixed target
+    # makes every returned position's expected marginal known, including the
+    # residual draw at rejection and the bonus after full acceptance.
+    target = torch.tensor([0.2, 0.3, 0.1, 0.4], device=device)
+    query_len = steps + 1
+    sampled, num_sampled = rejection_sample(
+        target_logits=target.log().expand(num_reqs * query_len, -1).contiguous(),
+        draft_logits=logits,
+        draft_sampled=torch.cat((torch.zeros(num_reqs, 1, dtype=torch.int64), tokens), dim=1).flatten().to(device),
+        cu_num_logits=torch.arange(num_reqs + 1, dtype=torch.int32, device=device) * query_len,
+        pos=torch.tensor([9, 10, 11], dtype=torch.int32, device=device).repeat(num_reqs),
+        idx_mapping=torch.arange(num_reqs, dtype=torch.int32, device=device),
+        expanded_idx_mapping=torch.arange(num_reqs, dtype=torch.int32, device=device).repeat_interleave(query_len),
+        expanded_local_pos=torch.arange(query_len, dtype=torch.int32, device=device).repeat(num_reqs),
+        temperature=torch.full((num_reqs,), temperature, device=device),
+        seed=torch.arange(num_reqs, dtype=torch.int64, device=device),
+        num_speculative_steps=steps,
+    )
+    sampled, num_sampled = sampled.cpu(), num_sampled.cpu()
+    assert ((num_sampled >= 1) & (num_sampled <= query_len)).all()
+    for step in range(query_len):
+        returned = sampled[num_sampled > step, step]
+        assert returned.numel() > 0
+        observed = torch.bincount(returned, minlength=4).float() / returned.numel()
+        tolerance = 5.0 * (0.25 / returned.numel()) ** 0.5
+        torch.testing.assert_close(observed, target.cpu(), atol=tolerance, rtol=0.0)
