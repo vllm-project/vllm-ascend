@@ -921,9 +921,11 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
-                req_ids, idx_mapping
-            )
+            # vLLM main appends the admitted draft counts (a 4th element) for
+            # batch-sharded sampling. Ascend does not shard the sample batch, so
+            # keep the first three fields on both the release and main trees.
+            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split[:3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
             # Non-fia backends skip padding query boundary when using adaptive verification

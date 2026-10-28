@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, ClassVar
 
 import torch
@@ -61,13 +63,35 @@ from vllm_ascend.utils import (
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
 
-# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
-# A5 decode keeps its lower-latency Triton path.
-_USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
+
+def _cann_index_score_available() -> bool:
+    """Whether the installed cann_ops_transformer provides MsaIndexScore."""
+    if importlib.util.find_spec("cann_ops_transformer") is None:
+        return False
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except Exception:
+        # The optional package can fail to import for environment reasons
+        # (missing libs, stubbed torch_npu in unit tests); treat that as absent.
+        return False
+    return hasattr(ops, "msa_index_score")
+
+
+# Use the CANN MsaIndexScore when it is installed (prefill on every device,
+# decode on A2/A3); otherwise the Triton index-score path computes the same
+# block scores and feeds the same TopK kernels.
+_CANN_INDEX_SCORE_AVAILABLE = _cann_index_score_available()
+_USE_ASCENDC_INDEX_SCORE_PREFILL = _CANN_INDEX_SCORE_AVAILABLE
+_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5 and _CANN_INDEX_SCORE_AVAILABLE
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,

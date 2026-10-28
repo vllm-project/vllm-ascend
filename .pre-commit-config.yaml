@@ -60,6 +60,11 @@ repos:
   # before pre-commit run --all-files to use the repository's existing policy.
   - id: actionlint
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
+    # Do not spawn shellcheck/pyflakes subprocesses: on some CI workers they
+    # resolve to wrappers that block the hook until format.sh's hard timeout.
+    # actionlint's own workflow syntax/expression checks still run, and
+    # tools/shellcheck.sh keeps linting the repository's shell scripts.
+    args: ["-shellcheck=", "-pyflakes="]
         
 - repo: local
   hooks:
