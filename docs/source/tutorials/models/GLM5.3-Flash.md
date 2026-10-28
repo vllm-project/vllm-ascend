@@ -431,7 +431,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
-After starting all nodes of the selected deployment, open another terminal and run `curl --fail http://<API_HOST>:<API_PORT>/health` against every API endpoint. For single-node deployment use that node's API; for colocated A2 use the API-serving master, since the headless node has no API. Wait for successful responses before sending the [functional verification requests](#6-functional-verification). Check the launch terminals on all nodes if initialization fails.
+After starting all nodes of the selected deployment, open another terminal and run `curl --fail <API_HOST>:<API_PORT>/health` against every API endpoint. For single-node deployment use that node's API; for colocated A2 use the API-serving master, since the headless node has no API. Wait for successful responses before sending the [functional verification requests](#6-functional-verification). Check the launch terminals on all nodes if initialization fails.
 
 ### 5.3 PD Disaggregated Deployment {: #53-1p1d-pd-disaggregated-deployment }
 
@@ -733,7 +733,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     communication; the socket interface variables still select the host
     network. Adjust the resource configuration for other network topologies.
 
-    Start Decode first, then Prefill. In another terminal, check `http://<DECODE_NODE_IP>:9900/health` through port `9903` and `http://<PREFILL_NODE_IP>:9081/health` through port `9082` with `curl --fail`. Start the proxy only after all six endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
+    Start Decode first, then Prefill. In another terminal, check `<DECODE_NODE_IP>:9900/health` through port `9903` and `<PREFILL_NODE_IP>:9081/health` through port `9082` with `curl --fail`. Start the proxy only after all six endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
 
     ##### A3 series Serving Scripts and Startup Commands
 
