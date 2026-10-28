@@ -104,6 +104,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Use the fused CANN operator torch_npu.npu_chunk_gated_delta_rule for the
+    # GDN prefill instead of the Triton chunk_gated_delta_rule pipeline.
+    # Default is on; the caller additionally probes the operator at runtime and
+    # falls back to Triton when it is unavailable.
+    "VLLM_ASCEND_ENABLE_GDN_FUSED_CHUNK": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_GDN_FUSED_CHUNK", "1"))),
+    # Emit a one-shot warning whenever the fused GDN prefill operator is hit.
+    # Diagnostic only (path-attribution evidence); default off.
+    "VLLM_ASCEND_GDN_FUSED_CHUNK_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_GDN_FUSED_CHUNK_DEBUG", "0"))),
 }
 
 # end-env-vars-definition
