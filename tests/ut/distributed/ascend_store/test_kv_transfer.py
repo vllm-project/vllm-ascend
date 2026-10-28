@@ -15,12 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import ctypes
 import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import torch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -28,6 +30,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    KVCacheByteRange,
     LayerBlockRange,
     LayerLoadTask,
     LayerBatchReqMeta,
@@ -47,6 +50,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    _all_gather_kv_shards,
+    _block_ids_are_contiguous,
+    _coalesced_kv_views,
+    _kv_shard_indices,
+    _kv_shard_lengths,
+    _should_use_mla_read_dedup,
+    _should_use_p2p_kv_exchange,
+    sharded_get_all_gather,
 )
 
 
@@ -69,6 +80,65 @@ class FakeStore:
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
         return [0] * len(keys)
+
+
+class ByteFakeStore(FakeStore):
+    def __init__(self, payloads, failed_keys=()):
+        super().__init__()
+        self.payloads = payloads
+        self.failed_keys = set(failed_keys)
+
+    def get(self, keys, addrs, sizes):
+        self.get_calls.append((list(keys), list(addrs), list(sizes)))
+        for key, key_addrs, key_sizes in zip(keys, addrs, sizes):
+            payload = self.payloads[key]
+            for addr, size in zip(key_addrs, key_sizes):
+                ctypes.memmove(addr, payload[:size], size)
+        return [1 if key in self.failed_keys else 0 for key in keys]
+
+
+class FakeAllGatherContext:
+    def __init__(self, world_size):
+        self.world_size = world_size
+        self.tensor_barrier = threading.Barrier(world_size, timeout=10)
+        self.payloads = [None] * world_size
+        self.reduce_barrier = threading.Barrier(world_size, timeout=10)
+        self.reduce_payloads = [None] * world_size
+        self.exchange_barrier = threading.Barrier(world_size, timeout=10)
+        self.exchange_views = [None] * world_size
+        self.exchange_status = [None] * world_size
+
+
+class FakeAllGatherGroup:
+    def __init__(self, context, rank):
+        self.world_size = len(context.payloads)
+        self.rank_in_group = rank
+        self._context = context
+
+    def all_gather(self, value, dim=0):
+        self._context.payloads[self.rank_in_group] = value.clone()
+        self._context.tensor_barrier.wait()
+        return torch.cat(self._context.payloads, dim=dim)
+
+    def all_reduce(self, value, op=None):
+        self._context.reduce_payloads[self.rank_in_group] = value.clone()
+        self._context.reduce_barrier.wait()
+        return torch.stack(self._context.reduce_payloads).sum(dim=0)
+
+    def exchange_kv_shards(self, tp_rank, local_views, owner_views):
+        self._context.exchange_views[tp_rank] = local_views
+        self._context.exchange_barrier.wait()
+        for owner, destinations in owner_views.items():
+            sources = self._context.exchange_views[owner]
+            if len(sources) != len(destinations):
+                raise AssertionError(f"P2P view count mismatch: {len(sources)} != {len(destinations)}")
+            for source, destination in zip(sources, destinations):
+                destination.copy_(source)
+
+    def all_reduce_kv_status(self, status):
+        self._context.reduce_payloads[self.rank_in_group] = status.clone()
+        self._context.reduce_barrier.wait()
+        return torch.stack(self._context.reduce_payloads).sum(dim=0, dtype=status.dtype)
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
@@ -1253,6 +1323,452 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
+
+    def test_read_dedup_dispatches_to_worker(self):
+        cache = torch.zeros(2, 16, dtype=torch.uint8)
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
+        db.set_group_buffers(
+            {0: [cache.data_ptr()]},
+            {0: [16]},
+            {0: [16]},
+            group_num_layers={0: 1},
+            group_cache_storages={
+                0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
+            },
+        )
+        store = FakeStore()
+        worker = MagicMock()
+        worker.tp_mismatch = False
+        worker._load_kv_read_dedup.return_value = (False, {1}, 1)
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            tp_size=2,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            worker=worker,
+            read_dedup=True,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        worker._load_kv_read_dedup.assert_called_once()
+        self.assertEqual(store.get_calls, [])
+        self.assertEqual(t._invalid_block_ids, {1})
+        self.assertIn("r1", t.get_and_clear_finished_requests())
+
+
+class TestShardedGetAllGather(unittest.TestCase):
+    def test_block_id_contiguity_guard(self):
+        self.assertTrue(_block_ids_are_contiguous([7, 8, 9, 10], [0, 1, 2, 3]))
+        self.assertFalse(_block_ids_are_contiguous([7, 9, 10, 12], [0, 1, 2, 3]))
+        self.assertTrue(_block_ids_are_contiguous([7], [0]))
+
+    def test_read_dedup_threshold_scales_with_tp_size(self):
+        mib = 1024 * 1024
+        self.assertFalse(_should_use_mla_read_dedup(18 * mib, 2))
+        self.assertTrue(_should_use_mla_read_dedup(18 * mib, 4))
+        self.assertTrue(_should_use_mla_read_dedup(72 * mib, 2))
+        self.assertTrue(_should_use_mla_read_dedup(8 * mib, 16))
+        self.assertFalse(_should_use_mla_read_dedup(7 * mib, 16))
+
+    def test_byte_ranges_follow_offsets_without_allocating_per_block_tensors(self):
+        database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [8], None)
+        first = torch.zeros(32, dtype=torch.uint8)
+        second = torch.zeros_like(first)
+        for value, cache in enumerate((first, second), start=1):
+            database.set_group_buffers(
+                {0: [cache.data_ptr() + 8]},
+                {0: [8]},
+                {0: [8]},
+                group_cache_storages={0: [(cache.untyped_storage(), 8, cache.device)]},
+            )
+            for block_id in (0, 1):
+                with patch.object(torch, "empty", side_effect=AssertionError("per-block Tensor allocation")):
+                    addrs, sizes, ranges, resolved = database.prepare_value_with_ranges(
+                        block_id * 8, (block_id + 1) * 8, [0, 1], block_id=block_id
+                    )
+                self.assertIsInstance(ranges[0], KVCacheByteRange)
+                views = [span.as_tensor() for span in ranges]
+                self.assertEqual(addrs, [cache.data_ptr() + 8 + block_id * 8])
+                self.assertEqual(sizes, [8])
+                self.assertEqual(resolved, block_id)
+                self.assertEqual(views[0].data_ptr(), addrs[0])
+                views[0].fill_(value + block_id)
+        torch.testing.assert_close(first, torch.tensor([0] * 8 + [1] * 8 + [2] * 8 + [0] * 8, dtype=torch.uint8))
+        torch.testing.assert_close(second, torch.tensor([0] * 8 + [2] * 8 + [3] * 8 + [0] * 8, dtype=torch.uint8))
+
+    def test_p2p_policy_uses_large_spans_only_for_one_peer(self):
+        mib = 1024 * 1024
+        # Preserve the few-view path, including smaller copies and larger TP.
+        self.assertTrue(_should_use_p2p_kv_exchange(8, 4, mib))
+        # Small views retain all-gather even with just one peer.
+        self.assertFalse(_should_use_p2p_kv_exchange(2, 144, 72 * mib))
+        # The TP=2 large-span threshold is inclusive and uses the mean view size.
+        self.assertFalse(_should_use_p2p_kv_exchange(2, 54, 54 * 8 * mib - 1))
+        self.assertTrue(_should_use_p2p_kv_exchange(2, 54, 54 * 8 * mib))
+        self.assertFalse(_should_use_p2p_kv_exchange(2, 65, 65 * 32 * mib))
+        for tp_size in (4, 8):
+            with self.subTest(tp_size=tp_size):
+                self.assertFalse(_should_use_p2p_kv_exchange(tp_size, 54, 54 * 32 * mib))
+
+    def test_shard_lengths_follow_contiguous_variable_sizes(self):
+        sizes = [[5], [7], [11], [13], [17]]
+        self.assertEqual(_kv_shard_lengths(sizes, 2), [23, 30])
+        self.assertEqual(_kv_shard_lengths(sizes, 4), [12, 11, 13, 17])
+
+    def test_coalesces_adjacent_views_and_keeps_storage_boundaries(self):
+        first = torch.arange(24, dtype=torch.int8)
+        second = torch.arange(8, dtype=torch.int8) + 31
+        views = [
+            [first[0:8], second[0:4]],
+            [first[8:16], second[4:8]],
+            [first[16:24]],
+        ]
+        coalesced = _coalesced_kv_views(views, [0, 1, 2])
+        self.assertEqual(len(coalesced), 2)
+        torch.testing.assert_close(coalesced[0], first)
+        torch.testing.assert_close(coalesced[1], second)
+
+    def test_contiguous_hint_preserves_interior_storage_and_partial_ranges(self):
+        first = torch.arange(24, dtype=torch.int8)
+        second = torch.arange(8, dtype=torch.int8) + 31
+        cases = [
+            [[first[:8]], [second], [first[16:24]]],
+            [[first[:4]], [first[4:6]], [first[8:12]]],
+        ]
+        for views in cases:
+            with self.subTest(views=views):
+                coalesced = _coalesced_kv_views(views, [0, 1, 2], assume_contiguous=True)
+                expected = torch.cat([key_views[0] for key_views in views])
+                torch.testing.assert_close(torch.cat(coalesced), expected)
+                self.assertGreater(len(coalesced), 1)
+
+    def test_fast_coalescing_for_contiguous_uniform_layers(self):
+        first = torch.arange(24, dtype=torch.int8)
+        second = torch.arange(12, dtype=torch.int8) + 31
+        views = [
+            [first[0:8], second[0:4]],
+            [first[8:16], second[4:8]],
+            [first[16:24], second[8:12]],
+        ]
+        coalesced = _coalesced_kv_views(views, [0, 1, 2], assume_contiguous=True)
+        self.assertEqual(len(coalesced), 2)
+        torch.testing.assert_close(coalesced[0], first)
+        torch.testing.assert_close(coalesced[1], second)
+
+    @staticmethod
+    def _build_task_args(caches, payloads, context, failed_keys_by_rank=None):
+        block_size = caches[0].shape[1]
+        num_blocks = caches[0].shape[0]
+        keys = [f"k{index}" for index in range(num_blocks)]
+        stores = []
+        groups = []
+        task_args = []
+        for tp_rank, cache in enumerate(caches):
+            database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [block_size], None)
+            database.set_group_buffers(
+                {0: [cache.data_ptr()]},
+                {0: [block_size]},
+                {0: [block_size]},
+                group_num_layers={0: 1},
+                group_cache_storages={
+                    0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
+                },
+            )
+            addrs = []
+            sizes = []
+            block_ids = []
+            views = []
+            for block_id in range(num_blocks):
+                addr, size, key_views, _ = database.prepare_value_with_views(
+                    block_id * block_size,
+                    (block_id + 1) * block_size,
+                    list(range(num_blocks)),
+                    block_id=block_id,
+                )
+                addrs.append(addr)
+                sizes.append(size)
+                block_ids.append(block_id)
+                views.append(key_views)
+            failed_keys = failed_keys_by_rank[tp_rank] if failed_keys_by_rank is not None else ()
+            store = ByteFakeStore(payloads, failed_keys=failed_keys)
+            stores.append(store)
+            groups.append(FakeAllGatherGroup(context, tp_rank))
+            task_args.append((store, groups[-1], tp_rank, keys, addrs, sizes, block_ids, views))
+        return keys, stores, task_args
+
+    def test_each_tp_rank_reads_disjoint_blocks_and_gathers_full_cache(self):
+        block_size = 8
+        num_blocks = 13
+        for tp_size in (2, 4, 8):
+            with self.subTest(tp_size=tp_size):
+                caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8) for _ in range(tp_size)]
+                keys = [f"k{index}" for index in range(num_blocks)]
+                payloads = {key: bytes([index + 1]) * block_size for index, key in enumerate(keys)}
+                expected = torch.tensor(
+                    [index + 1 for index in range(num_blocks) for _ in range(block_size)],
+                    dtype=torch.uint8,
+                ).view(num_blocks, block_size)
+                context = FakeAllGatherContext(tp_size)
+                _, stores, task_args = self._build_task_args(caches, payloads, context)
+
+                errors = []
+
+                def run(args, errors=errors):
+                    try:
+                        sharded_get_all_gather(*args)
+                    except Exception as exc:  # pragma: no cover - surfaced below
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=run, args=(args,)) for args in task_args]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                for tp_rank, (cache, store) in enumerate(zip(caches, stores)):
+                    torch.testing.assert_close(cache, expected)
+                    expected_indices = _kv_shard_indices(num_blocks, tp_size, tp_rank)
+                    self.assertEqual(store.get_calls[0][0], [keys[index] for index in expected_indices])
+
+    def test_reversed_physical_blocks_coalesce_without_changing_read_ownership(self):
+        num_blocks = 13
+        block_size = 8
+        physical_ids = list(reversed(range(num_blocks)))
+        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(num_blocks)}
+        expected = torch.empty(num_blocks, block_size, dtype=torch.uint8)
+        for logical_index, physical_id in enumerate(physical_ids):
+            expected[physical_id].fill_(logical_index + 1)
+        cases = [(tp_size, path) for tp_size in (2, 4, 8) for path in ("p2p", "all_gather")]
+        for tp_size, path in cases:
+            with self.subTest(tp_size=tp_size, path=path):
+                caches = [torch.zeros_like(expected) for _ in range(tp_size)]
+                context = FakeAllGatherContext(tp_size)
+                keys, stores, original_args = self._build_task_args(caches, payloads, context)
+                task_args = [
+                    (
+                        *args[:4],
+                        [args[4][index] for index in physical_ids],
+                        [args[5][index] for index in physical_ids],
+                        physical_ids,
+                        [
+                            [
+                                KVCacheByteRange(v.untyped_storage(), v.storage_offset(), v.numel(), v.device)
+                                for v in args[7][index]
+                            ]
+                            for index in physical_ids
+                        ],
+                    )
+                    for args in original_args
+                ]
+                errors = []
+                results = []
+
+                def run(args, errors=errors, results=results):
+                    try:
+                        results.append(sharded_get_all_gather(*args))
+                    except Exception as exc:  # pragma: no cover - surfaced below
+                        errors.append(exc)
+
+                # Exercise both wire formats and inspect direct exchange coalescing.
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer._P2P_EXCHANGE_VIEW_LIMIT",
+                    num_blocks * tp_size if path == "p2p" else 0,
+                ):
+                    threads = [threading.Thread(target=run, args=(args,)) for args in task_args]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(timeout=15)
+
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), tp_size)
+                for rank, (cache, store) in enumerate(zip(caches, stores)):
+                    torch.testing.assert_close(cache, expected)
+                    indices = _kv_shard_indices(num_blocks, tp_size, rank)
+                    self.assertEqual(store.get_calls[0][0], [keys[index] for index in indices])
+                    if path == "p2p":
+                        self.assertEqual(len(context.exchange_views[rank]), 1)
+                        self.assertEqual(context.exchange_views[rank][0].numel(), len(indices) * block_size)
+                    else:
+                        self.assertIsNotNone(context.payloads[rank])
+                for failed, missing, _ in results:
+                    self.assertFalse(failed)
+                    self.assertEqual(missing, set())
+
+    def test_failed_shard_propagates_missing_block_to_every_rank(self):
+        block_size = 8
+        caches = [torch.zeros(2, block_size, dtype=torch.uint8) for _ in range(2)]
+        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(2)}
+        context = FakeAllGatherContext(2)
+        keys, _, task_args = self._build_task_args(caches, payloads, context, failed_keys_by_rank=[{"k0"}, set()])
+        results = []
+        errors = []
+
+        def run(args):
+            try:
+                results.append(sharded_get_all_gather(*args))
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(args,)) for args in task_args]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        for request_failed, missing_block_ids, local_key_count in results:
+            self.assertFalse(request_failed)
+            self.assertEqual(missing_block_ids, {0})
+            self.assertEqual(local_key_count, 1)
+        self.assertEqual(keys, ["k0", "k1"])
+
+    def test_all_gather_copies_only_batched_status_to_cpu_once(self):
+        world_size = 4
+        wire_bytes = 3
+        statuses = [[128, 0], [1, 0], [0, 128], [0, 1]]
+        packets = [
+            torch.tensor([rank + 1] * wire_bytes + status, dtype=torch.uint8).view(torch.int8)
+            for rank, status in enumerate(statuses)
+        ]
+        group = MagicMock(world_size=world_size)
+        group.all_gather.return_value = torch.cat(packets)
+        received = {rank: [torch.empty(wire_bytes, dtype=torch.int8)] for rank in range(1, world_size)}
+        cpu_copies = []
+        tensor_cpu = torch.Tensor.cpu
+
+        def record_cpu_copy(tensor, *args, **kwargs):
+            cpu_copies.append((tuple(tensor.shape), tensor.is_contiguous()))
+            return tensor_cpu(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "cpu", record_cpu_copy):
+            aggregated = _all_gather_kv_shards(
+                group,
+                0,
+                [packets[0][:wire_bytes]],
+                received,
+                [wire_bytes] * world_size,
+                wire_bytes,
+                statuses[0],
+                torch.device("cpu"),
+            )
+
+        self.assertEqual(aggregated, [129, 129])
+        self.assertEqual(cpu_copies, [((world_size, len(statuses[0])), True)])
+        group.all_gather.assert_called_once()
+        for rank, views in received.items():
+            torch.testing.assert_close(views[0], packets[rank][:wire_bytes])
+
+    def test_missing_high_bit_does_not_overflow_status(self):
+        num_blocks = 65
+        block_size = 8
+        caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8)]
+        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(num_blocks)}
+        failed_indices = {7, 8, 31, 32, 63, 64}
+        context = FakeAllGatherContext(1)
+        _, _, task_args = self._build_task_args(
+            caches, payloads, context, failed_keys_by_rank=[{f"k{index}" for index in failed_indices}]
+        )
+
+        self.assertEqual(sharded_get_all_gather(*task_args[0]), (False, failed_indices, num_blocks))
+
+    def test_uint8_status_propagates_boundary_and_full_byte_failures(self):
+        num_blocks = 65
+        block_size = 8
+        boundary_indices = {7, 8, 31, 32, 63, 64}
+        for tp_size in (2, 8):
+            for path in ("p2p", "all_gather", "status_only"):
+                for failure in ("boundary", "all_missing", "backend_failure"):
+                    with self.subTest(tp_size=tp_size, path=path, failure=failure):
+                        caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8) for _ in range(tp_size)]
+                        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(num_blocks)}
+                        failed_indices = boundary_indices if failure == "boundary" else set(range(num_blocks))
+                        failed_keys = {f"k{index}" for index in failed_indices}
+                        context = FakeAllGatherContext(tp_size)
+                        _, stores, task_args = self._build_task_args(
+                            caches, payloads, context, failed_keys_by_rank=[failed_keys] * tp_size
+                        )
+                        if path == "status_only":
+                            task_args = [
+                                (
+                                    *args[:5],
+                                    [[0]] * num_blocks,
+                                    args[6],
+                                    [[torch.empty(0, dtype=torch.int8)]] * num_blocks,
+                                )
+                                for args in task_args
+                            ]
+                        if failure == "backend_failure":
+                            for store in stores:
+                                store.get = MagicMock(return_value=None)
+                        results = [None] * tp_size
+                        errors = []
+
+                        def run(rank, task_args=task_args, results=results, errors=errors):
+                            try:
+                                results[rank] = sharded_get_all_gather(*task_args[rank])
+                            except Exception as exc:  # pragma: no cover - surfaced below
+                                errors.append(exc)
+
+                        # Force each exchange branch independently of layout heuristics.
+                        view_limit = 0 if path == "all_gather" else num_blocks * tp_size
+                        backend_type = ByteFakeStore if failure == "backend_failure" else type(None)
+                        with (
+                            patch(
+                                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer._P2P_EXCHANGE_VIEW_LIMIT",
+                                view_limit,
+                            ),
+                            patch(
+                                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.MemcacheBackend",
+                                backend_type,
+                            ),
+                        ):
+                            threads = [threading.Thread(target=run, args=(rank,)) for rank in range(tp_size)]
+                            for thread in threads:
+                                thread.start()
+                            for thread in threads:
+                                thread.join(timeout=15)
+
+                        self.assertFalse(any(thread.is_alive() for thread in threads))
+                        self.assertEqual(errors, [])
+                        for rank, result in enumerate(results):
+                            self.assertEqual(
+                                result,
+                                (
+                                    failure == "backend_failure",
+                                    failed_indices,
+                                    len(_kv_shard_indices(num_blocks, tp_size, rank)),
+                                ),
+                            )
+                        status_bytes = 2 * ((num_blocks + 7) // 8)
+                        if path == "all_gather":
+                            wire_bytes = max(_kv_shard_lengths([[block_size]] * num_blocks, tp_size))
+                            for packet in context.payloads:
+                                self.assertEqual(packet.numel(), wire_bytes + status_bytes)
+                        else:
+                            for status in context.reduce_payloads:
+                                self.assertEqual(status.dtype, torch.uint8)
+                                self.assertEqual(status.numel(), status_bytes)
 
 
 class TestLayerBatchBuilder(unittest.TestCase):

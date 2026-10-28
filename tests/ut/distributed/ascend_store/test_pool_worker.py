@@ -1017,6 +1017,40 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
+    def test_mla_read_dedup_skips_align_state_groups(
+        self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
+    ):
+        mock_tp_rank.return_value = 0
+        mock_tp_size.return_value = 2
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        pcp_group.rank_in_group = 0
+        mock_pcp_group.return_value = pcp_group
+        mock_dcp_ws.return_value = 1
+        mock_dcp_rank.return_value = 0
+        mock_importlib.import_module.return_value = MagicMock()
+
+        config = self._make_vllm_config()
+        config.model_config.use_mla = True
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker(config, use_layerwise=False)
+        self.assertTrue(worker.mla_read_dedup)
+
+        with patch.object(KVPoolWorker, "_infer_group_uses_align_state", return_value=[True]):
+            worker = KVPoolWorker(config, use_layerwise=False)
+        self.assertFalse(worker.mla_read_dedup)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
     def test_init_kv_head_less_than_tp(
         self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
     ):

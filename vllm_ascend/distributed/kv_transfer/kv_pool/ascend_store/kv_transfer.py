@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tr
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
+    KVCacheByteRange,
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
@@ -104,6 +105,347 @@ def _circular_shift(lst: list, offset: int) -> list:
     if not lst or offset == 0:
         return lst
     return lst[offset:] + lst[:offset]
+
+
+_MLA_READ_DEDUP_TARGET_BYTES = 64 * 1024 * 1024
+_MLA_READ_DEDUP_MIN_BYTES = 8 * 1024 * 1024
+
+
+def _should_use_mla_read_dedup(total_bytes: int, tp_size: int) -> bool:
+    """Avoid fixed collective/copy overhead for small replicated KV loads."""
+    threshold = max(_MLA_READ_DEDUP_MIN_BYTES, _MLA_READ_DEDUP_TARGET_BYTES // max(tp_size, 1))
+    return total_bytes >= threshold
+
+
+def _kv_shard_indices(num_keys: int, world_size: int, tp_rank: int) -> list[int]:
+    base, remainder = divmod(num_keys, world_size)
+    start = tp_rank * base + min(tp_rank, remainder)
+    end = start + base + (1 if tp_rank < remainder else 0)
+    return list(range(start, end))
+
+
+def _kv_shard_lengths(sizes: list[list[int]], world_size: int) -> list[int]:
+    return [
+        sum(sum(sizes[index]) for index in _kv_shard_indices(len(sizes), world_size, owner))
+        for owner in range(world_size)
+    ]
+
+
+def _block_ids_are_contiguous(block_ids: list[int], indices: list[int]) -> bool:
+    return len(indices) <= 1 or all(
+        block_ids[indices[index + 1]] == block_ids[indices[index]] + 1 for index in range(len(indices) - 1)
+    )
+
+
+def _kv_byte_range(view: torch.Tensor | KVCacheByteRange) -> KVCacheByteRange:
+    if isinstance(view, KVCacheByteRange):
+        return view
+    if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
+        raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
+    return KVCacheByteRange(view.untyped_storage(), view.storage_offset(), view.numel(), view.device)
+
+
+def _same_kv_storage(first: KVCacheByteRange, second: KVCacheByteRange) -> bool:
+    return first.device == second.device and (
+        first.storage is second.storage or first.storage.data_ptr() == second.storage.data_ptr()
+    )
+
+
+def _coalesced_kv_views(
+    views: Sequence[Sequence[torch.Tensor | KVCacheByteRange]], indices: list[int], *, assume_contiguous: bool = False
+) -> list[torch.Tensor]:
+    """Merge layer-major storage spans before materializing exchange tensors."""
+    max_views = max((len(views[index]) for index in indices), default=0)
+    if assume_contiguous and indices:
+        first_key, last_key = indices[0], indices[-1]
+        view_count = len(views[first_key])
+        if view_count and all(len(views[index]) == view_count for index in indices):
+            fast_ranges = []
+            for view_index in range(view_count):
+                first = _kv_byte_range(views[first_key][view_index])
+                last = _kv_byte_range(views[last_key][view_index])
+                total_bytes = first.size * len(indices)
+                if (
+                    first.size == 0
+                    or first.size != last.size
+                    or not _same_kv_storage(first, last)
+                    or last.offset + last.size != first.offset + total_bytes
+                ):
+                    break
+                # Block IDs are a hint: verify interior storage and partial ranges too.
+                if any(
+                    span.size != first.size
+                    or span.offset != first.offset + position * first.size
+                    or not _same_kv_storage(first, span)
+                    for position, key_index in enumerate(indices)
+                    for span in (_kv_byte_range(views[key_index][view_index]),)
+                ):
+                    break
+                fast_ranges.append(KVCacheByteRange(first.storage, first.offset, total_bytes, first.device))
+            else:
+                return [span.as_tensor() for span in fast_ranges]
+
+    coalesced = []
+    for view_index in range(max_views):
+        current = None
+        for key_index in indices:
+            if view_index >= len(views[key_index]):
+                continue
+            span = _kv_byte_range(views[key_index][view_index])
+            if span.size == 0:
+                continue
+            if current is not None and _same_kv_storage(current, span) and current.offset + current.size == span.offset:
+                current = KVCacheByteRange(current.storage, current.offset, current.size + span.size, current.device)
+                continue
+            if current is not None:
+                coalesced.append(current.as_tensor())
+            current = span
+        if current is not None:
+            coalesced.append(current.as_tensor())
+    return coalesced
+
+
+def _exchange_kv_shards(
+    tp_group: Any,
+    tp_rank: int,
+    local_views: list[torch.Tensor],
+    owner_views: dict[int, list[torch.Tensor]],
+) -> None:
+    exchange = getattr(tp_group, "exchange_kv_shards", None)
+    if callable(exchange):
+        exchange(tp_rank, local_views, owner_views)
+        return
+
+    ops = []
+    for owner, recv_views in owner_views.items():
+        if owner == tp_rank:
+            continue
+        global_rank = tp_group.ranks[owner]
+        for view in local_views:
+            ops.append(torch.distributed.P2POp(torch.distributed.isend, view, global_rank, group=tp_group.device_group))
+        for view in recv_views:
+            ops.append(torch.distributed.P2POp(torch.distributed.irecv, view, global_rank, group=tp_group.device_group))
+    handles = torch.distributed.batch_isend_irecv(ops)
+    for handle in handles:
+        handle.wait()
+
+
+_KV_STATUS_BITS_PER_BYTE = 8
+
+
+def _all_reduce_kv_status(tp_group: Any, status: torch.Tensor) -> torch.Tensor:
+    all_reduce = getattr(tp_group, "all_reduce_kv_status", None)
+    if callable(all_reduce):
+        return all_reduce(status)
+    reduced = status.clone()
+    # Each key belongs to one rank, so bitmap bits are disjoint across ranks.
+    # SUM is equivalent to bitwise OR and cannot overflow a uint8 status byte.
+    torch.distributed.all_reduce(reduced, group=tp_group.cpu_group)
+    return reduced
+
+
+def _all_gather_kv_shards(
+    tp_group: Any,
+    tp_rank: int,
+    local_views: list[torch.Tensor],
+    owner_views: dict[int, list[torch.Tensor]],
+    shard_lengths: list[int],
+    local_bytes: int,
+    status_values: list[int],
+    device: torch.device,
+) -> list[int]:
+    wire_bytes = max(shard_lengths, default=0)
+    status_bytes = len(status_values)
+    packet_bytes = wire_bytes + status_bytes
+    payload = torch.empty(packet_bytes, dtype=torch.int8, device=device)
+
+    destinations = []
+    cursor = 0
+    for view in local_views:
+        end = cursor + view.numel()
+        destinations.append(payload[cursor:end])
+        cursor = end
+    if cursor != local_bytes:
+        raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={cursor}")
+    if destinations:
+        torch._foreach_copy_(destinations, local_views)
+    if local_bytes < wire_bytes:
+        payload[local_bytes:wire_bytes].zero_()
+
+    status = torch.tensor(status_values, dtype=torch.uint8, device=device)
+    payload[wire_bytes:].copy_(status.view(torch.int8))
+    gathered = tp_group.all_gather(payload, dim=0).flatten()
+    expected_numel = packet_bytes * tp_group.world_size
+    if gathered.numel() != expected_numel:
+        raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
+
+    destinations = []
+    sources = []
+    for owner, recv_views in owner_views.items():
+        shard_base = owner * packet_bytes
+        cursor = 0
+        for view in recv_views:
+            end = cursor + view.numel()
+            destinations.append(view)
+            sources.append(gathered[shard_base + cursor : shard_base + end])
+            cursor = end
+        if cursor != shard_lengths[owner]:
+            raise RuntimeError(
+                f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
+            )
+    if destinations:
+        torch._foreach_copy_(destinations, sources)
+
+    # Compact the status tails locally so all owners share one device-to-host copy.
+    owner_status = gathered.reshape(tp_group.world_size, packet_bytes)[:, wire_bytes:].contiguous().cpu()
+    status_array = owner_status.numpy().view(np.uint8)
+    return np.bitwise_or.reduce(status_array, axis=0).tolist()
+
+
+_P2P_EXCHANGE_VIEW_LIMIT = 4
+_P2P_EXCHANGE_MIN_VIEW_BYTES = 8 * 1024 * 1024
+_P2P_EXCHANGE_LARGE_VIEW_LIMIT = 64
+
+
+def _should_use_p2p_kv_exchange(world_size: int, total_views: int, total_bytes: int) -> bool:
+    """Prefer direct cache writes for few views or large TP=2 spans."""
+    if total_views <= _P2P_EXCHANGE_VIEW_LIMIT:
+        return True
+    # With one peer, large contiguous spans amortize per-view P2P overhead
+    # while avoiding the all-gather pack and copyback of the full KV payload.
+    # Bound the operation count: many large spans still incur costly P2P launches.
+    return (
+        world_size == 2
+        and total_views <= _P2P_EXCHANGE_LARGE_VIEW_LIMIT
+        and total_bytes >= total_views * _P2P_EXCHANGE_MIN_VIEW_BYTES
+    )
+
+
+def sharded_get_all_gather(
+    m_store: Backend,
+    tp_group: Any,
+    tp_rank: int,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    block_ids: list[int],
+    views: Sequence[Sequence[torch.Tensor | KVCacheByteRange]],
+) -> tuple[bool, set[int], int]:
+    """Load a TP-disjoint KV shard and all-gather it into every local cache."""
+    if not (len(keys) == len(addrs) == len(sizes) == len(block_ids) == len(views)):
+        raise ValueError("KV shard metadata lengths do not match")
+    if not keys:
+        return False, set(), 0
+
+    device = None
+    for key_views in views:
+        if key_views:
+            device = key_views[0].device
+            break
+    if device is None:
+        raise RuntimeError("KV read deduplication requires tensor views for all gathered ranges")
+
+    world_size = tp_group.world_size
+    local_indices = _kv_shard_indices(len(keys), world_size, tp_rank)
+    local_keys = [keys[index] for index in local_indices]
+    local_addrs = [addrs[index] for index in local_indices]
+    local_sizes = [sizes[index] for index in local_indices]
+    local_block_ids = [block_ids[index] for index in local_indices]
+    shard_lengths = _kv_shard_lengths(sizes, world_size)
+    local_bytes = shard_lengths[tp_rank]
+    wire_bytes = max(shard_lengths, default=0)
+    status_byte_count = (len(keys) + _KV_STATUS_BITS_PER_BYTE - 1) // _KV_STATUS_BITS_PER_BYTE
+
+    ret = None
+    local_missing: set[int] = set()
+    local_failed = False
+    if local_keys:
+        try:
+            ret = m_store.get(local_keys, local_addrs, local_sizes)
+        except Exception:
+            logger.exception("KV read deduplication shard get failed")
+            ret = None
+        if ret is None or len(ret) != len(local_keys):
+            local_failed = isinstance(m_store, MemcacheBackend)
+            local_missing.update(local_block_ids)
+        else:
+            local_missing.update(record_failed_blocks(local_block_ids, list(ret)))
+            if isinstance(m_store, MemcacheBackend) and local_missing:
+                local_failed = True
+
+    missing_bytes = [0] * status_byte_count
+    failure_bytes = [0] * status_byte_count
+    for index in local_indices:
+        if block_ids[index] in local_missing:
+            byte_index, bit_index = divmod(index, _KV_STATUS_BITS_PER_BYTE)
+            missing_bytes[byte_index] |= 1 << bit_index
+    if local_failed:
+        for index in local_indices:
+            byte_index, bit_index = divmod(index, _KV_STATUS_BITS_PER_BYTE)
+            missing_bytes[byte_index] |= 1 << bit_index
+            failure_bytes[byte_index] |= 1 << bit_index
+
+    if wire_bytes:
+        # Keep read ownership unchanged, but use the same physical block order
+        # for packing and receiving so reversed/reused allocations still coalesce.
+        local_view_indices = sorted(local_indices, key=block_ids.__getitem__)
+        local_views = _coalesced_kv_views(
+            views,
+            local_view_indices,
+            assume_contiguous=_block_ids_are_contiguous(block_ids, local_view_indices),
+        )
+        actual_local_bytes = sum(view.numel() for view in local_views)
+        if actual_local_bytes != local_bytes:
+            raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={actual_local_bytes}")
+        owner_views: dict[int, list[torch.Tensor]] = {}
+        for owner in range(world_size):
+            if owner == tp_rank:
+                continue
+            owner_indices = sorted(_kv_shard_indices(len(keys), world_size, owner), key=block_ids.__getitem__)
+            owner_view_list = _coalesced_kv_views(
+                views,
+                owner_indices,
+                assume_contiguous=_block_ids_are_contiguous(block_ids, owner_indices),
+            )
+            owner_bytes = sum(view.numel() for view in owner_view_list)
+            if owner_bytes != shard_lengths[owner]:
+                raise RuntimeError(
+                    f"KV P2P shard size mismatch for rank {owner}: expected={shard_lengths[owner]} actual={owner_bytes}"
+                )
+            owner_views[owner] = owner_view_list
+        status_values = missing_bytes + failure_bytes
+        total_views = len(local_views) + sum(len(owner_view_list) for owner_view_list in owner_views.values())
+        if _should_use_p2p_kv_exchange(world_size, total_views, sum(shard_lengths)):
+            status = torch.tensor(status_values, dtype=torch.uint8, device="cpu")
+            status_values = _all_reduce_kv_status(tp_group, status).tolist()
+            _exchange_kv_shards(tp_group, tp_rank, local_views, owner_views)
+        else:
+            status_values = _all_gather_kv_shards(
+                tp_group,
+                tp_rank,
+                local_views,
+                owner_views,
+                shard_lengths,
+                local_bytes,
+                status_values,
+                device,
+            )
+    else:
+        status = torch.tensor(missing_bytes + failure_bytes, dtype=torch.uint8, device="cpu")
+        status_values = _all_reduce_kv_status(tp_group, status).tolist()
+    aggregated_missing = status_values[:status_byte_count]
+    aggregated_failure = status_values[status_byte_count:]
+
+    request_failed = any(aggregated_failure)
+    missing_block_ids: set[int] = set()
+    for byte_index, byte in enumerate(aggregated_missing):
+        for bit_index in range(_KV_STATUS_BITS_PER_BYTE):
+            index = byte_index * _KV_STATUS_BITS_PER_BYTE + bit_index
+            if index >= len(keys):
+                break
+            if byte & (1 << bit_index):
+                missing_block_ids.add(block_ids[index])
+    return request_failed, missing_block_ids, len(local_keys)
 
 
 @dataclass(frozen=True)
@@ -1514,6 +1856,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        read_dedup: bool = False,
     ):
         super().__init__(
             m_store,
@@ -1529,6 +1872,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self.read_dedup = read_dedup
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1558,6 +1902,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
+            view_list: list[list[KVCacheByteRange]] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
@@ -1578,13 +1923,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     chunk_filter=chunk_filter,
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
-                    addr, size, block_id = self._prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
+                    if self.read_dedup:
+                        addr, size, views, block_id = self.token_database.prepare_value_with_ranges(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
+                        view_list.append(views)
+                    else:
+                        addr, size, block_id = self._prepare_value(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
@@ -1592,6 +1947,33 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if not key_list:
                 self.set_finished_request(req_id)
                 return
+            if self.read_dedup:
+                if self.worker is None or not hasattr(self.worker, "_load_kv_read_dedup"):
+                    raise RuntimeError("KV read deduplication requires the KVPool worker")
+                load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
+                read_result = self.worker._load_kv_read_dedup(
+                    key_list,
+                    addr_list,
+                    size_list,
+                    block_id_list,
+                    view_list,
+                )
+                if read_result is not None:
+                    request_failed, missing_block_ids, local_key_count = read_result
+                    if self._record_operation_cb is not None:
+                        self._record_operation_cb(
+                            "load_get",
+                            time.perf_counter() - load_get_start,
+                            local_key_count,
+                        )
+                    if missing_block_ids:
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(missing_block_ids)
+                    if request_failed:
+                        self._mark_failed_requests([req_meta])
+                    self.set_finished_request(req_id)
+                    return
+                logger.debug("KV read deduplication unavailable; using legacy full read")
             key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
             addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
             size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
