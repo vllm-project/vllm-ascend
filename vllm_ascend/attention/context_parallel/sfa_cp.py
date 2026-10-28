@@ -388,7 +388,12 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
         )
 
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        kv_outputs = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        # Packed native KV is scattered later. Its addresses must follow the
+        # same removal of replicated decode rows as the gathered payload.
+        if len(kv_outputs) == 3:
+            return (*kv_outputs, slots)
+        return kv_outputs
 
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:

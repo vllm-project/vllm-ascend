@@ -2019,7 +2019,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata,
             )
             k_pe, k_nope = kv_outputs[:2]
-            knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
+            knope_scale = kv_outputs[2] if len(kv_outputs) >= 3 else None
+            kv_store_slots = kv_outputs[3] if len(kv_outputs) == 4 else self._get_sfa_kv_slot_mapping(attn_metadata)
             # k_li no longer exists at this point: it is computed by
             # indexer.forward_k below and gathered at cache-write time, so
             # the fused gather below only carries the main KV.
@@ -2049,7 +2050,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
-                self._get_sfa_kv_slot_mapping(attn_metadata),
+                kv_store_slots,
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )
