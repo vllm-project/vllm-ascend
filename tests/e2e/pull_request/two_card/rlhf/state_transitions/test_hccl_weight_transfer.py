@@ -115,7 +115,6 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2, 3])
-@pytest.mark.filterwarnings("ignore:Tensor .*exceeds buffer_size_bytes=.*:UserWarning")
 def test_hccl_packed_cross_chunk_reload(case: WeightUpdateModelCase, num_buffers: int):
     """Force one nonempty tensor per chunk and repeat reload after generation.
 
