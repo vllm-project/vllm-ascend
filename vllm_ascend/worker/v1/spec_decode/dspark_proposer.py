@@ -126,7 +126,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             assert scatter_index.unique().numel() == scatter_index.numel(), (
                 "draft_id_to_target_id must map each draft id to a distinct target id"
             )
-            self._d2t_scatter_index = scatter_index
+            self._d2t_scatter_index = scatter_index.to(device=self.device, dtype=torch.int64)
             logger.info(
                 "[spec_decode] probabilistic drafting with reduced vocab: remapping "
                 "draft ids and scattering draft probs from draft-vocab %s to "

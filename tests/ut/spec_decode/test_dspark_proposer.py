@@ -1354,19 +1354,38 @@ class TestDSparkProbabilisticSampling(_DSparkProposerTestBase):
             expected = proposer.model.map_draft_to_target(logits.argmax(dim=-1))
             torch.testing.assert_close(token_ids[:, step], expected)
 
-    def test_scatter_uses_model_mapping_and_caches_index(self, probabilistic_proposer):
+    @pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+    def test_scatter_uses_model_mapping_and_caches_index(self, probabilistic_proposer, mapping_dtype):
         make, _ = probabilistic_proposer
         proposer = make()
         assert proposer._d2t_scatter_index is None
         mapping = proposer.model.map_draft_to_target(torch.arange(self.DRAFT_VOCAB_SIZE))
+        proposer.model.map_draft_to_target.side_effect = lambda token_ids: mapping.to(dtype=mapping_dtype)
         proposer.model.map_draft_to_target.reset_mock()
         draft_probs = torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
         expected = torch.zeros(2, self.TARGET_VOCAB_SIZE)
         expected[:, mapping] = draft_probs
 
+        cached_index = proposer._get_d2t_scatter_index()
+        assert cached_index.dtype == torch.int64
+        assert cached_index.device == proposer.device
         for _ in range(2):
             actual = proposer._scatter_draft_probs_to_target_vocab(draft_probs)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert proposer._get_d2t_scatter_index() is cached_index
+        proposer.model.map_draft_to_target.assert_called_once()
+
+    def test_scatter_index_is_cached_on_proposer_device(self, probabilistic_proposer):
+        make, _ = probabilistic_proposer
+        proposer = make()
+        # Meta verifies device transfer without requiring NPU hardware.
+        assert proposer.model.draft_id_to_target_id.device == torch.device("cpu")
+        proposer.device = torch.device("meta")
+        cached_index = proposer._get_d2t_scatter_index()
+
+        assert cached_index.device == proposer.device
+        assert cached_index.dtype == torch.int64
+        assert proposer._get_d2t_scatter_index() is cached_index
         proposer.model.map_draft_to_target.assert_called_once()
 
     def test_scatter_rejects_non_injective_mapping(self, probabilistic_proposer):
