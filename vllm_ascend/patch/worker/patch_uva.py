@@ -134,6 +134,12 @@ class _DirtyRows:
         self._prefix = self._size
 
     def _mark_rows(self, rows: np.ndarray) -> None:
+        if rows.dtype == np.bool_ and rows.ndim > 1:
+            # ``arr[arr > 0] = v`` selects elements, not rows, and NumPy has
+            # already performed that write by the time we get here. Refresh
+            # the whole buffer instead of raising IndexError on the 1-D mask.
+            self._mark_whole()
+            return
         if self._mask is None:
             self._mask = np.zeros(self._size, dtype=bool)
         self._mask[rows] = True
