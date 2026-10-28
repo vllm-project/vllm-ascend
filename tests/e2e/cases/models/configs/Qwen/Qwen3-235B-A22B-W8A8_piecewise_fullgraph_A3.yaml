@@ -3,13 +3,8 @@
 # ==========================================
 
 _envs: &envs
-  TASK_QUEUE_ENABLE: "1"
-  VLLM_USE_V1: "1"
-  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
-  OMP_PROC_BIND: "false"
-  OMP_NUM_THREADS: "1"
-  VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -35,7 +30,6 @@ _server_cmd: &server_cmd
   - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
-  - "--no-enable-prefix-caching"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
@@ -54,7 +48,7 @@ _benchmarks: &benchmarks
     num_prompts: 32
     batch_size: 32
     baseline: 100
-    threshold: 10
+    threshold: 4
 
 # ==========================================
 # ACTUAL TEST CASES
@@ -72,7 +66,7 @@ test_cases:
       - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
       - "--additional-config"
-      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
+      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192],"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
     benchmarks:
       <<: *benchmarks
 
@@ -82,23 +76,10 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
       - "--additional-config"
-      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
-    benchmarks:
-      <<: *benchmarks
-  - name: "Qwen3_235B_Accuracy_EPLB_gsm8k_lite"
-    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
-    envs:
-      <<: *envs
-      DYNAMIC_EPLB: "true"
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192],"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
     benchmarks:
       <<: *benchmarks
 

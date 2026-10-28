@@ -1658,6 +1658,7 @@ public:
         n_loop = tilingdata.nLoop;
         core_loop = tilingdata.coreLoop;
         swizzle_cnt = tilingdata.swizzleCount;
+        swizzle_direct = tilingdata.swizzleDirect;
         en_shuffle_k = tilingdata.enShuffleK;
         core_num = tilingdata.blockDim;
         load_all_Amat_flag = tilingdata.enLoadAllAmat;
@@ -1781,7 +1782,11 @@ private:
     __aicore__ __force_inline__ void GetBaseBlockIdx(uint64_t index, uint64_t &m_idx, uint64_t &n_idx)
     {
         uint64_t in_batch_idx = index % (m_loop * n_loop);
-        if constexpr (swizzleDir == 0) {  // Zn
+        // Use the tiling-selected swizzle direction so that the Cube tile
+        // traversal order matches the Vector side, which reads the same
+        // field from tiling data at runtime. A mismatch breaks Cube/Vector
+        // tile pairing once m_loop > 1 (e.g. tokens > 256).
+        if (swizzle_direct == 0) {  // Zn
             uint64_t tile_block_loop = (m_loop + swizzle_cnt - 1) / swizzle_cnt;
             uint64_t tile_block_idx = in_batch_idx / (swizzle_cnt * n_loop);
             uint64_t in_tile_block_idx = in_batch_idx % (swizzle_cnt * n_loop);
@@ -1840,6 +1845,7 @@ private:
     uint32_t core_idx{0};
     uint32_t ping_flag{0};
     uint32_t swizzle_cnt{1};
+    uint32_t swizzle_direct{swizzleDir};
     uint32_t en_shuffle_k{0};
     uint32_t MM1_MM2_mode{0};
     uint64_t b0mat_pingpong_buffer_len{0};

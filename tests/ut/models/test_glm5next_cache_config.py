@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -31,7 +31,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
 
 
-def make_config(*, retention_interval: int | None = 0):
+def make_config():
     return SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=2048),
         parallel_config=SimpleNamespace(
@@ -44,7 +44,6 @@ def make_config(*, retention_interval: int | None = 0):
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
-            prefix_cache_retention_interval=retention_interval,
         ),
     )
 
@@ -158,19 +157,6 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
     assert layout.mamba_groups == ()
 
 
-@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
-def test_kv_cache_config_preserves_retention_interval(retention_interval):
-    config = make_config(retention_interval=retention_interval)
-    groups = get_glm5_next_kv_cache_groups(config, make_specs())
-    layout = _get_glm5_next_cache_layout(groups)
-    assert layout is not None
-
-    budget = 10 * (layout.main_page_size + layout.small_page_size)
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
-
-    assert plan.prefix_cache_retention_interval == retention_interval
-
-
 def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
@@ -212,3 +198,47 @@ def test_misaligned_logical_block_is_rejected():
     )
     with pytest.raises(ValueError, match="divisible"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+
+
+@pytest.mark.parametrize("use_sparse", [False, True])
+@pytest.mark.parametrize("packed_main", [False, True])
+def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    config = make_config()
+    config.model_config.max_model_len = 1048576
+    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=16)
+    config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
+        is_layer_compact=True, is_block_compact=True
+    )
+    specs = make_specs()
+    if packed_main:
+        specs["model.layers.3.attn"] = AscendMLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=528,
+            dtype=torch.int8,
+            cache_sparse_sfa_c8=True,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    # Supply exactly enough physical memory for the configured context. The
+    # generic discount incorrectly makes this valid shared pool fail admission.
+    required = get_glm5_next_max_memory_usage(config, groups)
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.vllm_config = config
+    worker.model_config = config.model_config
+    worker.get_kv_cache_spec = lambda: specs
+    worker.model_runner = SimpleNamespace(
+        use_sparse=use_sparse,
+        use_compress=False,
+        supports_standardized_shared_kv_backing=True,
+    )
+    monkeypatch.setattr("vllm_ascend.worker.worker.get_kv_cache_groups", lambda *_args: groups)
+    budget = worker._scale_kv_cache_memory_for_multi_group(required)
+
+    assert budget == required
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_decode_inputs_cpu,
@@ -36,7 +36,7 @@ if not hasattr(aclgraph_utils_mod.ModelWithContext, "embed_input_ids"):
 _orig_init_speculator = ascend_spec_decode.init_speculator
 
 
-def _init_speculator_310p(vllm_config, device):
+def _init_speculator_310p(vllm_config, device, req_states=None):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if (
@@ -49,7 +49,7 @@ def _init_speculator_310p(vllm_config, device):
         )
 
         return AscendMTPSpeculator310(vllm_config, device)
-    return _orig_init_speculator(vllm_config, device)
+    return _orig_init_speculator(vllm_config, device, req_states)
 
 
 ascend_spec_decode.init_speculator = _init_speculator_310p

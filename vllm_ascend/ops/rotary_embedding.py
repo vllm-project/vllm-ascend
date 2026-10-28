@@ -35,6 +35,7 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
@@ -56,6 +57,7 @@ _cos_mla: torch.Tensor = None
 _sin_mla: torch.Tensor = None
 _cos_cache: torch.Tensor = None
 _sin_cache: torch.Tensor = None
+_cos_sin_flat: torch.Tensor | None = None
 _cos_sin_cache: torch.Tensor = None
 _cos: torch.Tensor = None
 _sin: torch.Tensor = None
@@ -95,13 +97,36 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     global _sin_cache
     global _cos_mla
     global _sin_mla
+    global _cos_sin_flat
     num_tokens = positions.size(0)
     # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
     # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
     if _cos_mla is not None and _cos_mla.shape[-1] == 0:
         return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
-    cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
-    sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
+    # Layout dispatch, not a fast/slow fallback: the two registration paths
+    # produce mutually exclusive cache layouts. The flat base only exists for
+    # interleaved registration (row 2i / 2i+1 addressing); contiguous
+    # registration has no interleaved base, and its per-half tables are
+    # already contiguous. Each branch is the optimal gather for its own
+    # layout, so neither can be dropped.
+    if _cos_sin_flat is not None:
+        # Interleaved registration (AscendRotaryEmbedding, MLA/SFA models):
+        # gather from the contiguous flat view of the interleaved base, where
+        # row 2i holds _cos_cache[i] and row 2i + 1 holds _sin_cache[i]. A row
+        # gather from the strided per-half views would make aclnnIndex
+        # materialize the whole cache table on every lookup; the flat base is
+        # contiguous, so this is a plain row copy.
+        even_positions = positions * 2
+        cos = _cos_sin_flat[even_positions]
+        sin = _cos_sin_flat[even_positions + 1]
+    else:
+        # Contiguous registration (AscendDeepseekScalingRotaryEmbedding):
+        # the per-half tables are already contiguous, so indexing them
+        # directly is a plain row gather with no materialization.
+        cos = _cos_cache[positions]
+        sin = _sin_cache[positions]
+    cos = cos.unsqueeze(1).unsqueeze(2)
+    sin = sin.unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
     if _cos_mla is None or _cos_mla.shape[-1] != cos.shape[-1]:
@@ -133,8 +158,14 @@ def _record_cos_sin_cache(cos_sin_cache):
 def _record_cos_and_sin_cache(cos_cache, sin_cache):
     global _cos_cache
     global _sin_cache
+    global _cos_sin_flat
     _cos_cache = cos_cache
     _sin_cache = sin_cache
+    # Contiguous registration: these per-half tables are already contiguous, so
+    # get_cos_and_sin_mla gathers from them directly. Drop the interleaved flat
+    # view so the fast path cannot read a stale buffer from the previous
+    # registration.
+    _cos_sin_flat = None
 
 
 def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
@@ -160,14 +191,26 @@ def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cach
     """
     global _cos_cache
     global _sin_cache
+    global _cos_sin_flat
     if _cos_cache is not None or _sin_cache is not None:
         return
     hidden_dim = cos_sin_cache.shape[-1] // 2
-    cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
+    repeated = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2)
+    cos_cache, sin_cache = repeated.chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
     owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
     owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
+    # Contiguous flat view of the interleaved buffer: row 2i == _cos_cache[i]
+    # and row 2i + 1 == _sin_cache[i]. get_cos_and_sin_mla gathers rows from
+    # this view because a row gather from the strided per-half views makes
+    # aclnnIndex materialize the whole cache per lookup; from the contiguous
+    # flat base it is a plain row copy. The strided pair above must stay: it is
+    # the registered derived-buffer pair (see docstring) and remains the gather
+    # source for registrations that do not provide this view. The flat view
+    # shares the same storage, so the sleep-mode wake backup that restores
+    # those buffers in place covers it as well.
+    _cos_sin_flat = repeated.view(-1, repeated.shape[-1])
 
 
 def update_cos_sin(positions):
@@ -708,17 +751,33 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
+        if not self.is_neox_style and not get_current_hardware_profile().supports(
+            HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE
+        ):
+            # The legacy ACL backend only supports half pairing.
+            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
+            if rotary_dim < head_dim:
+                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
+            return self._post_process(output, origin_shape, origin_dtype)
+
         # cos, sin: [seq_len, rotary_dim // 2]
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+            rotary_mode = "half"
+        else:
+            # GPT-J/Kimi pairs adjacent dimensions and repeats each coefficient.
+            cos = cos.repeat_interleave(2, dim=-1)
+            sin = sin.repeat_interleave(2, dim=-1)
+            rotary_mode = "interleave"
         # cos, sin: [1, seq_len, 1, rotary_dim]
         cos = cos.reshape(1, -1, 1, rotary_dim)
         sin = sin.reshape(1, -1, 1, rotary_dim)
 
         if rotary_dim == head_dim:
-            output = torch_npu.npu_rotary_mul(x, cos, sin)
+            output = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode=rotary_mode)
         else:
-            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin, rotary_mode=rotary_mode)
             output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)

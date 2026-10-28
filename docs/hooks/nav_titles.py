@@ -86,10 +86,6 @@ TITLES = {
     "index.md": {"en": "Home", "zh": "首页"},
     "getting_started/installation.md": {"en": "Installation", "zh": "安装指南"},
     "getting_started/quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
-    "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
         "zh": "PD 共置（Mooncake，多实例）",
@@ -112,10 +108,6 @@ TITLES = {
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
     "tutorials/models/DeepSeek-V4-Flash.md": {"en": "DeepSeek-V4-Flash", "zh": "DeepSeek-V4-Flash"},
-    "tutorials/models/DeepSeek-V4-Flash-Vision.md": {
-        "en": "DeepSeek-V4-Flash-Vision-Exp (Experimental)",
-        "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
-    },
     "tutorials/models/DeepSeek-V4.1-Flash.md": {
         "en": "DeepSeek-V4.1-Flash",
         "zh": "DeepSeek-V4.1-Flash",
@@ -125,12 +117,8 @@ TITLES = {
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
     "tutorials/models/Gemma4.md": {"en": "Gemma4", "zh": "Gemma4"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
-    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
-    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
-    "tutorials/models/GLM5.3-Flash.md": {
-        "en": "GLM-5.3-Flash (Experimental)",
-        "zh": "GLM-5.3-Flash (Experimental)",
-    },
+    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2 & GLM-5.3", "zh": "GLM-5.2 & GLM-5.3"},
+    "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
@@ -194,6 +182,7 @@ TITLES = {
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
     "tutorials/models/Qwen3-Embedding.md": {"en": "Qwen3-Embedding", "zh": "Qwen3-Embedding"},
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
+    "tutorials/models/Step-5-Preview.md": {"en": "Step-5-Preview (Experimental)", "zh": "Step-5-Preview（实验性支持）"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
     "user_guide/configuration/encoder_cache_manager.md": {
@@ -213,6 +202,10 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
+        "en": "Encoder Cache CPU Offload",
+        "zh": "编码器缓存 CPU 卸载",
+    },
     "user_guide/feature_guide/expert_parallelism_load_balancer.md": {
         "en": "Expert Parallelism Load Balancer",
         "zh": "专家并行负载均衡",
@@ -220,7 +213,10 @@ TITLES = {
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
-    "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
+    "user_guide/feature_guide/kv_cache_pool_ascend_store.md": {
+        "en": "KV Cache Pool (Ascend Store)",
+        "zh": "KV 缓存池（昇腾存储）",
+    },
     "user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md": {
         "en": "Mooncake Layerwise Adaptation and Optimization",
         "zh": "Mooncake Layerwise 适配与优化",

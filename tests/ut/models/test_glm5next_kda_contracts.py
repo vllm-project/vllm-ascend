@@ -69,7 +69,14 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     if direct_output:
         assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    if direct_output:
+        # write_recurrent_output zeroes the captured buffer before copying.
+        assert torch.count_nonzero(out[:, 3:]) == 0
+    else:
+        # The recurrent kernel writes valid rows only; padding rows are owned
+        # by the caller (index_copy_ / write_recurrent_output), so the sentinel
+        # NaNs written by the kernel must survive unchanged.
+        assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
@@ -100,7 +107,7 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         return v, torch.full_like(kwargs["initial_state"], 17)
 
     monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
-    monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
+    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
     )

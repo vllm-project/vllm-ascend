@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
 from vllm import LLM
+
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 model_name = "Qwen/Qwen3-Reranker-0.6B"
 

@@ -79,35 +79,28 @@ class _FakeBlockPool:
 class _FakeFAManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager()
-    return _FakeFAManager()
+        return _FakeMambaManager(**kwargs)
+    return _FakeFAManager(**kwargs)
 
 
-def _hybrid_config(
-    *,
-    mamba_eagle: bool = False,
-    retention_interval: int | None = None,
-) -> KVCacheConfig:
+def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
     groups = [
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
-    return KVCacheConfig(
-        num_blocks=8,
-        kv_cache_tensors=[],
-        kv_cache_groups=groups,
-        prefix_cache_retention_interval=retention_interval,
-    )
+    return KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
 def _make_coordinator(
@@ -116,14 +109,10 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
-    retention_interval: int | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
-    kv_cache_config = _hybrid_config(
-        mamba_eagle=mamba_eagle,
-        retention_interval=retention_interval,
-    )
+    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -136,7 +125,6 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
-        scheduler_block_size=HASH_BLOCK_SIZE,
     )
 
 
@@ -165,16 +153,6 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     # even when it is the mamba group (fallback must not overwrite it).
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, mamba_eagle=True)
     assert coordinator.eagle_group_ids == {1}
-
-
-@pytest.mark.parametrize("retention_interval", [None, 0, 384])
-def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_interval):
-    coordinator = _make_coordinator(
-        monkeypatch,
-        use_eagle=False,
-        retention_interval=retention_interval,
-    )
-    assert coordinator.retention_interval == retention_interval
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +216,6 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    import vllm.v1.core.kv_cache_utils as kcu
-
     from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
 
     sentinel_config = SimpleNamespace()
@@ -252,7 +228,8 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
     result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
     # The builder replaces the upstream entry point, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    assert kcu.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+    live_module = kcu_patch._kv_cache_planning
+    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 

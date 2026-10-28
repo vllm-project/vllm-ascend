@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
@@ -71,12 +72,12 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -89,20 +90,31 @@ from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
+    dsv4_skips_indexer_topk,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.32.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.32.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
+else:
+    from transformers import DeepseekV4Config
 
 sequence_parallel_chunk = sp_shard
 
@@ -124,7 +136,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
+        # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
+        # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
+        cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -325,7 +339,18 @@ class DeepseekV4MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
+        # vLLM main folded `num_hash_layers` into the per-layer `mlp_layer_types`;
+        # judge Hash-MoE per layer (it need not be a contiguous prefix) and fall
+        # back to the legacy count on the v0.32.0 lane, which has no
+        # `mlp_layer_types`.
+        if is_draft_layer:
+            self.hash = False
+        else:
+            mlp_layer_types = getattr(config, "mlp_layer_types", None)
+            if mlp_layer_types is not None:
+                self.hash = layer_idx < len(mlp_layer_types) and mlp_layer_types[layer_idx] == "hash_moe"
+            else:
+                self.hash = layer_idx < getattr(config, "num_hash_layers", 0)
         self.gate.bias_vl = None
         if getattr(config, "vision_n_layers", 0) > 0:
             self.gate.bias_vl = nn.Parameter(
@@ -550,6 +575,12 @@ class DeepseekV4Attention(nn.Module):
         else:
             rope_theta = config.rope_theta
             rope_groups = ["default"]
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
+        yarn_rope_parameters = config.rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -557,10 +588,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
+            scaling_factor=yarn_rope_parameters.get("factor", 1.0),
             base=rope_theta,
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            beta_fast=yarn_rope_parameters.get("beta_fast", 32),
+            beta_slow=yarn_rope_parameters.get("beta_slow", 1),
             rope_groups=rope_groups,
         )
 
@@ -577,16 +608,9 @@ class DeepseekV4Attention(nn.Module):
         # only, leaving impl-level references stale.
         skip_topk = False
         if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
+            pp_group = get_pp_group()
+            pp_start_layer, _ = get_pp_indices(config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+            skip_topk = dsv4_skips_indexer_topk(config, config_layer_idx, pp_start_layer)
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -613,6 +637,8 @@ class DeepseekV4Attention(nn.Module):
                 )
 
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.bfloat16
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -681,12 +707,32 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
+        if not vllm_version_is("0.32.0"):
+            # vLLM #61392 folded `compress_ratios` into `layer_types`; the
+            # Ascend helpers and the KV-store metadata still index the legacy
+            # field, so restore it.
+            if getattr(config, "compress_ratios", None) is None:
+                # `vllm.transformers_utils.deepseek_v4_utils` only exists on
+                # main (added by #61392), so keep the import lazy.
+                from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+
+                compress_ratios = get_compress_ratios(config)
+                if compress_ratios:
+                    config.compress_ratios = list(compress_ratios)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
+        yarn_rope_parameters = config.rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
+        max_position_embeddings = yarn_rope_parameters.get(
+            "original_max_position_embeddings", config.max_position_embeddings
+        )
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
@@ -838,6 +884,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        # Decoder layers run in order, so their OTP collectives can reuse the
+        # same address-stable scratch storage during profiling and graph replay.
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers:
+            if isinstance(layer, DeepseekV4DecoderLayer):
+                impl = layer.self_attn.dsa_attn.dsa_attn.impl
+                if not isinstance(impl, AscendDSAImpl):
+                    continue
+                impl._oproj_buffer_pool = self._oproj_buffer_pool
+                impl.reserve_oproj_buffers(torch.device(self.device), vllm_config.model_config.dtype)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -880,17 +936,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        self._needs_mtp_hidden_states = bool(
+        self._mtp_hidden_buffer: torch.Tensor | None = None
+        if (
             get_pp_group().is_last_rank
             and spec_config is not None
             and (spec_config.use_eagle() or spec_config.uses_draft_model())
-        )
-        self._mtp_buffer_shape = (
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-        )
-        self._mtp_buffer_dtype = vllm_config.model_config.dtype
-        self._mtp_hidden_buffer: torch.Tensor | None = None
+        ):
+            # Bind the buffer before compilation: lazy allocation in forward
+            # can leave FULL graph replay writing a different tensor from the
+            # model-owned residual restored for the replicated PCP draft.
+            self._mtp_hidden_buffer = torch.empty(
+                (vllm_config.scheduler_config.max_num_batched_tokens, hc_dim),
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -985,13 +1044,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._needs_mtp_hidden_states:
-            if self._mtp_hidden_buffer is None:
-                self._mtp_hidden_buffer = torch.empty(
-                    self._mtp_buffer_shape,
-                    dtype=self._mtp_buffer_dtype,
-                    device=self.device,
-                )
+        if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -1224,12 +1277,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

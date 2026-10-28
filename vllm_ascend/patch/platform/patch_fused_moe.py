@@ -40,7 +40,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"

@@ -8,7 +8,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
-from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
 
 
 class DeepseekV41Compressor(nn.Module):
@@ -32,10 +33,11 @@ class DeepseekV41Compressor(nn.Module):
                 )
             # Standalone unfused-reference tests may supply pages explicitly.
             if vllm_config is not None:
+                state_spec = AscendCircularBufferSpec if uses_a5_packed_cache() else CircularBufferSpec
                 self.state_cache = DeepseekV41CacheLayer(
                     vllm_config,
                     f"{prefix}.state_cache",
-                    CircularBufferSpec(
+                    state_spec(
                         block_size=STATE_RING_ROWS,
                         num_kv_heads=1,
                         head_size=2 * self.width,

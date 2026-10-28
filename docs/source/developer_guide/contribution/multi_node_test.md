@@ -92,8 +92,8 @@ multi-node-tests:
           config_file_path: DeepSeek-V3.yaml
           config_base_path: tests/e2e/cases/models/configs/DeepSeek
           size: 2
-        - name: multi-node-qwen3-dp
-          config_file_path: Qwen3-235B-A22B.yaml
+        - name: multi-node-qwen3-vl-dp
+          config_file_path: Qwen3-VL-235B-disagg-pd.yaml
           config_base_path: tests/e2e/cases/models/configs/Qwen
           size: 2
         - name: GLM5_1-W8A8-EP-external
@@ -188,8 +188,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -200,9 +200,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
         workerTemplate:
           spec:
             containers:
@@ -235,8 +235,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -247,9 +247,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
     ---
     apiVersion: v1
     kind: Service
@@ -552,4 +552,5 @@ tail -F /tmp/external_dp_logs/node-0/rank-0.log \
 # node 1: ranks
 tail -F /tmp/external_dp_logs/node-1/rank-0.log \
         /tmp/external_dp_logs/node-1/rank-1.log
+        
 ```

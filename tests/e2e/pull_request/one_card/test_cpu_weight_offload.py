@@ -11,7 +11,6 @@ Tests verify that offloading produces the same outputs
 as the baseline (no offloading).
 """
 
-import pytest
 from vllm.outputs import RequestOutput
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -19,15 +18,6 @@ from tests.e2e.pull_request import utils as e2e_utils
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 MODEL = "Qwen/Qwen3-0.6B"
-
-_NZ_GRAPH_SKIP_REASON = (
-    "NZ static buffers make the prefetch H2D copy a "
-    "cross-format (ND->NZ) conversion that is aclop-only on "
-    "CANN 9.0.0 and rejected during ACL graph capture; "
-    "AscendPrefetchOffloader fails fast with a clear error "
-    "for this combo. Remove this skip and the offloader "
-    "guard once the no-transdata prefetch path lands."
-)
 
 
 def _eager_baseline_kwargs(nz_mode: int) -> dict:
@@ -134,7 +124,7 @@ def test_prefetch_offload_nd_accuracy():
 
 @wait_until_npu_memory_free()
 def test_prefetch_offload_nz_eager_accuracy():
-    """NZ prefetch offload vs one eager baseline. NZ-graph is skipped (unsupported)."""
+    """NZ prefetch offload vs one eager baseline."""
     baseline_outputs = _generate_eager_baseline(nz_mode=2)
     _assert_offload_matches_baseline(
         baseline_outputs,
@@ -142,7 +132,15 @@ def test_prefetch_offload_nz_eager_accuracy():
     )
 
 
-@pytest.mark.skip(reason=_NZ_GRAPH_SKIP_REASON)
+@wait_until_npu_memory_free()
 def test_prefetch_offload_nz_graph_accuracy():
-    """Placeholder until NZ+graph prefetch is supported."""
-    raise AssertionError("NZ+graph prefetch should stay skipped")
+    """NZ+graph prefetch matches the eager baseline on Model Runner V2.
+
+    Qwen3 defaults to MRv2, whose prefetch path accepts NZ graph capture.
+    Model Runner V1 still fail-fasts in AscendPrefetchOffloader for this combo.
+    """
+    baseline_outputs = _generate_eager_baseline(nz_mode=2)
+    _assert_offload_matches_baseline(
+        baseline_outputs,
+        _prefetch_kwargs(enforce_eager=False, nz_mode=2),
+    )

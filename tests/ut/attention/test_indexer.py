@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
+import torch_npu
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -15,6 +16,8 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
 )
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.device_op import A5DeviceAdaptor
 
 _KERNEL_BLOCK_SIZE = 128
 
@@ -67,6 +70,8 @@ def _make_builder(
 
 def _make_common_metadata() -> SimpleNamespace:
     metadata = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=2,
         num_actual_tokens=4,
         num_input_tokens=4,
@@ -79,9 +84,6 @@ def _make_common_metadata() -> SimpleNamespace:
         is_prefilling=torch.tensor([True, True]),
         context_parallel_metadata=None,
         block_table_tensor=torch.arange(6).view(3, 2),
-        group_len=MagicMock(name="group_len"),
-        group_key_idx=MagicMock(name="group_key_idx"),
-        group_key_cache_idx=MagicMock(name="group_key_cache_idx"),
     )
 
     def replace(**changes):
@@ -154,7 +156,6 @@ def test_sfa_indexer_backend_contract():
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_get_ascend_config):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     cos = torch.zeros(5, 1, 1, 8)
     sin = torch.zeros(5, 1, 1, 8)
     mock_cos_sin.return_value = (cos, sin)
@@ -168,14 +169,12 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 
     assert isinstance(metadata, AscendSFAIndexerMetadata)
     assert metadata.num_actual_tokens == 4
+    assert not metadata.uses_pcp_sharded_layout
     assert torch.equal(metadata.slot_mapping, common.slot_mapping[:4])
     assert torch.equal(metadata.seq_lens, common.seq_lens[:2])
     assert torch.equal(metadata.cum_query_lens, common.query_start_loc[1:3])
     assert torch.equal(metadata.block_table, common.block_table_tensor[:2])
     assert metadata.block_size == _KERNEL_BLOCK_SIZE
-    assert metadata.group_len is None
-    assert metadata.group_key_idx is None
-    assert metadata.group_key_cache_idx is None
     assert torch.equal(metadata.actual_seq_lengths_query, common.query_start_loc[1:3])
     assert torch.equal(metadata.actual_seq_lengths_key, common.seq_lens[:2])
     assert metadata.num_decode_tokens == 0
@@ -191,18 +190,24 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert metadata.sin.data_ptr() == sin.data_ptr()
 
 
+def _make_decode_pcp_context() -> SimpleNamespace:
+    # Only the global-prefill flag is read when no request is prefilling.
+    return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+
+
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
 
     builder = _make_builder(pcp_size=2)
     common = _make_common_metadata()
+    common.pcp_context = _make_decode_pcp_context()
     metadata = builder.build(0, common)
 
     # Under PCP the commit writes the gathered prefill region too, so the
     # builder emits the full slot mapping instead of the input-token slice.
+    assert metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping is common.slot_mapping
 
 
@@ -212,13 +217,14 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
 def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
     mock_cos_sin, mock_get_ascend_config, dcp_size, expected_decode_tokens
 ):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
     common = _make_common_metadata()
     common.query_start_loc = torch.tensor([0, 1, 4], dtype=torch.int32)
     common.query_start_loc_cpu = common.query_start_loc.clone()
     common.max_query_len = 3
     common.is_prefilling = torch.tensor([False, True])
+
+    common.pcp_context = _make_decode_pcp_context()
 
     metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common)
 
@@ -235,7 +241,6 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
     pd_decode_recompute,
     expected_decode_tokens,
 ):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
     common = _make_common_metadata()
     common.num_actual_tokens = 2
@@ -249,6 +254,7 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
         "vllm_ascend.attention.indexer.is_pd_decode_recompute_scheduler_enabled",
         return_value=pd_decode_recompute,
     ):
+        common.pcp_context = _make_decode_pcp_context()
         metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common)
 
     # Short rescheduled prefills remain prefills unless the PD decode
@@ -258,37 +264,10 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-@patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block_metadata", create=True)
-def test_sfa_indexer_metadata_builder_primes_reshape_optim(
-    mock_store_kv_block_metadata,
-    mock_cos_sin,
-    mock_get_ascend_config,
-):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
-    mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
-
-    builder = _make_builder()
-    common = _make_common_metadata()
-    metadata = builder.build(0, common)
-
-    mock_store_kv_block_metadata.assert_called_once_with(
-        metadata.slot_mapping,
-        metadata.group_len,
-        metadata.group_key_idx,
-        metadata.group_key_cache_idx,
-        _KERNEL_BLOCK_SIZE,
-    )
-    assert metadata.group_len is not common.group_len
-    assert metadata.group_len.numel() == metadata.slot_mapping.numel()
-
-
-@patch("vllm_ascend.attention.indexer.get_ascend_config")
-@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_owns_replicated_dcp_addresses(
     mock_cos_sin,
     mock_get_ascend_config,
 ):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
     common = _make_common_metadata()
 
@@ -317,7 +296,6 @@ def test_sfa_indexer_metadata_builder_pads_dsa_slots(
 ):
     mock_get_tp_group.return_value.world_size = 4
     mock_get_tp_group.return_value.rank_in_group = 0
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(3, 1, 1, 8), torch.zeros(3, 1, 1, 8))
     common = _make_common_metadata()
     common.num_actual_tokens = 3
@@ -345,7 +323,6 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dsa_buffers(
     mock_get_ascend_config,
 ):
     mock_get_tp_group.return_value.rank_in_group = 0
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (
         torch.zeros(3, 1, 1, 8),
         torch.zeros(3, 1, 1, 8),
@@ -379,7 +356,6 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
     mock_cos_sin,
     mock_get_ascend_config,
 ):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (
         torch.zeros(5, 1, 1, 8),
         torch.zeros(5, 1, 1, 8),
@@ -410,7 +386,6 @@ def test_sfa_indexer_graph_capture_owns_stable_per_step_buffers(
     mock_get_tp_group, mock_cos_sin, mock_get_ascend_config, dsa_cp
 ):
     mock_get_tp_group.return_value.rank_in_group = 0
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.side_effect = [
         (torch.full((4, 1, 1, 8), value), torch.full((4, 1, 1, 8), -value)) for value in range(4)
     ]
@@ -436,14 +411,11 @@ def test_sfa_indexer_graph_capture_owns_stable_per_step_buffers(
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-@patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block_metadata", create=True)
-def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots_and_c8_groups(
-    mock_store_kv_block_metadata,
+def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     mock_cos_sin,
     mock_get_ascend_config,
     for_cudagraph_capture,
 ):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
     common = _make_common_metadata()
     global_batch = SimpleNamespace(
@@ -463,14 +435,12 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots_and_c8_groups(
     )
 
     builder = _make_builder(pcp_size=2, dcp_size=2)
-    build_kwargs = dict(
-        pcp_context=pcp_context,
-        pcp_cache_group_idx=0,
-    )
+    common.pcp_context = pcp_context
+    common.pcp_cache_group_idx = 0
     if for_cudagraph_capture:
-        metadata = builder.build_for_cudagraph_capture(common, **build_kwargs)
+        metadata = builder.build_for_cudagraph_capture(common)
     else:
-        metadata = builder.build(0, common, **build_kwargs)
+        metadata = builder.build(0, common)
 
     torch.testing.assert_close(
         metadata.block_table,
@@ -480,15 +450,6 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots_and_c8_groups(
         metadata.slot_mapping,
         torch.tensor([2816, 2560, 2688, -1], dtype=torch.int32),
     )
-    mock_store_kv_block_metadata.assert_called_once_with(
-        metadata.slot_mapping,
-        metadata.group_len,
-        metadata.group_key_idx,
-        metadata.group_key_cache_idx,
-        _KERNEL_BLOCK_SIZE,
-    )
-    assert metadata.group_len is not common.group_len
-    assert metadata.group_len.numel() == metadata.slot_mapping.numel()
 
 
 @pytest.mark.parametrize("with_dependency", [False, True])
@@ -499,7 +460,12 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     scale = torch.ones(2, 1) if quantized else None
     slots = torch.arange(2)
     metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
-    indexer = SimpleNamespace(_pcp_active=False, _dsa_cp_active=True, enable_sparse_li_c8=quantized)
+    indexer = SimpleNamespace(
+        use_pcp=False,
+        _dsa_cp_active=True,
+        enable_sparse_li_c8=quantized,
+        enable_sparse_li_quant=quantized,
+    )
 
     def forward_k(*args):
         events.append("forward_k")
@@ -530,3 +496,120 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     else:
         expected += ["wait_k"]
     assert events == expected + ["write_cache"]
+
+
+def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
+    indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    indexer.enable_sparse_li_c4 = True
+    indexer.enable_sparse_li_c8 = False
+    key_cache = torch.full((2, 128, 1, 64), 23, dtype=torch.uint8)
+    scale_bytes = torch.full((2, 128, 1, 2, 2), 23, dtype=torch.uint8)
+    indexer.k_cache = SimpleNamespace(kv_cache=(key_cache, scale_bytes.view(torch.float8_e8m0fnu)))
+    packed_key = torch.arange(3 * 64, dtype=torch.uint8).view(3, 64)
+    scale = torch.arange(12, dtype=torch.uint8).view(3, 2, 2)
+    slots = torch.tensor([1, 129, 255])
+    # A CPU tensor cannot use the NPU-only FP4 dtype. Its one-byte storage
+    # surrogate exercises the packed-dtype branch without an NPU allocation.
+    monkeypatch.setattr(torch_npu, "float4_e2m1fn_x2", torch.uint8, raising=False)
+
+    def scatter(cache, indices, updates):
+        assert cache.dtype == updates.dtype == torch.uint8
+        cache[indices.flatten()] = updates
+
+    scatter_op = Mock(side_effect=scatter)
+    monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter_op)
+
+    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots)
+
+    expected_key = torch.full_like(key_cache, 23).view(-1, 64)
+    expected_scale = torch.full_like(scale_bytes, 23).view(-1, 2, 2)
+    expected_key[slots] = packed_key
+    expected_scale[slots] = scale
+    assert torch.equal(key_cache.view(-1, 64), expected_key)
+    assert torch.equal(scale_bytes.view(-1, 2, 2), expected_scale)
+    assert scatter_op.call_count == 2
+
+
+@pytest.mark.parametrize("query_lengths,key_lengths", [([2, 3], [2, 3]), ([1, 1], [31, 65])])
+def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_lengths):
+    tokens, heads, head_dim = sum(query_lengths), 64, 128
+    query = torch.zeros(tokens * heads, head_dim // 2, dtype=torch.uint8)
+    query_scale = torch.zeros(tokens, heads, 2, 2, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    key = torch.zeros(4, 128, 1, head_dim // 2, dtype=torch.uint8)
+    key_scale = torch.zeros(4, 128, 1, 2, 2, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    weights = torch.arange(tokens * heads, dtype=torch.float32).view(tokens, heads).to(torch.bfloat16)
+    query_ends = torch.tensor(query_lengths, dtype=torch.int32).cumsum(0).to(torch.int32)
+    key_lengths = torch.tensor(key_lengths, dtype=torch.int32)
+    metadata = SimpleNamespace(block_table=torch.tensor([[1], [3]], dtype=torch.int32))
+    kernel_metadata = object()
+    expected = torch.zeros(tokens, 1, 2048, dtype=torch.int32)
+    metadata_op = Mock(return_value=kernel_metadata)
+    select_op = Mock(return_value=(expected, torch.empty(0)))
+    monkeypatch.setattr(A5DeviceAdaptor, "_load_cann_quant_lightning_indexer_ops", lambda: (metadata_op, select_op))
+
+    result = A5DeviceAdaptor.indexer_select_post_process(
+        query,
+        query_scale,
+        (tokens, heads, head_dim),
+        weights,
+        (key, key_scale),
+        0,
+        1,
+        metadata,
+        query_ends,
+        key_lengths,
+        False,
+        True,
+        False,
+    )
+
+    assert result is expected
+    q_arg, k_arg, w_arg, qs_arg, ks_arg = select_op.call_args.args
+    assert q_arg.shape == (tokens, heads, head_dim // 2)
+    assert q_arg.data_ptr() == query.data_ptr()
+    assert k_arg is key and qs_arg is query_scale and ks_arg is key_scale
+    assert w_arg.dtype == torch.float32
+    torch.testing.assert_close(w_arg, weights.float())
+    for call in (metadata_op.call_args, select_op.call_args):
+        args = call.kwargs
+        assert args["quant_mode"] == 5 and args["topk"] == 2048
+        assert args["layout_q"] == "TND" and args["layout_k"] == "PA_BBND"
+        assert args["mask_mode"] == 3 and args["cmp_ratio"] == 1
+        assert torch.equal(args["cu_seqlens_q"], torch.cat((torch.zeros(1, dtype=torch.int32), query_ends)))
+        assert args["seqused_k"] is key_lengths
+    assert metadata_op.call_args.kwargs["head_dim"] == head_dim
+    assert metadata_op.call_args.kwargs["num_heads_q"] == heads
+    assert select_op.call_args.kwargs["metadata"] is kernel_metadata
+    assert select_op.call_args.kwargs["block_table"] is metadata.block_table
+
+
+def test_c4_cache_spec_accounts_for_packed_key_and_mx_scales():
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.uint8,
+        scale_dim=4,
+        scale_dtype=torch.float8_e8m0fnu,
+        cache_sparse_li_c4=True,
+    )
+    assert spec.real_page_size_bytes == 128 * (64 + 4)
+    assert spec.page_size_bytes == spec.real_page_size_bytes
+
+
+@pytest.mark.parametrize("padded_tokens,actual_tokens", [(1, 1), (4, 1), (4, 0)])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_pcp_builder_resolves_replicated_draft_layout_with_padding(
+    mock_cos_sin, mock_config, padded_tokens, actual_tokens
+):
+    common = _make_common_metadata()
+    common.num_input_tokens = padded_tokens
+    common.num_actual_tokens = actual_tokens
+    common.slot_mapping = torch.full((padded_tokens,), -1, dtype=torch.int64)
+    common.positions = torch.arange(padded_tokens)
+    common.pcp_context = None
+    mock_cos_sin.return_value = (torch.zeros(padded_tokens, 1, 1, 8), torch.zeros(padded_tokens, 1, 1, 8))
+    metadata = _make_builder(pcp_size=2).build(0, common)
+    assert not metadata.uses_pcp_sharded_layout
+    assert metadata.slot_mapping.numel() == padded_tokens

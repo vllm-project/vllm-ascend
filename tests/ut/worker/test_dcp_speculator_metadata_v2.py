@@ -11,7 +11,9 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
@@ -76,9 +78,16 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     manager.vllm_config = config
     cls = AscendDSparkSpeculator if kind == "dspark" else AscendMTPSpeculator
     spec = object.__new__(cls)
+    spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
+    if kind == "mtp":
+        spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
+        spec.model_state = object()
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
+    # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
+    spec.dcp_size = config.parallel_config.decode_context_parallel_size
     spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
@@ -117,6 +126,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.kv_cache_config = SimpleNamespace(kv_cache_groups=[None])
 
     class RecordingBuilder:
+        # vLLM main inspects this on the builder before building metadata.
+        supports_update_block_table = False
+
         def build(self, common_prefix_len, common_attn_metadata):
             common = common_attn_metadata
             decode = FakeDecodeMetadata(common.query_start_loc_cpu[1:].tolist())
@@ -130,9 +142,17 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
                 seq_lens_cpu = common.seq_lens
             return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
 
-    spec.attn_groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: RecordingBuilder(), layer_names=["draft.layer"])]
-    ]
+    class RecordingAttnGroup:
+        # Both supported vLLM lanes (#56723) call the group's build_metadata.
+        layer_names = ["draft.layer"]
+
+        def get_metadata_builder(self, ubatch_idx=0):
+            return RecordingBuilder()
+
+        def build_metadata(self, common_attn_metadata, ubatch_idx=0, **kwargs):
+            return self.get_metadata_builder(ubatch_idx).build(0, common_attn_metadata)
+
+    spec.attn_groups = [[RecordingAttnGroup()]]
 
     def prepare_device(out, seq_lens, num_reqs, size, rank, interleave):
         out.zero_()
@@ -174,7 +194,9 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        assert common.is_prefilling.tolist() == [False, False]
+        # Upstream slices is_prefilling to the padded request count.
+        expected_is_prefilling = [False] * padded
+        assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
         expected = [31 + width, 128] + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected
@@ -244,7 +266,11 @@ def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture,
     common = result["draft.layer"].common
     assert _dcp_local_cpu(common) is None
     assert common.dcp_local_seq_lens is None
-    if kind == "dspark" and architecture == "SFA" and not full_rebuild:
+    if kind == "dspark" and architecture == "MLA":
+        # Non-causal MLA consumes the initialized draft KV lengths, not the
+        # target's optimistic bound plus another query block.
+        assert common.seq_lens_cpu.tolist() == device_lengths[:2].tolist()
+    elif kind == "dspark" and architecture == "SFA" and not full_rebuild:
         # Upstream derives its CPU view from the device lengths; the deprecated
         # seq_lens_cpu property was removed in vLLM main.
         torch.testing.assert_close(common.seq_lens, device_lengths[:2])
@@ -262,7 +288,7 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     builder.dcp_local_seq_lens_buf = torch.empty(4, dtype=torch.int32)
     builder.decode_threshold = 4
     builder.vllm_config = None
-    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "dcp_enabled", False, raising=False)
+    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "use_dcp", False, raising=False)
     monkeypatch.setattr(sfa_cp, "split_decodes_and_prefills", lambda *a, **kw: (4, 0, 4, 0))
     block_table = torch.zeros((4, 2), dtype=torch.int32)
     slots = torch.arange(4)
@@ -299,10 +325,10 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
         yield
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_factory",
         factory,
     )
-    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(TargetDependentARSpeculator, "_build_attn_metadata", lambda *a, **k: None)
     batch = SimpleNamespace(num_tokens=2, num_reqs=2)
     seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
     dcp_local = spec.input_buffers.dcp_local_seq_lens
@@ -354,7 +380,9 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    expected = [34, 128] + [0] * (padded - 2)
+    expected = (
+        device_lengths[:padded].tolist() if architecture == "MLA" and not use_dcp else [34, 128] + [0] * (padded - 2)
+    )
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))

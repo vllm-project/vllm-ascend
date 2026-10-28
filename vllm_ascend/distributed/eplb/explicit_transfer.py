@@ -108,9 +108,10 @@ def stage_explicit_layer_transfer(
     recv_dst_rows = np.full(slots_per_rank, -1, dtype=np.int32)
     recv_count = 0
     communicator.set_transfer_context(old, layer_idx)
+    destination_ranks = (ep_rank,) if getattr(communicator, "receiver_initiated", False) else range(num_ranks)
 
     with stream if stream is not None else nullcontext():
-        for dst_rank in range(num_ranks):
+        for dst_rank in destination_ranks:
             for dst_slot in range(slots_per_rank):
                 expert = int(new_placement[dst_rank, dst_slot])
                 src_rank = int(source_ranks[dst_rank, dst_slot])
