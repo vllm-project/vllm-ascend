@@ -203,27 +203,22 @@ class _DirtyRows:
 class MonitoredNumPyArray:
     """A NumPy mirror that reports the rows a write touches.
 
-    ``__setitem__`` is the only write the dirty tracker can observe, so every
-    other way of writing is either refused or treated as a whole-buffer write.
-    Handing out a writable view would reach the mirror without a callback and
-    leave the device copy silently stale, and the tracker has no way to notice
-    afterwards.
+    ``__setitem__`` is the only write the tracker can observe, so it is the
+    only write the mirror accepts. Every other access goes through a read-only
+    alias of the same memory: a write through a view, ``np.asarray``,
+    ``np.put``, ``flat``/``data`` or an in-place method raises instead of
+    reaching the mirror with no callback and leaving the device copy stale.
+    Raw pointers (``.ctypes``, ``torch.from_numpy``) stay escape hatches that
+    nothing should need.
     """
 
     def __init__(self, array: np.ndarray, callback: Callable):
         self._array = array
+        # ``np.frombuffer`` over a read-only memoryview, not ``array.view()``:
+        # a plain read-only view can have its writeable flag turned back on
+        # whenever the base stays writeable, which it has to here.
+        self._readonly = np.frombuffer(memoryview(array).toreadonly(), dtype=array.dtype).reshape(array.shape)
         self._callback = callback
-
-    def _seal(self, array: np.ndarray) -> np.ndarray:
-        """Make a view read-only so a write cannot bypass ``__setitem__``."""
-        if not np.may_share_memory(array, self._array):
-            # An independent copy: writing to it cannot reach the mirror.
-            return array
-        if array is self._array:
-            # Never seal the mirror itself; it has to stay writable here.
-            array = array.view()
-        array.flags.writeable = False
-        return array
 
     def __setitem__(self, key, value):
         self._array[key] = value
@@ -233,45 +228,16 @@ class MonitoredNumPyArray:
         return len(self._array)
 
     def __array__(self, dtype=None, copy=None):
-        # NumPy reaches a mirror through this path (``np.asarray``,
-        # ``np.copyto``, ``np.put``, ``out=``). Seal it like any other view;
-        # the protocol attributes are blocked in ``__getattr__`` so NumPy
-        # cannot take a writable shortcut around it.
-        array = np.asarray(self._array, dtype=dtype)
+        array = np.asarray(self._readonly, dtype=dtype)
         if copy:
             array = array.copy()
-        return self._seal(array)
+        return array
 
     def __getitem__(self, key):
-        result = self._array[key]
-        return self._seal(result) if isinstance(result, np.ndarray) else result
+        return self._readonly[key]
 
     def __getattr__(self, name):
-        if name in ("__array_struct__", "__array_interface__"):
-            # Either of these would hand NumPy a writable view of the mirror.
-            raise AttributeError(name)
-        attr = getattr(self._array, name)
-        if name in ("flat", "data", "ctypes", "base"):
-            # These expose the memory without a NumPy view we can seal, so the
-            # access itself has to publish the whole buffer.
-            self._callback(slice(None))
-        if isinstance(attr, np.ndarray):
-            return self._seal(attr)
-        if not callable(attr):
-            return attr
-
-        def _call(*args, **kwargs):
-            result = attr(*args, **kwargs)
-            if result is None or (name.startswith("__i") and name.endswith("__")):
-                # ndarray's in-place methods (fill, put, sort, partition, ...)
-                # mutate the receiver and return None; an explicit __iadd__
-                # and friends mutate it and return themselves.
-                self._callback(slice(None))
-            if isinstance(result, np.ndarray):
-                return self._seal(result)
-            return result
-
-        return _call
+        return getattr(self._readonly, name)
 
 
 class MonitoredTorchTensor:
