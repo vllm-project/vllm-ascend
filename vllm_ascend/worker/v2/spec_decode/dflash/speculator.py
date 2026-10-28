@@ -29,6 +29,33 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
 
+
+def _pad_block_table(block_table: torch.Tensor | None, num_reqs: int) -> torch.Tensor | None:
+    """Pad block-table rows so a graph-captured batch always has ``num_reqs``.
+
+    Kept local to this module instead of reaching into the metadata builder, so
+    the DFlash path does not depend on helpers owned by a different change.
+    """
+    if block_table is not None and block_table.shape[0] < num_reqs:
+        block_table = torch.cat(
+            [block_table, block_table.new_zeros((num_reqs - block_table.shape[0], block_table.shape[1]))],
+            dim=0,
+        )
+    return block_table
+
+
+def _supports_layout_reuse(builder: Any, vllm_config: VllmConfig) -> bool:
+    """Whether reusing the previous draft layout is safe for this builder."""
+    if type(builder) is not AscendAttentionMetadataBuilder:
+        return False
+    supports = getattr(builder, "supports_update_block_table", None)
+    if supports is not None:
+        return bool(supports)
+    # Older trees do not expose the capability flag. Fall back to the same
+    # preconditions so this path still works when the flag is unavailable.
+    return bool(getattr(vllm_config, "use_v2_model_runner", False)) and not getattr(builder, "pcp_enabled", False)
+
+
 # Upstream uses the attention kernel block size for DCP ownership, which is
 # incorrect when physical KV blocks are larger than kernel blocks. Bind the
 # physical size so ownership uses KV cache blocks while slot lookup uses the
@@ -340,7 +367,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                             previous,
                             seq_lens_gpu=self.input_buffers.seq_lens[:num_reqs_padded],
                             query_start_loc_gpu=self.input_buffers.query_start_loc[: num_reqs_padded + 1],
-                            block_tables=AscendAttentionMetadataBuilder._pad_block_table(
+                            block_tables=_pad_block_table(
                                 self.block_tables.input_block_tables[group_index][:num_reqs_padded], num_reqs_padded
                             ),
                             slot_mapping=self.block_tables.slot_mappings[group_index][:num_tokens],
@@ -487,8 +514,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # Specialized builders own additional per-step state. Keep their full
         # build path; only standard, non-CP FIA layouts are reusable here.
         self._reuse_draft_layout = self._use_cpu_seq_lens and all(
-            type(group.get_metadata_builder(0)) is AscendAttentionMetadataBuilder
-            and group.get_metadata_builder(0).supports_update_block_table
+            _supports_layout_reuse(group.get_metadata_builder(0), self.attn_vllm_config)
             for groups in self.attn_groups
             for group in groups
         )
