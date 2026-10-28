@@ -1,5 +1,0 @@
-pr: 19775
-entries:
-  - category: bugfix
-    text: Fixed an A5 scatter update operator crash during host tiling by evaluating the SIMD sort decision after core-count initialization.
-    hardware: [A5]
