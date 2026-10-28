@@ -732,6 +732,9 @@ class XliteWrapper:
             xlite_deepstack_input_embeds = [
                 deepstack_input[: inputs_embeds.size(0)] for deepstack_input in deepstack_input_embeds
             ]
+            # mypy resolves `xlite` from the newer stubs shipped in the lint image, where `aux_outputs` is inserted
+            # before `curr_stream`. This branch pins `xlite==0.1.0rc11.dev210`, which keeps `deepstack_input` in the
+            # 8th position, so the positional call below is correct for the pinned version.
             self.xlite_model.forward_with_inputs_embeds(
                 self.xlite_rt,
                 inputs_embeds,
@@ -740,7 +743,7 @@ class XliteWrapper:
                 self.freq_cis,
                 h,
                 stream,
-                xlite_deepstack_input_embeds,
+                xlite_deepstack_input_embeds,  # type: ignore[arg-type]
             )
             if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
                 self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
