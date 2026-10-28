@@ -1,0 +1,8 @@
+pr: PRNUM
+entries:
+  - category: bugfix
+    text: >-
+      Fixed silent model corruption after an MRv2 async EPLB rearrangement on Ascend A5. The
+      shared expert weight buffer could be refilled for the next layer while the previous
+      layer's copies out of it were still in flight, so migrated experts were written from
+      the wrong data.

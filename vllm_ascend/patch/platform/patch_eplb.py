@@ -693,6 +693,13 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
             new_indices=result.new_physical_to_logical_map.numpy(),
             ep_rank=ep_rank,
         )
+        # The expert weight buffer is shared by every layer of a rebalance
+        # cycle, and the copies out of it above are queued without blocking.
+        # HIXL's private streams cannot honor the consumed-event wait, so the
+        # next layer's transfer can refill the buffer while those copies are
+        # still reading it, which silently corrupts the migrated experts. Drain
+        # them before this result is acknowledged.
+        torch.npu.current_stream().synchronize()
         _commit_ascend_maps_for_layer(
             model_state,
             result.new_physical_to_logical_map,
