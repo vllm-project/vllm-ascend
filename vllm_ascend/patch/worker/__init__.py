@@ -56,9 +56,8 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
-# Re-apply the default-V2 runner selection (with the V2 feature blacklist)
-# and related V2/V1 feature patches in worker processes.
-# VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
+# Re-apply the V2-only runner selection on pickled configs, plus the V2
+# feature patches, in worker processes.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

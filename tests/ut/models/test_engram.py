@@ -11,7 +11,6 @@ from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -228,9 +227,6 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-
 @pytest.mark.parametrize(
     "enabled,shared,tp,mode,expected",
     [
@@ -377,45 +373,6 @@ def test_idle_hashes_have_no_valid_rows(num_tokens):
     assert keep.shape == (num_tokens,)
     assert keep.dtype == torch.bool
     assert not keep.any()
-
-
-def _runner(rows, computed, prompt):
-    token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
-    for index, row in enumerate(rows):
-        token_ids[index, : len(row)] = row
-    runner = object.__new__(NPUModelRunner)
-    runner.input_batch = SimpleNamespace(
-        num_reqs=len(rows),
-        token_ids_cpu=token_ids,
-        num_computed_tokens_cpu=np.asarray(computed, dtype=np.int32),
-        num_prompt_tokens=np.asarray(prompt, dtype=np.int32),
-    )
-    lookback = np.empty((len(rows), 3), dtype=np.int32)
-    runner.lookback_token_ids = SimpleNamespace(
-        np=lookback,
-        copy_to_gpu=lambda: torch.from_numpy(lookback.copy()),
-    )
-    runner.is_pooling_model = False
-    return runner
-
-
-@pytest.mark.parametrize(
-    "computed,num_reqs,expected",
-    [
-        (4, None, [13, 12, 11]),
-        (6, None, [-1, -1, 13]),
-        (0, None, [-1, -1, -1]),
-        (4, 0, [-1, -1, -1]),
-        (4, 1, [13, 12, 11]),
-    ],
-)
-def test_v1_lookback_uses_prompt_tokens_once(computed, num_reqs, expected):
-    runner = _runner([[10, 11, 12, 13, -7, -7]], [computed], [4])
-    copy = Mock(wraps=runner.lookback_token_ids.copy_to_gpu)
-    runner.lookback_token_ids.copy_to_gpu = copy
-    kwargs = runner._init_model_kwargs(num_reqs=num_reqs)
-    assert kwargs["lookback_token_ids"][0].tolist() == expected
-    copy.assert_called_once_with()
 
 
 @pytest.mark.parametrize("shared", [False, True])

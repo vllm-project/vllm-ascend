@@ -13,7 +13,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 
 ## Current Status on Ascend
 
-- Graph mode is currently available on both Model Runner V1/V2.
+- Graph mode is available on Model Runner V2.
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
 - **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.

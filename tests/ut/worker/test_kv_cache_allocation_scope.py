@@ -8,8 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
 
@@ -25,74 +23,6 @@ class _AllocationScope(AbstractContextManager):
     def __exit__(self, *args: Any) -> None:
         assert self.active
         self.active = False
-
-
-def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
-    scope = _AllocationScope()
-    raw_tensors = {"layer": object()}
-    reshaped = {"layer": object()}
-    runner = object.__new__(NPUModelRunner)
-    runner.shared_kv_cache_layers = {}
-    runner.kv_caches = []
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="llama"))
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
-
-    def allocate(_kv_cache_config):
-        assert scope.active
-        return raw_tensors
-
-    def reshape(_kv_cache_config, tensors, kernel_block_sizes):
-        assert not scope.active
-        assert tensors is raw_tensors
-        assert kernel_block_sizes is None
-        return reshaped
-
-    def bind(*_args, **_kwargs):
-        assert not scope.active
-
-    runner._allocate_kv_cache_tensors = allocate
-    runner._reshape_kv_cache_tensors = reshape
-
-    with patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=bind):
-        result = NPUModelRunner.initialize_kv_cache_tensors(
-            runner,
-            SimpleNamespace(),
-            kv_cache_allocation_context=scope,
-        )
-
-    assert result is reshaped
-    assert not scope.active
-
-
-def test_310p_kv_pool_only_wraps_backing_allocation() -> None:
-    scope = _AllocationScope()
-    caches = {"layer": object()}
-    runner = object.__new__(NPUModelRunner310)
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
-    runner.use_sparse = False
-    runner.model_config = SimpleNamespace(use_mla=False)
-    runner.shared_kv_cache_layers = {}
-    runner.kv_caches = []
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
-
-    def allocate(_kv_cache_config):
-        assert scope.active
-        return caches
-
-    def bind(*_args, **_kwargs):
-        assert not scope.active
-
-    runner._allocate_kv_cache_tensors = allocate
-
-    with patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=bind):
-        result = NPUModelRunner310.initialize_kv_cache_tensors(
-            runner,
-            SimpleNamespace(),
-            kv_cache_allocation_context=scope,
-        )
-
-    assert result is caches
-    assert not scope.active
 
 
 def test_kv_wake_does_not_run_model_runner_recovery() -> None:

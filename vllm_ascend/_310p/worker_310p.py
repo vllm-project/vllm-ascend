@@ -53,17 +53,10 @@ class NPUWorker310(NPUWorker):
         return super()._scale_kv_cache_memory_for_multi_group(available_memory)
 
     def _create_model_runner(self):
-        if self.use_v2_model_runner:
-            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+        from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
-            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
-            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
-            return model_runner
-
-        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
-
-        model_runner = NPUModelRunner310(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
         return model_runner
 
     def init_device(self):

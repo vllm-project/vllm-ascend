@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -17,7 +16,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
 )
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
-from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 
 def _spec(ratio=1, heads=1, v_dim=256, padding=0):
@@ -112,34 +110,6 @@ def test_cyclic_copy_moves_all_four_payloads_with_nonzero_offset(ratio):
 
 
 @pytest.mark.parametrize("ratio", [1, 2, 8])
-def test_zero_metadata_excludes_padding_and_static_v_scale(ratio):
-    spec = _spec(ratio, padding=256)
-    offset, guard = 128, 256
-    backing = torch.full((offset + 2 * spec.page_size_bytes + guard,), 89, dtype=torch.int8)
-    raw = backing[offset:-guard]
-    views = mxfp_cache_views_for_spec(raw, spec, 512)
-    views[3].fill_(127)
-    before = backing.clone()
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    group = SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["attn"])
-    zeroer.init_meta([group], [512], "mxfp8", set(), {"attn": SimpleNamespace(kv_cache=views)})
-    addresses, sizes, _, _, count = zeroer._meta
-    assert count == 3 * ratio
-    assert zeroer._seg_page_strides.tolist() == [spec.page_size_bytes // 4] * count
-    # Execute the byte ranges described by the production metadata on CPU.
-    for addr, size, stride in zip(addresses.tolist(), sizes.tolist(), zeroer._seg_page_strides.tolist()):
-        start = addr - backing.data_ptr() + 4 * stride  # scheduler page 1
-        backing[start : start + size * 4].zero_()
-    for view in views[:3]:
-        assert (view[ratio:].view(torch.uint8) == 0).all()
-    assert (views[3] == 127).all()
-    assert torch.equal(backing[: offset + spec.page_size_bytes], before[: offset + spec.page_size_bytes])
-    pitch = spec.page_size_bytes // ratio
-    payload = mxfp_packet_size_bytes(1, 512, 256, 256)
-    assert (raw.view(2 * ratio, pitch)[:, payload:] == 89).all()
-    assert torch.equal(backing[-guard:], before[-guard:])
-
-
 @pytest.mark.parametrize("case", ["raw_short", "pitch_short", "raw_stride", "bad_v_dim", "bad_k_dim"])
 def test_invalid_views_fail_before_as_strided(case):
     raw = torch.zeros(2 * 270336, dtype=torch.int8)

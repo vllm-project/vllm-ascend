@@ -22,7 +22,7 @@ Dots3 Note supports the following features on vLLM-Ascend:
 |---|---|---|
 | Model architecture | Dots3 Note MoE + MLA | MoE mixture of experts + multi-head latent attention |
 | Multimodal | audio + vision | Audio / vision encoders, enabled per form (see §5.1) |
-| MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (Model Runner V1 limitation) |
+| MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (vision limitation) |
 | FusedMC2 | ✅ | Fused `dispatch_ffn_combine` / `mega_moe` operators for MoE (`--additional-config`) |
 | Prefix caching | ✅ | `--enable-prefix-caching`, reuses KV for similar prompts |
 
@@ -277,7 +277,7 @@ Keep this terminal running. After seeing the success log listed in Section 5.6, 
 
 ### 5.3 image Online Deployment
 
-The vision form disables MTP (Model Runner V1 limitation) and forces chunked vision prefill to avoid peak OOM. `MEDIA_DIR` must be an in-container path and must contain the test images in Section 6.2:
+The vision form disables MTP and forces chunked vision prefill to avoid peak OOM. `MEDIA_DIR` must be an in-container path and must contain the test images in Section 6.2:
 
 ```bash
 export MEDIA_DIR=/path/to/local-image-root   # Local image media root directory (whitelist)
@@ -387,7 +387,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | `--mm-processor-cache-gb` | — | 0 | — | Multimodal processor cache size (GB) |
 | `--mm-encoder-tp-mode` | — | `data` | `data` | Tensor parallel mode of the multimodal encoder (data = replicate the encoder on each rank) |
 | `--skip-mm-profiling` | — | ✅ | — | Skip multimodal memory profiling |
-| `--speculative-config` | MTP3 | — | MTP3 | Speculative decoding configuration (MTP3 + draft eager); not set for the image form (Model Runner V1 vision limitation) |
+| `--speculative-config` | MTP3 | — | MTP3 | Speculative decoding configuration (MTP3 + draft eager); not set for the image form (vision limitation) |
 | `--default-chat-template-kwargs` | `enable_thinking:false` | — | `enable_thinking:false` | Default chat template arguments, disabling thinking output |
 
 #### 5.5.3 KV Cache Configuration
