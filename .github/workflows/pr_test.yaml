@@ -126,10 +126,6 @@ jobs:
         id: filter
         with:
           filters: |
-            lint_tracker:
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
             src:
               - 'vllm_ascend/**'
               - 'setup.py'
@@ -142,8 +138,9 @@ jobs:
               - 'tools/**'
               - 'CMakeLists.txt'
 
-      - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
+      # The shared lint image tracks main. Always align its dependencies with
+      # this checkout, including release-branch PRs that only change docs.
+      - name: Install vllm-ascend dev dependencies
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
@@ -155,6 +152,7 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
+          python3 -m pip show xlite mypy
 
       - name: Run pre-commit
         env:
