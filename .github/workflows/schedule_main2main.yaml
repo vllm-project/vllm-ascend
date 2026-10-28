@@ -509,6 +509,33 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Install FLA NPU wheel
+        working-directory: ${{ github.workspace }}
+        env:
+          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
+        run: |
+          set -euo pipefail
+          # This runner is linux-aarch64-a3; keep the case block when other
+          # pools are added (see _selected_tests.yaml for the full matrix).
+          FLA_VERSION=26.9.1+deva4a7958
+          FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
+          FLA_SHA256=6a6f298a23fbc4902e8379a469696bca1cce108db8159d9c5bf6dfe819a22d58
+          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/${FLA_WHL}"
+          # Direct GitHub first, gh-proxy fallback (PR CI always goes through
+          # the proxy; this pool reaches github.com directly for git).
+          if ! curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
+              "${FLA_DOWNLOAD_URL}" -o "/tmp/${FLA_WHL}"; then
+            echo "direct download failed, retrying through ${GIT_PROXY}"
+            curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
+              "${GIT_PROXY}${FLA_DOWNLOAD_URL}" -o "/tmp/${FLA_WHL}"
+          fi
+          echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check
+          uv pip install --no-deps "/tmp/${FLA_WHL}"
+          # Fail the job here rather than letting the flow rediscover a
+          # missing kernel op as an "adaptation failure" hours later.
+          python3 -c "import fla_npu.ops.ascendc"
+          rm -f "/tmp/${FLA_WHL}"
+
       - name: Save vllm-ascend csrc cache
         # Persist the on-runner build for the next dispatch.
         if: >-
