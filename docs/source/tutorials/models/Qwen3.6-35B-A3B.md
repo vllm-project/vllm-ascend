@@ -410,7 +410,7 @@ to download [AI-ModelScope/MMMU](https://modelscope.cn/datasets/AI-ModelScope/MM
 | mmmu | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
 | gpqa | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
 
-### 7.2 Using lm_eval
+### 7.2 Using Language Model Evaluation Harness
 
 Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. When using online serving, set `base_url` to the endpoint started in [Section 5](#5-online-service-deployment).
 
