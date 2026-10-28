@@ -53,9 +53,9 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 # vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.31.0 lane still ships it under
+# main; the v0.32.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.31.0"):
+if vllm_version_is("0.32.0"):
     from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
