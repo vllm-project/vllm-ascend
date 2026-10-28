@@ -1964,7 +1964,7 @@ layerwise setting and topology.
 
     | Role | Nodes | Global DP | TP | PP | Placement | Devices per role |
     | --- | --- | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 | 1 | 16 | 2 | Four nodes | 32 |
+    | Prefill | P0-P3 | 1 | 8 | 4 | Four nodes | 32 |
     | Decode | D0-D3 | 16 | 2 | 1 | Four DP ranks per node, starting at 0/4/8/12 | 32 |
 
     P0 exposes the only Prefill API on port 8077; P1-P3 are headless.
@@ -1972,7 +1972,7 @@ layerwise setting and topology.
     executor with `--nnodes 4`; Decode uses a launcher to start one TP2
     engine per DP rank. Both roles pin the V1 model runner and use int8
     attention and indexer KV caches. This deployment uses pipeline parallelism
-    (PP2); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
+    (PP4); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
     Prepare identical weights and software on all eight nodes, verify
     [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect),
@@ -2074,7 +2074,7 @@ layerwise setting and topology.
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
     source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
-    # Cross-node TP16 uses the NPU RoCE interfaces for device communication.
+    # Cross-node TP8 uses the NPU RoCE interfaces for device communication.
     # Leave HCCL_IF_IP unset and pin the host-side sockets to the business NIC.
     unset HCCL_IF_IP
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -2097,13 +2097,13 @@ layerwise setting and topology.
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
     export VLLM_USE_FASTOKENS=1
-    export VLLM_PP_LAYER_PARTITION="42,36"
+    export VLLM_PP_LAYER_PARTITION="20,20,20,18"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --pipeline-parallel-size 2 \
-      --tensor-parallel-size 16 \
+      --pipeline-parallel-size 4 \
+      --tensor-parallel-size 8 \
       --distributed-executor-backend mp \
       --nnodes 4 \
       --node-rank "$NODE_RANK" \
@@ -2139,7 +2139,7 @@ layerwise setting and topology.
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+          "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }' \
@@ -2228,7 +2228,7 @@ layerwise setting and topology.
         "kv_port": "30100",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+          "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }'
@@ -3446,25 +3446,25 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     This A2 pooling reference uses four Prefill nodes and four Decode nodes,
     with eight devices per node. One Prefill instance spans four nodes with
-    TP16 × PP2 and has DP size 1 with one API server. Decode uses one DP16 × TP2
+    TP8 × PP4 and has DP size 1 with one API server. Decode uses one DP16 × TP2
     group across four nodes.
 
     | Role | Nodes | Parallelism | Placement | Devices per role |
     | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 (1 instance) | TP16 × PP2 | One instance on P0-P3 | 32 |
+    | Prefill | P0-P3 (1 instance) | TP8 × PP4 | One instance on P0-P3 | 32 |
     | Decode | D0-D3 | DP16 × TP2 | Four local DP ranks per node, starting at 0/4/8/12 | 32 |
 
     P0 exposes the API on port 8000; P1-P3 are headless PP partners.
     Decode exposes ports 8000-8003 on each node, and the proxy listens on
-    1999. This pooled PP2 layout uses the same Prefill parallelism as the
+    1999. This pooled PP4 layout uses a wider Prefill partition than the
     non-pooled A2 PD deployment and adds MemCache KV pooling.
     Use the A2 image from Section 4 and the
     [A2 Decode launcher](#glm53-pd-a2-launcher).
 
-    The pooled Prefill and Decode engines both use `--max-model-len 128000`,
+    The pooled Prefill and Decode engines both use `--max-model-len 200000`,
     with MTP token counts 1 and 5, respectively.
-    The end-to-end limit is **128,000 tokens**, including input and output.
-    Both roles declare the actual Prefill DP1/PP2/TP16 partition `42,36` and
+    The end-to-end limit is **200,000 tokens**, including input and output.
+    Both roles declare the actual Prefill DP1/PP4/TP8 partition `20,20,20,18` and
     Decode DP16/TP2 topology.
 
     <a id="glm53-pool-a2-prepare"></a>
@@ -3544,7 +3544,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
     PP node rank, API port, local IP, instance leader IP, and visible devices.
-    Both PP stages of one instance use the same master address and partition.
+    All four PP stages of one instance use the same master address and partition.
     The Prefill instance uses its own master address.
 
     ```shell
@@ -3587,7 +3587,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export TASK_QUEUE_ENABLE=1
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_USE_FASTOKENS=1
-    export VLLM_PP_LAYER_PARTITION="42,36"
+    export VLLM_PP_LAYER_PARTITION="20,20,20,18"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
     export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
@@ -3597,9 +3597,9 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --tensor-parallel-size 16 \
+      --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --pipeline-parallel-size 2 \
+      --pipeline-parallel-size 4 \
       --distributed-executor-backend mp \
       --master-addr "$INSTANCE_LEADER_IP" \
       --master-port 7060 \
@@ -3610,7 +3610,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 128000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 16384 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
@@ -3638,7 +3638,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30000",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -3731,7 +3731,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 128000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 256 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
@@ -3760,7 +3760,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30200",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -4840,10 +4840,10 @@ refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 | 1M PD | A3 | Prefill | 16 | 1 | 1 | 2 | 16 | 64 | 16384 | 1048576 | 1 |
 | 1M PD | A3 | Decode | 4 | 8 | 4 | 1 | 4 | 8 | 48 | 1048576 | 5 |
 | Colocated | A2 | Shared | 8 | 4 | 1 | 1 | 1 | 128 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Prefill | 16 | 2 | 1 | 1 | 1 | 64 | 8192 | 135000 | 3 |
+| Ordinary PD | A2 | Prefill | 8 | 2 | 1 | 4 | 1 | 64 | 8192 | 135000 | 3 |
 | Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 135000 | 3 |
-| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 2 | 1 | 64 | 16384 | 128000 | 1 |
-| Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 128000 | 5 |
+| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 16384 | 200000 | 1 |
+| Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 200000 | 5 |
 
 ### 9.2 Tuning Guidelines {: #92-performance-workloads }
 
