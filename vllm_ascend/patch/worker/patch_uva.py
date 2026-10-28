@@ -226,6 +226,15 @@ class MonitoredNumPyArray:
         self._readonly = np.frombuffer(memoryview(array).toreadonly(), dtype=array.dtype).reshape(array.shape)
         self._callback = callback
 
+    _OWN_FIELDS = ("_array", "_readonly", "_callback")
+
+    def __setattr__(self, name, value):
+        if name not in self._OWN_FIELDS:
+            # Without this, ``buf.np.shape = ...`` would quietly land in the
+            # instance dictionary and shadow the forwarding instead of failing.
+            raise AttributeError(f"{type(self).__name__}.{name} cannot be assigned; write through buf.np[...] = value")
+        object.__setattr__(self, name, value)
+
     def __setitem__(self, key, value):
         self._array[key] = value
         self._callback(key)
@@ -264,6 +273,15 @@ class MonitoredTorchTensor:
         self._tensor = tensor
         self._callback = callback
         self._storage_ptr = tensor.untyped_storage().data_ptr()
+
+    _OWN_FIELDS = ("_tensor", "_callback", "_storage_ptr")
+
+    def __setattr__(self, name, value):
+        if name not in self._OWN_FIELDS:
+            # Same shadowing risk as the NumPy proxy: ``buf.cpu.shape = ...``
+            # would otherwise be accepted and change nothing.
+            raise AttributeError(f"{type(self).__name__}.{name} cannot be assigned; write through buf.cpu[...] = value")
+        object.__setattr__(self, name, value)
 
     def __setitem__(self, key, value):
         self._tensor[key] = value

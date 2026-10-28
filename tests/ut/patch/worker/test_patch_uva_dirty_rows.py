@@ -417,6 +417,20 @@ def test_numpy_explicit_inplace_dunder_is_refused():
     assert buf._uva.eq(0).all()
 
 
+def test_attribute_assignment_cannot_shadow_the_mirror():
+    buf = _make_uva_buffer(8)
+
+    with pytest.raises(AttributeError):
+        buf.np.shape = (16, 1)
+    with pytest.raises(AttributeError):
+        buf.np.flat = 9
+    with pytest.raises(AttributeError):
+        buf.cpu.shape = (16, 1)
+
+    assert buf.np.shape == (8, 2)
+    assert buf.cpu.shape == (8, 2)
+
+
 def test_mirrors_report_their_length():
     buf = _make_uva_buffer(8)
 
