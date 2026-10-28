@@ -621,6 +621,19 @@
 #       `EngineCore` and the multiprocess entry point.
 #
 # ** 19. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and may omit the
+#        draft config, while upstream normalizes unknown drafts to DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation, derive a
+#        validated draft config without changing the target or checkpoint, and
+#        register the adapter in worker/patch_minimax_m3_dspark.py. The adapter
+#        inherits DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR: no upstream MiniMax Flash draft implementation yet; extracted
+#        from https://github.com/CXY-Katrina/vllm-ascend/pull/7.
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:

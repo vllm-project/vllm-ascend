@@ -2,6 +2,8 @@ import math
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
+from functools import partial
+from pathlib import Path
 from typing import Literal, get_args
 
 import vllm.config.speculative as speculative_config
@@ -10,10 +12,13 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
+from vllm_ascend.patch.minimax_m3_dspark import _allow_minimax_draft, draft_hf_override
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
+
+_allow_minimax_draft(_orig_post_init)
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
 # DeepseekV2Config. K3 MLA has independent projection/head dimensions (e.g.
@@ -194,8 +199,28 @@ def _temporarily_disable_dspark_dcp(self: SpeculativeConfig):
 
 def _dspark_post_init(self):
     # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
-    with _temporarily_disable_dspark_dcp(self):
-        _orig_post_init(self)
+    original_target = getattr(self, "target_model_config", None)
+    draft_root = _minimax_dspark_root(self)
+    if draft_root is not None:
+        self.model = str(draft_root)
+        self.target_model_config = copy(original_target)
+        self.target_model_config.hf_overrides = partial(
+            draft_hf_override, model_root=str(draft_root), target_override=original_target.hf_overrides
+        )
+    try:
+        with _temporarily_disable_dspark_dcp(self):
+            _orig_post_init(self)
+    finally:
+        if draft_root is not None:
+            self.target_model_config = original_target
+    if draft_root is not None:
+        # v0.30's DefaultModelLoader reads model directly. Resolve the draft
+        # weights after constructing its config from the parent checkpoint.
+        self.draft_model_config.model = str(draft_root / "dspark")
+        self.draft_model_config.model_weights = str(draft_root / "dspark")
+        self.draft_model_config.quantization = (
+            "ascend" if getattr(self.draft_model_config.hf_config, "quantization_config", None) else None
+        )
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
@@ -207,6 +232,23 @@ def _dspark_post_init(self):
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
         _normalize_glm_mla_dspark(self)
+
+
+def _minimax_dspark_root(self):
+    target = getattr(self, "target_model_config", None)
+    hf_config = getattr(target, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if getattr(self, "method", None) != "dspark" or not any(
+        name in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration") for name in architectures
+    ):
+        return None
+    root = Path(target.model).resolve()
+    requested = getattr(self, "model", None)
+    if requested is not None and Path(requested).resolve() not in (root, root / "dspark"):
+        return None
+    if not (root / "dspark").is_dir():
+        raise ValueError(f"MiniMax BF16 DSpark weights are missing from {root / 'dspark'}")
+    return root
 
 
 def _normalize_glm_mla_dspark(self):

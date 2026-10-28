@@ -1694,7 +1694,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if spec is None or spec.draft_model_config is None:
+        return False
+    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+        spec.draft_model_config.architectures or ()
+    ):
+        return _validate_minimax_dspark_flash_attn(config, selector)
+    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     return (
@@ -1708,6 +1714,36 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
             or selector.use_rswa
             or selector.use_batch_invariant
             or selector.use_per_head_quant_scales
+        )
+    )
+
+
+def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
+    """Keep the Flash checkpoint's eager-only guards separate from M3 drafts."""
+    from vllm.v1.attention.backend import AttentionType
+
+    spec = config.speculative_config
+    if spec.method != "dspark" or not spec.enforce_eager:
+        return False
+    if spec.target_model_config.hf_text_config.model_type != "minimax_m3_text":
+        return False
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and selector.attn_type == AttentionType.DECODER
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not (
+            getattr(selector, "use_pcp", False)
+            or selector.use_dcp
+            or selector.use_mm_prefix
+            or selector.use_per_head_quant_scales
+            or selector.use_batch_invariant
+            or getattr(selector, "use_rswa", False)
+            or getattr(selector, "use_adaptive_verification", False)
         )
     )
 
