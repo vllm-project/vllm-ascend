@@ -75,6 +75,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
+    python3 -m pip uninstall -y triton-ascend triton && \
     python3 -m pip cache purge
 
 # Install cannbot wheels (only aarch64)
@@ -115,8 +116,8 @@ ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildto
 ARG HYBRID_OBS_BASE="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com"
 ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
 ARG TRITON_ASCEND_URL_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/triton-ascend"
-ARG TRITON_ASCEND_VERSION="20261019175332"
-ARG TRITON_ASCEND_PACKAGE_VERSION="3.6.0"
+ARG TRITON_ASCEND_VERSION="20261028193430"
+ARG TRITON_ASCEND_PACKAGE_VERSION="3.6.0.post2"
 RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         "linux/amd64"|"x86_64") \
             ARCH_SUFFIX="x86_64"; \
@@ -138,8 +139,8 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-#     echo "Install triton-ascend..." && \
-#     python3 -m pip install "$TRITON_ASCEND_URL" && \
+    echo "Install triton-ascend..." && \
+    python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
