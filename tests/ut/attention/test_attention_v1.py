@@ -851,6 +851,41 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
+    def _build_impl(self, attn_type):
+        return AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=None,
+        )
+
+    def test_encoder_only_attention_rejects_prefill_context_parallel(self):
+        """The encoder attention path does not gather PCP K/V, so PCP must fail fast instead of being wrong."""
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        with self.assertRaisesRegex(NotImplementedError, "prefill context parallelism"):
+            self._build_impl(attn_module.AttentionType.ENCODER_ONLY)
+
+    def test_encoder_only_attention_without_pcp_is_accepted(self):
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        impl = self._build_impl(attn_module.AttentionType.ENCODER_ONLY)
+
+        assert impl.attn_type == attn_module.AttentionType.ENCODER_ONLY
+
+    def test_decoder_attention_with_pcp_is_not_rejected_by_the_encoder_only_guard(self):
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        impl = self._build_impl(attn_module.AttentionType.DECODER)
+
+        assert impl.attn_type == attn_module.AttentionType.DECODER
+
     def _pooling_forward(self, attn_type):
         """Run forward() for a pooling request whose metadata still says causal."""
         query = torch.randn(10, 8, 64)
