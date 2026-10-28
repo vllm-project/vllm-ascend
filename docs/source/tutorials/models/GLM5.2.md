@@ -2074,7 +2074,7 @@ layerwise setting and topology.
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
     source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
-    # Cross-node TP8 uses the NPU RoCE interfaces for device communication.
+    # Cross-node PP4 uses the NPU RoCE interfaces for device communication.
     # Leave HCCL_IF_IP unset and pin the host-side sockets to the business NIC.
     unset HCCL_IF_IP
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -2118,7 +2118,7 @@ layerwise setting and topology.
       --seed 1024 \
       --served-model-name glm \
       --max-model-len 200000 \
-      --max-num-batched-tokens 16384 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
       --trust-remote-code \
@@ -2130,8 +2130,8 @@ layerwise setting and topology.
       --enable-auto-tool-choice \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
-      --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
+      --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
+      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
@@ -2218,7 +2218,7 @@ layerwise setting and topology.
       --enable-auto-tool-choice \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
-      --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true}' \
+      --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --kv-transfer-config '{
@@ -2325,8 +2325,8 @@ layerwise setting and topology.
       }'
     ```
 
-    Both roles use a 135,000-token maximum length, memory utilization 0.92,
-    and three MTP tokens. Prefill uses eager mode, a 16,384-token batch budget,
+    Both roles use a 200,000-token maximum length, memory utilization 0.92,
+    and three MTP tokens. Prefill uses eager mode, an 8,192-token batch budget,
     64 sequences, DSA CP, and FlashComm1. Decode uses a 256-token
     batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
     and recomputation scheduling.
@@ -2338,7 +2338,7 @@ layerwise setting and topology.
     If Prefill fails during Mooncake KV cache registration with
     `ValueError: Mooncake worker requires a local DP rank`, first verify that
     the conditional single-local-rank fix below is present in the installed
-    worker. This topology uses DP1 with PP2 across P0-P3; it has no separate
+    worker. This topology uses DP1 with PP4 across P0-P3; it has no separate
     global DP ranks, and a PP headless worker may still receive
     `data_parallel_rank_local=None`.
 
@@ -3611,7 +3611,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --seed 1024 \
       --served-model-name glm \
       --max-model-len 200000 \
-      --max-num-batched-tokens 16384 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
       --trust-remote-code \
@@ -3623,7 +3623,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enforce-eager \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
+      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -3744,7 +3744,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --reasoning-parser glm47 \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --kv-transfer-config '{
@@ -4840,9 +4840,9 @@ refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 | 1M PD | A3 | Prefill | 16 | 1 | 1 | 2 | 16 | 64 | 16384 | 1048576 | 1 |
 | 1M PD | A3 | Decode | 4 | 8 | 4 | 1 | 4 | 8 | 48 | 1048576 | 5 |
 | Colocated | A2 | Shared | 8 | 4 | 1 | 1 | 1 | 128 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Prefill | 8 | 2 | 1 | 4 | 1 | 64 | 8192 | 200000 | 3 |
+| Ordinary PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 8192 | 200000 | 1 |
 | Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 200000 | 3 |
-| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 16384 | 200000 | 1 |
+| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 8192 | 200000 | 1 |
 | Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 200000 | 5 |
 
 ### 9.2 Tuning Guidelines {: #92-performance-workloads }
