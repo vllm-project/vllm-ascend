@@ -122,7 +122,9 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### Atlas 850/850E/950 SuperPod Communication Configuration
 
-For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
+
+Automatic UB configuration requires HIXL 9.1.0 or later. Upgrade HIXL before using the configuration below. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
 
 ```bash
 export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
