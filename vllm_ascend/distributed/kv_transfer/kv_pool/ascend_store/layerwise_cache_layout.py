@@ -28,6 +28,7 @@ _PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
 _DEFAULT_MAX_PREFETCH_LAYERS = 8
 _INDEXER_CACHE_SUFFIX = ".indexer.k_cache"
+_MAX_NAMES_IN_ERROR = 8
 
 
 def allocate_shared_indexer_cache(
@@ -333,6 +334,12 @@ def build_layerwise_reuse_layout(
     )
 
 
+def _format_names_for_error(names: list[Any]) -> str:
+    """Render at most ``_MAX_NAMES_IN_ERROR`` names, eliding the rest."""
+    shown = names[:_MAX_NAMES_IN_ERROR]
+    return f"{shown}{' ...' if len(names) > len(shown) else ''}"
+
+
 def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -371,6 +378,19 @@ def apply_layerwise_kv_cache_plan(
             "Layer reuse includes %d base and %d MTP/spec-decode layer(s).",
             base_layers,
             actual_layers - base_layers,
+        )
+    # DeepSeek-V4 keeps several main caches per layer. Both model runners
+    # allocate that model's caches as views into one shared backing, which
+    # per-slot reuse descriptors cannot express: slot sizes differ per cache
+    # spec, and slots of equal size would alias each other's caches.
+    multi_main_layers = sorted(
+        physical_layer for physical_layer, specs in reuse_layout.layer_cache_specs.items() if specs.extra_main_specs
+    )
+    if multi_main_layers:
+        raise NotImplementedError(
+            "Layerwise KV cache reuse does not support layers with several main KV caches, "
+            f"such as DeepSeek-V4; found {len(multi_main_layers)} physical layer(s): "
+            f"{_format_names_for_error(multi_main_layers)}."
         )
 
     # vLLM describes multiple contiguous layer regions in one backing
@@ -440,6 +460,17 @@ def apply_layerwise_kv_cache_plan(
     for layer_name in layer_specs:
         if layer_name in excluded_layer_names:
             _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
+    # Every spec must still own a descriptor. The pre-pass above checks the
+    # *old* descriptors covered every spec; without the mirror-image check a
+    # spec dropped during the merge loses its backing allocation silently and
+    # fails much later, as a missing KV cache at bind time.
+    merged_layers = {layer_name for tensor in new_tensors for layer_name in tensor.layers}
+    uncovered = sorted(set(layer_specs) - merged_layers)
+    if uncovered:
+        raise ValueError(
+            "Layerwise KV cache reuse dropped backing descriptors for "
+            f"{len(uncovered)} cache spec(s): {_format_names_for_error(uncovered)}."
+        )
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(
         "Layerwise KV cache reuse merged %d descriptors into %d descriptors using %d buffer assignments.",

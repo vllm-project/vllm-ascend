@@ -413,6 +413,27 @@ def test_multi_main_spec_layer_selects_attn_as_main():
     assert [s.layer_name for s in layer_specs.extra_main_specs] == ["model.layers.0.self_attn.other_cache"]
 
 
+def test_reuse_rejects_layers_with_several_main_caches():
+    names = [f"model.layers.{layer}.self_attn.{cache}" for layer in range(4) for cache in ("attn", "swa_cache")]
+    spec = _make_full_attention_spec()
+    original_tensors = [_make_kv_cache_tensor(32, [name]) for name in names]
+    kv_cache_config = SimpleNamespace(
+        num_blocks=1,
+        kv_cache_tensors=original_tensors.copy(),
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=dict.fromkeys(names, spec)),
+            )
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="several main KV caches"):
+        apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(4, 1))
+
+    assert kv_cache_config.kv_cache_tensors == original_tensors
+
+
 def test_multi_group_sfa_descriptors_are_merged_by_main_component():
     main_names = [
         *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
