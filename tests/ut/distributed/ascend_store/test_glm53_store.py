@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
+    StoreLookupResult,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.models.glm5next.cache_config import (
@@ -159,7 +160,7 @@ class TestGLM53Store(unittest.TestCase):
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
                     scheduler.client.closed = False
-                    scheduler.client.lookup.return_value = hit
+                    scheduler.client.lookup_details.return_value = StoreLookupResult(expected, store_skip_tokens=hit)
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
                     )

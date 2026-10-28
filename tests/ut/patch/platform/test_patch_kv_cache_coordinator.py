@@ -77,12 +77,16 @@ class _FakeBlockPool:
 
 
 class _FakeFAManager:
+    supports_fine_grained_hash_lookup = True
+
     def __init__(self, **kwargs):
         self.use_eagle = False
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
+    supports_fine_grained_hash_lookup = True
+
     def __init__(self, **kwargs):
         self.use_eagle = False
         self.block_size = kwargs["kv_cache_spec"].block_size
@@ -368,3 +372,84 @@ def test_per_group_lookup_matches_scheduler_call_convention():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("hash_size", [64, 512])
+@pytest.mark.parametrize("allowed", [False, True])
+@pytest.mark.parametrize("include_block_aligned_group", [False, True])
+def test_partial_hit_capability_matches_installed_upstream(hash_size, allowed, include_block_aligned_group):
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+    from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec
+
+    register_all_kvcache_specs(None)
+    groups = [
+        KVCacheGroupSpec(
+            ["attention"], FullAttentionSpec(block_size=512, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        ),
+        KVCacheGroupSpec(
+            ["state"],
+            MambaSpec(block_size=512, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+        ),
+    ]
+    if include_block_aligned_group:
+        groups.append(
+            KVCacheGroupSpec(
+                ["chunked"],
+                ChunkedLocalAttentionSpec(
+                    block_size=512, num_kv_heads=1, head_size=1, dtype=torch.float32, attention_chunk_size=512
+                ),
+            )
+        )
+    kwargs: dict = dict(
+        kv_cache_config=KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups),
+        max_model_len=2048,
+        max_in_flight_tokens=2048,
+        scheduler_block_size=512,
+        hash_block_size=hash_size,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        allow_partial_hash_hits=allowed,
+    )
+    native = mod.HybridKVCacheCoordinator(**kwargs)
+    ascend = AscendHybridKVCacheCoordinator(**kwargs)
+    assert ascend.enable_partial_hash_hits == native.enable_partial_hash_hits
+    assert ascend._cache_hit_alignment_tokens == native._cache_hit_alignment_tokens
+
+
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("computed", [600, 700])
+def test_producer_write_token_counts_match_installed_upstream(use_eagle, computed):
+    from unittest.mock import Mock
+
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+    register_all_kvcache_specs(None)
+    config = _hybrid_config()
+    config.kv_cache_groups[0].is_eagle_group = use_eagle
+    config.kv_transfer_config = SimpleNamespace(is_kv_producer=True, is_kv_consumer=False)
+    kwargs: dict = dict(
+        kv_cache_config=config,
+        max_model_len=4096,
+        max_in_flight_tokens=4096,
+        scheduler_block_size=1536,
+        hash_block_size=128,
+        use_eagle=use_eagle,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        num_prefill_lookahead=6,
+    )
+    native = mod.HybridKVCacheCoordinator(**kwargs)
+    ascend = AscendHybridKVCacheCoordinator(**kwargs)
+    request = SimpleNamespace(num_prompt_tokens=700)
+    for coordinator in (native, ascend):
+        for manager in coordinator.single_type_managers:
+            manager.cache_blocks = Mock()
+        coordinator.cache_blocks(request, computed)
+    for actual, expected in zip(ascend.single_type_managers, native.single_type_managers):
+        assert actual.cache_blocks.call_args.args[1] == expected.cache_blocks.call_args.args[1]
+        assert actual.cache_blocks.call_args.kwargs["replay_boundaries"] == (699, 700)

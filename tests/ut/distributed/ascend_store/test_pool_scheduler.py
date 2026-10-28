@@ -25,8 +25,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -46,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -380,7 +383,9 @@ class TestKVPoolScheduler(unittest.TestCase):
             block_ids_by_group=[[13], [1, 2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12]],
             can_save=True,
         )
-        scheduler.retain_blocks_for_save(req_meta)
+        meta = AscendConnectorMetadata(preempted_req_ids=set())
+        meta.add_request(req_meta)
+        scheduler.retain_blocks_for_save(meta, SimpleNamespace(kv_connector_block_state=None))
 
         touched = [block.block_id for block in scheduler._block_pool.touch.call_args[0][0]]
         self.assertEqual(touched, [1, 2, 3, 4, 5, 6, 10, 11, 12])
@@ -1112,6 +1117,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock()
+    scheduler._finished_boundary_metas = {}
     output = SimpleNamespace(
         finished_req_ids={"retired"} if cleared_by == "finished" else set(),
         preempted_req_ids={"retired"} if cleared_by == "preempted" else set(),
@@ -1442,7 +1448,9 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
             "r1", token_len_chunk=16, block_ids_by_group=[[0, 1, 2, 3]], block_hashes=[b"h0"], can_save=True
         )
 
-        scheduler.retain_blocks_for_save(req_meta)
+        meta = AscendConnectorMetadata(preempted_req_ids=set())
+        meta.add_request(req_meta)
+        scheduler.retain_blocks_for_save(meta, SimpleNamespace(kv_connector_block_state=None))
 
         self.assertEqual(req_meta.event_id, 0)
         # Neither the null block nor speculative scratch may be pinned.
@@ -1947,8 +1955,161 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         self.assertEqual(hit, 16)
 
 
+@pytest.mark.parametrize("transport", ["rpc", "gva", "block_key"])
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("available_states,expected", [({128}, 0), ({64, 128}, 64), ({112, 128}, 112)])
+def test_hybrid_lookup_verifies_the_replay_checkpoint(transport, use_eagle, available_states, expected):
+    """A longer checkpoint cannot be truncated into a missing earlier state.
+
+    Attention covers all 128 tokens. Only the listed recurrent checkpoints
+    exist in the pool; the lookup models the intersection of those groups.
+    """
+    scheduler_class = KVPoolScheduler if transport == "rpc" else LayerwiseKVPoolScheduler
+    scheduler = scheduler_class.__new__(scheduler_class)
+    scheduler.cache_coordinator = AscendStoreCoordinator(
+        [
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+        16,
+        16,
+        [16, 16],
+        ["default", "mamba"],
+        use_eagle=use_eagle,
+    )
+    scheduler.num_speculative_blocks_by_group = {1: 0}
+    scheduler.kv_role = "kv_producer"
+    scheduler.use_hybrid = True
+    scheduler.use_eagle = use_eagle
+    scheduler.lcm_block_size = scheduler.cache_transfer_granularity = 16
+    scheduler.cacheable_group_ids = scheduler.kv_cache_group_ids = [0, 1]
+    scheduler.original_block_size = [16, 16]
+    scheduler.use_layerwise = transport != "rpc"
+    scheduler._discard_partial_chunks = True
+    scheduler.load_async = False
+    scheduler.load_specs = {}
+    request = SimpleNamespace(
+        request_id="replay",
+        prompt_token_ids=list(range(128)),
+        num_tokens=128,
+        block_hashes=[bytes([i]) * 32 for i in range(8)],
+    )
+
+    def lookup(token_len, *_args, **_kwargs):
+        def query(group_id, hashes, mask):
+            return [h for i, h in enumerate(hashes) if group_id == 0 or (i + 1) * 16 in available_states]
+
+        return scheduler.cache_coordinator.find_reachable_hit_tokens(
+            request.block_hashes,
+            token_len,
+            query,
+            return_details=True,
+        )
+
+    rpc_lookup = MagicMock(side_effect=lookup)
+    direct_lookup = MagicMock(side_effect=lambda _request, token_len, _computed: lookup(token_len))
+    if transport == "rpc":
+        scheduler.client = SimpleNamespace(closed=False, lookup_details=rpc_lookup)
+    else:
+        scheduler.use_block_key_layerwise = transport == "block_key"
+        scheduler.use_layerwise_transfer = transport == "gva"
+        scheduler._get_layerwise_hit_tokens = direct_lookup
+        scheduler._get_block_key_layerwise_hit_tokens = direct_lookup
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
+    if expected:
+        spec = scheduler.load_specs[request.request_id]
+        assert spec.kvpool_cached_tokens in available_states
+        assert spec.kvpool_cached_tokens == expected
+        assert spec.kvpool_store_skip_tokens == max(available_states)
+    else:
+        assert request.request_id not in scheduler.load_specs
+    assert rpc_lookup.call_count + direct_lookup.call_count == 1
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("dcp", [1, 2])
+@pytest.mark.parametrize("prefix_unit", [None, 4])
+def test_store_uses_core_hash_geometry_even_when_partial_hits_are_disabled(dcp, prefix_unit):
+    config = make_config(block_size=32)
+    config.cache_config.prefix_match_unit = prefix_unit
+    config.cache_config.enable_prefix_caching = True
+    config.parallel_config.decode_context_parallel_size = dcp
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.speculative_config.use_eagle.return_value = False
+    plan = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"], FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    scheduler_block_size, plan.hash_block_size = resolve_kv_cache_block_sizes(plan, config)
+    # Core may keep coarse matching even while Request.block_hashes are finer.
+    plan.cache_hit_alignment_tokens = scheduler_block_size
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=plan)
+    # The existing Ascend DCP planner resolves the GCD, independently of
+    # prefix_match_unit. Store must consume that resolved value unchanged.
+    assert scheduler.hash_block_size == ((prefix_unit or 16) if dcp == 1 else 16)
+    assert scheduler.hash_block_size == plan.hash_block_size
+    assert scheduler.cache_coordinator.enable_partial_hash_hits is False
+
+
+def test_unresolved_core_geometry_keeps_block_aligned_store_lookup():
+    config = make_config(block_size=16)
+    config.cache_config.prefix_match_unit = 4
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.speculative_config.use_eagle.return_value = False
+    plan = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+            ),
+        ],
+    )
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=plan)
+    coordinator = scheduler.cache_coordinator
+    assert coordinator is not None
+    assert not coordinator.enable_partial_hash_hits
+    assert coordinator._partial_coordinator is None
+    hashes = [bytes([i]) * 32 for i in range(7)]
+    assert coordinator.find_reachable_hit_tokens(hashes, 28, lambda _group, keys, _mask: keys) == 16
 
 
 @pytest.mark.parametrize("second_hit", [0, 768])

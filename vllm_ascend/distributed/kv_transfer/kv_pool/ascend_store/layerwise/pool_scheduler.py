@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -127,11 +128,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
-            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+            stateful_replay = bool(self.num_speculative_blocks_by_group)
+            token_len = (
+                prompt_token_len if stateful_replay else self._floor_to_cache_transfer_granularity(prompt_token_len)
+            )
+            if (
+                not stateful_replay
+                and not self.use_eagle
+                and len(self.cacheable_group_ids) != len(self.original_block_size)
+            ):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
@@ -147,7 +155,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         request: "Request",
         token_len: int,
         num_computed_tokens: int,
-    ) -> int:
+    ) -> int | StoreLookupResult:
         self._get_or_create_request_tracker(request.request_id)
         if self.cache_coordinator is not None:
             return self._lookup_layerwise_with_coordinator(
@@ -160,7 +168,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         request: "Request",
         token_len: int,
         num_computed_tokens: int,
-    ) -> int:
+    ) -> int | StoreLookupResult:
         if self.block_key_hybrid:
             return self._lookup_layerwise_with_coordinator(request, token_len)
         return self._lookup_block_key_contiguous(request, token_len, num_computed_tokens)
@@ -170,7 +178,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         request: "Request",
         token_len: int,
         num_computed_tokens: int = 0,
-    ) -> int:
+    ) -> int | StoreLookupResult:
         """Reachability-aware hit check for hybrid models.
 
         Only the blocks the KV cache managers consider reachable (sliding-
@@ -206,6 +214,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
             hbm_hit_tokens=num_computed_tokens,
+            return_details=bool(self.num_speculative_blocks_by_group),
         )
 
     def _lookup_layerwise_contiguous(

@@ -19,11 +19,18 @@ class InFlightSaveBlockTracker:
         speculative_blocks_by_group: dict[int, int],
         block_pool: BlockPool | None,
     ) -> None:
-        if not speculative_blocks_by_group or not req_meta.can_save:
+        if not req_meta.can_save or not (speculative_blocks_by_group or req_meta.boundary_puts):
             return
 
-        block_ids: list[int] = []
+        # Finished-request snapshots are retained before core frees the request.
+        # Publishing their metadata keeps the original event and references.
+        if req_meta.event_id is not None:
+            return
+
+        block_ids = [put.block_id for put in req_meta.boundary_puts or ()]
         for group_id, num_speculative_blocks in speculative_blocks_by_group.items():
+            if group_id in req_meta.state_handoff_groups:
+                continue
             group_block_ids = req_meta.block_ids_by_group[group_id]
             # Speculative scratch slots must remain exclusively owned for relocation.
             non_spec_block_ids = (
@@ -32,6 +39,7 @@ class InFlightSaveBlockTracker:
             block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
 
         assert block_pool is not None
+        block_ids = list(dict.fromkeys(block_ids))
         event_id = self.next_event_id
         self.next_event_id += 1
         req_meta.event_id = event_id

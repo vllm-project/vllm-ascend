@@ -967,7 +967,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
-            if not self.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not self.use_eagle
+                and not any(self.group_uses_align_state)
+                and load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = load_spec.kvpool_store_skip_tokens
             start_block = load_spec.vllm_cached_tokens // self.block_size
             cached_full_blocks = cached_tokens // self.block_size
@@ -1579,7 +1583,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not self.use_eagle
+                and not any(self.group_uses_align_state)
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)
@@ -1772,7 +1780,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not self.use_eagle
+                and not any(self.group_uses_align_state)
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)
