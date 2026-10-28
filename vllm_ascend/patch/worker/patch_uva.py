@@ -229,6 +229,9 @@ class MonitoredNumPyArray:
         self._array[key] = value
         self._callback(key)
 
+    def __len__(self) -> int:
+        return len(self._array)
+
     def __array__(self, dtype=None, copy=None):
         # NumPy reaches a mirror through this path (``np.asarray``,
         # ``np.copyto``, ``np.put``, ``out=``). Seal it like any other view;
@@ -293,6 +296,9 @@ class MonitoredTorchTensor:
     def __setitem__(self, key, value):
         self._tensor[key] = value
         self._callback(key)
+
+    def __len__(self) -> int:
+        return len(self._tensor)
 
     def __getitem__(self, key):
         # See the class docstring: a view write is the one remaining way to
