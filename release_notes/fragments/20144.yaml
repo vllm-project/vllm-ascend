@@ -1,0 +1,9 @@
+pr: 20144
+entries:
+  - category: config
+    text: >-
+      MooncakeConnectorV1 takes its KV transfer backend and transport from
+      kv_connector_extra_config (transfer_backend, transfer_protocol,
+      memfabric_transfer_protocol); defaults keep the previous Mooncake Ascend
+      behaviour, and transfer_backend="memfabric" is an experimental SDMA data
+      path. Prefill and decode must be configured identically.
