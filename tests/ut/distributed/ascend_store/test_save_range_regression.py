@@ -12,7 +12,6 @@ from types import SimpleNamespace as NS
 
 import numpy as np
 
-
 SOURCE = Path(__file__).resolve().parents[4] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store"
 
 
@@ -23,37 +22,70 @@ def extract_methods(filename, class_name, names):
     assert {node.name for node in methods} == names
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
     module = ast.Module(body=[future] + methods, type_ignores=[])
-    env = dict(np=np, logger=logging.getLogger(__name__), LayerBlockRange=NS,
-               LayerTransferTask=NS, SharedBlockData=NS,
-               get_block_hashes=lambda hashes, *args: hashes)
+    env = dict(
+        np=np,
+        logger=logging.getLogger(__name__),
+        LayerBlockRange=NS,
+        LayerTransferTask=NS,
+        SharedBlockData=NS,
+        get_block_hashes=lambda hashes, *args: hashes,
+    )
     exec(compile(ast.fix_missing_locations(module), str(SOURCE / filename), "exec"), env)
     return env
 
 
-BUILDER = extract_methods("kv_transfer.py", "LayerBatchBuilder", {
-    "_ensure_buf", "_require_request_arrays", "_dedupe_transfer_blocks", "build_shared",
-})
-WORKER = extract_methods("pool_worker.py", "KVPoolWorker", {
-    "_process_save_for_layer_batch", "_get_partial_block_index",
-})
+BUILDER = extract_methods(
+    "kv_transfer.py",
+    "LayerBatchBuilder",
+    {
+        "_ensure_buf",
+        "_require_request_arrays",
+        "_dedupe_transfer_blocks",
+        "build_shared",
+    },
+)
+WORKER = extract_methods(
+    "pool_worker.py",
+    "KVPoolWorker",
+    {
+        "_process_save_for_layer_batch",
+        "_get_partial_block_index",
+    },
+)
 
 
 def request(index, target, skip=0, hash_count=None):
     count = (target + 127) // 128
-    return NS(req_id=f"req-{index}", can_save=True, save_start_token=0,
-              save_end_token=target // 128 * 128, target_token_len=target,
-              block_hashes=list(range(target // 128 if hash_count is None else hash_count)),
-              load_spec=NS(can_load=True, kvpool_store_skip_tokens=skip, kvpool_cached_tokens=skip),
-              partial_block_index=None, save_keys=[], load_keys=[], is_last_chunk=False,
-              block_ids_by_group_np=[np.arange(count) + index * 1000],
-              block_gvas_by_group_np=[np.arange(count) + index * 10000 + 100000],
-              gva_block_offset=0, partial_save_gva_per_group=[900000 + index], last_block_gva=None)
+    return NS(
+        req_id=f"req-{index}",
+        can_save=True,
+        save_start_token=0,
+        save_end_token=target // 128 * 128,
+        target_token_len=target,
+        block_hashes=list(range(target // 128 if hash_count is None else hash_count)),
+        load_spec=NS(can_load=True, kvpool_store_skip_tokens=skip, kvpool_cached_tokens=skip),
+        partial_block_index=None,
+        save_keys=[],
+        load_keys=[],
+        is_last_chunk=False,
+        block_ids_by_group_np=[np.arange(count) + index * 1000],
+        block_gvas_by_group_np=[np.arange(count) + index * 10000 + 100000],
+        gva_block_offset=0,
+        partial_save_gva_per_group=[900000 + index],
+        last_block_gva=None,
+    )
 
 
 def ranges_for(requests):
-    worker = NS(tp_rank=0, put_step=1, hash_block_size=128, layerwise_offload=True,
-                _get_effective_group_block_size=lambda group: 128, layer_save_tasks=[[]],
-                _get_partial_block_index=WORKER["_get_partial_block_index"])
+    worker = NS(
+        tp_rank=0,
+        put_step=1,
+        hash_block_size=128,
+        layerwise_offload=True,
+        _get_effective_group_block_size=lambda group: 128,
+        layer_save_tasks=[[]],
+        _get_partial_block_index=WORKER["_get_partial_block_index"],
+    )
     WORKER["_process_save_for_layer_batch"](worker, requests, 0)
     return worker.layer_save_tasks[0]
 
@@ -62,7 +94,8 @@ def make_builder():
     builder = NS(group_id=0, _block_ids_buf=None, _block_gvas_buf=None)
     builder._ensure_buf = lambda count: BUILDER["_ensure_buf"](builder, count)
     builder._require_request_arrays = lambda block_range, save: BUILDER["_require_request_arrays"](
-        builder, block_range, save)
+        builder, block_range, save
+    )
     builder._dedupe_transfer_blocks = BUILDER["_dedupe_transfer_blocks"]
     return builder
 
@@ -74,8 +107,7 @@ def build(task, builder=None):
 class TestSaveRangeRegression(unittest.TestCase):
     def test_incident_six_requests(self):
         # Target and skip lengths from 0917_fail.log, not synthetic ranges.
-        specs = [(39475, 39424), (21322, 21248), (23515, 640),
-                 (31290, 1024), (28947, 17408), (29659, 29696)]
+        specs = [(39475, 39424), (21322, 21248), (23515, 640), (31290, 1024), (28947, 17408), (29659, 29696)]
         reqs = [request(i, target, skip) for i, (target, skip) in enumerate(specs)]
         task = ranges_for(reqs)[0]
         last = task.block_ranges[-1]
@@ -119,11 +151,11 @@ class TestSaveRangeRegression(unittest.TestCase):
         builder = make_builder()
         for start, end, partial, expected in [
             (0, 8, None, list(range(8))),  # grow reusable buffer
-            (5, 2, 2, [2]),              # negative length > 1, partial only
+            (5, 2, 2, [2]),  # negative length > 1, partial only
             (5, 2, None, []),
             (2, 2, 2, [2]),
             (2, 2, None, []),
-            (1, 3, 3, [1, 2, 3]),       # normal range after empty calls
+            (1, 3, 3, [1, 2, 3]),  # normal range after empty calls
         ]:
             with self.subTest(start=start, end=end, partial=partial):
                 r = NS(request=req, start_block=start, end_block=end, partial_block_index=partial)

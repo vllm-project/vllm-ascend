@@ -23,7 +23,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     SendTask,
     get_external_request_id,
 )
-
 from vllm_ascend.distributed.kv_transfer.load_failure_registry import is_failed_load
 
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0

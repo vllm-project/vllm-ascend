@@ -174,9 +174,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
         main_block_ids: list[int],
         indexer_block_ids: list[int],
     ) -> None:
-        self.failed_requests.append(
-            (request_id, list(main_block_ids), list(indexer_block_ids))
-        )
+        self.failed_requests.append((request_id, list(main_block_ids), list(indexer_block_ids)))
 
 
 @dataclass

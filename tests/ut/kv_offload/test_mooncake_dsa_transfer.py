@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_dsa_transfer as transfer
-
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa_transfer import (
     MAX_REGISTER_MEMORY_BYTES,
     DsaCacheLayout,
@@ -252,16 +251,30 @@ def test_vectorized_randomized_byte_mapping_matches_scalar(indexer):
         dest = tuple(rng.sample(range(1, 64), math.ceil(end / dblock)))
         local = DsaCacheLayout("x", 0, 10000, lp * size, lp * size + rng.randrange(4), dblock // lp, dblock, "x", 64)
         remote = DsaCacheLayout(
-            "x", 0, 100000, rp * size, rp * size + rng.randrange(4),
-            block * (cp if indexer else 1) // rp, block, "x", 64,
+            "x",
+            0,
+            100000,
+            rp * size,
+            rp * size + rng.randrange(4),
+            block * (cp if indexer else 1) // rp,
+            block,
+            "x",
+            64,
         )
-        args = dict(cp_size=cp, cp_rank=rng.randrange(cp), writer_rank=rng.randrange(writers), writer_size=writers,
-                    indexer=indexer)
+        args = dict(
+            cp_size=cp,
+            cp_rank=rng.randrange(cp),
+            writer_rank=rng.randrange(writers),
+            writer_size=writers,
+            indexer=indexer,
+        )
         old_stats, new_stats = {}, {}
-        expected = transfer._build_component_read_scalar(local, remote, source, dest, start, end,
-                                                        statistics=old_stats, **args)
-        actual = build_component_read(local, remote, source, dest, start, end,
-                                      statistics=new_stats, mapping_cache=cache, **args)
+        expected = transfer._build_component_read_scalar(
+            local, remote, source, dest, start, end, statistics=old_stats, **args
+        )
+        actual = build_component_read(
+            local, remote, source, dest, start, end, statistics=new_stats, mapping_cache=cache, **args
+        )
         assert byte_pairs(actual) == byte_pairs(expected)
         assert len(byte_pairs(actual)) == len(set(byte_pairs(actual)))
         assert new_stats == old_stats
@@ -305,8 +318,9 @@ def test_cache_reuses_mapping_but_recomputes_each_layer_addresses():
         build_component_read(local, remote, (3, 4), (1, 2, 3, 4), 0, 16, mapping_cache=cache, **args)
         other_local = replace(local, base=2000, stride=32, block_bytes=16, dtype="y", layer_name="y")
         other_remote = replace(remote, base=20000, stride=24, block_bytes=16, dtype="y", layer_name="y")
-        actual = build_component_read(other_local, other_remote, (3, 4), (1, 2, 3, 4), 0, 16,
-                                      mapping_cache=cache, **args)
+        actual = build_component_read(
+            other_local, other_remote, (3, 4), (1, 2, 3, 4), 0, 16, mapping_cache=cache, **args
+        )
         expected = transfer._build_component_read_scalar(other_local, other_remote, (3, 4), (1, 2, 3, 4), 0, 16, **args)
         assert actual == expected
         assert mapper.call_count == 1
@@ -314,24 +328,31 @@ def test_cache_reuses_mapping_but_recomputes_each_layer_addresses():
     assert not mapping.local_pages.flags.writeable
     # Capacity and dtype validation must not be bypassed by a cache hit.
     with pytest.raises(ValueError, match="capacity"):
-        build_component_read(replace(local, capacity=1), remote, (3, 4), (1, 2, 3, 4), 0, 16,
-                             mapping_cache=cache, **args)
+        build_component_read(
+            replace(local, capacity=1), remote, (3, 4), (1, 2, 3, 4), 0, 16, mapping_cache=cache, **args
+        )
     with pytest.raises(ValueError, match="dtype"):
-        build_component_read(replace(local, dtype="bad"), remote, (3, 4), (1, 2, 3, 4), 0, 16,
-                             mapping_cache=cache, **args)
+        build_component_read(
+            replace(local, dtype="bad"), remote, (3, 4), (1, 2, 3, 4), 0, 16, mapping_cache=cache, **args
+        )
 
 
 def test_cache_keys_include_block_ids_interval_and_ownership():
     local = DsaCacheLayout("x", 0, 1000, 8, 16, 1, 4, "x")
     remote = replace(local, base=10000)
     cache = {}
-    cases = [((3, 4), (1, 2, 3, 4), 0, 16, 0), ((4, 3), (1, 2, 3, 4), 0, 16, 0),
-             ((3, 4), (4, 3, 2, 1), 0, 16, 0), ((3, 4), (1, 2, 3, 4), 3, 15, 0),
-             ((3, 4), (1, 2, 3, 4), 0, 16, 1)]
+    cases = [
+        ((3, 4), (1, 2, 3, 4), 0, 16, 0),
+        ((4, 3), (1, 2, 3, 4), 0, 16, 0),
+        ((3, 4), (4, 3, 2, 1), 0, 16, 0),
+        ((3, 4), (1, 2, 3, 4), 3, 15, 0),
+        ((3, 4), (1, 2, 3, 4), 0, 16, 1),
+    ]
     for source, dest, start, end, rank in cases:
         args = dict(cp_size=2, cp_rank=rank, writer_rank=rank, writer_size=2, indexer=False)
-        assert build_component_read(local, remote, source, dest, start, end, mapping_cache=cache, **args) == \
-            transfer._build_component_read_scalar(local, remote, source, dest, start, end, **args)
+        assert build_component_read(
+            local, remote, source, dest, start, end, mapping_cache=cache, **args
+        ) == transfer._build_component_read_scalar(local, remote, source, dest, start, end, **args)
     assert len(cache) == transfer.MAX_CACHED_DSA_MAPPINGS
 
 
@@ -350,8 +371,9 @@ def test_large_addresses_preserve_python_integer_semantics(change):
     remote = replace(local, base=10000)
     local = replace(local, **change)
     args = dict(cp_size=1, cp_rank=0, writer_rank=0, writer_size=1, indexer=False)
-    assert build_component_read(local, remote, (1,), (2,), 0, 4, **args) == \
-        transfer._build_component_read_scalar(local, remote, (1,), (2,), 0, 4, **args)
+    assert build_component_read(local, remote, (1,), (2,), 0, 4, **args) == transfer._build_component_read_scalar(
+        local, remote, (1,), (2,), 0, 4, **args
+    )
 
 
 def test_vectorized_registration_split_and_statistics_match_reference():
@@ -360,18 +382,24 @@ def test_vectorized_registration_split_and_statistics_match_reference():
     remote = replace(local, base=1000)
     old_stats, new_stats = {}, {}
     args = dict(cp_size=1, cp_rank=0, writer_rank=0, writer_size=1, indexer=False)
-    expected = transfer._build_component_read_scalar(local, remote, (1, 2), (0, 1), 0, 2,
-                                                    statistics=old_stats, **args)
+    expected = transfer._build_component_read_scalar(local, remote, (1, 2), (0, 1), 0, 2, statistics=old_stats, **args)
     actual = build_component_read(local, remote, (1, 2), (0, 1), 0, 2, statistics=new_stats, **args)
     assert actual == expected
     assert old_stats == new_stats
     assert len(actual[0]) > 1
 
 
-@pytest.mark.parametrize("field,value", [
-    ("cp_size", 0), ("cp_rank", 2), ("writer_size", 0), ("writer_rank", 2),
-    ("start_token", -1), ("end_token", -1),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cp_size", 0),
+        ("cp_rank", 2),
+        ("writer_size", 0),
+        ("writer_rank", 2),
+        ("start_token", -1),
+        ("end_token", -1),
+    ],
+)
 def test_invalid_request_geometry_matches_scalar_error(field, value):
     layout = DsaCacheLayout("x", 0, 1000, 8, 8, 1, 4, "x")
     args = dict(start_token=0, end_token=4, cp_size=2, cp_rank=0, writer_rank=0, writer_size=2, indexer=False)

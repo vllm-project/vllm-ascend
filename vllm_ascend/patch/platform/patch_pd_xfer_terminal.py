@@ -52,9 +52,7 @@ def _update_from_kv_xfer_finished(self, kv_connector_output):
         req = self.requests.get(req_id)
         if req is None:
             # Very late completion after the request was cleaned up.
-            logger.warning(
-                "finished_recving for unknown request %s; ignoring.", req_id
-            )
+            logger.warning("finished_recving for unknown request %s; ignoring.", req_id)
             continue
         if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             self.finished_recving_kv_req_ids.add(req_id)
@@ -73,16 +71,12 @@ def _update_from_kv_xfer_finished(self, kv_connector_output):
                 req.status.name,
                 req.num_computed_tokens,
             )
-            terminal_errors.extend(
-                self.finish_requests(req_id, RequestStatus.FINISHED_ERROR)
-            )
+            terminal_errors.extend(self.finish_requests(req_id, RequestStatus.FINISHED_ERROR))
     for req_id in kv_connector_output.finished_sending or ():
         logger.debug("Finished sending KV transfer for request %s", req_id)
         req = self.requests.get(req_id)
         if req is None:
-            logger.warning(
-                "finished_sending for unknown request %s; ignoring.", req_id
-            )
+            logger.warning("finished_sending for unknown request %s; ignoring.", req_id)
             continue
         self._free_blocks(req)
 
@@ -95,9 +89,7 @@ _orig_update_from_output = Scheduler.update_from_output
 
 
 def _update_from_output(self, scheduler_output, model_runner_output):
-    engine_core_outputs = _orig_update_from_output(
-        self, scheduler_output, model_runner_output
-    )
+    engine_core_outputs = _orig_update_from_output(self, scheduler_output, model_runner_output)
     terminal_errors = getattr(self, "_pd_terminal_errors", None)
     if terminal_errors:
         self._pd_terminal_errors = []
@@ -114,15 +106,9 @@ def _update_from_output(self, scheduler_output, model_runner_output):
             )
             eco = engine_core_outputs.get(request.client_index)
             if eco is None:
-                engine_core_outputs[request.client_index] = EngineCoreOutputs(
-                    outputs=[error_frame]
-                )
+                engine_core_outputs[request.client_index] = EngineCoreOutputs(outputs=[error_frame])
                 continue
-            eco.outputs[:] = [
-                out
-                for out in eco.outputs
-                if out.request_id != request.request_id
-            ]
+            eco.outputs[:] = [out for out in eco.outputs if out.request_id != request.request_id]
             eco.outputs.append(error_frame)
     return engine_core_outputs
 

@@ -164,9 +164,7 @@ class MembPullReadThread(threading.Thread):
                 self._completed_ext_ids.discard(ext_id)
                 self._discarded_ext_ids[ext_id] = now
             expired = [
-                ext_id
-                for ext_id, ts in self._discarded_ext_ids.items()
-                if now - ts > DISCARDED_TOMBSTONE_TTL_SECONDS
+                ext_id for ext_id, ts in self._discarded_ext_ids.items() if now - ts > DISCARDED_TOMBSTONE_TTL_SECONDS
             ]
             for ext_id in expired:
                 del self._discarded_ext_ids[ext_id]
@@ -346,25 +344,11 @@ class MembPullReadThread(threading.Thread):
                                     if now - ts <= DISCARDED_TOMBSTONE_TTL_SECONDS
                                 }
                             stale_snapshot = completed_snapshot | discarded_snapshot
-                            fresh_reqs = [
-                                entry
-                                for entry in read_reqs
-                                if entry[0] not in stale_snapshot
-                            ]
-                            skipped_ids = sorted(
-                                {
-                                    entry[0]
-                                    for entry in read_reqs
-                                    if entry[0] in stale_snapshot
-                                }
-                            )
+                            fresh_reqs = [entry for entry in read_reqs if entry[0] not in stale_snapshot]
+                            skipped_ids = sorted({entry[0] for entry in read_reqs if entry[0] in stale_snapshot})
                             if skipped_ids:
                                 read_reqs = fresh_reqs
-                            done_ext_ids = [
-                                ext
-                                for ext in done_ext_ids
-                                if ext not in stale_snapshot
-                            ]
+                            done_ext_ids = [ext for ext in done_ext_ids if ext not in stale_snapshot]
                         # Contributor identity (unequal P/D TP). Absent = legacy single
                         # contributor: member 0 of a 1-member group pulls everything.
                         group_member_idx = int(msg[5]) if len(msg) > 5 else 0

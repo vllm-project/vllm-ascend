@@ -1,8 +1,7 @@
 """Generate decode KV copy descriptors without reading device values on the host."""
 
 import torch
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 _DESCRIPTOR_BLOCK_SIZE = 32
 _MAX_TOKEN_CAPACITY = 1 << 31

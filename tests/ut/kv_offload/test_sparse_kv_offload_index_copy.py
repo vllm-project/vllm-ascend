@@ -50,12 +50,8 @@ def test_eager_current_kv_index_copy_filters_invalid_slots():
     manager.token_size_bytes_v = 1 * torch.bfloat16.itemsize
     manager.max_d2h_index_copy_tokens = 4
 
-    host_k, host_v, physical_k, physical_v = (
-        _make_host_cache_with_private_sink(manager, (8, 2), (8, 1))
-    )
-    current_k = torch.tensor(
-        [[1, 2], [3, 4], [5, 6]], dtype=torch.bfloat16
-    )
+    host_k, host_v, physical_k, physical_v = _make_host_cache_with_private_sink(manager, (8, 2), (8, 1))
+    current_k = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.bfloat16)
     current_v = torch.tensor([[7], [8], [9]], dtype=torch.bfloat16)
 
     manager._offload_new_kv_via_index_copy(
@@ -192,9 +188,7 @@ def test_graph_mooncake_index_copy_runs_on_save_stream():
     assert torch.equal(physical_k[-1], current_k[1])
     assert torch.equal(physical_v[-1], current_v[1])
     current_stream.record_event.assert_called_once_with()
-    manager.current_kv_save_stream.wait_event.assert_called_once_with(
-        current_kv_ready
-    )
+    manager.current_kv_save_stream.wait_event.assert_called_once_with(current_kv_ready)
     descriptor_builder.assert_called_once()
 
 
@@ -230,9 +224,7 @@ def test_graph_mooncake_prepares_descriptors_on_first_layer_only():
         )
 
     assert manager._offload_new_kv_on_current_stream.call_count == 2
-    first_call, second_call = (
-        manager._offload_new_kv_on_current_stream.call_args_list
-    )
+    first_call, second_call = manager._offload_new_kv_on_current_stream.call_args_list
     assert first_call.kwargs == {
         "has_prefill": False,
         "capturing": True,

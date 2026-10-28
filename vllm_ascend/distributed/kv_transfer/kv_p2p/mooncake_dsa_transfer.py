@@ -302,11 +302,7 @@ def _aligned_page_mapping(
             first = first_block + (residue - first_block) % period
     step = min(local_page, remote_page)
     block_count = max(0, (last_block - first + period - 1) // period)
-    if (
-        block_count * (block // step) > MAX_VECTORIZED_DSA_SEGMENTS
-        or period > _MAX_INT64
-        or first > _MAX_INT64
-    ):
+    if block_count * (block // step) > MAX_VECTORIZED_DSA_SEGMENTS or period > _MAX_INT64 or first > _MAX_INT64:
         return None
     blocks = np.arange(first, last_block, period, dtype=np.int64)
     source_ordinals = blocks // cp_size
@@ -323,10 +319,7 @@ def _aligned_page_mapping(
         destination = destination[blocks]
     except (OverflowError, ValueError):
         return None
-    if (
-        np.any(source < 0) or np.any(destination < 0)
-        or np.any(source > _MAX_INT64) or np.any(destination > _MAX_INT64)
-    ):
+    if np.any(source < 0) or np.any(destination < 0) or np.any(source > _MAX_INT64) or np.any(destination > _MAX_INT64):
         return None  # Preserve scalar behavior for unusual physical IDs.
     source = source.astype(np.int64, copy=False)
     destination = destination.astype(np.int64, copy=False)
@@ -406,8 +399,12 @@ def build_component_read(
         raise ValueError("overlapping component page stride")
     token_bytes = local.block_bytes // local_page
     fallback_args = dict(
-        cp_size=cp_size, cp_rank=cp_rank, writer_rank=writer_rank, writer_size=writer_size,
-        indexer=indexer, statistics=statistics,
+        cp_size=cp_size,
+        cp_rank=cp_rank,
+        writer_rank=writer_rank,
+        writer_size=writer_size,
+        indexer=indexer,
+        statistics=statistics,
     )
 
     def scalar():
@@ -418,14 +415,34 @@ def build_component_read(
     if token_bytes <= 0 or token_bytes * (end_token - start_token) > _MAX_INT64:
         return scalar()
     key = (
-        source_ids, destination_ids, start_token, end_token, cp_size, cp_rank, writer_rank, writer_size, indexer,
-        local.block_tokens, remote.block_tokens, local.scale, remote.scale,
+        source_ids,
+        destination_ids,
+        start_token,
+        end_token,
+        cp_size,
+        cp_rank,
+        writer_rank,
+        writer_size,
+        indexer,
+        local.block_tokens,
+        remote.block_tokens,
+        local.scale,
+        remote.scale,
     )
     mapping = None if mapping_cache is None else mapping_cache.get(key)
     if mapping is None:
         mapping = _aligned_page_mapping(
-            local, remote, source_ids, destination_ids, start_token, end_token,
-            cp_size, cp_rank, writer_rank, writer_size, indexer,
+            local,
+            remote,
+            source_ids,
+            destination_ids,
+            start_token,
+            end_token,
+            cp_size,
+            cp_rank,
+            writer_rank,
+            writer_size,
+            indexer,
         )
         if mapping is None:
             return scalar()
@@ -439,10 +456,13 @@ def build_component_read(
     # Guard every multiply/add in Python integers before int64 address math.
     # Wider/negative address layouts preserve the scalar Python-int semantics.
     for layout, maximum, page in (
-        (local, mapping.max_local_id, local_page), (remote, mapping.max_remote_id, remote_page)
+        (local, mapping.max_local_id, local_page),
+        (remote, mapping.max_remote_id, remote_page),
     ):
-        if layout.base < 0 or layout.stride < 0 or (
-            layout.base + (maximum + 1) * layout.scale * layout.stride + page * token_bytes > _MAX_INT64
+        if (
+            layout.base < 0
+            or layout.stride < 0
+            or (layout.base + (maximum + 1) * layout.scale * layout.stride + page * token_bytes > _MAX_INT64)
         ):
             return scalar()
     dst = local.base + mapping.local_pages * local.stride + mapping.local_offsets * token_bytes
@@ -454,12 +474,15 @@ def build_component_read(
         merged = (dst[starts].tolist(), src[starts].tolist(), np.add.reduceat(lengths, starts).tolist())
     else:
         merged = ([], [], [])
-    if local.capacity and remote.capacity and (
-        layout_span_bytes(local) > MAX_REGISTER_MEMORY_BYTES or layout_span_bytes(remote) > MAX_REGISTER_MEMORY_BYTES
-    ):
-        merged = split_transfer_lists_at_region_boundaries(
-            *merged, local_base=local.base, remote_base=remote.base
+    if (
+        local.capacity
+        and remote.capacity
+        and (
+            layout_span_bytes(local) > MAX_REGISTER_MEMORY_BYTES
+            or layout_span_bytes(remote) > MAX_REGISTER_MEMORY_BYTES
         )
+    ):
+        merged = split_transfer_lists_at_region_boundaries(*merged, local_base=local.base, remote_base=remote.base)
     if statistics is not None:
         statistics["entries_before"] = statistics.get("entries_before", 0) + int(lengths.size)
         statistics["entries_after"] = statistics.get("entries_after", 0) + len(merged[0])

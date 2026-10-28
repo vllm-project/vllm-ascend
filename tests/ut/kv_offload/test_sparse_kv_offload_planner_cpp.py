@@ -244,7 +244,6 @@ def test_current_kv_index_copy_descriptors_survive_graph_replays(
         torch_npu.npu.synchronize()
 
 
-
 def test_stable_rows_suffix_invalidation_and_plan_encoding(planner_helper):
     state = PlannerState()
     first = torch.stack([torch.arange(0, TOPK), torch.arange(TOPK, TOPK * 2)]).to(torch.int32)

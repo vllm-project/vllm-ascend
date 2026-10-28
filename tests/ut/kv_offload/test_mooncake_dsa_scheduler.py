@@ -58,9 +58,7 @@ def _request():
 
 
 @pytest.mark.parametrize("group0_block_size,prefix_tokens", [(2, 2), (1, 2)])
-def test_failure_reporting_excludes_untouched_cached_prefix(
-    group0_block_size, prefix_tokens
-):
+def test_failure_reporting_excludes_untouched_cached_prefix(group0_block_size, prefix_tokens):
     scheduler = _scheduler()
     scheduler.block_size[0] = group0_block_size
     request = _request()

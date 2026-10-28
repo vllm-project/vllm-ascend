@@ -354,9 +354,7 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     raw_host_bytes = kv_cache_config.num_blocks * sum(spec.page_size_bytes for spec in host_specs)
     alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     writeback_sink_bytes = (
-        sum(spec.page_size_bytes // spec.block_size for spec in host_specs)
-        if include_mooncake_writeback_sinks
-        else 0
+        sum(spec.page_size_bytes // spec.block_size for spec in host_specs) if include_mooncake_writeback_sinks else 0
     )
     return raw_host_bytes + alignment_reserve_bytes + writeback_sink_bytes
 
@@ -561,9 +559,7 @@ class SparseKVOffloadManager:
         self.fused_overlap_membership_map: torch.Tensor | None = None
         self.fused_overlap_membership_map_rows = 0
         self.fused_overlap_planner_membership_map: torch.Tensor | None = None
-        self.fused_overlap_membership_plan_device_staging: (
-            torch.Tensor | None
-        ) = None
+        self.fused_overlap_membership_plan_device_staging: torch.Tensor | None = None
         self.fused_plan_broadcast_buffer: torch.Tensor | None = None
         self.fused_overlap_plan_owner_layer_id: int | None = None
         self.fused_overlap_plan_topk: int | None = None
@@ -679,9 +675,7 @@ class SparseKVOffloadManager:
 
         logical_token_capacity = self.kv_cache_config.num_blocks * self.block_size
         if logical_token_capacity <= 0:
-            raise ValueError(
-                "Mooncake Host-KV logical token capacity must be positive"
-            )
+            raise ValueError("Mooncake Host-KV logical token capacity must be positive")
         sink_sizes: list[int] = []
         for size in sizes:
             if size <= 0 or size % logical_token_capacity != 0:
@@ -691,10 +685,7 @@ class SparseKVOffloadManager:
                 )
             sink_sizes.append(size // logical_token_capacity)
 
-        physical_sizes = [
-            size + sink_size
-            for size, sink_size in zip(sizes, sink_sizes, strict=True)
-        ]
+        physical_sizes = [size + sink_size for size, sink_size in zip(sizes, sink_sizes, strict=True)]
         physical_tensors = allocator.allocate_tensors(physical_sizes, alignment)
         logical_tensors: list[torch.Tensor] = []
         registry = getattr(self, "_mooncake_writeback_raw_views", None)
@@ -738,17 +729,11 @@ class SparseKVOffloadManager:
         registry = getattr(self, "_mooncake_writeback_raw_views", {})
         physical_raw = registry.get(logical_ptr)
         if physical_raw is None:
-            raise RuntimeError(
-                "Mooncake Host-KV writeback storage is not registered"
-            )
+            raise RuntimeError("Mooncake Host-KV writeback storage is not registered")
         if token_dim <= 0 or logical_tensor.numel() % token_dim != 0:
-            raise ValueError(
-                "Mooncake Host-KV tensor has an invalid token-row layout"
-            )
+            raise ValueError("Mooncake Host-KV tensor has an invalid token-row layout")
         logical_rows = logical_tensor.numel() // token_dim
-        expected_bytes = (
-            logical_tensor.numel() + token_dim
-        ) * logical_tensor.element_size()
+        expected_bytes = (logical_tensor.numel() + token_dim) * logical_tensor.element_size()
         if physical_raw.numel() != expected_bytes:
             raise RuntimeError(
                 "Mooncake Host-KV writeback storage has an unexpected size: "
@@ -759,10 +744,7 @@ class SparseKVOffloadManager:
             token_dim,
         )
         if int(writeback.data_ptr()) != logical_ptr:
-            raise RuntimeError(
-                "Mooncake Host-KV logical and writeback views do not share "
-                "the same base address"
-            )
+            raise RuntimeError("Mooncake Host-KV logical and writeback views do not share the same base address")
         if not hasattr(self, "_mooncake_writeback_views"):
             self._mooncake_writeback_views = {}
         self._mooncake_writeback_views[logical_ptr] = writeback
@@ -1550,9 +1532,7 @@ class SparseKVOffloadManager:
         )
 
         warmup_index_copy_destinations(self)
-        self.fused_index_copy_descriptor_builder = (
-            build_index_copy_destinations
-        )
+        self.fused_index_copy_descriptor_builder = build_index_copy_destinations
 
     def offload_new_kv(
         self,
@@ -1573,9 +1553,7 @@ class SparseKVOffloadManager:
             self.current_kv_by_layer[layer_id] = (k, v)
             # All decode layers share one slot mapping within a forward step.
             prepare_index_copy_descriptors = layer_id == 0
-        use_mooncake_index_copy = (
-            self.use_fused_overlap and self._uses_mooncake_host_pool()
-        )
+        use_mooncake_index_copy = self.use_fused_overlap and self._uses_mooncake_host_pool()
         if (
             capturing
             and not has_prefill
@@ -1840,9 +1818,7 @@ class SparseKVOffloadManager:
             raise RuntimeError("Mooncake Host views and current K/V must share one NPU device")
         num_slots = flat_host_k.shape[0]
         if num_slots != flat_host_v.shape[0] or num_slots <= 0:
-            raise ValueError(
-                "Mooncake Host K/V pools have incompatible token capacities"
-            )
+            raise ValueError("Mooncake Host K/V pools have incompatible token capacities")
         writeback_host_k = self._get_mooncake_writeback_view(
             k_cache_cpu,
             token_dim_k,
@@ -1851,14 +1827,8 @@ class SparseKVOffloadManager:
             v_cache_cpu,
             token_dim_v,
         )
-        if (
-            writeback_host_k.shape[0] != num_slots + 1
-            or writeback_host_v.shape[0] != num_slots + 1
-        ):
-            raise RuntimeError(
-                "Mooncake Host K/V writeback views must contain exactly "
-                "one private sink row"
-            )
+        if writeback_host_k.shape[0] != num_slots + 1 or writeback_host_v.shape[0] != num_slots + 1:
+            raise RuntimeError("Mooncake Host K/V writeback views must contain exactly one private sink row")
 
         if capturing:
             current_kv_ready = torch_npu.npu.current_stream().record_event()
@@ -1871,10 +1841,7 @@ class SparseKVOffloadManager:
                         None,
                     )
                     if descriptor_builder is None:
-                        raise RuntimeError(
-                            "Mooncake graph writeback requires the NPU "
-                            "index_copy descriptor builder"
-                        )
+                        raise RuntimeError("Mooncake graph writeback requires the NPU index_copy descriptor builder")
                     descriptor_builder(
                         slots,
                         self.d2h_dst_idx_npu,

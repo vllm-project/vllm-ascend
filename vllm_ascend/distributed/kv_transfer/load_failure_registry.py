@@ -31,9 +31,7 @@ _failed_load_req_ids: dict[str, float] = {}
 
 def _prune_locked(now: float) -> None:
     expired = [
-        req_id
-        for req_id, recorded_at in _failed_load_req_ids.items()
-        if now - recorded_at > FAILED_LOAD_TTL_SECONDS
+        req_id for req_id, recorded_at in _failed_load_req_ids.items() if now - recorded_at > FAILED_LOAD_TTL_SECONDS
     ]
     for req_id in expired:
         del _failed_load_req_ids[req_id]

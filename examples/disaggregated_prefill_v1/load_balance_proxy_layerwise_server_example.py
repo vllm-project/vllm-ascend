@@ -390,8 +390,7 @@ async def send_request_to_service(
             # request_id would create a second admission with the same external
             # id and a duplicate KV transfer round. Fail immediately instead.
             logger.error(
-                "P notification rejected, not retrying: request_id=%s endpoint=%s "
-                "attempt=%s status=%s error=%s",
+                "P notification rejected, not retrying: request_id=%s endpoint=%s attempt=%s status=%s error=%s",
                 request_id,
                 endpoint,
                 attempt,

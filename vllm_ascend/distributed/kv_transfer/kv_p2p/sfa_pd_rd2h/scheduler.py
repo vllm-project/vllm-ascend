@@ -47,9 +47,7 @@ METASERVER_MAX_OUTER_RETRIES = 3
 # the P notification and returns only after P finishes), so the read timeout
 # must cover long prefills; it exists to bound a hung proxy/P endpoint, not
 # to cut slow-but-progressing prefills short.
-METASERVER_HTTP_TIMEOUT = httpx.Timeout(
-    connect=10.0, read=600.0, write=30.0, pool=10.0
-)
+METASERVER_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)
 # Finished-request markers only need to outlive pending retry timers/futures
 # (seconds); the TTL bounds memory on long-running engines. Internal ids are
 # unique per admission, so an expired entry can never suppress a new request.
@@ -460,8 +458,7 @@ class SFAPDRD2HScheduler:
                         # never arrive, and re-POSTing the same notification
                         # could double-admit on P, so fail the request.
                         raise _MetaserverDispatchError(
-                            "metaserver returned HTTP %d for request %r"
-                            % (response.status_code, message.get("request_id"))
+                            f"metaserver returned HTTP {response.status_code} for request {message.get('request_id')!r}"
                         )
                     return
                 except (httpx.ConnectError, httpx.ConnectTimeout) as error:
@@ -482,15 +479,13 @@ class SFAPDRD2HScheduler:
                     # proxy dispatches synchronously; fail the request
                     # instead. Mirrors the proxy's connect-only retry policy.
                     logger.error(
-                        "Metaserver transport failed after send (not retrying): "
-                        "url=%s, error=%s: %s",
+                        "Metaserver transport failed after send (not retrying): url=%s, error=%s: %s",
                         url,
                         type(error).__name__,
                         error,
                     )
                     raise _MetaserverDispatchError(
-                        "metaserver transport failed after send for request %r: %s"
-                        % (message.get("request_id"), error)
+                        f"metaserver transport failed after send for request {message.get('request_id')!r}: {error}"
                     )
 
     def _submit_metaserver_request(
@@ -588,8 +583,7 @@ class SFAPDRD2HScheduler:
             if trackers is not None:
                 self._rendezvous_failed_reqs[request_id] = trackers
         logger.error(
-            "SFAPDRD2H D rendezvous failed for request %s; request will be "
-            "failed via the invalid-block channel: %s",
+            "SFAPDRD2H D rendezvous failed for request %s; request will be failed via the invalid-block channel: %s",
             request_id,
             error,
         )

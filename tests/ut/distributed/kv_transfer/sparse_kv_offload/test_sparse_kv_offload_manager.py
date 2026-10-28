@@ -717,12 +717,8 @@ class TestHostBackendSelection(unittest.TestCase):
 
         self.assertEqual(logical_k_raw.numel(), 32)
         self.assertEqual(logical_v_raw.numel(), 16)
-        physical_k = manager._mooncake_writeback_raw_views[
-            logical_k_raw.data_ptr()
-        ]
-        physical_v = manager._mooncake_writeback_raw_views[
-            logical_v_raw.data_ptr()
-        ]
+        physical_k = manager._mooncake_writeback_raw_views[logical_k_raw.data_ptr()]
+        physical_v = manager._mooncake_writeback_raw_views[logical_v_raw.data_ptr()]
         self.assertEqual(physical_k.numel(), 36)
         self.assertEqual(physical_v.numel(), 18)
 
@@ -863,9 +859,7 @@ class TestRegisterKvCachesBackendBranch(unittest.TestCase):
         if host_backend == "mooncake":
             allocator = object.__new__(MooncakeHostPool)
             allocator.topology = SimpleNamespace(tp_size=1)
-            allocator.describe_local_views = MagicMock(
-                return_value=(0, 128, (("host.0", "k", 0),))
-            )
+            allocator.describe_local_views = MagicMock(return_value=(0, 128, (("host.0", "k", 0),)))
             manager._host_kv_allocator = allocator
             manager._get_mooncake_writeback_view = MagicMock()
         manager._register_offload_layers = MagicMock()

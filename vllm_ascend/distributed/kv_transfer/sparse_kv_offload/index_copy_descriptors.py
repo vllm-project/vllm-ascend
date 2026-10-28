@@ -39,15 +39,8 @@ def build_index_copy_destinations(
     rows = slots.numel()
     if slots.dtype != torch.int64 or destinations.dtype != torch.int64:
         raise ValueError("Mooncake index_copy slots and destinations must use int64")
-    if (
-        slots.device != destinations.device
-        or not slots.is_contiguous()
-        or not destinations.is_contiguous()
-    ):
-        raise ValueError(
-            "Mooncake index_copy descriptor tensors must be contiguous "
-            "on one device"
-        )
+    if slots.device != destinations.device or not slots.is_contiguous() or not destinations.is_contiguous():
+        raise ValueError("Mooncake index_copy descriptor tensors must be contiguous on one device")
     if rows <= 0 or rows > destinations.numel() or host_capacity <= 0:
         raise ValueError(
             "Mooncake index_copy descriptor dimensions are invalid: "
@@ -55,9 +48,7 @@ def build_index_copy_destinations(
             f"host_capacity={host_capacity}"
         )
 
-    sanitize_index_copy_destinations_kernel[
-        (triton.cdiv(rows, _DESCRIPTOR_BLOCK_SIZE),)
-    ](
+    sanitize_index_copy_destinations_kernel[(triton.cdiv(rows, _DESCRIPTOR_BLOCK_SIZE),)](
         slots,
         destinations,
         rows,

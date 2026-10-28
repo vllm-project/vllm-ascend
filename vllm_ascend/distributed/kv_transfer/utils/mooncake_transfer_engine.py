@@ -60,7 +60,6 @@ class GlobalTE:
         sizes: list[int],
         locations: list[str] | None = None,
     ) -> None:
-
         normalized_locations = locations if locations is not None else [_WILDCARD_LOCATION] * len(ptrs)
         regions = list(zip(ptrs, sizes, normalized_locations))
 

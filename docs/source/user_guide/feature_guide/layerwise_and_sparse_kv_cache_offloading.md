@@ -6,12 +6,10 @@ KV cache is a major NPU memory cost in long-sequence inference. Prefill and
 Decode have different performance characteristics, so they use different
 offloading strategies:
 
-
 | Stage   | Feature                    | What remains on the NPU                 |
 | ------- | -------------------------- | --------------------------------------- |
 | Prefill | Layerwise KV Cache Offload | A few reusable full-layer KV buffers    |
 | Decode  | Sparse KV Cache Offload    | Indexer cache and a hot top-k KV buffer |
-
 
 Prefill has enough computation to overlap full-layer transfers. Decode does
 not, so it keeps the full KV cache in host memory and loads only the top-k
@@ -23,8 +21,6 @@ show the potential to substantially increase sequence length or batch size, but
 actual results depend on the model, hardware, and configuration.
 
 ## 2. Layerwise KV Cache Offload for Prefill
-
-
 
 ### How it works
 
@@ -65,8 +61,6 @@ source /usr/local/memfabric_hybrid/set_env.sh
 export PYTHONHASHSEED=0
 ```
 
-
-
 ### Configuration
 
 This example keeps layer 0 independent and assigns all other layers to three
@@ -85,12 +79,10 @@ reusable buffers:
 }
 ```
 
-
 | Parameter                      | Description                                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
 | `layerwise_num_shared_buffers` | Number of reusable NPU buffers. More buffers use more memory but provide more opportunity to overlap transfer and computation. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse.                                  |
-
 
 The buffer count is workload-dependent. Start with two to four buffers and tune
 it according to NPU memory and transfer bandwidth.
@@ -110,11 +102,7 @@ limitation does not apply when `SfaRemoteD2HConnector` performs P/D transfer.
 - MTP layers and optional SFA indexer caches participate in buffer reuse and
 memory accounting automatically.
 
-
-
 ## 3. Sparse KV Cache Offload for Decode
-
-
 
 ### How it works
 
@@ -137,8 +125,6 @@ or `MooncakeConnectorV1` for the Mooncake backend.
 - Tensor parallelism is supported; context and pipeline parallelism are not.
 - Model Runner V1 is required.
 - Install the compiler and OpenMP runtime required by the native LRU planner.
-
-
 
 ### Preparation
 
@@ -163,8 +149,6 @@ bash script/build_and_pack_run.sh
 bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
 export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
 ```
-
-
 
 #### Mooncake dependencies
 
@@ -276,7 +260,6 @@ Enable `dsa_pd_offload=true` on Prefill as well; see
 
 #### Parameters
 
-
 | Parameter              | Description                                                                                                                               |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `host_backend`         | Host KV allocation backend. Options: `memfabric` (default) and `mooncake`.                                                                |
@@ -284,7 +267,6 @@ Enable `dsa_pd_offload=true` on Prefill as well; see
 | `dram_size_per_dp_GB`  | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool.                                               |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production.                                                   |
 | `lru_max_threads`      | Per-Decode-Worker CPU LRU planner thread budget. Positive integer; default `8`.                                                           |
-
 
 `lru_max_threads` caps the CPU LRU planner per Decode Worker. The effective
 team is also limited by the current work rows and the process CPU affinity.
@@ -310,10 +292,6 @@ flowchart LR
     PNPU -->|"Remote D2H pull"| DHost
     DHost -->|"Top-k cache misses"| DNPU
 ```
-
-
-
-
 
 ### Prefill configuration
 

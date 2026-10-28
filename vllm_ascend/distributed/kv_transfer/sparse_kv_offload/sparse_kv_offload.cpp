@@ -511,9 +511,9 @@ std::unique_ptr<CurrentKvIndexCopyPayload> make_current_kv_index_copy_payload(
   TORCH_CHECK(dst_idx_buffer.numel() >= max_num_tokens, "dst_idx_buffer is too small");
   TORCH_CHECK(count_buffer.numel() >= 1, "count_buffer is empty");
 
-  return std::make_unique<CurrentKvIndexCopyPayload>(CurrentKvIndexCopyPayload{
-      slot_mapping, src_idx_buffer, dst_idx_buffer, count_buffer, num_actual_tokens, max_num_tokens, num_host_slots,
-      false});
+  return std::make_unique<CurrentKvIndexCopyPayload>(
+      CurrentKvIndexCopyPayload{slot_mapping, src_idx_buffer, dst_idx_buffer, count_buffer, num_actual_tokens,
+                                max_num_tokens, num_host_slots, false});
 }
 
 void build_current_kv_index_copy_descriptors(CurrentKvIndexCopyPayload* payload) noexcept {
@@ -550,9 +550,10 @@ void build_current_kv_index_copy_descriptors(CurrentKvIndexCopyPayload* payload)
   count[0] = num_copies;
 }
 
-int64_t compute_current_kv_index_copy_descriptors(
-    const at::Tensor& slot_mapping, int64_t num_actual_tokens, int64_t max_num_tokens, int64_t num_host_slots,
-    const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer, const at::Tensor& count_buffer) {
+int64_t compute_current_kv_index_copy_descriptors(const at::Tensor& slot_mapping, int64_t num_actual_tokens,
+                                                  int64_t max_num_tokens, int64_t num_host_slots,
+                                                  const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer,
+                                                  const at::Tensor& count_buffer) {
   auto payload = make_current_kv_index_copy_payload(slot_mapping, num_actual_tokens, max_num_tokens, num_host_slots,
                                                     src_idx_buffer, dst_idx_buffer, count_buffer);
   build_current_kv_index_copy_descriptors(payload.get());
@@ -571,8 +572,7 @@ std::mutex& current_kv_index_copy_graph_registry_mutex() {
 
 std::unordered_map<aclmdlRI, std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry>>&
 current_kv_index_copy_graph_registries() {
-  static auto* registries =
-      new std::unordered_map<aclmdlRI, std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry>>();
+  static auto* registries = new std::unordered_map<aclmdlRI, std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry>>();
   return *registries;
 }
 
@@ -607,8 +607,7 @@ CurrentKvIndexCopyPayload* retain_current_kv_index_copy_graph_payload(
       registries.erase(it);
     }
     TORCH_CHECK(register_ret == ACL_SUCCESS,
-                "failed to bind current KV index_copy payload registry to graph lifetime, error code: ",
-                register_ret);
+                "failed to bind current KV index_copy payload registry to graph lifetime, error code: ", register_ret);
   }
   it->second->payloads.push_back(std::move(payload));
   return raw_payload;
@@ -622,9 +621,10 @@ void current_kv_index_copy_descriptor_callback(void* args) noexcept {
   }
 }
 
-void enqueue_current_kv_index_copy_descriptors(
-    const at::Tensor& slot_mapping, int64_t num_actual_tokens, int64_t max_num_tokens, int64_t num_host_slots,
-    const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer, const at::Tensor& count_buffer) {
+void enqueue_current_kv_index_copy_descriptors(const at::Tensor& slot_mapping, int64_t num_actual_tokens,
+                                               int64_t max_num_tokens, int64_t num_host_slots,
+                                               const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer,
+                                               const at::Tensor& count_buffer) {
   auto payload = make_current_kv_index_copy_payload(slot_mapping, num_actual_tokens, max_num_tokens, num_host_slots,
                                                     src_idx_buffer, dst_idx_buffer, count_buffer);
   const auto stream = c10_npu::getCurrentNPUStream().stream();
@@ -647,8 +647,8 @@ void enqueue_current_kv_index_copy_descriptors(
   if (ret == ACL_SUCCESS && !graph_lifetime) {
     payload.release();
   }
-  TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc for current KV index_copy descriptors failed, error code: ",
-              ret);
+  TORCH_CHECK(ret == ACL_SUCCESS,
+              "aclrtLaunchHostFunc for current KV index_copy descriptors failed, error code: ", ret);
 }
 
 struct LruResidentCompactWithPlanPayload {
@@ -858,5 +858,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Build compact source/destination index_copy descriptors on CPU");
   m.def("enqueue_current_kv_index_copy_descriptors", &enqueue_current_kv_index_copy_descriptors,
         "Enqueue graph-safe current KV index_copy descriptor generation");
-
 }

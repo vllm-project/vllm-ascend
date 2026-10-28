@@ -226,8 +226,7 @@ class SFAPDRD2HConsumerWorker:
                 self.request_map[ext_id] = failed_req_id
                 self._rendezvous_failed_ext_ids.add(ext_id)
             logger.warning(
-                "SFAPD D rendezvous failed: tp=%s req=%s ext=%s main=%d indexer=%d "
-                "thread_serialized=%s",
+                "SFAPD D rendezvous failed: tp=%s req=%s ext=%s main=%d indexer=%d thread_serialized=%s",
                 self.tp_rank,
                 failed_req_id,
                 ext_id,
@@ -239,7 +238,6 @@ class SFAPDRD2HConsumerWorker:
             req_id = getattr(req, "req_id", None)
             if req_id is not None:
                 ext_id = get_external_request_id(req_id)
-                old_req_id = self.request_map.get(ext_id)
                 self.request_map[ext_id] = req_id
                 main_ids = list(getattr(req, "main_block_ids", []) or [])
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])

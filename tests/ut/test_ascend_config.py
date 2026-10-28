@@ -694,31 +694,35 @@ class TestSparseKVOffloadConfig(TestBase):
     def test_lru_max_threads_rejects_invalid_values(self):
         for enabled in (False, True):
             for value in (0, -1, True, False, "8", 8.0, 8.5, None):
-                with self.subTest(enabled=enabled, value=value, value_type=type(value).__name__):
-                    with self.assertRaisesRegex(
+                with (
+                    self.subTest(enabled=enabled, value=value, value_type=type(value).__name__),
+                    self.assertRaisesRegex(
                         ValueError,
                         r"sparse_kv_offload_config\.lru_max_threads must be a positive integer",
-                    ):
-                        SparseKVOffloadConfig.from_additional_config(
-                            SimpleNamespace(),
-                            {"enabled": enabled, "lru_max_threads": value},
-                        )
-
-    def test_use_fused_overlap_validation_precedes_lru_max_threads(self):
-        for enabled in (False, True):
-            with self.subTest(enabled=enabled):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    r"sparse_kv_offload_config\.use_fused_overlap must be a boolean",
+                    ),
                 ):
                     SparseKVOffloadConfig.from_additional_config(
                         SimpleNamespace(),
-                        {
-                            "enabled": enabled,
-                            "use_fused_overlap": "invalid",
-                            "lru_max_threads": 0,
-                        },
+                        {"enabled": enabled, "lru_max_threads": value},
                     )
+
+    def test_use_fused_overlap_validation_precedes_lru_max_threads(self):
+        for enabled in (False, True):
+            with (
+                self.subTest(enabled=enabled),
+                self.assertRaisesRegex(
+                    ValueError,
+                    r"sparse_kv_offload_config\.use_fused_overlap must be a boolean",
+                ),
+            ):
+                SparseKVOffloadConfig.from_additional_config(
+                    SimpleNamespace(),
+                    {
+                        "enabled": enabled,
+                        "use_fused_overlap": "invalid",
+                        "lru_max_threads": 0,
+                    },
+                )
 
     def test_sparse_kv_host_backend_defaults_to_memfabric(self):
         config = SparseKVOffloadConfig.from_additional_config(

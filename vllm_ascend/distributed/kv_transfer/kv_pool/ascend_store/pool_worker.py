@@ -8,11 +8,6 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 import numpy as np
-
-from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
-    discard_failed_load,
-    record_failed_load,
-)
 import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -74,6 +69,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
+)
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    record_failed_load,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -1319,7 +1317,9 @@ class KVPoolWorker:
                     block_gvas.append(0)
 
                 if new_keys:
-                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys), LAYERWISE_READ_LEASE_TTL_MS)
+                    new_gvas = self.m_store.batch_alloc(
+                        new_keys, [alloc_size] * len(new_keys), LAYERWISE_READ_LEASE_TTL_MS
+                    )
                     if any(gva <= 0 for gva in new_gvas):
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
@@ -1579,7 +1579,8 @@ class KVPoolWorker:
                         request.can_save = False
                         record_failed_load((request.req_id,))
                         logger.warning(
-                            "load_gvas: req=%s invalid_blocks=%d; canceling load (no save, no PD push); scheduler will fail the request",
+                            "load_gvas: req=%s invalid_blocks=%d; canceling load "
+                            "(no save, no PD push); scheduler will fail the request",
                             request.req_id,
                             len(cancelled_block_ids),
                         )
