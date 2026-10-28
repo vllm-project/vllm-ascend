@@ -90,6 +90,21 @@ class VocabParallelPlan:
     output_reduce_group: GroupCoordinator | None = None
 
 
+def _is_main_model_module() -> bool:
+    """Whether the module currently being constructed belongs to the main model.
+
+    vLLM constructs every draft model (DSpark/EAGLE/DFlash speculators, the
+    ``draft_model`` proposer, extract-hidden-states models) inside a
+    ``set_model_tag`` context whose tag differs from the default ``"backbone"``
+    used while the main model is built. The tag is the only reliable
+    main-vs-draft signal: the draft loading paths pass no distinguishing
+    module prefix.
+    """
+    from vllm.compilation.backends import model_tag
+
+    return model_tag == "backbone"
+
+
 def _resolve_vocab_parallel_plan(
     *,
     prefix: str,
@@ -141,7 +156,14 @@ def _resolve_vocab_parallel_plan(
             group.world_size,
         )
 
-    if is_token_embedding and embedding_tp_enable():
+    if is_token_embedding and embedding_tp_enable() and _is_main_model_module():
+        # Restrict the fine-grained plan to the main model's token embedding.
+        # Draft-model embeddings never join the paired exchange: drafts are fed
+        # inputs_embeds during propose replay (or looked up outside the paired
+        # exchange steps), so routing them FINE_GRAINED would desynchronize the
+        # cross-DP exchange group the first time any code path calls them and
+        # would shard their weights over a group whose collectives they never
+        # participate in.
         group = get_embed_tp_group()
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,

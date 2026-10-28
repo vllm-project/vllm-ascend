@@ -579,6 +579,62 @@ class TestVocabParallelPlan(unittest.TestCase):
             ):
                 _resolve_vocab_parallel_plan(prefix=prefix, disable_tp=False)
 
+    def test_resolve_vocab_parallel_plan_excludes_draft_models(self):
+        """Draft-model embeddings must not join the fine-grained exchange group."""
+        from contextlib import nullcontext
+
+        from vllm.compilation.backends import set_model_tag
+
+        def group(rank, world_size):
+            return MagicMock(rank_in_group=rank, world_size=world_size)
+
+        tp_group = group(1, 2)
+        embed_group = group(2, 4)
+        non_pcp_config = MagicMock()
+        non_pcp_config.parallel_config.prefill_context_parallel_size = 1
+
+        def resolve(prefix, tag=None):
+            tag_context = set_model_tag(tag) if tag is not None else nullcontext()
+            with (
+                tag_context,
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                    return_value=False,
+                ),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.embedding_tp_enable",
+                    return_value=True,
+                ),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable",
+                    return_value=False,
+                ),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.get_current_vllm_config",
+                    return_value=non_pcp_config,
+                ),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=tp_group),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_embed_tp_group", return_value=embed_group),
+            ):
+                return _resolve_vocab_parallel_plan(prefix=prefix, disable_tp=False)
+
+        # Main-model embeddings (with or without a "language_model" wrapper)
+        # keep the fine-grained plan with the exchange group attached.
+        for prefix in ("model.embed_tokens", "language_model.model.embed_tokens"):
+            with self.subTest(prefix=prefix):
+                plan = resolve(prefix)
+                self.assertIs(plan.mode, VocabParallelMode.FINE_GRAINED)
+                self.assertIs(plan.token_exchange_group, embed_group)
+
+        # Draft models are constructed inside a non-backbone model-tag context;
+        # their embeddings fall back to standard TP with no exchange group.
+        for tag in ("draft_model", "dspark_head", "eagle_head"):
+            with self.subTest(tag=tag):
+                plan = resolve("model.embed_tokens", tag=tag)
+                self.assertIs(plan.mode, VocabParallelMode.STANDARD)
+                self.assertIsNone(plan.token_exchange_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
+
 
 class TestAscendLogitsProcessor(unittest.TestCase):
     def setUp(self):
