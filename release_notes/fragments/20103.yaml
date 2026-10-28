@@ -1,0 +1,4 @@
+pr: 20103
+entries:
+  - category: bugfix
+    text: Fixed EngineCore crashes on multimodal requests when one of the custom Ascend schedulers (dyntra-lb, profiling-chunk, balance) is enabled, which still unpacked the pre-0.32 four-value encoder-input scheduling result.
