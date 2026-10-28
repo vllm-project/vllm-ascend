@@ -301,6 +301,10 @@ class MonitoredTorchTensor:
             # Raw storage access can write any element; publish everything.
             self._callback(slice(None))
             return attr
+        if isinstance(attr, torch.Tensor) and self._is_mirror_alias(attr):
+            # ``.T``/``.mT``/``.H``/``.real`` hand out a writable view of the
+            # mirror, so a write through one has to be published too.
+            self._callback(slice(None))
         if not callable(attr):
             return attr
 
