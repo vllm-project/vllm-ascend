@@ -214,8 +214,12 @@ class MonitoredNumPyArray:
     alias of the same memory: a write through a view, ``np.asarray``,
     ``np.put``, ``flat``/``data`` or an in-place method raises instead of
     reaching the mirror with no callback and leaving the device copy stale.
-    Raw pointers (``.ctypes``, ``torch.from_numpy``) stay escape hatches that
-    nothing should need.
+
+    What stays outside the tracker cannot be closed here: the raw pointer
+    (``.ctypes``) and a tensor built with ``torch.from_numpy`` over any of these
+    arrays, because torch ignores NumPy's writeable flag. The proxy is also not
+    an ``ndarray``, so arithmetic, comparison and the ``np.*`` helpers are not
+    forwarded; read through ``np.asarray(buf.np)`` when a real array is needed.
     """
 
     def __init__(self, array: np.ndarray, callback: Callable):
@@ -260,13 +264,17 @@ class MonitoredTorchTensor:
 
     ``__setitem__`` and the in-place methods (torch's trailing-underscore
     convention) are the writes the tracker can observe. In-place methods mark
-    the whole buffer, which is slower but never stale; ``.numpy()`` hands out a
-    read-only array and ``.data`` is refused so neither can write behind the
-    tracker's back.
+    the whole buffer, which is slower but never stale; delegated calls and
+    attributes that hand back a tensor over the mirror's storage (``to`` with
+    the same dtype, ``detach``, ``view``, ``T``, ``split``, ...) mark it too.
+    ``.numpy()`` returns a read-only array and ``.data`` is refused.
 
-    torch has no read-only views, so a write through a view (``t.cpu[0:2]``,
-    ``t.cpu.view(-1)``) still cannot be observed. Use ``.np`` or a
-    ``__setitem__`` on the mirror for writes; the in-repo readers only read.
+    torch has no read-only views, so two writes stay outside the tracker: one
+    through a view returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``), and one
+    through a tensor that ``torch.from_numpy`` built over ``.numpy()`` (torch
+    only warns about the writeable flag). Wrapping ``__getitem__`` would make
+    every read pay for a proxy, and the in-repo callers only read; write through
+    ``.np`` or ``__setitem__`` instead.
     """
 
     def __init__(self, tensor: torch.Tensor, callback: Callable):
