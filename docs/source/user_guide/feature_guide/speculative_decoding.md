@@ -7,7 +7,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
 1. **Proposer** (`vllm_ascend/worker/v2/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
-2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
+2. **Rejection Sampler** (`vllm_ascend/worker/v2/spec_decode/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
 
 The following speculative decoding methods are supported:
 

@@ -45,11 +45,9 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
-# NOTE: the former patch_rejection_sampler.py has been removed.
-# vllm_ascend/sample/rejection_sampler.py subclasses RejectionSampler and
-# defines its own forward, so the upstream vllm.v1.sample.rejection_sampler
-# helpers never run on Ascend and there is nothing left to rebind. That module
-# is MRv1-only, so MRv2 processes never import vllm_ascend.sample.
+# NOTE: the former patch_rejection_sampler.py has been removed together with
+# the MRv1-only vllm_ascend.sample package, so there is no rejection sampler
+# left to rebind on Ascend.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa

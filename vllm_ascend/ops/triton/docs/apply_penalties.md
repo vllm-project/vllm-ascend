@@ -17,7 +17,7 @@
   2. `apply_all_penalties_kernel` updates the logits.
      - Grid: `grid = (min(num_seqs, num_vectorcore), 1, 1)`; each program handles `ceil(num_seqs / num_programs)` consecutive sequences.
      - Per sequence: load the three scalar penalties once, then sweep the vocabulary in `BLOCK_SIZE = 2048` tiles. For each tile, apply the repetition scaling (`1/p` for positive logits, `p` otherwise), subtract `frequency_penalty * output_bin_counts`, subtract `presence_penalty * output_mask`, and store back in place.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by `AscendSampler.apply_penalties` (`vllm_ascend/sample/sampler.py`) and by the rejection sampler (`vllm_ascend/sample/rejection_sampler.py`); it runs in the sampling stage after the model forward and is therefore outside the ACL graph capture region. When Triton is unavailable (`HAS_TRITON` is false), `AscendSampler` falls back to the default vLLM implementation.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Reached through `apply_all_penalties` in this package (`vllm_ascend/ops/triton/penalty.py`) and exercised by the Triton kernel equivalence test; it runs in the sampling stage after the model forward and is therefore outside the ACL graph capture region.
 
 ## Parameters
 
@@ -33,7 +33,7 @@
 ## Constraints
 
 - `logits` must be 2-D `[num_seqs, vocab_size]`; `num_seqs` must match the first dimension of the two token tensors and the length of the three penalty tensors. The kernel reads the strides of every tensor, so non-contiguous `logits` is supported; `tokens` is made contiguous on the host side if needed.
-- Padding contract: any token id `>= vocab_size` is ignored. Callers must pad with `vocab_size` (not `-1`); `vllm_ascend/sample/penalties.py` converts `-1` to `vocab_size` before the call. Negative ids other than `-1` are not handled.
+- Padding contract: any token id `>= vocab_size` is ignored. Callers must pad with `vocab_size` (not `-1`); `apply_all_penalties` in `vllm_ascend/ops/triton/penalty.py` converts `-1` to `vocab_size` before the call. Negative ids other than `-1` are not handled.
 - `max_prompt_len` or `max_output_len` equal to 0 is supported: `get_token_bin_counts_and_mask_triton` returns an all-zero histogram without launching a kernel.
 - `num_seqs == 0` is **not** supported. The histogram helpers do return early, but `_apply_all_penalties_triton` still launches with `grid = (min(num_seqs, num_vectorcore), 1, 1)`, i.e. a zero-sized launch. Callers must skip the call for an empty batch; in serving the sampler is never invoked with zero sequences.
 - `repetition_penalties` must be `> 0`; the kernel divides by it for positive logits. vLLM validates this at the request level (`repetition_penalty > 0`).

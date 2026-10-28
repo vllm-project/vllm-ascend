@@ -14,13 +14,13 @@ from vllm_ascend.ops.triton.reject_sample import (
     rejection_random_sample_kernel,
     sample_recovered_tokens_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.sample.rejection_sampler import (
+from vllm_ascend.ops.triton.reject_sample_pytorch import (
     expand_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
     sample_recovered_tokens_pytorch,
 )
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.v2.sample.rejection_greedy import (
     rejection_greedy_sample_pytorch,
     rejection_greedy_sample_spec_len_1_pytorch,

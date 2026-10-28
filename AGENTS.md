@@ -88,7 +88,7 @@ When preparing or reviewing a PR, read the [PR testing requirements](docs/source
 
 ### Naming Conventions
 
-- **Classes**: `PascalCase` (e.g., `NPUModelRunner`, `AscendSampler`, `ACLGraphManager`)
+- **Classes**: `PascalCase` (e.g., `NPUModelRunner`, `ACLGraphManager`)
 - **Functions/Methods**: `snake_case` (e.g., `forward_pass`, `compute_attention`)
 - **Constants**: `ALL_UPPER_CASE`
 - **Variables**: `snake_case` (e.g., `token_ids`, `sequence_lengths`)
@@ -138,7 +138,6 @@ Choose the integration approach that fits the change:
 
 2. **Inheritance**:
     - `NPUModelRunner(GPUModelRunner)` - Extend vLLM model runner with NPU-specific behavior
-    - `AscendSampler` - Extend vLLM sampler with NPU-specific operations
     - Add NPU-specific components via composition (e.g., `AclGraphManager`)
     - Custom Operators - NPU-specific custom operators (e.g., `AscendRMSNorm`)
 

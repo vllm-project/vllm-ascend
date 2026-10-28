@@ -100,11 +100,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.15.0rc1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:record_function_or_nullcontext
 
-# ===== MTP / NPUModelRunner =====
-- symbol: vllm_ascend.sample.rejection_sampler:rejection_sample
-  min_version: "0.9.1"
-  handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:capture_rejection_output
-
 # ===== Request Lifecycle =====
 - symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
   min_version: "0.9.1"
