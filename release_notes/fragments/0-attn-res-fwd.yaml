@@ -1,0 +1,15 @@
+# Rename to the assigned PR number after opening the draft PR.
+pr: 0
+entries:
+  - category: performance
+    hardware: [A2, A3]
+    text: >-
+      Accelerated small-batch AttnResFwd with residual-row parallel scoring,
+      full-hidden output ownership, one readiness barrier, UB padding, and
+      double-buffered output reads. Larger rows retain the H-split fallback.
+  - category: bugfix
+    hardware: [A2, A3]
+    text: >-
+      Fixed broadcast scratch sizing and reduction tail initialization, and
+      rejected unsafe metadata, non-finite normalization epsilon, and writable
+      bank storage aliases before launching AttnResFwd.

@@ -10,11 +10,12 @@
 
 /*!
  * \file attn_res_fwd_apt.cpp
- * \brief Shared AttnResFwd entry for A3 (arch22) and A5 (arch35).
+ * \brief Shared AttnResFwd entry for A2/A3 (arch22) and A5 (arch35).
  */
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
 #include "arch22/attn_res_fwd_reload.h"
 #include "arch22/attn_res_fwd_resident.h"
+#include "arch22/attn_res_fwd_cooperative.h"
 #else
 #include "arch35/attn_res_fwd_reload.h"
 #include "arch35/attn_res_fwd_resident.h"
@@ -33,13 +34,25 @@ extern "C" __global__ __aicore__ void attn_res_fwd(
     REGISTER_TILING_DEFAULT(AttnResFwdTilingData);
     GET_TILING_DATA(tilingData, tilingGM);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    (void)workspaceGM; // 无用户 FP32-v Workspace；仅系统预留
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    KERNEL_TASK_TYPE(TILING_KEY_BF16_COOPERATIVE, KERNEL_TYPE_MIX_AIV_1_0);
+#else
+    (void)workspaceGM;
+#endif
 
     TPipe pipe;
     AttnResFwdInitParams initParams{prefixSum, blockResidual, projWeight, normWeight, hiddenStates, nullptr, nullptr,
         tilingData.fusedAdd != 0 ? addend : nullptr, prefixOut,
         tilingData.outputNormEps > 0.0f ? outputNorm : nullptr, materialized};
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    if (TILING_KEY_IS(TILING_KEY_BF16_COOPERATIVE)) {
+        AttnResFwdCooperative<bfloat16_t> op(&pipe, &tilingData);
+        op.Init(initParams, GetUserWorkspace(workspaceGM));
+        op.Process();
+        return;
+    }
+#endif
     if (TILING_KEY_IS(TILING_KEY_BF16_RELOAD)) {
         AttnResFwdReload<bfloat16_t, true> op(&pipe, &tilingData);
         op.Init(initParams);

@@ -4,8 +4,9 @@
 
 `AttnResFwd` 是 Kimi K3 的注意力残差融合算子。单个 Torch 入口
 `torch.ops._C_ascend.attn_res_fwd` 将可选的 BF16 加法、残差 bank 混合、
-可选的输出 RMSNorm，以及 bank 写回放在一次调用中。当前算子配置面向
-Ascend 950（A5）推理；A3 运行行为尚未验证。
+可选的输出 RMSNorm，以及 bank 写回放在一次调用中。源码注册覆盖
+A2、A3 和 A5；本次小 batch 协作路径仅接入 A2/A3。已在 Ascend910B3 上完成
+CANN 9.3.0 编译和小 shape 精度、性能验证；A3 及大 H 分段路径仍需硬件验证。
 
 令 `p` 为 `prefix_sum`（有 `addend` 时先做 BF16 加法），`v_i` 为
 `block_residual` 中前 `num_valid_blocks` 行，并令最后一行 `v_N=p`。
@@ -31,8 +32,8 @@ output, raw_prefix, materialized = torch.ops._C_ascend.attn_res_fwd(
 | `addend` | `None` 或 `[T,H]`，BF16，连续 | 可选的前层输出；加法结果以 BF16 供后续计算。 |
 | `block_residual` | `[T,S,H]`，BF16；每行连续，token 间可有 stride | 残差 bank；仅前 `num_valid_blocks` 行参与混合。 |
 | `proj_weight`、`norm_weight` | 分别为 `[1,H]`、`[H]`，BF16，连续 | 混合分数的投影和 RMSNorm 权重。 |
-| `norm_eps`、`num_valid_blocks` | `norm_eps > 0`；`0 ≤ num_valid_blocks ≤ S` | 混合归一化参数和有效 bank 行数。 |
-| `output_norm_weight`、`output_norm_eps` | `None` 或 `[H]`，BF16，连续；传入权重时 `output_norm_eps > 0` | 可选的输出 RMSNorm。 |
+| `norm_eps`、`num_valid_blocks` | `norm_eps` 为 FP32 可表示的有限正数；`0 ≤ num_valid_blocks ≤ S` | 混合归一化参数和有效 bank 行数。 |
+| `output_norm_weight`、`output_norm_eps` | `None` 或 `[H]`，BF16，连续；传入权重时 epsilon 为 FP32 可表示的有限正数 | 可选的输出 RMSNorm。 |
 | `block_write_idx` | `-1` 或 `[num_valid_blocks,S)` 中的行号 | 将 `raw_prefix` 写入尚未参与本次混合的 bank 行；`-1` 表示不写回。 |
 | `return_materialized` | `bool` | 为真时单独保留归一化前的混合结果。 |
 | `mix` | `bool` | 为假时跳过 bank 混合，用于前层或只做加法的路径。 |
@@ -43,14 +44,92 @@ output, raw_prefix, materialized = torch.ops._C_ascend.attn_res_fwd(
 复用输入 `prefix_sum`；`return_materialized=False` 时
 `materialized` 复用 `output`。写回只修改指定的 bank 行，不修改
 `prefix_sum` 或 `addend`。`T=0` 可走空输出路径。
+启用 bank 写回时，`block_residual` 不得与其他只读输入共享存储；Torch 入口会在
+提交 kernel 前拒绝这类别名。关闭写回时仍允许只读输入共享 bank 存储。
+底层 ACLNN 调用方同样需要保证写回 bank 与其他输入不重叠。
 
 ## 实现与验证
 
-Host tiling 根据 H、有效行数和 UB 容量选择 RESIDENT 或 RELOAD；
-`optimize_prefill` 仅在满足缓存条件时切换对应的 PREFILL tiling key，
-不增加公开算子入口。模型中的层内和末层调用均使用同一个 Torch 入口。
+A2/A3 小 batch 优先使用行并行路径
+`AttnResFwdCooperative::ProcessRowParallel()`。设 token 数为 T、
+有效历史行数为 N、候选行数 R=N+1、可用 AIV 核数为 C：
+
+1. 打分任务按 `(token, candidate)` 分配，任务数为 T*R，启动
+   `min(C,T*R)` 个核；任务多于核数时按核号循环领取。每个任务读取完整 H，
+   计算一行的 RMSNorm 和投影点积，向独立的 32B workspace 槽写一个分数。
+2. 所有核执行一次 `SyncAll<true>()`，保证各候选分数和融合 prefix 已写完。
+3. 每个 token 的 prefix 打分核兼任输出核，读取该 token 的 R 个分数，
+   做 softmax，遍历全部候选行并生成完整 H 的加权输出。
+4. 混合结果先舍入 BF16。启用输出 RMSNorm 时，由该输出核对完整 H 计算
+   平方和、invRms 和 gamma 乘法，然后写出结果，不需要再次核间同步。
+
+完整行快路径不切 H，也不使用第二个 kernel。一次就绪同步仍是全核同步；没有改成跨核
+轮询或异步通知。每核只处理一个打分任务时，输出核复用本核 UB 中的原始
+BF16 prefix；循环领取多个任务时从 GM 读取，避免复用已被覆盖的数据。
+打分任务优先处理 prefix，但写入分数仍保持“历史行在前、prefix 在后”的顺序。
+
+完整 H 输出使用两份 BF16 输入 buffer，计算当前残差行时预取下一行；队列深度仍为 1。
+Host 将新增输入 buffer 计入 UB 预算，H 分段路径仍使用单缓冲。
+对齐后的 FP32 行大小为 512B 整数倍时，在 `rowBuf_` 末尾预留 256B，
+错开后续 buffer 地址以减少 UB bank/group 冲突；padding 不参与计算。
+输出循环外一次设置 Counter mask，Cast 和累加使用已有的无重复 mask 设置接口，
+保留必要的 Vector 依赖屏障，退出循环后恢复 mask。
+BF16 Copy 使用多 repeat 批量调用，归约只初始化未对齐的尾块。
+
+
+在 40 个 AIV、N=8、H=7168 下，T=1 启动 9 核，T=4 启动 36 核；
+打分结束后分别由 1 核、4 核完成输出。用户 workspace 分别为 288B、1152B，
+仅保存分数，不含系统空间。Host 日志显示 `rowParallel=1`、
+`scoreSplits=1`、`outputSplits=1`、`residentGroup=0`。
+这项策略以减少同步为目的，是否降低延迟以目标硬件实测为准。
+
+协作路径要求 T 不超过 C 的四分之一、H 至少为 512、R 在 2 到 128 之间。
+只有完整 H 的队列、FP32 工作区、元数据和安全余量能放入 UB，才选择上述路径。
+不满足协作选择条件时使用原有按 token 分核的 RESIDENT/RELOAD。
+完整行缓冲超过 UB 时保留 H 分段回退：先汇总各段平方和得到整行 invRms，
+再汇总各段分数做 softmax，输出按 H 分段；输出 RMSNorm 需要再汇总平方和。
+分段任务超过核数时按核号步进循环处理。旧 UB 驻留核组实现已删除。
+H=7168 不是固定分界，分段数由 UB 预算选择；超过所有受支持分段预算时明确报错。
+
+Host 只在 A2/A3 上选择协作 tiling key，A5 保留原来的 `arch35` 路径。
+其他场景保留原来的按 token 分核路径，Host 根据 H、有效行数和 UB 容量选择
+RESIDENT 或 RELOAD；prefill 缓存策略和公开 Torch 入口不变。
+协作 kernel 只使用 AIV，以 `MIX_AIV_1_0` 类型和 batch 调度模式启用硬件同步。
+所有启动核都参加同样的同步，不依赖输出核数量。
+
+A2/A3 的原 RESIDENT/RELOAD 路径保留按 token 分核，并修正了标量 Brcb
+临时区不足 256B、非对齐 H 归约尾部未初始化的问题。Host 也禁止 bank 写回
+槽覆盖有效历史行，与 Torch 入口的约束一致。
+Host 还会在整数收窄前检查 shape、候选行数、stride 和写槽范围，拒绝会导致
+`N+1`、对齐或 buffer 字节长度溢出的元数据；平台信息缺失和属性指针缺失时返回失败。
+投影必须严格为 `[1,H]`，epsilon 必须为 FP32 可表示的有限值。
+
 
 单卡精度用例位于
 `tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py`，
 使用独立 CPU 参考值覆盖 Kimi K3 的 H=7168、decode/prefill、
 可选加法、输出归一化和写回。该用例不代表整网 TP/EP/DSpark 吞吐验收。
+协作路径的补充用例位于同目录的 `test_attn_res_fwd_cooperative.py`，
+覆盖小 batch、非对齐 H、带 token stride 的 bank、独立输出归一化 epsilon
+以及输出别名，并补充大 batch 原路径回归用例。无需 NPU 的检查位于
+`tests/ut/ops/test_attn_res_fwd_parallel_plan.py`，覆盖 Host 任务规划，以及通过
+CPU API 替身直接运行生产 kernel 的分核、地址和数值逻辑。替身将搬运和流水
+视为同步操作，不模拟真实硬件归约指令的加法树，也不代替 CANN 编译和上板验证。
+
+
+### Ascend910B3 性能对照
+
+同一卡、相同 BF16 输入，两版均带 `-g`；Add 和输出 RMSNorm 开启。
+原始计算代码使用提交 `86add7adfd1194c225fd8880699d5be7a248c3ce`，
+仅增加一行 ascend910b 平台注册。四轮交换顺序，每组预热 30 次、采集 100 次，
+每种 shape/版本共 400 次 kernel 采样，1600 次测量输出逐次参考校验通过。
+
+| Shape `[T,N,H]` | 原始版均值（μs） | 优化版均值（μs） | 延迟降低 |
+| --- | --- | --- | --- |
+| `[1,8,7168]` | 18.495028 | 9.055510 | 51.04% |
+| `[4,8,7168]` | 18.965053 | 13.692963 | 27.80% |
+
+本表仅表示目标 kernel 耗时，不代表整网吞吐。性能采集后的检视修复集中于 Host
+元数据校验和 Torch 别名检查，A2/A3 计算 kernel 源码保持不变。
+小 shape NPU 精度覆盖原有路径、非对齐 H 和输出别名；大 H 仅有 CPU 协作控制流回归，
+不能据此认定 H 分段的异步硬件行为已通过验证。
