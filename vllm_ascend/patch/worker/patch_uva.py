@@ -69,15 +69,14 @@ class _DirtyRows:
     mask, so the per-write cost stays in NumPy instead of Python.
     """
 
-    __slots__ = ("_size", "_prefix", "_count", "_mask")
+    __slots__ = ("_size", "_prefix", "_mask")
 
     def __init__(self, size: int) -> None:
         self._size = size
-        # Rows in [0, _prefix) are known to be dirty. _count may over-count
-        # (a row can be marked twice), but it never under-counts, which is all
-        # the "prefix is fully covered" proof needs.
+        # Rows in [0, _prefix) are known to be dirty. The prefix only grows
+        # through writes that cover it from row 0, so no per-row bookkeeping
+        # is needed to prove the coverage.
         self._prefix = 0
-        self._count = 0
         self._mask: np.ndarray | None = None
 
     def mark(self, key) -> None:
@@ -106,7 +105,6 @@ class _DirtyRows:
                 return
             if step == 1 and start <= self._prefix:
                 # Extends (or stays inside) the dirty prefix: O(1).
-                self._count += stop - start
                 if stop > self._prefix:
                     self._prefix = stop
                 return
@@ -120,16 +118,13 @@ class _DirtyRows:
                 raise IndexError(f"row index {rows} out of [0, {self._size})")
             if index == self._prefix:
                 self._prefix += 1
-                self._count += 1
-            elif index < self._prefix:
-                self._count += 1
-            else:
+            elif index > self._prefix:
+                # A row below the prefix is already covered by it.
                 self._mark_rows(np.array([index], dtype=np.intp))
             return
         self._mark_rows(rows if isinstance(rows, np.ndarray) else np.asarray(rows))
 
     def _mark_whole(self) -> None:
-        self._count += self._size
         self._prefix = self._size
 
     def _mark_rows(self, rows: np.ndarray) -> None:
@@ -142,7 +137,6 @@ class _DirtyRows:
         runs: list[tuple[int, int]] = []
         covered = 0
         if self._prefix:
-            # _count >= _prefix, so every row below _prefix was marked.
             runs.append((0, self._prefix))
             covered = self._prefix
         if self._mask is not None:
@@ -154,7 +148,6 @@ class _DirtyRows:
                 for run in np.split(index, breaks):
                     runs.append((int(run[0]), int(run[-1]) + 1))
         self._prefix = 0
-        self._count = 0
         return runs
 
 
@@ -245,9 +238,6 @@ class UvaBufferWrapper:
             self._cpu_view = MonitoredTorchTensor(self._cpu, self._dirty.mark)
             self._np_view = MonitoredNumPyArray(self._np, self._dirty.mark)
 
-    def _mark_cpu_modified(self, key) -> None:
-        self._dirty.mark(key)
-
     @property
     def cpu(self):
         return self._cpu_view
@@ -260,14 +250,11 @@ class UvaBufferWrapper:
         if self._use_real_uva:
             return
         for start, stop in self._dirty.take():
-            src = self._cpu[start:stop]
-            dst = self._uva[start:stop]
             # A slice of the pinned host buffer is still pinned, so the copy
             # stays asynchronous without an intermediate staged tensor.
-            if src.dtype == torch.uint64:
-                dst.view(torch.int64).copy_(src.view(torch.int64), non_blocking=True)
-            else:
-                dst.copy_(src, non_blocking=True)
+            _int64_storage(self._uva[start:stop]).copy_(
+                _int64_storage(self._cpu[start:stop]), non_blocking=True
+            )
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         """Get the device data of the buffer.
