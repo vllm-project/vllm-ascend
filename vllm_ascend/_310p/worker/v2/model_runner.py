@@ -81,7 +81,10 @@ def _post_update_cpu(
         total_len = int(req_states.total_len.np[req_idx])
         if update_tokens and count > 0:
             tokens = sampled_cpu[batch_idx, :count].to(dtype=req_states.all_token_ids.cpu.dtype)
-            req_states.all_token_ids.cpu[req_idx, total_len : total_len + count].copy_(tokens)
+            # Assign through the proxy: a write into the view returned by
+            # ``.cpu[row, start:stop]`` never reaches the dirty tracker, so the
+            # decoded tokens would not be published to ``.gpu``.
+            req_states.all_token_ids.cpu[req_idx, total_len : total_len + count] = tokens
             req_states.last_sampled_tokens_cpu[req_idx, 0] = tokens[-1]
             req_states.total_len.stage_write_elem(req_idx, total_len + count)
         if not update_computed:
