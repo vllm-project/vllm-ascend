@@ -201,6 +201,44 @@ def test_empty_negative_step_slice_marks_nothing():
     assert dirty.take() == []
 
 
+def test_zero_dimensional_integer_key_marks_the_row():
+    # ``arr[np.array(3)] = v`` is a scalar index, not a row list.
+    dirty = _DirtyRows(8)
+
+    dirty.mark(np.array(3))
+
+    assert dirty.take() == [(3, 4)]
+
+
+def test_two_dimensional_integer_key_marks_every_listed_row():
+    # ``arr[pairs] = v`` writes elements, but every row it names is dirty.
+    dirty = _DirtyRows(8)
+
+    dirty.mark(np.array([[0, 1], [1, 5]]))
+
+    assert dirty.take() == [(0, 2), (5, 6)]
+
+
+def test_whole_buffer_write_clears_the_pending_mask():
+    dirty = _DirtyRows(8)
+
+    dirty.mark(5)
+    dirty.mark(slice(None))
+
+    assert dirty.take() == [(0, 8)]
+    assert dirty._mask_pending is False
+
+
+def test_single_row_write_below_the_prefix_allocates_no_mask():
+    dirty = _DirtyRows(8)
+
+    dirty.mark(slice(0, 4))
+    dirty.mark(2)
+
+    assert dirty._mask is None
+    assert dirty.take() == [(0, 4)]
+
+
 def test_numpy_write_reaches_the_device_shadow():
     buf = _make_uva_buffer(8)
 
@@ -282,6 +320,42 @@ def test_failed_copy_leaves_the_remaining_rows_dirty():
 
     assert buf._uva[1].eq(3).all()
     assert buf._uva[5].eq(9).all()
+
+
+def test_failed_prefix_copy_leaves_the_prefix_dirty():
+    buf = _make_uva_buffer(8)
+    buf.np[0:3] = 4
+
+    shadow = buf._uva
+    buf._uva = _FailingDevice(shadow, fail_on=1)
+    with pytest.raises(RuntimeError):
+        buf.uva(8)
+
+    buf._uva = shadow
+    buf.uva(8)
+
+    assert buf._uva[0:3].eq(4).all()
+
+
+def test_sync_refreshes_rows_past_the_requested_prefix():
+    # ``uva(n)`` slices what the caller sees; it does not clip the sync.
+    buf = _make_uva_buffer(8)
+    buf.np[0:5] = 9
+
+    buf.uva(2)
+
+    assert buf._uva[4].eq(9).all()
+
+
+def test_uint64_scattered_write_reaches_the_device_shadow():
+    buf = _make_uva_buffer(8, cols=1, dtype=torch.uint64)
+
+    buf.np[6] = np.array([2**63 + 1], dtype=np.uint64)
+    buf.np[1] = np.array([7], dtype=np.uint64)
+    buf.uva(8)
+
+    assert buf._uva[1].item() == 7
+    assert buf._uva[6].item() == 2**63 + 1
 
 
 def test_empty_index_list_marks_nothing():
