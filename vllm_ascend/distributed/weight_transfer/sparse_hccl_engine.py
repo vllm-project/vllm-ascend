@@ -95,6 +95,7 @@ class SparseHCCLTrainerInitInfo(SparseNCCLTrainerInitInfo):
 
 
 class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
+    _stateless_init_process_group = staticmethod(hccl_common.stateless_init_process_group)
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = SparseHCCLWeightTransferUpdateInfo
     model_update_group: "PyHcclCommunicator | None"
