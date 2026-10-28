@@ -66,9 +66,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     SendReqInfo,
     SendTask,
     UniformTypeKVCacheSpecs,
+    _tensor_block_stride,
+    build_hook_layer_aliases,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    order_layer_components,
+    select_pcp_sender_rank,
     string_to_int64_hash,
     zmq_ctx,
 )
@@ -457,6 +461,31 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                         expected = torch.zeros_like(source.view(torch.uint8))
                         expected[[2, 3, 5]] = source.view(torch.uint8)[[0, 1, 4]]
                         self.assertTrue(torch.equal(destination.view(torch.uint8), expected))
+
+    def test_padded_page_stride_splits_runs_into_blocks(self):
+        layer_name = "model.layers.0.self_attn.compressor.state_cache"
+        self.thread.kv_cache_specs = [MagicMock(block_size=16)]
+        req_meta = self.req_meta_base
+        req_meta.local_block_ids = [[5, 6]]
+        req_meta.remote_block_ids = [[10, 11]]
+        send_task = SendTask(layer_name=layer_name, layer_names=[layer_name])
+        for stride, expected_src, expected_dst, expected_length in (
+            (32, [1000 + 5 * 32, 1000 + 6 * 32], [4000 + 10 * 32, 4000 + 11 * 32], [16, 16]),
+            (16, [1000 + 5 * 16], [4000 + 10 * 16], [32]),
+        ):
+            with self.subTest(stride=stride):
+                self.thread.layer_metadata = {
+                    layer_name: _make_layer_metadata(kv_caches_base_addr=[1000], block_len=[16], block_stride=[stride]),
+                }
+                req_meta.remote_layer_metadata = {
+                    layer_name: _make_layer_metadata(kv_caches_base_addr=[4000], block_len=[16], block_stride=[stride]),
+                }
+
+                src, dst, length = self.thread.get_transfer_meta(send_task, "req", req_meta, layer_name, 0)
+
+                self.assertEqual(src, expected_src)
+                self.assertEqual(dst, expected_dst)
+                self.assertEqual(length, expected_length)
 
     def test_quantized_main_staging_buffer_not_used_for_indexer(self):
         main_name = "model.layers.0.self_attn.attn"
@@ -1391,6 +1420,198 @@ def test_mooncake_save_records_fallback_event_without_early_hook():
     assert queued_send_task.wait_event is fallback_event
 
 
+def _make_worker_for_dsv4_swa_only_layer():
+    worker, connector_metadata = _make_worker_for_cache_write_event_test()
+    # A DeepSeek-V4 compress_ratio <= 1 layer owns only its SWA cache, while
+    # the attention hooks still report the ``.attn`` module name.
+    swa_cache = "model.layers.0.self_attn.swa_cache"
+    mtp_swa_cache = "mtp.0.self_attn.swa_cache"
+    worker.total_layers = 2
+    worker.index_to_name = {0: [swa_cache], 1: [mtp_swa_cache]}
+    worker.layer_metadata = {
+        swa_cache: _make_layer_metadata(tensor_group_idx=[0]),
+        mtp_swa_cache: _make_layer_metadata(tensor_group_idx=[0]),
+    }
+    worker._cache_write_events = [None, None]
+    worker.hook_layer_aliases = build_hook_layer_aliases(worker.index_to_name, worker.layer_metadata)
+    return worker, connector_metadata
+
+
+def test_mooncake_hooks_resolve_cacheless_attention_name_to_layer_cache():
+    worker, connector_metadata = _make_worker_for_dsv4_swa_only_layer()
+
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.Event",
+        side_effect=lambda: MagicMock(),
+    ):
+        worker.on_kv_cache_written("model.layers.0.self_attn.attn")
+        cache_write_event = worker._cache_write_events[0]
+        worker.save_kv_layer("model.layers.0.self_attn.attn", [], MagicMock(), connector_metadata)
+        task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+        assert task.wait_event is cache_write_event
+        assert task.layer_name == "model.layers.0.self_attn.swa_cache"
+        assert task.layer_names == ["model.layers.0.self_attn.swa_cache"]
+
+        # The MTP module index is 0, so it must resolve through the MTP slot
+        # rather than through its own module index.
+        worker.on_kv_cache_written("mtp.0.self_attn.attn")
+        worker.save_kv_layer("mtp.0.self_attn.attn", [], MagicMock(), connector_metadata)
+        task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+        assert task.layer_idx == 1
+        assert task.layer_name == "mtp.0.self_attn.swa_cache"
+    assert worker.current_layer == 2
+
+
+def test_mooncake_hooks_reject_attention_name_from_another_layer():
+    worker, connector_metadata = _make_worker_for_dsv4_swa_only_layer()
+
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "does not belong to physical layer 0"):
+        worker.on_kv_cache_written("model.layers.1.self_attn.attn")
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "does not belong to physical layer 0"):
+        worker.save_kv_layer("mtp.0.self_attn.attn", [], MagicMock(), connector_metadata)
+    # A second MTP module whose cache was never registered has no alias.
+    worker.current_layer = 1
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "does not belong to physical layer 1"):
+        worker.on_kv_cache_written("mtp.1.self_attn.attn")
+    worker.kv_send_layer_thread.send_queue.put.assert_not_called()
+
+
+def test_build_hook_layer_aliases_only_maps_cacheless_attention_modules():
+    index_to_name = {
+        0: ["model.layers.0.self_attn.swa_cache"],
+        1: ["model.layers.1.self_attn.attn", "model.layers.1.self_attn.swa_cache"],
+        2: ["mtp.0.self_attn.swa_cache"],
+    }
+    kv_cache_names = [name for names in index_to_name.values() for name in names]
+
+    assert build_hook_layer_aliases(index_to_name, kv_cache_names) == {
+        "model.layers.0.self_attn.attn": 0,
+        "mtp.0.self_attn.attn": 2,
+    }
+
+
+def test_order_layer_components_puts_dsv4_main_cache_first():
+    prefix = "model.layers.2.self_attn"
+    registered = [
+        f"{prefix}.swa_cache",
+        f"{prefix}.compressor.state_cache",
+        f"{prefix}.indexer.compressor.state_cache",
+        f"{prefix}.attn",
+        f"{prefix}.indexer.k_cache",
+    ]
+
+    assert order_layer_components(registered) == [
+        f"{prefix}.attn",
+        f"{prefix}.swa_cache",
+        f"{prefix}.compressor.state_cache",
+        f"{prefix}.indexer.k_cache",
+        f"{prefix}.indexer.compressor.state_cache",
+    ]
+
+
+def test_tensor_block_stride_follows_runtime_layout():
+    # A split K or V tensor advances by its own content, not by the layer page.
+    split_half = torch.empty(4, 8, dtype=torch.bfloat16)
+    assert _tensor_block_stride(split_half, block_len=16) == 16
+    # A padded page advances past the view's content.
+    padded = torch.empty(4, 16, dtype=torch.bfloat16)[:, :8]
+    assert _tensor_block_stride(padded, block_len=16) == 32
+
+
+def test_save_sends_request_when_only_a_secondary_component_has_blocks():
+    worker, _ = _make_worker_for_cache_write_event_test()
+    main_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    worker.index_to_name = {0: [main_name, swa_name]}
+    worker.layer_metadata = {
+        main_name: _make_layer_metadata(tensor_group_idx=[0]),
+        swa_name: _make_layer_metadata(tensor_group_idx=[1]),
+    }
+    worker.kv_cache_specs = [MagicMock(), MagicMock()]
+    metadata = MooncakeLayerwiseConnectorMetadata()
+    metadata.requests["swa_only"] = SimpleNamespace(local_block_ids=[[], [7]])
+    metadata.requests["nothing"] = SimpleNamespace(local_block_ids=[[], []])
+
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.Event",
+        side_effect=lambda: MagicMock(),
+    ):
+        worker.save_kv_layer(main_name, [], MagicMock(), metadata)
+
+    task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+    assert set(task.send_request) == {"swa_only"}
+    assert task.layer_names == [main_name, swa_name]
+    worker._mark_layer_reuse_pending.assert_called_once_with(0)
+
+
+def test_sliding_window_floor_keeps_the_window_plus_one_block():
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.group_sliding_window = [None, 128]
+    worker.block_size = [128, 128]
+
+    assert worker.sliding_window_first_live_block(1024, 0) == 0
+    assert worker.sliding_window_first_live_block(100, 1) == 0
+    assert worker.sliding_window_first_live_block(1000, 1) == 6
+    assert worker._clamp_to_sliding_window(2, 1000, 1) == 6
+    assert worker._clamp_to_sliding_window(7, 1000, 1) == 7
+
+
+def _make_worker_for_split_metadata(pcp_size, pcp_rank):
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.tp_size, worker.tp_rank = 1, 0
+    worker.pcp_size, worker.pcp_rank = pcp_size, pcp_rank
+    worker.dcp_size, worker.dcp_rank = 1, 0
+    worker.pd_head_ratio = 1
+    worker.use_mla = True
+    worker.total_num_kv_heads = 1
+    worker.block_size = [16]
+    worker.group_sliding_window = [None]
+    return worker
+
+
+def _make_split_req_meta():
+    return SimpleNamespace(
+        remote_pcp_size=1,
+        remote_dcp_size=1,
+        remote_tp_size=1,
+        remote_host="decode",
+        remote_port=30100,
+        remote_cache_tokens=0,
+        local_transed_tokens=0,
+        local_computed_tokens=64,
+        prompt_len=64,
+        chunk_finish=True,
+        local_block_ids=[[10, 11, 12, 13]],
+        remote_block_ids=[[20, 21, 22, 23]],
+    )
+
+
+def test_select_pcp_sender_rank_is_deterministic_and_spread():
+    assert select_pcp_sender_rank("req", 1) == 0
+    ranks = [select_pcp_sender_rank(f"req-{index}", 4) for index in range(64)]
+    assert ranks == [select_pcp_sender_rank(f"req-{index}", 4) for index in range(64)]
+    assert set(ranks) == {0, 1, 2, 3}
+
+
+def test_pcp_replicas_send_through_one_rank_as_if_pcp_were_off():
+    # Model Runner V2 PCP replicates KV, so every rank lists all four blocks.
+    expected = _make_worker_for_split_metadata(pcp_size=1, pcp_rank=0)._get_kv_split_metadata(
+        _make_split_req_meta(), 0, "req", 0
+    )
+    assert expected == {
+        ("decode", 30100): {
+            "local_block_ids": [10, 11, 12, 13],
+            "remote_block_ids": [20, 21, 22, 23],
+            "trans_count": 1,
+        }
+    }
+    sender = select_pcp_sender_rank("req", 4)
+    for pcp_rank in range(4):
+        worker = _make_worker_for_split_metadata(pcp_size=4, pcp_rank=pcp_rank)
+        mappings = worker._get_kv_split_metadata(_make_split_req_meta(), 0, "req", 0)
+        assert mappings == (expected if pcp_rank == sender else {})
+
+
 def test_sparse_sfa_c8_save_skips_legacy_quantization_and_preserves_reuse_gate():
     worker, metadata = _make_worker_for_cache_write_event_test()
     worker.sparse_sfa_c8_layers = {"layer0"}
@@ -1646,6 +1867,15 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertIsNone(worker.kv_send_layer_thread)
         self.assertIsNotNone(worker.kv_recv_layer_thread)
 
+    def test_init_accepts_quant_config_without_kv_quant_flags(self):
+        # deepseek_v4_fp8 and other non-ModelSlim configs define neither flag.
+        self.vllm_config.quant_config = SimpleNamespace()
+
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, _make_mock_kv_cache_config(), self.engine_id)
+
+        self.assertFalse(worker.enable_kv_quant)
+        self.assertFalse(worker.enable_c8_quant)
+
     def test_register_kv_caches_mla_case(self):
         mla_cache1 = MagicMock()
         mla_cache1.size.return_value = (10, 16, 1, 16)
@@ -1830,7 +2060,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
         register_buffer.assert_not_called()
 
-    def test_register_kv_caches_rejects_components_in_different_groups(self):
+    def test_register_kv_caches_keeps_each_component_in_its_own_group(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
         main_group = MagicMock()
@@ -1860,8 +2090,11 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         }
         worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
 
-        with self.assertRaisesRegex(AssertionError, "must share one KV cache group"):
-            worker.register_kv_caches(kv_caches)
+        worker.register_kv_caches(kv_caches)
+
+        self.assertEqual(worker.index_to_name[0], [main_name, indexer_name])
+        self.assertEqual(worker.layer_metadata[main_name].tensor_group_idx, [0, 0])
+        self.assertEqual(worker.layer_metadata[indexer_name].tensor_group_idx, [1])
 
     def test_register_kv_caches_uses_main_cache_for_quant_staging_buffer(self):
         main_name = "model.layers.0.self_attn.attn"
