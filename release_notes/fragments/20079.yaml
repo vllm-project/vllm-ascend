@@ -1,0 +1,4 @@
+pr: 20079
+entries:
+  - category: bugfix
+    text: Fixed incorrect SFA C8 KV-cache writes when PCP batches contain replicated decode tokens.
