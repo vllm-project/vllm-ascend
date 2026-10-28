@@ -36,6 +36,36 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
+#### Native DSpark draft configuration
+
+Development builds containing the native Flash draft adapter load the draft from
+`<MODEL_PATH>/dspark/*.safetensors`. Both BF16 and MXFP8 draft projections are
+supported; MXFP8 weights and their byte scales are preserved during loading.
+The draft uses the target model's embeddings and output head.
+
+Keep `dspark/config.json` when it is supplied with the checkpoint. If the export
+omits that file, the adapter accepts only the validated M3.1 Flash profile
+(hidden size 6144, 60 target layers, vocabulary size 200064), checks every draft
+tensor, and derives the five-layer draft configuration. Its defaults include
+target layers `[3, 17, 31, 45, 59]`, block size 7, sliding window 4096, Markov rank
+256 and noise token 200058. Explicit draft training settings take precedence.
+The adapter supplies `mask_token_id` and `ptd_token_id` in the draft HF config;
+they are not extra `--speculative-config` arguments. Checkpoint files are not
+rewritten.
+
+Use the following fragment with an otherwise working target-model deployment:
+
+```text
+--speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16","draft_sample_method":"probabilistic"}'
+```
+
+The Flash-specific CANN FlashAttn selection requires an A5 Model Runner V2 eager
+draft with FP16/BF16 queries and unquantized draft KV. Pipeline/context parallel,
+adaptive verification and unsupported attention features retain their existing
+backend. Original M3 `Qwen3DSparkModel` drafts retain their separate eager/graph
+support. This draft adapter does not replace the target-model deployment
+requirements described above.
+
 ### 3.2 Verify Multi-node Communication
 
 Prepare the business network and the NPU interconnect by following
