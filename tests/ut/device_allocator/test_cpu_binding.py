@@ -765,6 +765,46 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
     )
+    def test_build_cpu_pools_topo_mode_resolves_physical_npu_id_to_logic_id(self, _mock_get_device_type):
+        # 910B3 container: `npu-smi info -m` reports NPU ID=7 for Chip Logic ID=0,
+        # while `npu-smi info -t topo` keys the CPU affinity by the physical id.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = list(range(48, 72))
+        cpu_alloc.device_info.npu_affinity = {7: list(range(48, 72))}
+        cpu_alloc.device_info.npu_map_info = {"7": {"0": "0"}}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: list(range(48, 72))})
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_mode_prefers_logic_id_key_over_physical_fallback(self, _mock_get_device_type):
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = [48, 49, 50, 51]
+        cpu_alloc.device_info.npu_affinity = {0: [48, 49], 7: [50, 51]}
+        cpu_alloc.device_info.npu_map_info = {"7": {"0": "0"}}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [48, 49]})
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
     def test_build_cpu_pools_topo_mode_skips_non_running_npu_without_cpuset_overlap(self, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.all_logic_npus = [0, 1]
