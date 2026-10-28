@@ -3,10 +3,10 @@
 
 """Unit tests for the UVA host-shadow dirty-row tracking.
 
-These buffers are sized like the flattened block table (millions of rows), so
-recording dirty rows per element used to make a single ``np[:n] = x`` cost
-hundreds of milliseconds of host time. The tracker must stay O(1) for the
-contiguous-prefix writes and still copy scattered writes correctly.
+Recording dirty rows one row at a time used to make a single ``np[:n] = x``
+cost hundreds of milliseconds of host time, and that prefix write runs on every
+step. The tracker must stay O(1) for the contiguous-prefix writes and still
+copy scattered writes correctly.
 """
 
 import numpy as np
@@ -55,7 +55,7 @@ def test_prefix_write_is_tracked_without_allocating_a_mask():
     dirty.mark(slice(0, 8192))
 
     assert dirty.take() == [(0, 8192)]
-    # The whole point: no per-row set and no 2 MB mask for a prefix write.
+    # The whole point: no per-row set and no mask at all for a prefix write.
     assert dirty._mask is None
 
 
