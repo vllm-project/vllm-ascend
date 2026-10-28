@@ -1,0 +1,4 @@
+﻿pr: 18138
+entries:
+  - category: performance
+    text: Rotate only K when preparing the DFlash context prefix and submit the batch layout copy earlier on Ascend, removing redundant RoPE work and overlapping a host-to-device wait.
