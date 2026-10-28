@@ -43,7 +43,7 @@ def test_qwen4_exp_is_wired_only_through_mrv2() -> None:
     model = _source("vllm_ascend/models/qwen4_exp/model.py")
     model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
     v2_attn = _source("vllm_ascend/worker/v2/attn_utils.py")
-    v2_speculator = _source("vllm_ascend/worker/v2/spec_decode/autoregressive/speculator.py")
+    v2_speculator = _source("vllm_ascend/worker/v2/spec_decode/target_dependent_ar/speculator.py")
 
     assert "get_model_state_cls" in model
     assert "AscendQwen4ExpModelState" in model

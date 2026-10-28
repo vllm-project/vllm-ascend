@@ -38,7 +38,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     layer.num_heads = 2
     layer.num_kv_heads = 1
     layer.head_dim = 4
-    layer.kv_cache = torch.empty(1)
+    layer.kv_cache = (torch.empty(1), torch.empty(1))
     layer.topk_indices_buffer = torch.empty((2, 3), dtype=torch.int32)
 
     main_metadata = SimpleNamespace(
