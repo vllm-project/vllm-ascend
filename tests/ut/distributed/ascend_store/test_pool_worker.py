@@ -1488,6 +1488,39 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 32)
 
+    def test_detailed_lookup_preserves_legacy_fallback(self):
+        worker = self._make_worker()
+        for coordinator in (None, MagicMock()):
+            worker.cache_coordinator = coordinator
+            # A subset cannot use the hybrid coordinator's all-group proof.
+            worker.num_kv_cache_groups = 2
+            for exists, expected in (([1, 1], 32), ([1, 0], 16), ([0, 0], 0)):
+                with self.subTest(coordinator=coordinator is not None, exists=exists):
+                    worker.m_store.exists.return_value = exists
+                    result = worker.lookup_details(32, ["h0", "h1"], [0])
+                    self.assertEqual(result.hit_tokens, expected)
+                    self.assertEqual(result.tail_key_boundaries, {})
+            if coordinator is not None:
+                coordinator.find_reachable_hit_tokens.assert_not_called()
+                coordinator.find_partial_hit.assert_not_called()
+
+    def test_detailed_fallback_rechecks_recurrent_replay_boundary(self):
+        for earlier_state, expected in [(1, 16), (0, 0)]:
+            with self.subTest(earlier_state=earlier_state):
+                worker = self._make_worker()
+                worker.cache_coordinator = None
+                worker.group_uses_align_state = [True]
+                first_key = worker._build_lookup_keys(32, ["h0", "h1"], 0, False)[0][0]
+                worker.m_store.exists.side_effect = lambda keys, earlier_state=earlier_state, first_key=first_key: [
+                    earlier_state if key == first_key else 1 for key in keys
+                ]
+
+                result = worker.lookup_details(32, ["h0", "h1"], [0])
+
+                self.assertEqual(result.hit_tokens, expected)
+                self.assertEqual(result.store_skip_tokens, 32)
+                self.assertEqual(worker.m_store.exists.call_count, 2)
+
     def test_lookup_scheduler_partial(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 0]
@@ -2273,54 +2306,60 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     self.assertIs(shared[group].block_ids_arr, original_ids[group])
                     self.assertIs(shared[group].block_gvas_arr, original_gvas[group])
 
-    def test_mtp_load_uses_safe_extent_not_store_skip_extent(self):
-        worker = self._make_worker()
-        worker.use_eagle = True
-        worker.layerwise_offload = True
-        worker.independent_layers = [0, 1]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=["h0", "h1"],
-            load_spec=LoadSpec(
-                vllm_cached_tokens=16,
-                kvpool_cached_tokens=16,
-                can_load=True,
-                kvpool_store_skip_tokens=32,
-            ),
-        )
+    def test_replay_load_uses_safe_extent_not_store_skip_extent(self):
+        for use_eagle, align_state in [(True, False), (False, True), (True, True)]:
+            with self.subTest(use_eagle=use_eagle, align_state=align_state):
+                worker = self._make_worker()
+                worker.use_eagle = use_eagle
+                worker.group_uses_align_state = [align_state]
+                worker.layerwise_offload = True
+                worker.independent_layers = [0, 1]
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=32,
+                    block_ids=[0, 1],
+                    block_hashes=["h0", "h1"],
+                    load_spec=LoadSpec(
+                        vllm_cached_tokens=16,
+                        kvpool_cached_tokens=16,
+                        can_load=True,
+                        kvpool_store_skip_tokens=32,
+                    ),
+                )
 
-        worker._process_load_for_layer_batch([request], 1)
+                worker._process_load_for_layer_batch([request], 1)
 
-        self.assertEqual(worker.layer_load_tasks[1], [])
+                self.assertEqual(worker.layer_load_tasks[1], [])
 
-    def test_mtp_gva_prepare_uses_safe_extent_not_store_skip_extent(self):
-        worker = self._make_gva_worker()
-        worker.use_eagle = True
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info]
-        worker.m_store.batch_add_lease.return_value = [0]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids_by_group=[[0, 1]],
-            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
-            block_hashes=["h0", "h1"],
-            load_spec=LoadSpec(
-                vllm_cached_tokens=16,
-                kvpool_cached_tokens=16,
-                can_load=True,
-                kvpool_store_skip_tokens=32,
-            ),
-        )
+    def test_replay_gva_prepare_uses_safe_extent_not_store_skip_extent(self):
+        for use_eagle, align_state in [(True, False), (False, True), (True, True)]:
+            with self.subTest(use_eagle=use_eagle, align_state=align_state):
+                worker = self._make_gva_worker()
+                worker.use_eagle = use_eagle
+                worker.group_uses_align_state = [align_state]
+                key_info = MagicMock()
+                key_info.size.return_value = 64
+                key_info.gva_list.return_value = [201]
+                worker.m_store.batch_get_key_info.return_value = [key_info]
+                worker.m_store.batch_add_lease.return_value = [0]
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=32,
+                    block_ids_by_group=[[0, 1]],
+                    block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+                    block_hashes=["h0", "h1"],
+                    load_spec=LoadSpec(
+                        vllm_cached_tokens=16,
+                        kvpool_cached_tokens=16,
+                        can_load=True,
+                        kvpool_store_skip_tokens=32,
+                    ),
+                )
 
-        worker._prepare_load_gvas([request])
+                worker._prepare_load_gvas([request])
 
-        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
-        self.assertEqual(len(queried_keys), 1)
+                queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+                self.assertEqual(len(queried_keys), 1)
 
     def test_save_range_clamps_to_allocated_blocks(self):
         for offload in (False, True):

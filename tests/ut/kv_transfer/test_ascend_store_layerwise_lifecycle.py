@@ -271,6 +271,26 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
         def compute(layer, block_ids, start, end):
             name = f"model.layers.{layer}.attn"
             spec = specs[name]
+            if isinstance(spec, MambaSpec):
+                # Continue from the restored state rather than overwriting it
+                # from token IDs: replaying a token twice must change the result.
+                for plane, cache in enumerate(caches[name]):
+                    state = (
+                        cache[block_ids[(start - 1) // spec.block_size]].flatten()[0].item()
+                        if start
+                        else (layer * 13 + plane * 7) % 97 + 1
+                    )
+                    previous_end = start
+                    for index, bid in enumerate(block_ids):
+                        if index * spec.block_size >= end:
+                            break
+                        boundary = min((index + 1) * spec.block_size, end)
+                        if bid and start < boundary <= end:
+                            state = (state - 1 + sum(request.all_token_ids[previous_end:boundary])) % 97 + 1
+                            cache[bid].fill_(state)
+                            assert state == payload(request.all_token_ids, boundary, layer, plane)
+                            previous_end = boundary
+                return
             for index, bid in enumerate(block_ids):
                 boundary = (index + 1) * spec.block_size
                 if bid and start < boundary <= end:
@@ -300,7 +320,15 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
                     worker.wait_for_layer_load(name)
                     # Validate restored bytes BEFORE simulating the next model operation.
                     if load_meta is not None:
-                        stored_prefix = load_meta.load_spec.kvpool_store_skip_tokens or start
+                        stored_prefix = load_meta.load_spec.kvpool_cached_tokens
+                        if isinstance(spec, MambaSpec) and start:
+                            # A state snapshot must describe the exact restart
+                            # boundary, not a later prefix with one token removed.
+                            assert start % spec.block_size == 0
+                            state_bid = blocks[group_id][start // spec.block_size - 1]
+                            assert state_bid
+                            for plane, cache in enumerate(caches[name]):
+                                assert torch.all(cache[state_bid] == payload(tokens, start, layer, plane))
                         for index, bid in enumerate(blocks[group_id]):
                             if bid and (index + 1) * spec.block_size <= stored_prefix:
                                 for plane, cache in enumerate(caches[name]):
@@ -365,8 +393,10 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             cache.fill_(-1)
     assert run_request("warm", producer + [128], 128) == 128
     assert scheduler.reset_prefix_cache()
-    # Preserve main's complete-hit policy: reserve the final token for replay.
-    assert run_request("complete-hit", producer, 127) == 127
+    # Recurrent state must restart at a stored checkpoint before the last
+    # token. Attention-only caches can still replay just that final token.
+    complete_hit = 96 if recurrent_type is not None else 127
+    assert run_request("complete-hit", producer, complete_hit) == complete_hit
     assert scheduler.reset_prefix_cache()
     assert run_request("boundary", producer[:-1], 96) == 96
     assert scheduler.reset_prefix_cache()

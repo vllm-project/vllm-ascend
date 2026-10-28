@@ -189,6 +189,39 @@ def test_missing_paired_cache_is_rejected():
         get_glm5_next_kv_cache_groups(make_config(), specs)
 
 
+@pytest.mark.parametrize("pool", [4, 16])
+@pytest.mark.parametrize("override", [None, 19])
+def test_platform_builder_accounts_for_all_device_allocations(pool, override):
+    pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm.v1.core.kv_cache_planning import (
+        DefaultKVCacheConfigBuilder,
+        _pool_bytes_per_block_from_builder,
+    )
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+    from vllm_ascend.platform import NPUPlatform
+
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.cache_config.num_gpu_blocks_override = override
+    groups = get_glm5_next_kv_cache_groups(config, make_specs(pool))
+    # Reproduce the real planning failure: the default probe assumes a single
+    # backing size, while this placement owns independent main and indexer pools.
+    with pytest.raises(ValueError, match="several device allocations"):
+        _pool_bytes_per_block_from_builder(DefaultKVCacheConfigBuilder(), config, groups)
+    builder = AscendKVCacheConfigBuilder()
+    bytes_per_block = _pool_bytes_per_block_from_builder(builder, config, groups)
+    num_blocks = override or 7
+    plan = builder.get_kv_cache_config_from_groups(config, groups, num_blocks)
+    assert len({tensor.size for tensor in plan.kv_cache_tensors}) == 2
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == num_blocks * bytes_per_block
+    assert plan.num_blocks == num_blocks
+    assert config.cache_config.num_gpu_blocks_override == override
+    assert NPUPlatform.get_kv_cache_config_builder_cls(config) == (
+        "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+    )
+
+
 def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(

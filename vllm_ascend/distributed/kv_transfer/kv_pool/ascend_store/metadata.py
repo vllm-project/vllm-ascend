@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import compress
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -16,6 +16,9 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+
+# Ascend Store extension of the upstream LookupKey admin channel.
+LOOKUP_DETAILS_MSG: bytes = b"lookup_details"
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
@@ -405,6 +408,16 @@ class ChunkedTokenDatabase:
             return None
         return self.cache_coordinator.load_mask(block_hashes, token_len)
 
+    def resolve_load_tail_key(
+        self, key: str, group_id: int, end: int, load_spec: LoadSpec, block_hashes: list[BlockHash]
+    ) -> str:
+        boundary = load_spec.tail_key_boundaries.get(group_id)
+        if end == load_spec.token_len and boundary is not None:
+            return self._get_key_prefix(group_id) + block_hash_to_str(
+                block_hashes[boundary // self.hash_block_size - 1]
+            )
+        return key
+
     def mask_allows_chunk(
         self,
         masks: tuple[list[bool], ...] | None,
@@ -502,6 +515,11 @@ class ChunkedTokenDatabase:
             if block_idx >= len(block_ids):
                 return addr_list, size_list, 0
             block_id = block_ids[block_idx]
+        if getattr(self.cache_coordinator, "enable_partial_hash_hits", False) is True:
+            # Upstream Store keys describe valid prefix extent, while values
+            # retain the physical page layout, including whole recurrent state.
+            start = start // group_block_size * group_block_size
+            end = start + group_block_size
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
@@ -587,10 +605,16 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
+        fine_grained = getattr(self.cache_coordinator, "enable_partial_hash_hits", False) is True
         grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
-        if not grouped_hashes:
-            return
-        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
+        if fine_grained:
+            assert token_len % self.hash_block_size == 0
+            assert token_len <= len(block_hashes) * self.hash_block_size
+            num_logical_blocks = cdiv(token_len, logical_block_size)
+        else:
+            if not grouped_hashes:
+                return
+            num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
         chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
@@ -624,7 +648,8 @@ class ChunkedTokenDatabase:
             candidate_index += 1
             if not shard_allows:
                 continue
-            yield start_idx, end_idx, grouped_hashes[chunk_id], block_id
+            chunk_hash = block_hashes[end_idx // self.hash_block_size - 1] if fine_grained else grouped_hashes[chunk_id]
+            yield start_idx, end_idx, chunk_hash, block_id
 
     def process_tokens(
         self,
@@ -854,6 +879,15 @@ def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     return bytes(block_hash)
 
 
+@dataclass
+class StoreLookupResult:
+    hit_tokens: int = 0
+    # The last physical block may be stored under a longer verified prefix
+    # than the recovery boundary (for example EAGLE's attention proof).
+    tail_key_boundaries: dict[int, int] = field(default_factory=dict)
+    store_skip_tokens: int | None = None
+
+
 # Parameters related to the connector metadata
 @dataclass
 class LoadSpec:
@@ -876,6 +910,7 @@ class LoadSpec:
     layerwise_previous_step: bool = False
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
+    tail_key_boundaries: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(init=False)
@@ -1013,6 +1048,18 @@ class RequestTracker:
                 )
 
 
+class BoundaryPut(NamedTuple):
+    """Core-owned state block published at an exact prefix boundary.
+
+    Matches vLLM's Mooncake Store boundary handoff. The block ID is a
+    snapshot source, not an index into the request's mutable block table.
+    """
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 @dataclass(init=False)
 class ReqMeta:
     # Request id
@@ -1050,6 +1097,8 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    boundary_puts: list[BoundaryPut] | None = None
+    state_handoff_groups: tuple[int, ...] = ()
 
     def __init__(
         self,
@@ -1091,6 +1140,8 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        boundary_puts: list[BoundaryPut] | None = None,
+        state_handoff_groups: tuple[int, ...] = (),
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1114,6 +1165,8 @@ class ReqMeta:
         self.original_block_size = original_block_size
         self.event_id = event_id
         self.store_job_id = store_job_id
+        self.boundary_puts = list(boundary_puts or ())
+        self.state_handoff_groups = state_handoff_groups
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np

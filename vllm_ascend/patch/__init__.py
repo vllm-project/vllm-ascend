@@ -216,6 +216,11 @@
 #       Remove this patch and its platform import once all supported vLLM
 #       release tags and verified main pins include the upstream fix.
 #
+# Fine-grained replay also uses platform/patch_prefix_cache_write_policy.py.
+# It follows the role-dependent read policy when registering attention aliases
+# and retaining replay checkpoints, using the upstream BlockPool APIs.
+# Reference: vllm-ascend PR #18517; remove this adaptation when the shared core
+# accepts the effective replay policy for both cache writes and reads.
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`

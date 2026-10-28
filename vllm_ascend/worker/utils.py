@@ -37,8 +37,8 @@ def copy_kv_cache_blocks_inplace(
     if not kv_cache_block_copies:
         return
 
-    cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    cache_groups: dict[int, list[torch.Tensor]] = {}
+    seen_views: set[tuple[int, tuple[int, ...], tuple[int, ...], torch.dtype]] = set()
     for entry in kv_caches:
         if entry is None:
             continue
@@ -49,36 +49,44 @@ def copy_kv_cache_blocks_inplace(
         for tensor in tensors:
             if tensor is None:
                 continue
-            data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            view_key = (tensor.data_ptr(), tuple(tensor.shape), tensor.stride(), tensor.dtype)
+            if view_key in seen_views:
                 continue
-            seen_tensors.add(data_ptr)
-            cache_tensors.append(tensor)
+            seen_views.add(view_key)
+            storage_ptr = tensor.untyped_storage().data_ptr()
+            cache_groups.setdefault(storage_ptr, []).append(tensor)
 
-    if not cache_tensors:
+    if not cache_groups:
         return
 
-    device = cache_tensors[0].device
-    for tensor in cache_tensors:
-        assert tensor.device == device
-        assert tensor.shape[0] % num_blocks == 0
-        # FP8 is storage here. NPU stack/index operators need byte views;
-        # same-size bitcasts preserve the non-contiguous page geometry.
-        if tensor.dtype == torch.float8_e4m3fn:
-            tensor = tensor.view(torch.int8)
-        kernel_blocks_per_block = tensor.shape[0] // num_blocks
-        # Page-strided MLA views are non-contiguous, so a flat ``view`` would
-        # either fail or materialize a copy. Split only dim 0 to preserve the
-        # original strided storage while copying every kernel block in a page.
-        blocks = torch.as_strided(
-            tensor,
-            size=(num_blocks, kernel_blocks_per_block, *tensor.shape[1:]),
-            stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
-            storage_offset=tensor.storage_offset(),
-        )
-        source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
-        for index, copy in enumerate(kv_cache_block_copies):
-            blocks[copy.dst_block_id].copy_(source_blocks[index])
+    device = next(iter(cache_groups.values()))[0].device
+    for cache_tensors in cache_groups.values():
+        # A packed attention page can alias a smaller Mamba view at the same
+        # address. Preserve both layouts, and snapshot their sources before
+        # any writes so cyclic copies cannot read an already-modified alias.
+        # Stage only requested source pages from one backing allocation at a time.
+        pending_copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for tensor in cache_tensors:
+            assert tensor.device == device
+            assert tensor.shape[0] % num_blocks == 0
+            # FP8 is storage here. NPU stack/index operators need byte views;
+            # same-size bitcasts preserve the non-contiguous page geometry.
+            if tensor.dtype == torch.float8_e4m3fn:
+                tensor = tensor.view(torch.int8)
+            kernel_blocks_per_block = tensor.shape[0] // num_blocks
+            # Split only dim 0 to preserve strided storage while copying every
+            # kernel block in a physical page.
+            blocks = torch.as_strided(
+                tensor,
+                size=(num_blocks, kernel_blocks_per_block, *tensor.shape[1:]),
+                stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
+                storage_offset=tensor.storage_offset(),
+            )
+            source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
+            pending_copies.append((blocks, source_blocks))
+        for blocks, source_blocks in pending_copies:
+            for index, copy in enumerate(kv_cache_block_copies):
+                blocks[copy.dst_block_id].copy_(source_blocks[index])
 
 
 def _group_tensor_strides(
