@@ -48,6 +48,7 @@ def make_worker(monkeypatch, mask_stride=1):
     monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
     monkeypatch.setattr(torch.cuda, "stream", fake_stream_context)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: FakeStream())
+    monkeypatch.setattr(worker_module, "PIN_MEMORY", False)
     kernel = FakeKernel()
     monkeypatch.setattr(worker_module.structured_outputs, "_apply_grammar_bitmask_kernel", kernel)
     worker = AscendStructuredOutputsWorker(8, 64, torch.device("cpu"), mask_stride)
