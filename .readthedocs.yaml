@@ -20,17 +20,20 @@ build:
     python: "3.12"
   jobs:
     post_checkout:
-      - git fetch origin main --unshallow --no-tags --filter=blob:none || true
-    pre_create_environment:
-      - pip install uv
-    create_environment:
-      - uv venv $READTHEDOCS_VIRTUALENV_PATH
+      # Revision dates only read commits and trees. Fetch complete history for
+      # this build's commit without downloading historical file contents.
+      - |
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch origin --unshallow --no-tags --filter=blob:none "$(git rev-parse HEAD)"
+        fi
     install:
-      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r docs/requirements-docs.txt
-    pre_build:
-      # Generate model-code artifacts (pre-generated shell scripts for tutorials).
-      # Chinese source generation is handled inside rtd_build.sh.
-      - python tools/docs_codegen/cli.py || true
+      # Keep the cache on the virtualenv filesystem so uv can link packages
+      # instead of falling back to copying across filesystems.
+      - |
+        UV_CACHE_DIR="$READTHEDOCS_VIRTUALENV_PATH/.uv-cache" \
+        uv pip install \
+          --python "$READTHEDOCS_VIRTUALENV_PATH/bin/python" \
+          -r docs/requirements-docs.txt
     # Custom build command. rtd_build.sh writes mkdocs output to
     # $READTHEDOCS_OUTPUT/html/ directly because the default mkdocs
     # integration (which would move site/ there) is disabled by
@@ -39,6 +42,14 @@ build:
     build:
       html:
         - bash tools/rtd_build.sh
+
+python:
+  # Retain RTD's native uv bootstrap and virtualenv creation. Dependencies
+  # are installed by build.jobs.install above.
+  install:
+    - method: uv
+      command: pip
+      requirements: docs/requirements-docs.txt
 
 mkdocs:
   configuration: mkdocs.yml

@@ -3,7 +3,7 @@
 # Language is selected via the DOCS_LANG environment variable (default: en).
 # Chinese builds also set DOCS_DIR, DOCS_THEME_LANG, DOCS_SITE_NAME,
 # DOCS_SITE_URL, DOCS_PALETTE_*, DOCS_MACROS_DIR, DOCS_IS_RELEASE.
-# See .readthedocs.zh.yaml for the env vars used by the Chinese build.
+# See tools/rtd_build.sh for the env vars used by the Chinese build.
 #
 # Deployed on Read the Docs with Material for MkDocs theme.
 
@@ -61,6 +61,18 @@ theme:
     repo: fontawesome/brands/github
   custom_dir: docs/overrides
 
+# Exclusions are relative to the active docs_dir, including Chinese builds.
+# Include fragments remain readable by macros and the revision-date hook.
+exclude_docs: |
+  /_build/
+  *.zh.md
+  /_templates/
+  *.inc.md
+  /release.template.md
+  /zh/
+  __pycache__/
+  /locale/
+
 # ---- Plugins ----
 plugins:
   - search:
@@ -73,24 +85,16 @@ plugins:
       module_name: docs/hooks/macros_main
       include_dir: !ENV [DOCS_MACROS_DIR, docs/source]
       on_undefined: keep
-  - exclude:
-      glob:
-        - "_build/*"
-        - "*.zh.md"
-        - "_templates/*"
-        - "**/*.inc.md"
-        - "release.template.md"
-        - "zh/*"
-        - "__pycache__/*"
 
 # ---- Hooks ----
 hooks:
-  - docs/hooks/model_code.py
   # Sets per-page and per-section titles for the active language.
   # See docs/hooks/nav_titles.py for the title mapping.
   - docs/hooks/nav_titles.py
   # Extend the TOC only on MiniMax-M3; other pages keep the site-wide depth.
   - docs/hooks/minimax_m3_toc.py
+  # Include shared fragments and map Chinese pages to English Git history.
+  - docs/hooks/revision_date.py
 
 # ---- Markdown extensions ----
 markdown_extensions:
@@ -151,6 +155,8 @@ extra_javascript:
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
+  # Enable dates on RTD; local builds and previews need no Git history.
+  show_revision_date: !ENV [READTHEDOCS, false]
   # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
   is_release: !ENV [DOCS_IS_RELEASE, false]
   # Read the Docs build context, exposed to override templates (e.g. the

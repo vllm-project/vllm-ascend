@@ -1,0 +1,5 @@
+# PO extraction and automated translation; no website renderer is needed.
+openai
+polib
+regex
+zhconv
