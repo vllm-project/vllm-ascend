@@ -695,7 +695,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --limit-mm-per-prompt '{"vision_chunk":2}' \
             --data-parallel-size 8 \
             --data-parallel-size-local 1 \
-            --data-parallel-start-rank 0 \
             --data-parallel-address $LOCAL_IP \
             --data-parallel-rpc-port $RPC_PORT \
             --tensor-parallel-size 8 \
@@ -777,7 +776,12 @@ The A2 capabilities have not changed in this release and remain consistent with 
     | `NODE0_IP`                   | Not required | Node 0 IP                         | Workers use this address to join the DP group.   |
     | `--headless`                 | Omitted      | Enabled                           | Workers do not expose an API endpoint.           |
     | `--data-parallel-address`    | `$LOCAL_IP`  | `$NODE0_IP`                       | Always resolves to Node 0.                       |
-    | `--data-parallel-start-rank` | `0`          | Unique value from `1` through `7` | Every node owns one global DP rank.              |
+    | `--data-parallel-start-rank` | Omitted      | Unique value from `1` through `7` | Every node owns one global DP rank.              |
+
+    Node 0 omits `--data-parallel-start-rank` so that rank 0 is inferred
+    automatically. Setting it to `0` on the API node triggers external/hybrid
+    DP load balancing, and the remote headless engines are then rejected with
+    `Remote engine must not use --headless in external or hybrid dp lb mode`.
 
     Key A2 deployment parameters:
 
