@@ -78,6 +78,34 @@ We create the example setup with the **MooncakeLayerwiseConnector** from `vllm_a
 For the PD disaggregation part, when using MooncakeLayerwiseConnector: The request first enters the Decoder instance, the Decoder triggers a remote prefill task in reverse via the Metaserver. The Prefill node then executes inference and pushes KV Cache layer-wise to the Decoder, overlapping computation with transmission. Once the transfer is complete, the Decoder seamlessly continues with the subsequent token generation.
 `docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` shows the brief idea about the disaggregated prefill.
 
+## Cross-Encoder Mooncake Store reads
+
+With the Ascend `ECMooncakeConnector`, enabling `cross_encoder_cache` also enables
+background Store GETs. Requests wait for their GET result before
+proceeding. This applies to both FabricMem and non-FabricMem Store paths.
+
+Configure these options in `ec_connector_extra_config`:
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `ascend_store_get_async_bytes` | `2147483648` (2 GiB) | Limits the expected payload bytes admitted to asynchronous GETs until consumed or discarded. |
+
+The byte budget does not allocate an additional buffer. Objects that exceed the
+remaining budget use the synchronous path. An explicit budget of `0` admits no
+asynchronous GETs. For example, to use a 1 GiB budget:
+
+```json
+{
+  "cross_encoder_cache": true,
+  "ascend_store_get_async_bytes": 1073741824
+}
+```
+
+Background GETs are enabled whenever `cross_encoder_cache` is enabled; there is
+no separate enable/disable switch. The former `ascend_store_get_async` option is
+no longer used. The byte budget does not enable cross-Encoder caching when
+`cross_encoder_cache` is disabled.
+
 ## Limitations
 
 * Disable `--mm-processor-cache-gb 0` if you want to use cross-process caching
