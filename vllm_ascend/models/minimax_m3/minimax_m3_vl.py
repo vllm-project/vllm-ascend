@@ -237,6 +237,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.pp_sharded_tensor_keys = getattr(self.language_model, "pp_sharded_tensor_keys", ())
         self._sync_moe_parameters()
 
     def _sync_moe_parameters(self) -> None:

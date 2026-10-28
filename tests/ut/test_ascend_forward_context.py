@@ -151,6 +151,44 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
+def test_deepseek_v4_sharded_pipeline_preserves_mhc_stream_and_full_aux(monkeypatch):
+    from vllm.sequence import IntermediateTensors
+
+    from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
+
+    positions = torch.arange(3)
+    hidden = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
+    aux = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    context = SimpleNamespace(is_padding=torch.zeros(3, dtype=torch.bool))
+    padding_mask = MagicMock(return_value=torch.tensor([False, True]))
+    shard = MagicMock(side_effect=AssertionError("Received PP shards must not be sharded again"))
+    gather = MagicMock(side_effect=AssertionError("PP hidden shards must not be gathered before sending"))
+    monkeypatch.setattr(deepseek_v4, "get_pp_group", lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False))
+    monkeypatch.setattr(deepseek_v4, "sp_shard", shard)
+    monkeypatch.setattr(deepseek_v4, "sp_all_gather", gather)
+    monkeypatch.setattr(deepseek_v4, "sp_padding_mask", padding_mask)
+    monkeypatch.setattr(deepseek_v4.envs, "VLLM_MOE_SKIP_PADDING", True)
+    monkeypatch.setattr(deepseek_v4, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(deepseek_v4, "get_forward_context", lambda: context)
+    model = SimpleNamespace(
+        use_sequence_parallel_moe=True,
+        pp_sharded_tensor_keys=("hidden_states",),
+        layers=[],
+        start_layer=0,
+        end_layer=0,
+        aux_hidden_state_layers=set(),
+    )
+    incoming = IntermediateTensors({"hidden_states": hidden, "pp_transport_aux_hidden_states_0": aux})
+
+    output = deepseek_v4.DeepseekV4Model.forward(model, None, positions, incoming)
+
+    assert output["hidden_states"] is hidden
+    assert output["pp_transport_aux_hidden_states_0"] is aux
+    assert padding_mask.call_args.args[1] is positions
+    shard.assert_not_called()
+    gather.assert_not_called()
+
+
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
     vllm_config = _make_vllm_config(tensor_parallel_size=6)
 

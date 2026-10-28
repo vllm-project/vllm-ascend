@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
+    from vllm_ascend.worker.v2.pp_transport import PPTokenShardBuffer
 
 
 class AscendModelState(DefaultModelState):
@@ -76,6 +77,9 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    pp_input_buffer: "PPTokenShardBuffer | None" = None
+    pp_capture_layout: Callable[[int], None] | None = None
+    pp_num_tokens: int | None = None
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
@@ -388,6 +392,9 @@ class AscendModelState(DefaultModelState):
         return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
+        self.pp_num_tokens = input_batch.num_tokens_after_padding
+        if self.pp_input_buffer is not None:
+            self.pp_input_buffer.activate(self.pp_num_tokens)
         model_inputs = super().prepare_inputs(input_batch, req_states)
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
         return model_inputs
@@ -406,6 +413,8 @@ class AscendModelState(DefaultModelState):
         )
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        if self.pp_capture_layout is not None:
+            self.pp_capture_layout(num_tokens)
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
         model_inputs.update(self.prepare_engram_dummy_inputs(num_reqs, num_tokens))
         return model_inputs

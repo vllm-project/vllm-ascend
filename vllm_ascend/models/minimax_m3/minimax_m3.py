@@ -1116,6 +1116,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.pp_sharded_tensor_keys = (
+            ("hidden_states", "residual")
+            if vllm_config.parallel_config.use_sequence_parallel_moe
+            and vllm_config.use_v2_model_runner
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            else ()
+        )
         self._enable_eagle3_aux_hidden_states = (
             vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
         )
@@ -1149,9 +1158,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        tensor_factory = make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size)
+
+        def make_main_tensors(batch_size, dtype, device):
+            if self.pp_sharded_tensor_keys:
+                tp_size = get_tensor_model_parallel_world_size()
+                batch_size = (batch_size + tp_size - 1) // tp_size
+            return tensor_factory(batch_size, dtype, device)
+
         self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
             self,
-            make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size),
+            make_main_tensors,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1165,6 +1182,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         pp_group = get_pp_group()
+        pp_sharded = bool(getattr(self, "pp_sharded_tensor_keys", ()))
         if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1182,12 +1200,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 PPTransportDataType.AUX_HIDDEN_STATES,
             )
 
-        hidden_states_are_sp = False
+        hidden_states_are_sp = pp_sharded and not pp_group.is_first_rank
         sp_forward_context = None
         original_is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
             sp_forward_context = get_forward_context()
             original_is_padding = sp_forward_context.is_padding
+            if hidden_states_are_sp:
+                sp_forward_context.is_padding = sp_padding_mask(original_is_padding, positions)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -1220,9 +1240,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             sp_forward_context.is_padding = original_is_padding
 
         if not pp_group.is_last_rank:
-            if hidden_states_are_sp:
-                # PP transport carries full-token tensors. The next stage can
-                # start a fresh SP region after receiving them.
+            if pp_sharded and not hidden_states_are_sp:
+                if residual is None:
+                    residual = torch.zeros_like(hidden_states)
+                hidden_states = sp_shard(hidden_states)
+                residual = sp_shard(residual)
+            elif hidden_states_are_sp and not pp_sharded:
                 assert residual is not None
                 hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
                 residual = sp_all_gather(residual)[: positions.shape[0]]
@@ -1466,6 +1489,7 @@ class MiniMaxM3SparseForCausalLM(
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxM3Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.pp_sharded_tensor_keys = getattr(self.model, "pp_sharded_tensor_keys", ())
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

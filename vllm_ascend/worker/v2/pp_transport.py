@@ -20,6 +20,54 @@ if TYPE_CHECKING:
 _PP_TRANSPORT_PREFIX = "pp_transport"
 
 
+def zero_pp_shard_padding(
+    tensors: dict,
+    sharded_keys: tuple[str, ...],
+    num_tokens: int,
+    tp_size: int,
+    tp_rank: int,
+) -> None:
+    """Restore the padding previously recreated by gather/trim/shard at a PP boundary."""
+    rows = (num_tokens + tp_size - 1) // tp_size
+    valid_rows = max(0, min(rows, num_tokens - tp_rank * rows))
+    for key in sharded_keys:
+        if tensors[key].shape[0] != rows:
+            raise ValueError(f"PP shard {key} has {tensors[key].shape[0]} rows, expected {rows}.")
+        if valid_rows < rows:
+            tensors[key][valid_rows:].zero_()
+
+
+class PPTokenShardBuffer:
+    """Keep stable PP storage with per-batch full-token and shard views."""
+
+    def __init__(self, active: IntermediateTensors, sharded_keys: tuple[str, ...], tp_size: int) -> None:
+        if not isinstance(tp_size, int) or tp_size < 1:
+            raise ValueError("PP token shard TP size must be positive.")
+        self.active = active
+        self.backing = dict(active.tensors)
+        self.sharded_keys = sharded_keys
+        self.tp_size = tp_size
+        missing_keys = set(sharded_keys) - self.backing.keys()
+        if missing_keys:
+            raise ValueError(f"PP token shard buffers are missing keys: {sorted(missing_keys)}.")
+
+    def activate(self, num_tokens: int) -> None:
+        if num_tokens < 0:
+            raise ValueError("PP token count must be nonnegative.")
+        shard_rows = (num_tokens + self.tp_size - 1) // self.tp_size
+        tensors = {}
+        for key, tensor in self.backing.items():
+            rows = shard_rows if key in self.sharded_keys else num_tokens
+            if rows > tensor.shape[0]:
+                raise ValueError(f"PP buffer {key} needs {rows} rows, but its capacity is {tensor.shape[0]}.")
+            tensors[key] = tensor[:rows]
+        self.active.tensors = tensors
+
+    def fork(self) -> "PPTokenShardBuffer":
+        """Share canonical storage with an independent active tensor container."""
+        return type(self)(IntermediateTensors(dict(self.backing)), self.sharded_keys, self.tp_size)
+
+
 class _PPTransportModel(Protocol):
     config: "PretrainedConfig"
     start_layer: int

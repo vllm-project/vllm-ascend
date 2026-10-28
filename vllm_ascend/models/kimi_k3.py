@@ -803,6 +803,16 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             and parallel_config.enable_expert_parallel
             and parallel_config.tensor_parallel_size > 1
         )
+        self.pp_sharded_tensor_keys = (
+            ("hidden_states", "residual")
+            if self.use_sequence_parallel
+            and vllm_config.use_v2_model_runner
+            and parallel_config.pipeline_parallel_size > 1
+            and config.attn_res_block_size is not None
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            else ()
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -874,11 +884,18 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     ) -> IntermediateTensors:
         if self.config.attn_res_block_size is None:
             return super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        tensor_factory = super().make_empty_intermediate_tensors
+
+        def make_main_tensors(batch_size, dtype, device):
+            if self.pp_sharded_tensor_keys:
+                batch_size = cdiv(batch_size, get_tensor_model_parallel_world_size())
+            return tensor_factory(batch_size, dtype, device)
+
         # Materialized DSpark states are captured before a layer; raw states
         # are captured after the preceding layer. Handle a PP cut at either.
         return make_pp_empty_intermediate_tensors(
             self,
-            super().make_empty_intermediate_tensors,
+            make_main_tensors,
             include_start_layer=not self.dspark_aux_capture_materialized,
         )(batch_size, dtype, device)
 
@@ -945,6 +962,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             )
 
         full_num_tokens = positions.shape[0]
+        pp_sharded = bool(getattr(self, "pp_sharded_tensor_keys", ()))
         if get_pp_group().is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
             residual = None
@@ -964,12 +982,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     forward_context.is_padding,
                     positions,
                 )
-            # Every stage starts from full-sequence tensors - the previous
-            # stage closed its sequence-parallel region at the boundary -
-            # and keeps its own shard afterwards, matching DeepSeek V4.
-            hidden_states = sp_shard(hidden_states)
-            if residual is not None:
-                residual = sp_shard(residual)
+            if get_pp_group().is_first_rank or not pp_sharded:
+                hidden_states = sp_shard(hidden_states)
+                if residual is not None:
+                    residual = sp_shard(residual)
             aux_hidden_states = [sp_shard(aux) for aux in aux_hidden_states]
         if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
@@ -1031,11 +1047,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = hidden_states + prefix_delta
         if not get_pp_group().is_last_rank:
             if self.use_sequence_parallel:
-                # The next PP rank expects full-sequence tensors; close the
-                # sequence-parallel region before crossing the boundary so the
-                # upstream PP transport only sees replicated tensors.
-                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-                residual = sp_all_gather(residual)[:full_num_tokens]
+                if not pp_sharded:
+                    hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                    residual = sp_all_gather(residual)[:full_num_tokens]
                 aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
             return add_pp_transport_tensors(
                 IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
@@ -1146,6 +1160,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
         )
+        self.pp_sharded_tensor_keys = getattr(self.model, "pp_sharded_tensor_keys", ())
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.config.vocab_size,
@@ -1285,6 +1300,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
+        self.pp_sharded_tensor_keys = getattr(self.language_model, "pp_sharded_tensor_keys", ())
         self.media_placeholder = self.config.media_placeholder_token_id
 
     def get_language_model(self) -> AscendKimiLinearForCausalLM:

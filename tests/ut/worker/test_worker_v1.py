@@ -53,6 +53,7 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
                     output.kv_connector_output = None
                     worker.model_runner = MagicMock()
+                    worker.model_runner.pp_sharded_tensor_keys = ()
                     worker.model_runner.execute_model.return_value = output
                     scheduler_output = SimpleNamespace(total_num_scheduled_tokens=int(forward_pass))
 
@@ -66,6 +67,45 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     pp_group.return_value.isend_tensor_dict.assert_called_once_with(
                         output.tensors, all_gather_group=group
                     )
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    def test_sharded_transport_sends_same_lane_shard_with_zero_padding(self, tp_group, pp_group, ascend_config):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        ascend_config.return_value.msmonitor_use_daemon = False
+        tp_group.return_value.world_size = 2
+        tp_group.return_value.rank_in_group = 1
+        pp_group.return_value.is_first_rank = False
+        pp_group.return_value.is_last_rank = False
+        pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(use_sequence_parallel_moe=False, distributed_executor_backend="mp")
+        )
+        worker.log_memory_stats = MagicMock()
+        worker._pp_send_work = []
+        worker.profiler = None
+        worker.use_v2_model_runner = True
+        state = SimpleNamespace(pp_num_tokens=3)
+        output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
+
+        def execute(scheduler_output, incoming):
+            self.assertEqual(incoming.tensors["hidden_states"].shape, (2, 4))
+            return output
+
+        worker.model_runner = SimpleNamespace(
+            pp_sharded_tensor_keys=("hidden_states",), model_state=state, execute_model=execute, is_pooling_model=False
+        )
+        self.assertIsNone(worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=3)))
+        pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=None)
+        sent = pp_group.return_value.isend_tensor_dict.call_args.kwargs
+        self.assertIsNone(sent["all_gather_group"])
+        payload = pp_group.return_value.isend_tensor_dict.call_args.args[0]
+        self.assertIs(payload["hidden_states"], output["hidden_states"])
+        self.assertTrue(payload["hidden_states"][0].eq(1).all())
+        self.assertTrue(payload["hidden_states"][1].eq(0).all())
 
 
 class TestNPUWorker(TestBase):
