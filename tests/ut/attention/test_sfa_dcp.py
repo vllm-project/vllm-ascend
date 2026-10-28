@@ -467,6 +467,7 @@ def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency
     metadata = SimpleNamespace(
         num_actual_tokens=rows,
         num_decode_tokens=decode,
+        uses_pcp_sharded_layout=variant == "pcp",
         slot_mapping=torch.arange(rows, dtype=torch.int64) + 5,
         cos=torch.ones(rows, 64),
         sin=torch.zeros(rows, 64),
