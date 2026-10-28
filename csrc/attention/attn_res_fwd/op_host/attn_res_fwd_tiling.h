@@ -28,6 +28,7 @@ struct AttnResFwdCompileInfo {
     uint64_t aivNum{0UL};
     uint64_t ubSize{0UL};
     bool supportsCooperative{false};
+    bool regBase{false};
 };
 
 struct AttnResFwdInfo {

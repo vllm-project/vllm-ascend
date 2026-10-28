@@ -60,13 +60,15 @@ struct ParallelPlan {
   uint32_t rowParallel{0};
 };
 
-inline uint64_t RowParallelUbBytes(uint32_t rows, uint64_t tile) {
+inline uint64_t RowParallelUbBytes(uint32_t rows, uint64_t tile, bool regBase = false) {
   const uint64_t metaAlign =
       (static_cast<uint64_t>(rows) + COOPERATIVE_FLOAT_BLOCK - 1) / COOPERATIVE_FLOAT_BLOCK * COOPERATIVE_FLOAT_BLOCK;
-  const uint64_t metaElems = std::max<uint64_t>(metaAlign, COOPERATIVE_HIDDEN_ALIGN);
+  const uint64_t metaElems =
+      regBase ? (metaAlign + COOPERATIVE_HIDDEN_ALIGN - 1) / COOPERATIVE_HIDDEN_ALIGN * COOPERATIVE_HIDDEN_ALIGN
+              : std::max<uint64_t>(metaAlign, COOPERATIVE_HIDDEN_ALIGN);
   const uint64_t slots = std::max<uint64_t>(metaAlign, rows);
   const uint32_t rowPadding =
-      tile * sizeof(float) % COOPERATIVE_UB_ADDRESS_PERIOD_BYTES == 0 ? COOPERATIVE_ROW_PADDING_BYTES : 0;
+      !regBase && tile * sizeof(float) % COOPERATIVE_UB_ADDRESS_PERIOD_BYTES == 0 ? COOPERATIVE_ROW_PADDING_BYTES : 0;
   return tile * (4 * sizeof(uint16_t) + 3 * sizeof(float)) +
          (2 * metaElems + metaAlign * COOPERATIVE_FLOAT_BLOCK + slots * COOPERATIVE_FLOAT_BLOCK +
           2 * COOPERATIVE_FLOAT_BLOCK) *
@@ -74,10 +76,10 @@ inline uint64_t RowParallelUbBytes(uint32_t rows, uint64_t tile) {
          COOPERATIVE_SLOT_BYTES + COOPERATIVE_UB_ALLOWANCE + rowPadding;
 }
 
-// Only choose cooperation on A2/A3 when token parallelism leaves most cores idle.
+// Only choose cooperation on supported devices when token parallelism leaves most cores idle.
 // Prefer whole-H output ownership when the full-row buffer budget fits UB.
 inline ParallelPlan MakeParallelPlan(uint32_t tokens, uint32_t rows, uint32_t hidden, uint32_t cores, uint64_t ubBytes,
-                                     bool outputNorm, bool supportsCooperative) {
+                                     bool outputNorm, bool supportsCooperative, bool regBase = false) {
   ParallelPlan plan;
   if (!supportsCooperative || tokens == 0 || rows < 2 || rows > COOPERATIVE_MAX_ROWS ||
       hidden < COOPERATIVE_MIN_HIDDEN || tokens > cores / COOPERATIVE_CORE_GAIN) {
@@ -86,7 +88,7 @@ inline ParallelPlan MakeParallelPlan(uint32_t tokens, uint32_t rows, uint32_t hi
   const uint64_t rowTasks = static_cast<uint64_t>(tokens) * rows;
   const uint64_t wholeTile = (static_cast<uint64_t>(hidden) + COOPERATIVE_HIDDEN_ALIGN - 1) / COOPERATIVE_HIDDEN_ALIGN *
                              COOPERATIVE_HIDDEN_ALIGN;
-  if (RowParallelUbBytes(rows, wholeTile) <= ubBytes) {
+  if (RowParallelUbBytes(rows, wholeTile, regBase) <= ubBytes) {
     plan.usedCores = static_cast<uint32_t>(std::min<uint64_t>(cores, rowTasks));
     plan.scoreSplits = 1;
     plan.outputSplits = 1;
@@ -112,7 +114,9 @@ inline ParallelPlan MakeParallelPlan(uint32_t tokens, uint32_t rows, uint32_t hi
     // Three BF16 rows (input queue, output queue, reusable row) and three FP32
     // rows (score weight, current row, accumulator); metadata includes Brcb's
     // full eight-block destination, even when only its first block is used.
-    const uint64_t metaElems = std::max<uint64_t>(metaAlign, COOPERATIVE_HIDDEN_ALIGN);
+    const uint64_t metaElems =
+        regBase ? (metaAlign + COOPERATIVE_HIDDEN_ALIGN - 1) / COOPERATIVE_HIDDEN_ALIGN * COOPERATIVE_HIDDEN_ALIGN
+                : std::max<uint64_t>(metaAlign, COOPERATIVE_HIDDEN_ALIGN);
     const uint64_t slotCount =
         std::max({metaAlign, static_cast<uint64_t>(rows) * scoreSplits, static_cast<uint64_t>(outputSplits)});
     const uint64_t requiredUb = tileElems * (3 * sizeof(uint16_t) + 3 * sizeof(float)) +

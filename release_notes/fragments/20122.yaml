@@ -12,3 +12,9 @@ entries:
       Fixed broadcast scratch sizing and reduction tail initialization, and
       rejected unsafe metadata, non-finite normalization epsilon, and writable
       bank storage aliases before launching AttnResFwd.
+  - category: feature
+    hardware: [A5]
+    text: >-
+      Added a RegBase cooperative AttnResFwd path with residual-row parallel
+      scoring, one readiness barrier for full-row outputs, double-buffered
+      output reads, and a UB-budgeted H-split fallback.

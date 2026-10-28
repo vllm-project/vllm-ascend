@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A2/A3 whole-row and H-split cooperative paths, plus bank mutation coverage."""
+"""A2/A3/A5 whole-row and H-split paths, plus bank mutation coverage."""
 
 import pytest
 import torch
 import torch_npu
 
-A2_A3_SOC_VERSIONS = frozenset(range(220, 226)) | frozenset(range(250, 257))
+COOPERATIVE_SOC_VERSIONS = frozenset(range(220, 226)) | frozenset(range(250, 257)) | {260}
 
 
 @pytest.fixture(scope="module", autouse=True)
-def require_a2_a3_custom_operator():
-    if not torch.npu.is_available() or torch_npu.npu.get_soc_version() not in A2_A3_SOC_VERSIONS:
-        pytest.skip("Cooperative AttnResFwd requires an A2/A3 build and device")
+def require_cooperative_custom_operator():
+    if not torch.npu.is_available() or torch_npu.npu.get_soc_version() not in COOPERATIVE_SOC_VERSIONS:
+        pytest.skip("Cooperative AttnResFwd requires an A2/A3/A5 build and device")
     if not hasattr(torch.ops._C_ascend, "attn_res_fwd"):
         from vllm_ascend.device.device_config import check_ascend_device_type
         from vllm_ascend.utils import bootstrap_custom_op_env
@@ -51,6 +51,9 @@ def require_a2_a3_custom_operator():
         (16, 64, 1537, False, True, True, True, True),
         (1, 2048, 1, True, False, True, False, True),
         (1, 2048, 32, True, False, True, False, True),
+        (1, 8, 1538, True, True, True, True, True),
+        (1, 63, 1024, True, True, True, True, True),
+        (1, 127, 1024, True, True, True, True, True),
     ],
 )
 @torch.inference_mode()

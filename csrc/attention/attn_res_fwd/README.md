@@ -5,8 +5,9 @@
 `AttnResFwd` 是 Kimi K3 的注意力残差融合算子。单个 Torch 入口
 `torch.ops._C_ascend.attn_res_fwd` 将可选的 BF16 加法、残差 bank 混合、
 可选的输出 RMSNorm，以及 bank 写回放在一次调用中。源码注册覆盖
-A2、A3 和 A5；本次小 batch 协作路径仅接入 A2/A3。已在 Ascend910B3 上完成
-CANN 9.3.0 编译和小 shape 精度、性能验证；A3 及大 H 分段路径仍需硬件验证。
+A2、A3 和 A5，小 batch 协作路径同时接入三类平台。已在 Ascend910B3 上完成
+CANN 9.3.0 编译和小 shape 精度、性能验证。A5 使用独立 RegBase 协作实现，
+已完成 ascend950 交叉编译；A3、A5 及大 H 分段路径仍需对应硬件验证。
 
 令 `p` 为 `prefix_sum`（有 `addend` 时先做 BF16 加法），`v_i` 为
 `block_residual` 中前 `num_valid_blocks` 行，并令最后一行 `v_N=p`。
@@ -50,8 +51,8 @@ output, raw_prefix, materialized = torch.ops._C_ascend.attn_res_fwd(
 
 ## 实现与验证
 
-A2/A3 小 batch 优先使用行并行路径
-`AttnResFwdCooperative::ProcessRowParallel()`。设 token 数为 T、
+A2/A3 小 batch 使用 `AttnResFwdCooperative::ProcessRowParallel()`，
+A5 使用 `AttnResFwdCooperativeRegBase::ProcessRowParallel()`，分核逻辑相同。设 token 数为 T、
 有效历史行数为 N、候选行数 R=N+1、可用 AIV 核数为 C：
 
 1. 打分任务按 `(token, candidate)` 分配，任务数为 T*R，启动
@@ -90,7 +91,11 @@ BF16 Copy 使用多 repeat 批量调用，归约只初始化未对齐的尾块�
 分段任务超过核数时按核号步进循环处理。旧 UB 驻留核组实现已删除。
 H=7168 不是固定分界，分段数由 UB 预算选择；超过所有受支持分段预算时明确报错。
 
-Host 只在 A2/A3 上选择协作 tiling key，A5 保留原来的 `arch35` 路径。
+Host 在 A2/A3/A5 上选择协作 tiling key。A5 的打分沿用原有 RegBase RMSNorm
+及投影归约，输出使用寄存器内 BF16 转换和独立乘加；softmax 对有效候选行
+执行 masked max/sum 归约，覆盖不足一个寄存器和跨两个寄存器的候选数量。
+A5 的 metadata 按 64 个 FP32 元素补齐，Host 计入对应 UB 开销；A2/A3 的
+256B padding 和外置 Counter mask 调优不直接套用到 A5。
 其他场景保留原来的按 token 分核路径，Host 根据 H、有效行数和 UB 容量选择
 RESIDENT 或 RELOAD；prefill 缓存策略和公开 Torch 入口不变。
 协作 kernel 只使用 AIV，以 `MIX_AIV_1_0` 类型和 batch 调度模式启用硬件同步。
@@ -116,10 +121,12 @@ Host 还会在整数收窄前检查 shape、候选行数、stride 和写槽范�
 CPU API 替身直接运行生产 kernel 的分核、地址和数值逻辑。替身将搬运和流水
 视为同步操作，不模拟真实硬件归约指令的加法树，也不代替 CANN 编译和上板验证。
 
-当前提交在 Ascend910B3、CANN 9.3.0 上完成编译和安装；重新编译生产 Torch
-入口后，40 个 NPU 用例通过，4 个大 H 用例按测试范围排除。4 项 CPU 测试通过，
-其中生产 kernel 替身覆盖 22 个协作场景和 5 个原路径场景。A3 和大 H 的 NPU
-验证仍需补充。
+A2/A3 版本在 Ascend910B3、CANN 9.3.0 上完成编译和安装；重新编译生产 Torch
+入口后，43 个 NPU 用例通过，4 个大 H 用例按测试范围排除。
+A5 接入后的 CPU 回归为 5 项测试通过，分别覆盖 25 个 A2/A3 协作场景和
+25 个 A5 控制流场景（使用数学替身，不模拟寄存器指令），并保留原路径回归。
+A5 完成 CANN 9.3.0 ascend950 交叉编译和打包，尚无 A5 实机精度与性能数据。
+A3 和大 H 的 NPU 验证仍需补充。
 
 ### Ascend910B3 性能对照
 

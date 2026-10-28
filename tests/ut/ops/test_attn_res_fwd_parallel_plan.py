@@ -15,6 +15,12 @@ from pathlib import Path
 
 class AttnResParallelPlanTest(unittest.TestCase):
     def test_production_kernel_with_cpu_api_shim(self):
+        self._run_production_kernel_with_cpu_api_shim(False)
+
+    def test_a5_kernel_control_flow_with_cpu_api_shim(self):
+        self._run_production_kernel_with_cpu_api_shim(True)
+
+    def _run_production_kernel_with_cpu_api_shim(self, regbase):
         compiler = shutil.which("c++")
         if compiler is None:
             self.skipTest("A C++ compiler is required to exercise the kernel with CPU API stubs")
@@ -36,6 +42,7 @@ class AttnResParallelPlanTest(unittest.TestCase):
                     "-Wall",
                     "-Wextra",
                     "-Werror",
+                    *(["-DATTN_RES_TEST_REGBASE=1"] if regbase else []),
                     "-I",
                     str(root),
                     "-I",
@@ -158,15 +165,16 @@ int main() {
 #include "csrc/attention/attn_res_fwd/op_host/attn_res_fwd_parallel_plan.h"
 using namespace AttnResFwd;
 int main() {
-    for (uint32_t cores : {1U, 4U, 8U, 40U, 48U})
+    for (uint32_t cores : {1U, 4U, 8U, 40U, 48U, 64U})
     for (uint32_t tokens : {0U, 1U, 4U, 10U, 11U, 16U, 40U, 128U})
     for (uint32_t rows : {1U, 2U, 9U, 17U, 65U, 128U, 129U})
     for (uint32_t hidden : {0U, 65U, 511U, 512U, 1537U, 7168U, 32768U})
     for (uint64_t ub : {0ULL, 192ULL * 1024, 248ULL * 1024})
+    for (bool regBase : {false, true})
     for (bool norm : {false, true}) {
         auto unsupported = MakeParallelPlan(tokens, rows, hidden, cores, ub, norm, false);
         assert(!unsupported.usedCores && !unsupported.workspaceBytes);
-        auto p = MakeParallelPlan(tokens, rows, hidden, cores, ub, norm, true);
+        auto p = MakeParallelPlan(tokens, rows, hidden, cores, ub, norm, true, regBase);
         const uint64_t tile = ((uint64_t(hidden) + 63) / 64) * 64;
         const bool eligible = tokens > 0 && tokens <= cores / COOPERATIVE_CORE_GAIN &&
             rows >= 2 && rows <= COOPERATIVE_MAX_ROWS && hidden >= COOPERATIVE_MIN_HIDDEN &&
@@ -199,7 +207,7 @@ int main() {
             assert(p.workspaceBytes == (2 * tasks + (norm ? tokens * p.outputSplits : 0)) * 32);
             continue;
         }
-        assert(RowParallelUbBytes(rows, tile) <= ub);
+        assert(RowParallelUbBytes(rows, tile, regBase) <= ub);
         assert(p.scoreSplits == 1 && p.outputSplits == 1);
         const uint64_t tasks = uint64_t(tokens) * rows;
         assert(p.usedCores == std::min<uint64_t>(cores, tasks));

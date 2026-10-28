@@ -5,6 +5,10 @@
 #include "csrc/attention/attn_res_fwd/op_host/attn_res_fwd_parallel_plan.h"
 #include "csrc/attention/attn_res_fwd/op_kernel/arch22/attn_res_fwd_cooperative.h"
 #include "csrc/attention/attn_res_fwd/op_kernel/arch22/attn_res_fwd_resident.h"
+#ifdef ATTN_RES_TEST_REGBASE
+  #include "attn_res_fwd_regbase_cpu_stubs.h"
+  #include "csrc/attention/attn_res_fwd/op_kernel/arch35/attn_res_fwd_cooperative.h"
+#endif
 
 #include <exception>
 #include <iostream>
@@ -30,7 +34,12 @@ void CheckPrecision(const std::vector<bfloat16_t>& actual, const std::vector<bfl
 
 void Run(Case c, Path path = Path::COOPERATIVE) {
   constexpr uint64_t ubBytes = 192 * 1024;
-  auto plan = AttnResFwd::MakeParallelPlan(c.tokens, c.valid + 1, c.hidden, c.cores, ubBytes, c.norm, true);
+#ifdef ATTN_RES_TEST_REGBASE
+  constexpr bool regBase = true;
+#else
+  constexpr bool regBase = false;
+#endif
+  auto plan = AttnResFwd::MakeParallelPlan(c.tokens, c.valid + 1, c.hidden, c.cores, ubBytes, c.norm, true, regBase);
   if (path != Path::COOPERATIVE) {
     plan = {};
     plan.usedCores = std::min(c.tokens, c.cores);
@@ -150,7 +159,11 @@ void Run(Case c, Path path = Path::COOPERATIVE) {
       try {
         AscendC::TPipe pipe;
         if (path == Path::COOPERATIVE) {
+#ifdef ATTN_RES_TEST_REGBASE
+          AttnResFwd::AttnResFwdCooperativeRegBase<bfloat16_t> kernel(&pipe, &tiling);
+#else
           AttnResFwd::AttnResFwdCooperative<bfloat16_t> kernel(&pipe, &tiling);
+#endif
           kernel.Init(params, reinterpret_cast<GM_ADDR>(workspace.data() + guardFloats));
           assert(pipe.ubBytes + AttnResFwd::COOPERATIVE_UB_ALLOWANCE <= ubBytes);
           kernel.Process();
@@ -214,6 +227,9 @@ int main() {
       {1, 2, 7168, 8, true, true, true, true},  // Multiple rows per scoring core.
       {1, 4, 7168, 8, false, false, false, true},
       {1, 1, 7168, 48, true, true, true, false},
+      {1, 8, 1538, 64, true, true, true, true},  // Even H without an aligned half-row split.
+      {1, 63, 1024, 64, true, true, true, true},
+      {1, 127, 1024, 64, true, true, true, true},
   };
   for (const auto& c : cases) Run(c);
   Run({16, 4, 1537, 40, true, true, true, true}, Path::RESIDENT);

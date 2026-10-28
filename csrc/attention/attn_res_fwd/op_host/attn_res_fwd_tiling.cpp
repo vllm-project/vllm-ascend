@@ -81,8 +81,9 @@ void AttnResFwdTiling::InitCompileInfo()
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
     const auto socVersion = ascendcPlatform.GetSocVersion();
+    compileInfo_.regBase = socVersion == platform_ascendc::SocVersion::ASCEND950;
     compileInfo_.supportsCooperative = socVersion == platform_ascendc::SocVersion::ASCEND910B ||
-        socVersion == platform_ascendc::SocVersion::ASCEND910_93;
+        socVersion == platform_ascendc::SocVersion::ASCEND910_93 || compileInfo_.regBase;
     if (compileInfo_.aivNum <= 0) {
         OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
         return;
@@ -169,7 +170,8 @@ uint64_t AttnResFwdTiling::EstimateUbComputeBytes(bool resident) const
     }
     ub += static_cast<uint64_t>(3) * HAlignFp32 * sizeof(float); // scoreWeight + vRow + outFp32
     ub += static_cast<uint64_t>(metaAlign) * sizeof(float); // vecMeta
-    const uint32_t scratchElems = compileInfo_.supportsCooperative ? std::max(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
+    const uint32_t scratchElems = compileInfo_.supportsCooperative && !compileInfo_.regBase ?
+        std::max(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
     ub += static_cast<uint64_t>(scratchElems) * sizeof(float); // metaSoftmax; arch22 Brcb needs 256B.
     ub += static_cast<uint64_t>(metaAlign) * ELEM_PER_BLK_FP32 * sizeof(float); // metaBrc[n*8] after Softmax Brcb
     ub += static_cast<uint64_t>(SCALAR_LOCAL_ELEMS) * sizeof(float);
@@ -231,7 +233,7 @@ ge::graphStatus AttnResFwdTiling::DoLibApiTiling()
         const auto plan = AttnResFwd::MakeParallelPlan(
             tilingData_.numTokens, tilingData_.blockCount, tilingData_.hiddenSize,
             static_cast<uint32_t>(compileInfo_.aivNum), compileInfo_.ubSize,
-            tilingData_.outputNormEps > 0.0f, compileInfo_.supportsCooperative);
+            tilingData_.outputNormEps > 0.0f, compileInfo_.supportsCooperative, compileInfo_.regBase);
         if (plan.usedCores != 0) {
             tilingData_.usedCoreNum = plan.usedCores;
             tilingData_.outputSplits = plan.outputSplits;
