@@ -288,7 +288,7 @@ layers with a custom partition. `draft_tensor_parallel_size` controls only the
 draft model's TP size; it does not define a draft-model PP partition.
 
 The following matrix lists the features that can be stacked with PP on
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual
+Model Runner V2. Support describes each individual
 feature combination with PP and remains subject to the model and hardware
 requirements in the relevant feature guide.
 

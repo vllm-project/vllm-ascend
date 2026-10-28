@@ -6,7 +6,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
-1. **Proposer** (`vllm_ascend/worker/v1/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
+1. **Proposer** (`vllm_ascend/worker/v2/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
 2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
 
 The following speculative decoding methods are supported:
@@ -849,7 +849,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Model Runner V2 supports upstream vLLM's block verification for speculative decoding. It jointly verifies a block of draft tokens using cumulative target-to-draft probability ratios and samples a recovery token from the corresponding residual distribution. This can increase the accepted draft length while preserving the target sampling distribution. Performance gains depend on the draft model and workload.
 
-Model Runner V2 is enabled by default (`VLLM_USE_V2_MODEL_RUNNER=1`). To enable block verification, set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
+To enable block verification, set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
 
 **Offline inference**:
 
