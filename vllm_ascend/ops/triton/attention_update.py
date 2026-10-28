@@ -79,15 +79,9 @@ def prepare_attention_update(
     first_dtype = lses[0].dtype
     first_device = lses[0].device
     for i, lse in enumerate(lses):
-        assert lse.numel() == rows, (
-            f"lses[{i}] has {lse.numel()} elements, expected {rows} (same as lses[0])."
-        )
-        assert lse.dtype == first_dtype, (
-            f"lses[{i}] dtype {lse.dtype} != lses[0] dtype {first_dtype}."
-        )
-        assert lse.device == first_device, (
-            f"lses[{i}] device {lse.device} != lses[0] device {first_device}."
-        )
+        assert lse.numel() == rows, f"lses[{i}] has {lse.numel()} elements, expected {rows} (same as lses[0])."
+        assert lse.dtype == first_dtype, f"lses[{i}] dtype {lse.dtype} != lses[0] dtype {first_dtype}."
+        assert lse.device == first_device, f"lses[{i}] device {lse.device} != lses[0] device {first_device}."
     relative = torch.empty((len(lses), rows), dtype=torch.float32, device=lses[0].device)
     anchor = lses[0].new_empty(rows)
     if rows:
