@@ -1,5 +1,0 @@
-pr: 20104
-entries:
-  - category: bugfix
-    text: Fixed incorrect Kimi-K3 generation when MLA uses a standalone output gate by preserving the gate across attention preprocessing.
-    model: kimi-k3
