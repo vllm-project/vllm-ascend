@@ -80,6 +80,10 @@ LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations
 
 Prompt logprobs is also not supported with LM head TP: a request asking for prompt logprobs fails with an explicit error at sampling time.
 
+#### Embedding TP and Speculative Decoding
+
+Embedding TP works with speculative decoding; draft-model embeddings never join the fine-grained exchange (drafts are fed `inputs_embeds` during propose replay) and always keep the standard TP layout. With `tensor_parallel_size == 1`, a draft model that owns its full embedding table therefore replicates it on every rank instead of sharding it — the per-rank saving of the embedding knob applies to the main model's table only.
+
 #### Configuration Limit
 
 The Fine-Grained TP size for any component must:

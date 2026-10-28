@@ -98,7 +98,9 @@ def _is_main_model_module() -> bool:
     ``set_model_tag`` context whose tag differs from the default ``"backbone"``
     used while the main model is built. The tag is the only reliable
     main-vs-draft signal: the draft loading paths pass no distinguishing
-    module prefix.
+    module prefix. A main model that constructs its embedding inside a
+    non-backbone tag context (integrated draft wrappers that build the
+    embedding themselves) also falls back to the standard layout here.
     """
     from vllm.compilation.backends import model_tag
 
