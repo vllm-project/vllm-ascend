@@ -1,0 +1,4 @@
+pr: 20158
+entries:
+  - category: bugfix
+    text: Fixed incomplete KV cache block copies for overlapping hybrid cache views, preserving cache contents during copy-on-write.
