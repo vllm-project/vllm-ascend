@@ -35,7 +35,8 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.in_proj_qkvbfg_a = project
     layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
     layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
-    layer.o_norm = lambda x, gate: x
+    # The gated norm now runs inside the KDA custom op, which writes into `out`.
+    layer.o_norm = SimpleNamespace(forward_oot=lambda output, gate, *, out: out)
     layer.o_proj = lambda x: (x, None)
     seen = []
 
@@ -51,7 +52,11 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
         padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
     )
     metadata = SimpleNamespace(pcp_context=pcp_context)
-    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    monkeypatch.setattr(
+        model_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer": metadata}, no_compile_layers={"layer": layer}),
+    )
     gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
     pcp_group = SimpleNamespace(
         world_size=2,
@@ -61,6 +66,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.pcp_group = pcp_group
     layer.pcp_size = pcp_group.world_size
     layer.pcp_rank = pcp_group.rank_in_group
+
+    # The KDA custom op is registered against the NPU dispatch key, so a CPU
+    # runner cannot dispatch it. Call its implementation directly instead.
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
 
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
