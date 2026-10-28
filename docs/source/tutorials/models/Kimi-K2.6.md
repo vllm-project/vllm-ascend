@@ -193,8 +193,8 @@ Key Parameter Descriptions:
 - Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
-- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try increasing `--max-num-seqs` to improve system throughput.
+- `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
+- If you use the w4a8 weight, more memory will be allocated to KV Cache, and you can try increasing `--max-num-seqs` to improve system throughput.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -818,11 +818,11 @@ After about several minutes, you can get the performance evaluation result.
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-#### Table 1: Scenario Overview
+**Table 1: Scenario Overview**
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
 |High Throughput<br>(16k input)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|Use dp2 tp8 to balance memory capacity and compute efficiency|
 |High Throughput<br>(16k input)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 on both P and D nodes; balanced latency and throughput|
@@ -833,7 +833,7 @@ After about several minutes, you can get the performance evaluation result.
 |Multimodal<br>(1080P)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 or dp16 tp1, depending on memory and concurrency|
 |Multimodal<br>(1080P)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
 
-#### Table 2: Detailed Node Configuration
+**Table 2: Detailed Node Configuration**
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|

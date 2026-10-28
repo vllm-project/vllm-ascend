@@ -1432,7 +1432,7 @@ layerwise setting and topology.
     | Prefill | P0, P1 | 1 | 16 | 2 | One PP stage per node | 32 |
     | Decode | D0, D1 | 16 | 2 | 1 | Eight DP ranks per node | 32 |
 
-    Each container exposes devices 0-15. P0 exposes the only Prefill API;
+    Each container exposes devices 0-15. P0 exposes the only Prefill API.
     P1 runs the second PP stage without an API server. Decode ranks 0-7 run
     on D0 and ranks 8-15 on D1, with API ports 8000-8007 on each node.
 
@@ -1869,7 +1869,7 @@ layerwise setting and topology.
 
     ###### Start the Engines
 
-    Once the preparation is done, you can start the server with the following command on each node:
+    Once preparation is complete, run the following commands on each node from the directory containing the scripts:
 
     1. Prefill node 0
 
@@ -3375,7 +3375,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     Start the MemCache metadata service and complete its configuration on all
     four nodes before starting vLLM.
 
-    Once the preparation is done, you can start the server with the following command on each node:
+    Once preparation is complete, run the following commands on each node from the directory containing the scripts:
 
     1. Prefill node 0
 
@@ -4805,7 +4805,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
@@ -4878,9 +4878,11 @@ This option does not apply to the 950DT products FP8 examples or GLM-5.3-Flash.
 
 ## 10 FAQ
 
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
 ### Q: How to enable function calling for GLM-5.2 and GLM-5.3?
 
-A: Please add following configurations in vLLM startup command
+A: Please add following configurations in vLLM startup command.
 
 ```shell
 --tool-call-parser glm47 \

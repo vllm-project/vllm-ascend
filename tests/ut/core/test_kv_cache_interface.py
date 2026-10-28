@@ -31,8 +31,8 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
-# the v0.31.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# the v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 else:
     from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
@@ -81,14 +81,11 @@ def test_get_storage_block_size_and_dcp_memory():
 
 
 def test_get_storage_block_size_for_plain_mla_subclass():
-    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` on main; the
-    # v0.31.0 lane keeps it as an optional override. A plain MLA subclass
-    # (HiddenStateCacheSpec) must resolve on both lanes.
+    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` in both
+    # supported lanes. A plain MLA subclass (HiddenStateCacheSpec) must
+    # resolve to block_size.
     spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    if vllm_version_is("0.31.0"):
-        expected = spec.block_size if spec.storage_block_size is None else spec.storage_block_size
-    else:
-        expected = spec.block_size
+    expected = spec.block_size
     assert get_storage_block_size(spec) == expected
 
 

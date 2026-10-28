@@ -65,7 +65,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
-from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache, vllm_version_is
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -85,8 +85,8 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:

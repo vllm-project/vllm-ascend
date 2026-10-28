@@ -88,6 +88,9 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         from "left to the update", which is what legacy trainers rely on.
         """
         self.shutdown()
+        # v0.32 has no metadata cache in the parent; initialize it here for both
+        # versions and never reuse metadata across transfer sessions.
+        self._last_hccl_update_info: dict[torch.nn.Module, HCCLWeightTransferUpdateInfo] = {}
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
@@ -142,6 +145,13 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
         params = self._wire_params(update_info)
+        # Upstream main omits unchanged metadata after the first update. Keep
+        # the cache model-specific, while resolving this round's wire params
+        # above independently of the cached parameter metadata.
+        if update_info.names:
+            self._last_hccl_update_info[self.model] = update_info
+        else:
+            update_info = self._last_hccl_update_info.get(self.model, update_info)
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,

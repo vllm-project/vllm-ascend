@@ -7,6 +7,11 @@ import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
+    LOOKUP_MSG,
+    RESET_MSG,
+    RESP_OK,
+)
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
@@ -1192,6 +1197,45 @@ class KVPoolScheduler:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
 
+    def reset_store(self) -> bool:
+        """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
+        if self.sending_events or self.sending_blocks:
+            logger.error(
+                "AscendStore reset_store refused; in-flight saves still track sending_events=%s sending_blocks=%s",
+                list(self.sending_events),
+                list(self.sending_blocks),
+            )
+            return False
+
+        stale_ids = bool(self._loading_req_ids)
+        # True when any block besides the null block is still held.
+        if self._block_pool is None:
+            blocks_still_referenced = True
+        else:
+            used = self._block_pool.num_gpu_blocks - self._block_pool.get_num_free_blocks()
+            blocks_still_referenced = used != 1
+        if stale_ids and blocks_still_referenced:
+            logger.error(
+                "AscendStore reset_store refused; blocks still referenced loading_req_ids=%s",
+                self._loading_req_ids,
+            )
+            return False
+        if stale_ids:
+            self._loading_req_ids.clear()
+
+        if self.client is None:
+            self.client = LookupKeyClient(self.vllm_config)
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("AscendStore reset via remove_all succeeded.")
+            else:
+                logger.warning("AscendStore reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("AscendStore reset_store RPC failed: %s", e)
+            return False
+
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
 
@@ -1225,6 +1269,7 @@ class LookupKeyClient:
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
+            LOOKUP_MSG,
             token_len.to_bytes(4, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
@@ -1239,6 +1284,12 @@ class LookupKeyClient:
             return 0
 
         return int.from_bytes(resp, "big")
+
+    def reset(self) -> bool:
+        """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
+        self.socket.send(RESET_MSG)
+        resp = self.socket.recv()
+        return bytes(resp) == RESP_OK
 
     def close(self):
         if self._closed:
@@ -1257,7 +1308,12 @@ class LookupKeyClient:
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    # NOTE: This isolates lookup IPC paths only. MooncakeConnector (V1) worker
+    # handshake ports and MooncakeConnectorV2 scheduler control ports may still
+    # overlap ports reserved by other workers or components. DP indices do not
+    # guarantee disjoint TCP port ranges.
+    # Dense engines reset their compute DP rank, but retain their serving index.
+    dp_index = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
@@ -1271,4 +1327,4 @@ def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_index}"
