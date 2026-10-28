@@ -108,6 +108,24 @@ def test_take_resets_the_tracker():
     assert dirty.take() == []
 
 
+def test_mask_is_not_scanned_until_a_scattered_write_marks_it():
+    dirty = _DirtyRows(64)
+
+    dirty.mark(5)  # the only write that needs the mask
+    assert dirty.take() == [(5, 6)]
+    # The allocation is kept, but nothing is pending, so later syncs skip it.
+    assert dirty._mask is not None
+    assert dirty._mask_pending is False
+
+    dirty.mark(slice(0, 4))
+    assert dirty._mask_pending is False
+    assert dirty.take() == [(0, 4)]
+
+    dirty.mark(9)
+    assert dirty._mask_pending is True
+    assert dirty.take() == [(9, 10)]
+
+
 def test_out_of_bounds_index_is_rejected():
     dirty = _DirtyRows(8)
 

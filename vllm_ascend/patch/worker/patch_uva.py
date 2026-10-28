@@ -69,7 +69,7 @@ class _DirtyRows:
     mask, so the per-write cost stays in NumPy instead of Python.
     """
 
-    __slots__ = ("_size", "_prefix", "_mask")
+    __slots__ = ("_size", "_prefix", "_mask", "_mask_pending")
 
     def __init__(self, size: int) -> None:
         self._size = size
@@ -77,7 +77,13 @@ class _DirtyRows:
         # through writes that cover it from row 0, so no per-row bookkeeping
         # is needed to prove the coverage.
         self._prefix = 0
+        # The mask is allocated on the first scattered write and then kept, so
+        # that one scattered write does not make every later sync re-zero (and
+        # re-scan) one byte per row, which is up to 2 MB for the block table.
+        # This flag is what keeps the scan off the hot path: it is the only
+        # reason take() has to look at the mask at all.
         self._mask: np.ndarray | None = None
+        self._mask_pending = False
 
     def mark(self, key) -> None:
         """Record the rows touched by an ``arr[key] = value`` write."""
@@ -131,6 +137,7 @@ class _DirtyRows:
         if self._mask is None:
             self._mask = np.zeros(self._size, dtype=bool)
         self._mask[rows] = True
+        self._mask_pending = True
 
     def take(self) -> list[tuple[int, int]]:
         """Return the coalesced ``[start, stop)`` runs to copy, then reset."""
@@ -139,9 +146,12 @@ class _DirtyRows:
         if self._prefix:
             runs.append((0, self._prefix))
             covered = self._prefix
-        if self._mask is not None:
-            index = np.flatnonzero(self._mask[covered:])
-            self._mask[:] = False
+        if self._mask_pending:
+            mask = self._mask
+            assert mask is not None  # _mark_rows allocates before the flag
+            index = np.flatnonzero(mask[covered:])
+            mask[:] = False
+            self._mask_pending = False
             if index.size:
                 index += covered
                 breaks = np.flatnonzero(np.diff(index) != 1) + 1
