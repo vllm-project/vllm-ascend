@@ -122,6 +122,14 @@ def _gather_paged_kv_to_dense(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # npu_fusion_attention consumes dense TND KV, while cached prefill KV is
     # stored by blocks. Gather only valid tokens from the block table.
+    # BNSD/HND layout stores blocks as [num_blocks, num_kv_heads, block_size,
+    # head_size]; view it as the natural [num_blocks, block_size, num_kv_heads,
+    # head_size] shape so the block gather below is layout-agnostic.
+    # (block_size is 64/128 while num_kv_heads is at most 16, so the two
+    # layouts are distinguishable by shape[1].)
+    if key_cache.shape[1] == num_kv_heads and key_cache.shape[2] != num_kv_heads:
+        key_cache = key_cache.permute(0, 2, 1, 3)
+        value_cache = value_cache.permute(0, 2, 1, 3)
     block_size = key_cache.shape[1]
     max_seq_len = max(seq_lens)
     seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
