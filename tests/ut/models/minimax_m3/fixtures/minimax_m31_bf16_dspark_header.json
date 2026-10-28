@@ -1,0 +1,413 @@
+{
+  "language_model.model.dspark.confidence_head.proj.bias": {
+    "dtype": "BF16",
+    "shape": [
+      1
+    ]
+  },
+  "language_model.model.dspark.confidence_head.proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      1,
+      6400
+    ]
+  },
+  "language_model.model.dspark.fc.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      30720
+    ]
+  },
+  "language_model.model.dspark.final_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.hidden_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.input_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.mlp.down_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      12288
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.mlp.gate_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.mlp.up_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.post_attention_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.k_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.k_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.o_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      8192
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.q_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.q_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      8192,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.0.decoder_layer.self_attn.v_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.input_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.mlp.down_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      12288
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.mlp.gate_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.mlp.up_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.post_attention_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.k_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.k_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.o_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      8192
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.q_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.q_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      8192,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.1.decoder_layer.self_attn.v_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.input_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.mlp.down_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      12288
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.mlp.gate_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.mlp.up_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.post_attention_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.k_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.k_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.o_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      8192
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.q_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.q_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      8192,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.2.decoder_layer.self_attn.v_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.input_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.mlp.down_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      12288
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.mlp.gate_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.mlp.up_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.post_attention_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.k_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.k_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.o_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      8192
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.q_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.q_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      8192,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.3.decoder_layer.self_attn.v_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.input_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.mlp.down_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      12288
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.mlp.gate_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.mlp.up_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      12288,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.post_attention_layernorm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.k_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.k_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.o_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      6144,
+      8192
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.q_norm.weight": {
+    "dtype": "BF16",
+    "shape": [
+      128
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.q_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      8192,
+      6144
+    ]
+  },
+  "language_model.model.dspark.layers.4.decoder_layer.self_attn.v_proj.weight": {
+    "dtype": "BF16",
+    "shape": [
+      512,
+      6144
+    ]
+  },
+  "language_model.model.dspark.markov_head.markov_w1.weight": {
+    "dtype": "BF16",
+    "shape": [
+      200064,
+      256
+    ]
+  },
+  "language_model.model.dspark.markov_head.markov_w2.weight": {
+    "dtype": "BF16",
+    "shape": [
+      200064,
+      256
+    ]
+  }
+}

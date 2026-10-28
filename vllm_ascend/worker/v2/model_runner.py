@@ -1371,6 +1371,42 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return False
 
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
+
+        if (
+            spec is None
+            or self.speculator is None
+            or spec.method != "dspark"
+            or self.model_config.architecture
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
+            or (
+                "Qwen3DSparkModel" not in draft_architectures
+                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
+            )
+        ):
+            return False
+
         # Inspect the initialized draft backends instead of repeating selection
         # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
         draft_backends = getattr(self.speculator, "attn_backends", {})
