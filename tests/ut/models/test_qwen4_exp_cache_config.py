@@ -802,6 +802,16 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     )
 
 
+def test_platform_builder_uses_qwen_pool_accounting() -> None:
+    pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    groups = _groups()
+    expected = get_qwen4_exp_pool_bytes_per_block(groups)
+    assert expected is not None
+    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
+
+
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
     from vllm.v1.attention.backend import CommonAttentionMetadata
