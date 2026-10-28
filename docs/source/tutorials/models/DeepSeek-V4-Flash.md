@@ -1679,8 +1679,8 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | Configuration | Workload / native window | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
     |---|---|---|---|---:|
     | `decode-4k-total` | 4K input / 2K output, pure D, total | 4096 / on | 2 / 85 | 4 |
-    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 1 / 128 | 4 |
-    | `decode-16k` | 16K / 1K, pure D | 4096 / on | 1 / 128 | 4 |
+    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 4 / 51 | 4 |
+    | `decode-16k` | 16K / 1K, pure D | 4096 / on | 4 / 51 | 4 |
     | `decode-long` | 64K / 1K or 128K / 1K, pure D | 4096 / on | 5 / 42 | 1 |
     | `cold-pd` | PC0 pure P or full PD | 8192 / off | 1 / 128 | 4 |
     | `pc90` | Distinct-suffix, multiple-prefix pooling; see [A2 KV Pooling](#526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration) | 8192 / on | 1 / 128 | 4 |
@@ -1698,7 +1698,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
     | `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
-    The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft1/mns128/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
+    The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft4/mns51/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
 
     The measured context budgets are intentionally asymmetric: `--max-model-len 150000` on P and `508576` on D. The larger D budget does not extend the prompt length that P can prefill. All ordinary-length workloads listed here fit within the P budget; do not advertise the D value as the end-to-end prompt limit. If a deployment requires equal P/D limits, change both to the chosen service limit and revalidate KV capacity and throughput before reusing these measurements.
 
@@ -1763,7 +1763,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
       --kv-transfer-config "$kv_config"
     ```
 
@@ -2618,7 +2618,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     #### A2 KV Pooling: Mooncake SSD Profile and Memcache Integration {: #526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration }
 
-    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft1/mns128/GMU0.97.
+    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft4/mns51/GMU0.97.
 
     | Backend | Preparation | Validation scope |
     |---|---|---|
@@ -2783,7 +2783,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
           --kv-transfer-config "$kv_config"
         ```
 
@@ -2870,7 +2870,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
           --kv-transfer-config "$kv_config"
         ```
 
