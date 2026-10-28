@@ -110,6 +110,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
   Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
+- Pooling models with bidirectional (`ENCODER_ONLY`) attention layers, such as Decision 3.0 (D3) checkpoints, are not supported with PCP. Pooling models default to the V1 model runner, which rejects PCP; if `VLLM_USE_V2_MODEL_RUNNER=1` forces the V2 runner, the attention backend fails at startup because it does not gather the other ranks' K/V.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.

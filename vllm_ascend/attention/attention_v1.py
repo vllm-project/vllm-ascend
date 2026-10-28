@@ -583,6 +583,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
+        if (
+            attn_type == AttentionType.ENCODER_ONLY
+            and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Bidirectional (ENCODER_ONLY) attention does not support prefill context parallelism (PCP): each "
+                "PCP rank only holds its slice of the prompt and the encoder attention path does not gather the "
+                "other ranks' K/V, so the result would silently be wrong. Set --prefill-context-parallel-size to 1."
+            )
         self.use_pcp = (
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1

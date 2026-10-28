@@ -280,6 +280,16 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
             enable_sfa.assert_called_once_with(config)
 
 
+def test_pcp_is_rejected_on_the_v1_model_runner():
+    """Pooling models default to the V1 runner (see mrv2_utils), where PCP is not supported."""
+    config = SimpleNamespace(
+        use_v2_model_runner=False, parallel_config=SimpleNamespace(prefill_context_parallel_size=2)
+    )
+
+    with pytest.raises(ValueError, match="PCP .* is not supported by vLLM Ascend"):
+        _validate_parallel_config(config)
+
+
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("enable_sfa_c8", [False, True])
 def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
