@@ -1,10 +1,16 @@
-"""Bind common Key/Local tables and layer indices; construct Remote layouts separately.
+"""Bind one group's Key/Local tables and layer indices; build Remote layouts separately.
 
-PP selects layers; TP selects heads inside each tensor. DCP has already selected
-the local tokens upstream, so its rank labels the views without slicing again.
-PCP does not change this local tensor selection. Tables belong to one group
-binding; their partition coordinates are not global object identities. Temporary
-Tensor views share caller-owned KV storage, which must outlive all bound addresses.
+Segments follow layer/name/component/element order. Within one PP partition (DCP rank fixed):
+
+    segment              0    1    2  |  3    4
+    layer                [ layer A ]    [layer B]
+    Local[head 0].bases   a0   a1   a2    a3   a4
+    Local[head 1].bases   b0   b1   b2    b3   b4
+    shared geometry      block_strides / lengths
+    Layer[PP]            A -> [0:3]      B -> [3:5]
+    Remote[PP].offsets   byte offset of each segment within the remote object
+
+KV storage remains caller-owned and must outlive all bound addresses.
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ class LocalSegmentData(TypedDict):
     """Block-zero addresses and byte geometry in segment order.
 
     Uniform strides/lengths are stored as singletons shared by all segments.
-    Empty objects have empty arrays. Use local_lengths() for selected lengths.
+    Empty objects have empty arrays.
     """
 
     bases: UInt64Array
@@ -76,23 +82,10 @@ def build_mappings(
     key_builder: KeyBuilder | None = None,
     layerwise: bool = False,
 ) -> tuple[KeyTable, LocalTable, LayerTable | None]:
-    """Bind Key/Local once, optionally retaining layer indices; never build Remote.
+    """Bind local partitions from Tensor views without copying KV data.
 
-    Key and Local are keyed by (PP, DCP, head partition); layer slices are keyed by PP.
-    Local segments follow layer/name/component/element order. Head partitions in
-    one PP partition share strides, lengths and layer slices, but own their bases.
-    Treat layer indices as read-only. Bulk leaves them absent (None).
-    Remote builders consume these numeric results without revisiting tensors.
-
-    Attention block grouping follows the runner's storage-block/kernel-row ratio,
-    including compressed MLA. Mamba pages are not kernel-split. Tensor axis zero
-    supplies capacity; no scheduler num_blocks or new KV storage allocation is needed.
-    HND/LBHNC inputs are registered per-layer head-major views. KV storage stays
-    caller-owned and must outlive bound addresses. No KV contents are copied.
-
-    The default builder emits canonical PoolKey affixes. An external callable
-    receives object-specific KeyMetadata once and returns (prefix, suffix).
-    Lookup identities outside the selected local partitions are not constructed.
+    Return Key/Local tables and layer indices (None for Bulk). Treat layer indices as read-only.
+    key_builder maps each partition's KeyMetadata to (prefix, suffix), defaulting to PoolKey affixes.
     """
     group = next((group for group in topology.transfer_groups if group.group_id == group_id), None)
     if group is None:
@@ -100,6 +93,7 @@ def build_mappings(
     metadata = group.key_metadata
     head_partition_count = topology.tp_partition.key_slices_per_rank if topology.tp_partition.tp_mismatch else 1
     first_head_rank = metadata.head_or_tp_rank * head_partition_count
+    # HND/LBHNC caches arrive as per-layer head-major views.
     head_axis = 1 if kv_cache_layout in ("HND", "LBHNC") else 2
     token_axis = 2 if head_axis == 1 else 1
     builder = _default_key_builder if key_builder is None else key_builder
@@ -108,7 +102,7 @@ def build_mappings(
     local: LocalTable = {}
     layer_slices: LayerTable | None = {} if layerwise else None
     for pp_rank, layers in select_layers(group, topology.consumer_pipeline_partitions).items():
-        # Fix the coordinates and layer membership before inspecting memory.
+        # DCP tokens are already sliced upstream; PCP does not change local selection.
         partitions = tuple(
             (pp_rank, metadata.dcp_rank, first_head_rank + head_partition_index)
             for head_partition_index in range(head_partition_count)
@@ -133,29 +127,23 @@ def build_mappings(
                 for tensor in tensors:
                     if not tensor.numel():
                         continue
-                    # Group kernel blocks before splitting head partitions so
-                    # every partition uses the same logical-block byte stride.
                     scale = _kernel_blocks_per_group(tensor, spec, token_axis)
                     blocks = tensor.unflatten(0, (-1, scale))
                     element_bytes = tensor.element_size()
                     stride = blocks.stride(0) * element_bytes
-                    # Each view stays within one layer/component/logical block
-                    # and one object's head partition, which may contain several heads.
-                    for head_partition_index, view in enumerate(
-                        split_head_partitions(blocks[0], head_partition_count, head_axis)
-                    ):
-                        for part in contiguous_subviews(view):
-                            bases[head_partition_index].append(part.data_ptr())
-                            # Equal head partitions differ only in base addresses.
-                            if head_partition_index == 0:
-                                length = part.numel() * element_bytes
-                                strides.append(stride)
-                                lengths.append(length)
+                    head_views = split_head_partitions(blocks[0], head_partition_count, head_axis)
+                    # Equal head views share shape/strides, so their segments differ only by address offset.
+                    head_offsets = tuple(view.data_ptr() - head_views[0].data_ptr() for view in head_views)
+                    for part in contiguous_subviews(head_views[0]):
+                        address = part.data_ptr()
+                        strides.append(stride)
+                        lengths.append(part.numel() * element_bytes)
+                        for partition_bases, offset in zip(bases, head_offsets, strict=True):
+                            partition_bases.append(address + offset)
 
             if pp_layer_slices is not None:
                 pp_layer_slices[layer.physical_layer_id] = slice(layer_segment_start, len(lengths))
 
-        # Freeze shared geometry once; retain separate bases for each partition.
         block_strides = _compact_uniform_values(strides)
         segment_lengths = _compact_uniform_values(lengths)
         if layer_slices is not None and pp_layer_slices is not None:
@@ -224,20 +212,12 @@ def _kernel_blocks_per_group(tensor: torch.Tensor, spec: KVCacheSpec, token_axis
 def split_head_partitions(tensor: torch.Tensor, head_partition_count: int, head_axis: int) -> tuple[torch.Tensor, ...]:
     if head_partition_count == 1 or not tensor.numel():
         return (tensor,) * head_partition_count
-    # Equal partitions may contain several heads. Unflatten rejects indivisible
-    # head counts, while splitting by size can leave a tail.
-    # unbind then exposes each partition as a view of the same storage.
+    # Unflatten rejects head counts that cannot be divided equally.
     return tensor.unflatten(head_axis, (head_partition_count, -1)).unbind(head_axis)
 
 
 def contiguous_subviews(view: torch.Tensor) -> Iterator[torch.Tensor]:
-    """Yield contiguous subviews in logical element order without copying data.
-
-    The caller has already bounded the region to one object's head partition
-    within one layer/component/logical block. Recursion only subdivides that
-    region; it never merges across boundaries or decides remote placement.
-    Empty inputs yield nothing. Contiguous inputs are returned unchanged.
-    """
+    """Yield contiguous subviews in logical element order without copying data."""
     if view.numel() == 0:
         return
     if view.is_contiguous():
@@ -253,11 +233,7 @@ def contiguous_subviews(view: torch.Tensor) -> Iterator[torch.Tensor]:
 
 
 def build_key_range_remote(local: LocalTable) -> RemoteTable:
-    """Pack each PP payload tightly; use the common layer index to select ranges.
-
-    Input is one group's bound Local table. Head partitions share lengths within each PP,
-    so each output layout is constructed once and indexed by PP rank.
-    """
+    """Pack each PP payload tightly, sharing offsets across head partitions."""
     remote: RemoteTable = {}
     for (pp_rank, _, _), segments in local.items():
         if pp_rank in remote:
@@ -278,15 +254,12 @@ def build_gva_remote(topology: KVPoolTopology, local: LocalTable, layer_slices: 
         if pp_rank in remote:
             continue
         boundaries = _segment_byte_boundaries(segments["lengths"], len(segments["bases"]))
-        pp_layer_slices = layer_slices[pp_rank]
+        layer_spans = layer_slices[pp_rank]
         if topology.pp_partition.global_layer_count is not None:
-            uniform_layer_bytes = None
-            for selected in pp_layer_slices.values():
-                layer_bytes = int(boundaries[selected.stop]) - int(boundaries[selected.start])
-                if uniform_layer_bytes is not None and uniform_layer_bytes != layer_bytes:
-                    raise ValueError("Global layer spans require uniform per-layer payloads")
-                uniform_layer_bytes = layer_bytes
-        size, origin = _gva_object_span(topology, int(boundaries[-1]), len(pp_layer_slices))
+            layer_sizes = {int(boundaries[span.stop]) - int(boundaries[span.start]) for span in layer_spans.values()}
+            if len(layer_sizes) > 1:
+                raise ValueError("Global layer spans require uniform per-layer payloads")
+        size, origin = _gva_object_span(topology, int(boundaries[-1]), len(layer_spans))
         offsets = boundaries[:-1]
         if origin:
             offsets += np.uint64(origin)
@@ -330,7 +303,7 @@ def _gva_object_span(topology: KVPoolTopology, payload_bytes: int, layer_count: 
 
 
 def map_keys(key_parts: tuple[str, str], hashes: Sequence[bytes | str]) -> tuple[str, ...]:
-    """Fill an object's fixed wire name without consulting geometry or tensors."""
+    """Insert block hashes into an object's wire name."""
     prefix, suffix = key_parts
     return tuple(prefix + (value.hex() if isinstance(value, bytes) else value) + suffix for value in hashes)
 
@@ -351,11 +324,7 @@ def local_addresses(
 
 
 def local_lengths(segments: LocalSegmentData, segment_range: slice = _ALL_SEGMENTS) -> UInt64Array:
-    """Select length values, preserving singletons for the caller's final broadcast.
-
-    An empty selection returns an empty array even when the object is uniform.
-    Broadcast against the selected addresses only when per-segment sizes are needed.
-    """
+    """Select lengths: keep uniform values as singletons, but return an empty array for empty selections."""
     lengths = segments["lengths"]
     if len(lengths) == 1:
         return lengths if len(segments["bases"][segment_range]) else lengths[:0]
