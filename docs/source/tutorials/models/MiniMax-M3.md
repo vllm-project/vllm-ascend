@@ -133,7 +133,7 @@ Select the `docker run` command for your hardware platform:
 
 Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
 
-Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+Expected result: The container is listed with status `Up`. You can also verify the vllm Ascend version inside the container:
 
 ```bash
 pip show vllm-ascend
@@ -141,7 +141,7 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:
 
@@ -871,7 +871,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
-    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM-Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
+    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
 === "950DT products"
 
@@ -2496,7 +2496,7 @@ Send client requests to `http://<PROXY_HOST_IP>:18919/v1/chat/completions`. The 
 3. Prepare a prompt containing exactly 1,048,576 tokens using the deployed model's tokenizer. Keep input plus requested output within `1049600`; the configuration reserves up to 1024 output tokens for a full 1M-token input.
 4. Verify the API's input-token count and the requested retrieval answers. Check the Prefill prompt-token counter and the receiving Decode rank's external-prefix-cache hit counter to confirm the long prefix was transferred. Decode should not recompute the complete 1M prefill.
 
-The recorded A3 run used vLLM `0.30.0+empty` and vLLM-Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
+The recorded A3 run used vLLM `0.30.0+empty` and vLLM Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
@@ -2828,11 +2828,11 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| GSM8K   | 8 H20 (96G × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 H20 (96GB × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
 | GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
-| AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | 8 H20 (96GB × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 H20 (96GB × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=1.0, top_p=0.95 |
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
@@ -2876,7 +2876,7 @@ ais_bench \
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in Chapter 5, "Online Service Deployment."
+The recommended configurations are the same as those specified in Chapter 5 [Online Service Deployment](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 
