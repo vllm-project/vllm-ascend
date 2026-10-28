@@ -296,34 +296,35 @@ def test_numpy_view_writes_are_refused_instead_of_going_stale():
         np.asarray(buf.np)[0, 0] = 1
     with pytest.raises(ValueError):
         buf.np.reshape(-1)[0] = 1
+    with pytest.raises(ValueError):
+        np.put(buf.np, [8, 9], 6)
+    with pytest.raises(ValueError):
+        buf.np.flat[0] = 1
+
+    # The seal cannot be undone: NumPy refuses to re-enable writeability,
+    # which a plain read-only view of a writable base would allow.
+    with pytest.raises(ValueError):
+        buf.np[0:2].flags.writeable = True
+    with pytest.raises(ValueError):
+        np.asarray(buf.np).flags.writeable = True
 
     # The mirror itself must still be writable through __setitem__.
     buf.np[0:2] = 7
     buf.uva(8)
     assert buf._uva[0:2].eq(7).all()
+    assert buf._uva[2:].eq(0).all()
 
 
-def test_numpy_in_place_method_publishes_the_whole_buffer():
+def test_numpy_in_place_method_is_refused():
     buf = _make_uva_buffer(8)
 
-    # ndarray's in-place methods mutate the receiver and return None, so the
-    # tracker cannot tell which rows changed and publishes all of them.
-    buf.np.fill(3)
+    # ndarray's in-place methods mutate the receiver, which the tracker cannot
+    # attribute to rows; they raise instead of risking a stale device copy.
+    with pytest.raises(ValueError):
+        buf.np.fill(3)
+
     buf.uva(8)
-
-    assert buf._uva.eq(3).all()
-
-
-def test_numpy_put_is_observed():
-    buf = _make_uva_buffer(8)
-
-    # np.put() dispatches to the mirror's own put(), which is intercepted.
-    # Flat indices 8 and 9 are the two columns of row 4.
-    np.put(buf.np, [8, 9], 6)
-    buf.uva(8)
-
-    assert buf._uva[4].eq(6).all()
-    assert buf._uva[5].eq(0).all()
+    assert buf._uva.eq(0).all()
 
 
 def test_torch_in_place_method_publishes_the_whole_buffer():
@@ -376,15 +377,16 @@ def test_torch_alias_writes_reach_the_device_shadow(alias):
     assert torch.equal(buf._uva, buf._cpu)
 
 
-def test_numpy_explicit_inplace_dunder_reaches_the_device_shadow():
-    # ``buf.np += 5`` fails on the proxy (no __iadd__ on the type), but an
-    # explicit __iadd__ call mutates the mirror in place and must publish it.
+def test_numpy_explicit_inplace_dunder_is_refused():
+    # ``buf.np += 5`` fails on the proxy (no __iadd__ on the type), and an
+    # explicit __iadd__ call now fails on the read-only alias as well.
     buf = _make_uva_buffer(8)
 
-    buf.np.__iadd__(5)
-    buf.uva(8)
+    with pytest.raises(ValueError):
+        buf.np.__iadd__(5)
 
-    assert torch.equal(buf._uva, buf._cpu)
+    buf.uva(8)
+    assert buf._uva.eq(0).all()
 
 
 def test_mirrors_report_their_length():
