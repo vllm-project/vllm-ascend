@@ -161,6 +161,12 @@ class _DirtyRows:
             # and would raise on the mask; an empty multi-dimensional boolean
             # mask selects no elements either, so both are no-ops.
             return
+        if not (np.issubdtype(rows.dtype, np.integer) or rows.dtype == np.bool_):
+            # NumPy accepted a key we cannot read as rows, for example an
+            # object that only implements ``__index__``. The write already
+            # happened, so publish everything rather than drop it.
+            self._mark_whole()
+            return
         if rows.dtype == np.bool_ and rows.ndim > 1:
             # ``arr[arr > 0] = v`` selects elements, not rows, and NumPy has
             # already performed that write by the time we get here. Refresh

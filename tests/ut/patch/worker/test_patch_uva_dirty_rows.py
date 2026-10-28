@@ -262,6 +262,22 @@ def test_scattered_numpy_writes_reach_the_device_shadow():
     assert buf._uva[0].eq(0).all()
 
 
+def test_index_only_key_publishes_the_whole_buffer():
+    class _RowIndex:
+        def __index__(self) -> int:
+            return 3
+
+    buf = _make_uva_buffer(8)
+
+    # NumPy accepts any object with __index__ as a row index; the tracker
+    # cannot read it as rows, so it must publish everything.
+    buf.np[_RowIndex()] = 5
+    buf.uva(8)
+
+    assert buf._uva[3].eq(5).all()
+    assert buf._uva[4].eq(0).all()
+
+
 def test_multi_dimensional_boolean_write_reaches_the_device_shadow():
     buf = _make_uva_buffer(4)
     mask = np.array([[True, False], [False, False], [False, True], [False, False]])
