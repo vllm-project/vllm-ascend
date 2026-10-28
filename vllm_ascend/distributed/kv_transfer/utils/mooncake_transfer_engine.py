@@ -1,16 +1,34 @@
 import threading
 
+# Mooncake transport used for PD KV transfer unless
+# ``kv_connector_extra_config["transfer_protocol"]`` overrides it. ``ascend``
+# installs the Ascend transport, which falls back to ``aclrtMemcpy`` staging
+# when the machine exposes neither RoCE nor fabric memory; nodes that do have a
+# device-direct path can select it per deployment instead of patching this
+# module. Prefill and decode must be configured with the same value.
+DEFAULT_TRANSFER_PROTOCOL = "ascend"
+
 
 class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
+        self.transfer_protocol: str | None = None
         self._initialization_attempted = False
         self.is_register_buffer: bool = False
         self.registered_buffers: list[tuple[int, int]] = []
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
-    def get_transfer_engine(self, hostname: str, device_name: str | None):
+    def get_transfer_engine(
+        self,
+        hostname: str,
+        device_name: str | None,
+        protocol: str | None = None,
+    ):
+        """``protocol=None`` means "whatever this process already uses", so the
+        components that share this singleton (encoder cache transfer, the
+        AscendStore Mooncake backend) keep calling it the way they always did.
+        """
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
@@ -36,13 +54,27 @@ class GlobalTE:
                     self._initialization_attempted = True
                     engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
-                    ret_value = engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
+                    resolved_protocol = protocol or DEFAULT_TRANSFER_PROTOCOL
+                    ret_value = engine.initialize(hostname, "P2PHANDSHAKE", resolved_protocol, device_name)
                     if ret_value != 0:
                         raise RuntimeError(
                             f"TransferEngine initialization failed with ret_value: {ret_value}. "
                             "Restart the process before retrying."
                         )
+                    # Publish the protocol before the engine: readers check the
+                    # pair, and an engine visible with protocol=None would look
+                    # like a conflict to a lock-free caller.
+                    self.transfer_protocol = resolved_protocol
                     self.transfer_engine = engine
+        # The native engine is process-wide and cannot be re-initialized, so a
+        # second caller asking for another transport would otherwise silently
+        # run on the first one. This only catches an in-process mismatch;
+        # prefill and decode are separate processes.
+        if protocol is not None and protocol != self.transfer_protocol:
+            raise RuntimeError(
+                f"TransferEngine already initialized with protocol {self.transfer_protocol!r}; "
+                f"cannot switch to {protocol!r} in the same process."
+            )
         return self.transfer_engine
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
