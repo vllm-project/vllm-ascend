@@ -257,7 +257,6 @@ def _ascend_config(**overrides):
             lmhead_tensor_parallel_size=1,
             embedding_tensor_parallel_size=1,
             mlp_tensor_parallel_size=1,
-            olora_tensor_parallel_size=0,
         ),
         "dynamic_spec_config": SimpleNamespace(method=None, method_params={}),
     }
@@ -549,7 +548,6 @@ def test_data_parallel_rank_stays_out_of_the_fingerprint(identity_module, monkey
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
-        olora_tensor_parallel_size=0,
     )
     monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(finegrained_tp_config=finegrained))
     first_rank = _build_fingerprint(identity_module, model_config, data_parallel_rank=0)
@@ -606,7 +604,6 @@ def test_sharded_dp_rank_selector_conditions(identity_module, monkeypatch):
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
-        olora_tensor_parallel_size=0,
     )
     monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(finegrained_tp_config=finegrained))
     assert resolve() == 3
