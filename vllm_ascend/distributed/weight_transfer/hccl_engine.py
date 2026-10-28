@@ -4,8 +4,8 @@
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. Packed transfers use the
-upstream orchestration with Ascend stream and owning-storage adaptations.
+legacy per-update packed wire parameters are local. Packed transfers use local
+HCCL loops with cross-chunk event ordering and owning-storage protection.
 """
 
 from concurrent.futures import ThreadPoolExecutor

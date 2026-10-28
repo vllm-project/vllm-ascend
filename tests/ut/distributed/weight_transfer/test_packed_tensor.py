@@ -136,11 +136,11 @@ def _make_group_mock() -> MagicMock:
 def test_packed_cross_chunk_event_orders_loader_and_tracks_clones(num_buffers):
     """A later stream may overtake pending clone and loader work without an event."""
     active = None
-    streams = []
-    operations = []
-    retained = []
-    observed = []
-    tracked = []
+    streams: list[Any] = []
+    operations: list[str] = []
+    retained: list[torch.Tensor] = []
+    observed: list[str] = []
+    tracked: list[tuple[torch.Tensor, Any]] = []
 
     class Stream(_FakeNpuStream):
         def __init__(self):
@@ -225,6 +225,20 @@ def test_packed_cross_chunk_event_orders_loader_and_tracks_clones(num_buffers):
         assert all(
             any(item is tensor and recorded is stream for item, recorded in tracked) for stream in (*streams, caller)
         )
+
+
+def test_packed_tracking_does_not_retain_clones_released_by_loader():
+    """Tracking helpers must not accidentally mask a missing lifetime record."""
+    released = []
+
+    def load(weights):
+        references = [weakref.ref(tensor) for _, tensor in weights]
+        weights.clear()
+        assert all(reference() is None for reference in references)
+        released.append(True)
+
+    packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), _make_group_mock(), 0, load, 1, 2)
+    assert released == [True]
 
 
 def test_packed_broadcast_producer_single_tensor():
