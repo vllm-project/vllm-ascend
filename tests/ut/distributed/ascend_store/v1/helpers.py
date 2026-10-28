@@ -336,7 +336,7 @@ class FakeResources(KVPoolResources):
 
     def prepare_kv_caches(self, kv_caches):
         # Keep real views alive so both routes bind the same address geometry.
-        self.kv_caches = {}
+        self.kv_caches: dict[str, torch.Tensor] | None = {}
         for group in self._topology.transfer_groups:
             for name in group.layer_names:
                 if group.uses_align_state:

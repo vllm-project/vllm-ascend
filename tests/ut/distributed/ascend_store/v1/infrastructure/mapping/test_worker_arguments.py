@@ -143,7 +143,7 @@ def test_round_trip_between_tp_pp_partitions_and_replicas(layout, replicas, sour
                     )
                 originals[tensor.data_ptr()] = tensor.clone()
     for sources, targets in ((producers, consumers), (consumers, producers)):
-        objects = {}
+        objects: dict[str, bytearray] = {}
         for case in sources:
             bulk, layers, _, _ = transfer_arguments(case, 3, ("a", "b"), (1, 2))
             payloads = {key: bytearray(sum(sizes)) for key, sizes in zip(bulk.keys, bulk.sizes, strict=True)}
