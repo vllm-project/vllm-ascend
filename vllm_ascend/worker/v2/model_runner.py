@@ -709,13 +709,20 @@ class NPUModelRunner(GPUModelRunner):
         )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        if dummy_run and not is_profile and embedding_tp_enable():
-            # Embedding TP dummy join (mirrors the LM-head join below): real
-            # batches run the token exchange inside the embedding lookup, while
-            # idle dummy batches feed inputs_embeds directly and skip the
-            # exchange entirely, leaving the busy ranks' cross-DP collectives
-            # unpaired until HCCL times out. Join at the group-agreed capacity
-            # so every rank contributes the same exchange length per step.
+        if (
+            dummy_run
+            and not is_profile
+            and embedding_tp_enable()
+            # Only inputs-embeds models need the join: their dummy batches feed
+            # inputs_embeds directly and skip the embedding lookup, so the
+            # busy ranks' cross-DP exchange would be left unpaired until HCCL
+            # times out. Text models' dummy batches still carry input_ids and
+            # run the exchange inside the dummy forward — they self-pair and
+            # must not join a second time.
+            and self.uses_inputs_embeds
+        ):
+            # Join at the group-agreed capacity so every rank contributes the
+            # same exchange length per step.
             join_module = self._find_embed_tp_module()
             if join_module is not None:
                 join_module(

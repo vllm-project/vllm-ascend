@@ -54,6 +54,9 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner._uses_flashmla = False
     runner.adaptive_verification = None
+    # Text-model default in GPUModelRunner.__init__: dummy batches carry
+    # input_ids and run the embedding exchange inside the dummy forward.
+    runner.uses_inputs_embeds = False
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
@@ -391,9 +394,23 @@ class _FakeEmbedTpModule:
         self.join_inputs.append(input_ids)
 
 
-@pytest.mark.parametrize("embedding_tp", [True, False])
-def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp):
+@pytest.mark.parametrize(
+    ("embedding_tp", "uses_inputs_embeds"),
+    [
+        # Inputs-embeds models (MM / prompt embeds): dummy batches skip the
+        # embedding, so the runner must join the exchange for them.
+        (True, True),
+        # Text models: dummy batches carry input_ids and the dummy forward
+        # runs the exchange itself; a runner-side join would double it.
+        (True, False),
+        # Feature off: never join.
+        (False, True),
+        (False, False),
+    ],
+)
+def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp, uses_inputs_embeds):
     runner = _make_runner(need_timing=False)
+    runner.uses_inputs_embeds = uses_inputs_embeds
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
     )
@@ -420,7 +437,7 @@ def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp):
     ):
         runner.execute_model(scheduler_output, dummy_run=True)
 
-    if embedding_tp:
+    if embedding_tp and uses_inputs_embeds:
         # One capacity-sized zero-id join per dummy step, paired across ranks.
         assert len(embed_tp_module.join_inputs) == 1
         join_ids = embed_tp_module.join_inputs[0]
@@ -434,6 +451,7 @@ def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp):
 def test_execute_model_real_run_skips_embedding_tp_join():
     """Real batches exchange inside the model forward; no runner-side join."""
     runner = _make_runner(need_timing=False)
+    runner.uses_inputs_embeds = True
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
     )
