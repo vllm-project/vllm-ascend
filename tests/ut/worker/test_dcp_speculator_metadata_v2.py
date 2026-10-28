@@ -11,23 +11,14 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
-
-# vLLM #60335 renamed the AR speculator class/module on main; the release
-# lane (v0.31.0) still ships `autoregressive.speculator.AutoRegressiveSpeculator`.
-if vllm_version_is("0.31.0"):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
-        AutoRegressiveSpeculator,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
-        TargetDependentARSpeculator as AutoRegressiveSpeculator,
-    )
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
@@ -152,8 +143,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
             return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
 
     class RecordingAttnGroup:
-        # vLLM main (#56723) calls the group's build_metadata; v0.31.0 resolves
-        # the builder itself and calls build(common_prefix_len, metadata).
+        # Both supported vLLM lanes (#56723) call the group's build_metadata.
         layer_names = ["draft.layer"]
 
         def get_metadata_builder(self, ubatch_idx=0):
@@ -204,7 +194,7 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        # vLLM 0.31 slices is_prefilling to the padded request count.
+        # Upstream slices is_prefilling to the padded request count.
         expected_is_prefilling = [False] * padded
         assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
@@ -298,7 +288,7 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     builder.dcp_local_seq_lens_buf = torch.empty(4, dtype=torch.int32)
     builder.decode_threshold = 4
     builder.vllm_config = None
-    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "dcp_enabled", False, raising=False)
+    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "use_dcp", False, raising=False)
     monkeypatch.setattr(sfa_cp, "split_decodes_and_prefills", lambda *a, **kw: (4, 0, 4, 0))
     block_table = torch.zeros((4, 2), dtype=torch.int32)
     slots = torch.arange(4)
@@ -335,10 +325,10 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
         yield
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_factory",
         factory,
     )
-    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(TargetDependentARSpeculator, "_build_attn_metadata", lambda *a, **k: None)
     batch = SimpleNamespace(num_tokens=2, num_reqs=2)
     seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
     dcp_local = spec.input_buffers.dcp_local_seq_lens

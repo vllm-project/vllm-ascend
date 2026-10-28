@@ -18,7 +18,6 @@
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -43,7 +42,11 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
-import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
+# NOTE: the former patch_rejection_sampler.py has been removed.
+# vllm_ascend/sample/rejection_sampler.py subclasses RejectionSampler and
+# defines its own forward, so the upstream vllm.v1.sample.rejection_sampler
+# helpers never run on Ascend and there is nothing left to rebind. That module
+# is MRv1-only, so MRv2 processes never import vllm_ascend.sample.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
@@ -72,14 +75,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-    # vLLM #60335 renamed the shared AR speculator module to `target_dependent_ar`
-    # on main; the release lane (v0.31.0) still ships `autoregressive`.
-    if vllm_version_is("0.31.0"):
-        from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
-            speculator as _ar_spec,
-        )
-    else:
-        from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as _ar_spec
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as _ar_spec
 
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
         AutoRegressiveAclGraphManager310,

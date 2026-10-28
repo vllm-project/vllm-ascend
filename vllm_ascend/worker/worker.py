@@ -101,6 +101,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -116,9 +117,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
+# in kv_cache_utils, so importing the main-only module breaks worker startup.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import (
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
@@ -333,6 +334,7 @@ class NPUWorker(WorkerBase):
         self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
+        global_te.unregister_buffer()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -346,6 +348,9 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes,
         )
 
+    def disconnect_kv_transfer_peers(self) -> None:
+        global_te.disconnect_all_peers()
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:
@@ -357,6 +362,8 @@ class NPUWorker(WorkerBase):
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+        if tags is None or "kv_cache" in tags:
+            global_te.reregister_buffer()
 
         # Do not access or consume saved weights when only the KV pool wakes.
         wake_weights = tags is None or "weights" in tags
@@ -955,10 +962,10 @@ class NPUWorker(WorkerBase):
         # vLLM #57516 reclaims cached memory inside `load_model` via
         # `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable
         # memory pool `torch.npu.empty_cache()` trips "captures_underway.empty()",
-        # so on main neutralize it while weights load; the pool is reclaimed by
-        # sleep()/wake_up(). The v0.31.0 lane does not reclaim inside load_model.
+        # so neutralize it while weights load on both supported lanes; the pool
+        # is reclaimed by sleep()/wake_up().
         empty_cache_context: AbstractContextManager[Any]
-        if self.vllm_config.model_config.enable_sleep_mode and not vllm_version_is("0.31.0"):
+        if self.vllm_config.model_config.enable_sleep_mode:
             empty_cache_context = patch("torch.npu.empty_cache", lambda: None)
         else:
             empty_cache_context = nullcontext()
@@ -1180,6 +1187,24 @@ class NPUWorker(WorkerBase):
             pcp_rank = get_pcp_group().rank_in_group
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
+
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        if vllm_version_is("0.32.0"):
+            # v0.32.0's engine core never issues this RPC, and the upstream
+            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
+            # helpers do not exist on that lane.
+            return None
+        else:
+            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+                _find_simple_cpu_offload_connector,
+            )
+
+            if not has_kv_transfer_group():
+                return None
+            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+            if connector is None:
+                return None
+            return connector.get_aligned_num_cpu_blocks()
 
     def _get_layerwise_kv_cache_memory_info(
         self,

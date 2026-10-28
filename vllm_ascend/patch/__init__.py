@@ -198,10 +198,10 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
 #    Why:
-#       GLM-5.3 always generates reasoning, but the supported vLLM v0.31.0
-#       and verified main pin do not include PR #56994. Passing thinking=False
-#       or enable_thinking=False disables extraction and leaks reasoning into
-#       content, including for streamed responses.
+#       GLM-5.3 always generates reasoning. This compatibility fallback
+#       normalizes thinking=False and enable_thinking=False to prevent
+#       reasoning from leaking into content; v0.32.0 also handles this
+#       upstream through PR #56994.
 #    How:
 #       Detect the GLM-5.3 template using the upstream signature and normalize
 #       both switches on a copy of the parser kwargs before initialization.
@@ -242,7 +242,7 @@
 #       override is kept only for the drop exemption of entry 2; remove it
 #       together with entry 2 once upstream exposes the PD role.
 #   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
-#      v0.31.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
+#      v0.32.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
 #      #61183),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
@@ -696,16 +696,15 @@
 #
 #   3. `xgrammar.GrammarCompiler.compile_json_schema`
 #    Why:
-#       vLLM #58067 (main only, absent from v0.31.0) passes
+#       vLLM #58067 (included in v0.32.0 and verified main) passes
 #       `separators=(",", ":")` when `disable_any_whitespace` is set. The
 #       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
 #       stricter grammar makes small models loop on `","` until `max_tokens`
 #       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
-#       test). The v0.31.0 lane never passes the argument.
+#       test).
 #    How:
-#       On the main lane, wrap `GrammarCompiler.compile_json_schema` to force
-#       `separators=None`, restoring the legacy (v0.31.0) grammar. Gated by
-#       `vllm_version_is("0.31.0")` so the release lane is untouched.
+#       Wrap `GrammarCompiler.compile_json_schema` in both supported lanes to
+#       force `separators=None`, restoring the legacy grammar.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58067
 #    Future Plan:
@@ -820,7 +819,7 @@
 #
 #   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
 #    Why:
-#       vLLM 0.31 rejects V1 PP with async scheduling for a GPU runner
+#       Both supported vLLM lanes reject V1 PP with async scheduling for a GPU runner
 #       limitation. Ascend has separate PP communication and scheduler patches.
 #    How:
 #       Add this feature to the existing Ascend V1 allowlist, preserving
@@ -1154,21 +1153,6 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
 #
-# ** 18. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
-#
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
@@ -1340,7 +1324,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
 #       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
-#       upstream vLLM #60335; the v0.31.0 release lane still uses that path).
+#       upstream vLLM #60335; both supported lanes use the new path).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.

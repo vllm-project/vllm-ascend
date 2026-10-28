@@ -105,7 +105,7 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 | **Scheduler** | `vllm_ascend/core/scheduler_profiling_chunk.py` | Integrate CPP scheduling |
 | **EngineCore** | `vllm_ascend/patch/platform/patch_profiling_chunk.py` | Startup profiling, record execution time |
 | **NPUWorker** | `vllm_ascend/worker/worker.py` | Execute real forward pass profiling |
-| **NPUModelRunner** | `vllm_ascend/worker/v1/model_runner.py` | `profile_cpp=True` mode |
+| **NPUModelRunner** | `vllm_ascend/worker/v2/model_runner.py` | Build and execute the CPP profiling dummy prefill |
 
 ### Workflow
 

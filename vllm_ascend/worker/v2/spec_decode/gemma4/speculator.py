@@ -27,12 +27,12 @@ from vllm.logger import logger
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
-class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
+class AscendGemma4Speculator(AscendTargetDependentARSpeculator, Gemma4Speculator):
     """Recombines the two methods both bases define (draft config, draft load)."""
 
     def _prefill(
@@ -44,6 +44,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         num_tokens_across_dp=None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs=None,
+        skip_sample: bool = False,
     ):
         if attn_metadata and any(
             metadata is not None and metadata.attn_state == AscendAttentionState.PrefillNoCache
@@ -63,6 +64,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
             mm_inputs,
+            skip_sample,
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
