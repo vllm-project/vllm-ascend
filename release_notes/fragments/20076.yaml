@@ -5,3 +5,9 @@ entries:
       Reduced prefill time-to-first-token by 37-47% on NPU deployments that use the
       emulated UVA path, by tracking host-shadow dirty rows in O(1) instead of
       calling a Python callback once per row.
+  - category: bugfix
+    text: >-
+      Fixed the emulated UVA host shadow for empty index lists and
+      multi-dimensional boolean keys, and made a failed host-to-device copy keep
+      the unrefreshed rows dirty so the next sync retries them instead of leaving
+      stale device data.
