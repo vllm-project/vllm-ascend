@@ -34,6 +34,21 @@ def _fake_buffer(rows: int, cols: int = 2, dtype=torch.int32) -> UvaBufferWrappe
     return buf
 
 
+class _FailingDevice:
+    """A device shadow whose Nth row-range copy fails."""
+
+    def __init__(self, shadow: torch.Tensor, fail_on: int) -> None:
+        self._shadow = shadow
+        self._fail_on = fail_on
+        self._calls = 0
+
+    def __getitem__(self, key):
+        self._calls += 1
+        if self._calls == self._fail_on:
+            raise RuntimeError("H2D copy failed")
+        return self._shadow[key]
+
+
 def test_prefix_write_is_tracked_without_allocating_a_mask():
     dirty = _DirtyRows(2_097_152)
 
@@ -244,4 +259,22 @@ def test_repeated_sync_only_copies_new_rows():
     buf.uva(8)
 
     assert buf._uva[0:2].eq(4).all()
+    assert buf._uva[5].eq(9).all()
+
+
+def test_failed_copy_leaves_the_remaining_rows_dirty():
+    buf = _fake_buffer(8)
+    buf.np[5] = 9
+    buf.np[1] = 3
+
+    shadow = buf._uva
+    buf._uva = _FailingDevice(shadow, fail_on=2)
+    with pytest.raises(RuntimeError):
+        buf.uva(8)
+
+    # The range whose copy failed must be retried instead of being dropped.
+    buf._uva = shadow
+    buf.uva(8)
+
+    assert buf._uva[1].eq(3).all()
     assert buf._uva[5].eq(9).all()
