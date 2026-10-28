@@ -491,10 +491,10 @@ class AscendConfig:
                 "full_mode": false
             },
             "finegrained_tp_config": {
-                "oproj_tensor_parallel_size": 0,
-                "lmhead_tensor_parallel_size": 0,
-                "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0
+                "oproj_tensor_parallel_size": 1,
+                "lmhead_tensor_parallel_size": 1,
+                "embedding_tensor_parallel_size": 1,
+                "mlp_tensor_parallel_size": 1
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,

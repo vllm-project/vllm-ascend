@@ -253,10 +253,10 @@ def _ascend_config(**overrides):
         "num_head_replica": 1,
         "draft_window_size": None,
         "finegrained_tp_config": SimpleNamespace(
-            oproj_tensor_parallel_size=0,
-            lmhead_tensor_parallel_size=0,
-            embedding_tensor_parallel_size=0,
-            mlp_tensor_parallel_size=0,
+            oproj_tensor_parallel_size=1,
+            lmhead_tensor_parallel_size=1,
+            embedding_tensor_parallel_size=1,
+            mlp_tensor_parallel_size=1,
             olora_tensor_parallel_size=0,
         ),
         "dynamic_spec_config": SimpleNamespace(method=None, method_params={}),
@@ -610,6 +610,10 @@ def test_sharded_dp_rank_selector_conditions(identity_module, monkeypatch):
     )
     monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(finegrained_tp_config=finegrained))
     assert resolve() == 3
+    # The FinegrainedTPConfig defaults (all 1) mean no sharding: with them the
+    # selector must stay None, or every DP deployment would split its seed pool.
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+    assert resolve() is None
 
 
 def test_speculative_layout_does_not_partition_weight_seeds(identity_module):
