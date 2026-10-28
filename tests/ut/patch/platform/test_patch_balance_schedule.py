@@ -611,6 +611,7 @@ _SCHEDULER_METHOD_SEAMS = [
     "schedule",  # super().schedule() on the disabled path
     "_preempt_request",
     "_try_schedule_encoder_inputs",
+    "_allocate_encoder_inputs",
     "_mamba_block_aligned_split",
     "_holds_kv_blocks",
     "_is_blocked_waiting_status",
@@ -897,7 +898,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *_a, **_k: n)
     scheduler.scheduler_config.long_prefill_token_threshold = 8
     scheduler.lora_config = MagicMock(max_loras=1)
-    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
+    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1], []))
     scheduler.encoder_cache_manager.allocate = MagicMock()
     reqs = _create_requests(2, num_tokens=40, max_tokens=8)
     reqs[0].lora_request = MagicMock(lora_int_id=1)
@@ -1184,3 +1185,27 @@ def test_balance_schedule_forwards_uses_mrope_to_new_request_data():
 
     spy.assert_called_once()
     assert spy.call_args.kwargs["uses_mrope"] is True
+
+
+def test_balance_schedule_accepts_five_value_encoder_input_tuple():
+    """vLLM 0.32 returns five values from _try_schedule_encoder_inputs."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=40)[0]
+    request.mm_features = [MagicMock()]
+    scheduler.add_request(request)
+    scheduler.encoder_cache_manager.allocate = MagicMock()
+    scheduler.encoder_cache_manager.check_and_update_cache = MagicMock()
+
+    def fake_try_schedule(_request, _num_computed, num_new_tokens, budget, **_kwargs):
+        # 1 new encoder input, 1 duplicate already present in the cache.
+        return [0], num_new_tokens, budget, [], [0]
+
+    with patch.object(Scheduler, "_try_schedule_encoder_inputs", side_effect=fake_try_schedule):
+        scheduler.schedule()
+
+    scheduler.encoder_cache_manager.allocate.assert_called_once_with(request, 0)
+    scheduler.encoder_cache_manager.check_and_update_cache.assert_called_once_with(request, 0)

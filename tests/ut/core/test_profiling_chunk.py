@@ -671,7 +671,7 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler3._build_kv_connector_meta = MagicMock(return_value="meta")
         scheduler3.connector.get_num_new_matched_tokens.side_effect = [(2, True), (2, False)]
         scheduler3.connector_prefix_cache_stats = MagicMock()
-        scheduler3._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 100, [1]))
+        scheduler3._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 100, [1], []))
         scheduler3.encoder_cache_manager.allocate = MagicMock()
         scheduler3.is_encoder_decoder = True
         scheduler3._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
