@@ -1,0 +1,4 @@
+pr: 20008
+entries:
+  - category: bugfix
+    text: Fixed legacy Qwen3-VL sharded checkpoint loading with device-side image normalization on vLLM 0.32.0 by keeping processor-derived normalization buffers out of checkpoint state.
