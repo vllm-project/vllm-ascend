@@ -86,6 +86,7 @@ class AscendStructuredOutputsWorker(StructuredOutputsWorker):
                     for req_id in grammar_req_ids
                     for position in range(self.mask_stride)
                 ]
+            assert mapping is not None
             assert num_masks == len(mapping)
 
         self._wait_for_host_buffers()
