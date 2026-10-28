@@ -65,6 +65,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_prefill_params,
     get_graph_params,
     update_draft_graph_params_workspaces,
+    update_draft_graph_prefill_params_workspaces,
     update_graph_params_workspaces,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
@@ -2968,8 +2969,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
                 )
+                # Keep target, draft decode, and draft prefill workspaces in their own
+                # registries: capture above already resolved `graph_params` that way,
+                # and replay reads the workspace back from the same registry.
                 if _EXTRA_CTX.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
+                    if _EXTRA_CTX.is_draft_model_prefill:
+                        update_draft_graph_prefill_params_workspaces(num_tokens, workspace)
+                    else:
+                        update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
 
