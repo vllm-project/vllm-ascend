@@ -580,7 +580,6 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
         if self.vllm_config.is_mm_encoder_only:
             from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 

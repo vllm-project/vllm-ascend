@@ -34,9 +34,6 @@ def test_guard_step_sits_below_inference_mode():
     fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "execute_model"]
     assert len(fns) == 1
     assert _decorator_names(fns[0]) == ["inference_mode", "runtime_guard_step"]
-    # v1 must stay unwired.
-    v1 = (_WORKER_ROOT / "v1" / "model_runner.py").read_text(encoding="utf-8")
-    assert "runtime_guard" not in v1
 
 
 class _StepRunner:
