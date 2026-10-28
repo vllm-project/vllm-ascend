@@ -38,22 +38,13 @@ Copy `.github` to the shared temporary directory before calling it:
 ```
 
 With this layout, `./../../_temp` resolves to `$RUNNER_TEMP`. A layout change can
-break the action path; keep the check below and update the static `uses` path if
-needed.
+break the action path; the staging script checks this layout before copying.
+Update the static `uses` path if needed.
 
 ```yaml
 - name: Check layout and stage actions
   shell: bash
-  run: |
-    set -euo pipefail
-    if [[ "$(realpath "$GITHUB_WORKSPACE/../../_temp")" != \
-          "$(realpath "$RUNNER_TEMP")" ]]; then
-      echo "::error::Runner directory layout changed; local action path needs updating."
-      exit 1
-    fi
-
-    mkdir -p "$RUNNER_TEMP/ci-workflow"
-    cp -a "$GITHUB_WORKSPACE/.github" "$RUNNER_TEMP/ci-workflow/"
+  run: bash .github/workflows/scripts/stage_ci_actions.sh
 
 - name: Restore incremental cache
   uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
@@ -65,7 +56,8 @@ needed.
 ```
 
 Run staging after checkout and use the same `if` condition as the action call.
-For a subdirectory checkout, adjust the copy source and `source-root` accordingly.
+For a subdirectory checkout, set staging `working-directory` to that directory
+and pass `.` to the script; adjust the action's `source-root` accordingly.
 
 ## Selective Testing System
 

@@ -246,16 +246,8 @@ jobs:
       - name: Check layout and stage actions
         if: ${{ inputs.request_id != '' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$(realpath "$GITHUB_WORKSPACE/../../_temp")" != \
-                "$(realpath "$RUNNER_TEMP")" ]]; then
-            echo "::error::Runner directory layout changed; local action path needs updating."
-            exit 1
-          fi
-
-          mkdir -p "$RUNNER_TEMP/ci-workflow"
-          cp -a "$GITHUB_WORKSPACE/temp-vllm-ascend/.github" "$RUNNER_TEMP/ci-workflow/"
+        working-directory: ./temp-vllm-ascend
+        run: bash .github/workflows/scripts/stage_ci_actions.sh .
 
       - name: Restore incremental cache for source checkout
         id: source-l1
