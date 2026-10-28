@@ -1,0 +1,5 @@
+# Replace 0 with the assigned PR number and rename this file when opening the PR.
+pr: 0
+entries:
+  - category: feature
+    text: Added speculative draft model weight updates through NPU IPC on Model Runner V2 using the upstream draft weight update APIs, with packed and unpacked payload support.

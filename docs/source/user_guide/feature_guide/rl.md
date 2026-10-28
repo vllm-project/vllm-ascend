@@ -164,6 +164,34 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+#### Update speculative draft weights over IPC
+
+With a model-based `--speculative-config`, the NPU IPC backend also supports
+upstream's draft weight update API on Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). After initializing the transfer engine and
+pausing generation, call `POST /start_draft_weight_update` instead of
+`POST /start_weight_update`. Send the draft checkpoint tensors through the same
+`POST /update_weights` endpoint, then call `POST /finish_weight_update` before
+resuming generation. The offline equivalents are `LLM.start_draft_weight_update`,
+`LLM.update_weights`, and `LLM.finish_weight_update`.
+
+Use parameter names from the draft model's checkpoint, without adding a
+`drafter.` prefix. Both packed and unpacked IPC payloads use the selected draft
+model and its model configuration for the complete layerwise reload lifecycle.
+Finishing the draft session restores the main model as the default update target.
+Update the main and draft models in separate sessions; overlapping sessions are
+rejected. Draft updates preserve the main model's LoRA state. Shared parameters,
+such as tied embeddings, retain the sharing established when the models loaded.
+
+`HTTPVLLMWeightSyncClient.start_weight_update()` starts a main-model session by
+default. When using a trainer engine's `send_weights()` for a draft update,
+provide a client whose `start_weight_update()` calls `/start_draft_weight_update`;
+its initialization, chunk updates, and finish calls remain the same.
+
+These APIs require a loaded draft model. Token-based speculation, such as n-gram
+lookup, has no draft weights to update. When using level 2 sleep, reload both
+models' discarded weights before resuming generation.
+
 ### Pause and resume generation
 
 With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.
