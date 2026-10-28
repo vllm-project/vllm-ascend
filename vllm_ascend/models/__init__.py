@@ -3,6 +3,10 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "DSparkMiniMaxDraftModel",
+        "vllm_ascend.patch.worker.patch_minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM",
+    )
+    ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",
     )

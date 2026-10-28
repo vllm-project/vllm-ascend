@@ -92,7 +92,10 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
 
     original_embed, original_head = model.model.embed_tokens, model.lm_head
 
-    def vocab_layer(vocab_size, hidden_size, params_dtype):
+    prefixes = []
+
+    def vocab_layer(vocab_size, hidden_size, params_dtype, prefix=""):
+        prefixes.append(prefix)
         layer = nn.Linear(hidden_size, 3, bias=False, dtype=params_dtype)
         layer.shard_indices = SimpleNamespace(org_vocab_start_index=1, org_vocab_end_index=3)
         layer.quant_method = SimpleNamespace(process_weights_after_loading=lambda layer: None)
@@ -118,3 +121,20 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
         torch.testing.assert_close(layer.weight, expected)
     assert model.has_own_embed_tokens
     assert model.has_own_lm_head
+    assert prefixes == ["draft.embed_tokens", "draft.lm_head"]
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+def test_target_vocab_loading_crosses_chunk_boundaries(tmp_path, rotate):
+    from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
+
+    name = "language_model.lm_head.weight"
+    source = torch.arange(4104, dtype=torch.float32).reshape(2052, 2)
+    save_file({name: source}, tmp_path / "model.safetensors")
+    layer = nn.Linear(2, 2053, bias=False)
+    layer.shard_indices = SimpleNamespace(org_vocab_start_index=1, org_vocab_end_index=2052)
+    rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]]) if rotate else None
+    load_quarot_target_layer(layer, tmp_path, (name,), rotation, "test head")
+    expected = source[1:] @ rotation.T if rotate else source[1:]
+    torch.testing.assert_close(layer.weight[:2051], expected)
+    torch.testing.assert_close(layer.weight[2051:], torch.zeros(2, 2))
