@@ -1,0 +1,7 @@
+pr: 19492
+entries:
+  - category: dependency
+    text: >-
+      Upgraded triton-ascend from 3.2.2 to 3.6.0 for runtime installation and isolated builds,
+      with compatibility for torch_npu's Inductor cache fingerprint, kernel launch hooks,
+      and compile-time kernel arguments.

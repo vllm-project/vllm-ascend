@@ -49,6 +49,39 @@ if _triton_available:
         if not hasattr(_tl_core, "_aggregate"):
             _tl_core._aggregate = lambda *a, **kw: None
 
+    # torch_npu's Inductor cache still imports triton_key from the old path.
+    # Alias the real function before compilation, including in spawned workers.
+    # Remove once supported torch_npu versions import it from runtime.cache.
+    try:
+        import triton.compiler.compiler as _triton_compiler  # type: ignore[import-untyped]
+    except ImportError:
+        pass  # Triton may be unavailable in CPU UT environments.
+    else:
+        if not hasattr(_triton_compiler, "triton_key"):
+            from triton.runtime.cache import triton_key as _triton_key  # type: ignore[import-untyped]
+
+            _triton_compiler.triton_key = _triton_key
+
+        # Triton 3.6 moved launch hooks to knobs.runtime. Keep torch_npu's
+        # legacy class reads live, including hooks installed after import.
+        # Remove once supported torch_npu launchers read knobs.runtime.
+        try:
+            from triton import knobs as _triton_knobs  # type: ignore[import-untyped]
+        except ImportError:
+            pass  # Older Triton versions retain the original class attributes.
+        else:
+
+            class _TritonLaunchHook:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+                def __get__(self, instance, owner=None):
+                    return getattr(_triton_knobs.runtime, self.name)
+
+            for _hook_name in ("launch_enter_hook", "launch_exit_hook"):
+                if not hasattr(_triton_compiler.CompiledKernel, _hook_name):
+                    setattr(_triton_compiler.CompiledKernel, _hook_name, _TritonLaunchHook(_hook_name))
+
 _GLOBAL_PATCH_APPLIED = False
 
 

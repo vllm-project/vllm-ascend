@@ -28,6 +28,47 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# ** File: vllm_ascend/__init__.py (early Triton compatibility) **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `triton.compiler.compiler.triton_key`
+#   2. `triton.compiler.compiler.CompiledKernel.launch_enter_hook / launch_exit_hook`
+#    Why:
+#       torch_npu's Inductor cache and launcher use APIs moved in Triton 3.6.
+#    How:
+#       At package initialization, export runtime.cache.triton_key at the old
+#       path only if missing. This also covers direct compilation outside a
+#       vLLM worker and preserves the original compiler fingerprint function.
+#       Missing launch hook attributes are descriptors reading knobs.runtime
+#       on each access. Preserve existing attributes and forward callbacks
+#       unchanged, including runtime hook replacement and metadata handling.
+#    Related PR (if no, explain why):
+#       No torch_npu PR yet; this bridges the pinned dependency versions.
+#    Future Plan:
+#       Remove when all supported torch_npu versions use runtime.cache and
+#       knobs.runtime for the cache key and launch hooks respectively.
+#
+# ** File: worker/patch_npu_triton_launcher.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torch_npu._inductor.npu_triton_heuristics.TritonCompileResultNpu.make_launcher`
+#    Why:
+#       Triton's attrs-dict API does not determine the NPU launch ABI. Inductor
+#       can omit constexprs from src.signature, so passing them to NPULauncher
+#       produces too many arguments even after binding the Python launcher.
+#    How:
+#       Select torch_npu's existing compact argument path when src.signature
+#       omits all declared constexprs. Reuse its function code with a private
+#       globals dictionary overriding only the ABI predicate; shared module
+#       globals remain unchanged. This adds no per-launch call for that path.
+#       For full signatures, bind known constexprs still required by the Python
+#       launcher (one extra Python call). Preserve grid logic, metadata and hooks.
+#    Related PR (if no, explain why):
+#       No torch_npu PR yet. PyTorch 2.10 CompileResult._get_arg_lists already
+#       substitutes known constexprs, but Ascend also needs signature-based ABI
+#       selection. This bridges the pinned torch_npu version.
+#    Future Plan:
+#       Remove when supported torch_npu launchers use the compiled signature to
+#       determine constexpr argument handling.
+#
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
