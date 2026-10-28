@@ -590,7 +590,13 @@ class NPUPlatform(Platform):
 
         validate_turboquant(vllm_config)
         if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
-            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+            hardware_profile = get_current_hardware_profile()
+            if not hardware_profile.supports(HardwareCapability.FP8_ATTENTION):
+                raise ValueError(
+                    f"fp8 KV cache is not supported on the current hardware "
+                    f"(device_type={getattr(hardware_profile, 'device_type', '?')}); "
+                    f"set --kv-cache-dtype to a dtype supported by this device."
+                )
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -1421,8 +1427,7 @@ def _setup_compile_backend(
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
-                "cudagraph_mode=%s",
-                compilation_config.cudagraph_mode,
+                f"cudagraph_mode={compilation_config.cudagraph_mode}."
             )
         compilation_config.set_splitting_ops_for_v1(
             all2all_backend=vllm_config.parallel_config.all2all_backend,
