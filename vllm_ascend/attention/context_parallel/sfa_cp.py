@@ -388,12 +388,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
         )
 
-        kv_outputs = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        # Packed native KV is scattered later. Its addresses must follow the
-        # same removal of replicated decode rows as the gathered payload.
-        if self.uses_packed_sfa_main_cache:
-            return (*kv_outputs, slots)
-        return kv_outputs
+        # The later native cache store must use the gathered KV's addresses.
+        attn_metadata.slot_mapping = slots
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
@@ -1706,9 +1703,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
         slots = attn_metadata.dcp_context.slot_mapping
-        # PCP gathers prefill KV rows; retain their full DCP mapping.
+        # PCP stores gathered KV with the mapping saved by exec_kv.
         if isinstance(self, AscendSFAPCPImpl) and self._has_prefill(attn_metadata):
-            return slots
+            return attn_metadata.slot_mapping
         return slots[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
