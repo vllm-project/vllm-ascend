@@ -224,7 +224,7 @@ jobs:
     name: multi-node
     needs: [setup-vars, parse-trigger, build-image]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -418,7 +418,7 @@ jobs:
     name: single-node
     needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -470,7 +470,7 @@ jobs:
     name: Parse multi-node profiles
     needs: [setup-vars, parse-trigger, multi-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.setup-vars.result == 'success' &&
       needs.multi-node-tests.result != 'skipped' &&
       needs.setup-vars.outputs.profile_parse == 'true'
@@ -495,7 +495,7 @@ jobs:
     name: Parse single-node profiles
     needs: [setup-vars, parse-trigger, single-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.setup-vars.result == 'success' &&
       needs.single-node-tests.result != 'skipped' &&
       needs.setup-vars.outputs.profile_parse == 'true'
@@ -521,7 +521,7 @@ jobs:
     name: Generate accuracy test matrix
     needs: [parse-trigger]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' && (
         needs.parse-trigger.outputs.filter == 'all' ||
         contains(needs.parse-trigger.outputs.filter, 'accuracy-group')
@@ -559,7 +559,7 @@ jobs:
   single-node-accuracy-tests:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.generate-accuracy-matrix.result != 'skipped' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
@@ -591,7 +591,7 @@ jobs:
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.parse-trigger.outputs.filter != 'all' &&
       needs.generate-accuracy-matrix.result != 'skipped' &&
@@ -634,7 +634,7 @@ jobs:
     name: Merge benchmark artifacts into nightly-a2.zip
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a2b3-0

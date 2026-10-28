@@ -174,7 +174,7 @@ jobs:
     timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.should_run }}
+    if: ${{ !cancelled() && inputs.should_run }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:
@@ -240,36 +240,6 @@ jobs:
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
           install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
 
-      - name: Clear resources
-        run: |
-          set -euo pipefail
-          TIMEOUT=120
-          SLEEP_INTERVAL=2
-
-
-          echo "Deleting leaderworkerset [$LWS_NAME] in namespace [$NAMESPACE]..."
-          kubectl delete leaderworkerset "$LWS_NAME" -n "$NAMESPACE" --ignore-not-found
-          kubectl delete service "${LWS_NAME}-leader" -n "$NAMESPACE" --ignore-not-found
-
-          echo "Waiting for pods of leaderworkerset [$LWS_NAME] to be deleted..."
-          START_TIME=$(date +%s)
-          while true; do
-            ELAPSED=$(( $(date +%s) - START_TIME ))
-            if [[ $ELAPSED -ge $TIMEOUT ]]; then
-              echo "Timeout reached ($TIMEOUT seconds), some pods still exist:"
-              kubectl get pods -n "$NAMESPACE" | grep "^${LWS_NAME}-" || true
-              exit 1
-            fi
-            PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
-              | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)
-            if [[ -z "$PODS_EXIST" ]]; then
-              echo "All pods for [$LWS_NAME] deleted."
-              break
-            fi
-            echo "Waiting for pods to be deleted: $PODS_EXIST"
-            sleep $SLEEP_INTERVAL
-          done
-
       - name: Launch cluster
         env:
           BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
@@ -318,6 +288,11 @@ jobs:
 
           jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 "$RUNNER_TEMP/profile-env.json" \
             -D lws_name="$LWS_NAME" \
+            -D k8s_namespace="$NAMESPACE" \
+            -D ci_repository="$GITHUB_REPOSITORY" \
+            -D ci_repository_id="$GITHUB_REPOSITORY_ID" \
+            -D ci_run_id="$GITHUB_RUN_ID" \
+            -D ci_run_attempt="$GITHUB_RUN_ATTEMPT" \
             -D log_prefix="$LOG_PREFIX" \
             -D download_spec="$DOWNLOAD_SPEC" \
             -D size="$size" \
@@ -607,7 +582,7 @@ jobs:
 
       - name: Publish profiling data
         id: profile_bundle
-        if: ${{ always() && steps.profiling.outputs.enabled == 'true' }}
+        if: ${{ !cancelled() && steps.profiling.outputs.enabled == 'true' }}
         env:
           PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
           AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
@@ -632,7 +607,7 @@ jobs:
 
       - name: Upload profiling index
         id: profile_artifact
-        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        if: ${{ !cancelled() && steps.profile_bundle.outputs.artifact_key != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.profiling.outputs.parse == 'true' && 'profile-capture' || 'profile-artifact' }}-${{ steps.profile_bundle.outputs.artifact_key }}
@@ -642,13 +617,13 @@ jobs:
 
       - name: Profiling summary
         if: >-
-          always() && steps.profile_bundle.outputs.artifact_key != '' &&
+          !cancelled() && steps.profile_bundle.outputs.artifact_key != '' &&
           (steps.profiling.outputs.parse != 'true' || steps.profile_bundle.outcome != 'success' ||
            steps.profile_artifact.outcome != 'success')
         run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
 
       - name: Collect AOP bisect diagnostics
-        if: ${{ always() && inputs.aop_multi_enabled }}
+        if: ${{ !cancelled() && inputs.aop_multi_enabled }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -665,7 +640,7 @@ jobs:
           done
 
       - name: Upload AOP bisect diagnostics (GitHub Artifacts)
-        if: ${{ always() && inputs.aop_multi_enabled }}
+        if: ${{ !cancelled() && inputs.aop_multi_enabled }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -675,7 +650,7 @@ jobs:
           retention-days: 7
 
       - name: Fetch benchmark results from PVC
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           if [ -d "$LOG_PREFIX/aisbench_outputs" ]; then
@@ -700,7 +675,8 @@ jobs:
           fi
 
       - name: Post process
-        if: always()
+        if: ${{ !cancelled() && env.LWS_NAME != '' }}
+        continue-on-error: true
         env:
           DOWNLOAD_PATH: ${{ inputs.download_path }}
         run: |
@@ -725,35 +701,17 @@ jobs:
               "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }})
           fi
 
-          echo "Current pod status:"
-          kubectl get pods -n "$NAMESPACE" --ignore-not-found=true
-
-          echo "Deleting resources for [$LWS_NAME]..."
-          kubectl delete -f ./lws.yaml --ignore-not-found=true --wait=false || true
-
-          echo "Waiting for pods of [$LWS_NAME] to fully terminate..."
-          TIMEOUT=300
-          SLEEP_INTERVAL=5
-          START_TIME=$(date +%s)
-          while true; do
-            ELAPSED=$(( $(date +%s) - START_TIME ))
-            if [[ $ELAPSED -ge $TIMEOUT ]]; then
-              echo "Timeout reached ($TIMEOUT seconds) waiting for termination, continuing anyway."
-              kubectl get pods -n "$NAMESPACE" | grep "^${LWS_NAME}-" || true
-              break
-            fi
-            PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
-              | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)
-            if [[ -z "$PODS_EXIST" ]]; then
-              echo "All pods for [$LWS_NAME] have terminated."
-              break
-            fi
-            echo "Waiting for pods to terminate: $PODS_EXIST"
-            sleep $SLEEP_INTERVAL
-          done
+      - name: Clean up LWS resources
+        if: ${{ always() && env.LWS_NAME != '' }}
+        timeout-minutes: 10
+        run: |
+          python3 .github/workflows/scripts/lws_cleanup.py cleanup \
+            --namespace "$NAMESPACE" --repository-id "$GITHUB_REPOSITORY_ID" \
+            --run-id "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" --task-id "$LWS_NAME"
 
       - name: Collect requested paths from test pods
-        if: ${{ always() && inputs.download_path != '' }}
+        if: ${{ !cancelled() && inputs.download_path != '' }}
         id: collect_download
         continue-on-error: true
         env:
@@ -800,7 +758,7 @@ jobs:
           echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
 
       - name: Upload requested paths
-        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.collect_download.outcome == 'success' }}
         id: upload_download
         continue-on-error: true
         uses: actions/upload-artifact@v7
@@ -812,12 +770,12 @@ jobs:
           compression-level: 0
 
       - name: Remove uploaded archives from shared storage
-        if: ${{ always() && steps.upload_download.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.upload_download.outcome == 'success' }}
         continue-on-error: true
         run: rm -f "${LOG_PREFIX}"/node*_download.tar.gz
 
       - name: Collect Ascend logs
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           size="${{ inputs.size }}"
@@ -850,7 +808,7 @@ jobs:
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
 
       - name: Upload Ascend logs
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
@@ -861,7 +819,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Ascend logs (GitHub Artifacts)
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -870,12 +828,12 @@ jobs:
           retention-days: 7
 
       - name: Set benchmark artifact timestamp
-        if: always()
+        if: ${{ !cancelled() }}
         id: bench_ts
         run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
 
       - name: Upload benchmark results
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
@@ -887,7 +845,7 @@ jobs:
           retention-days: 90
 
       - name: Upload benchmark results (GitHub Artifacts)
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -898,7 +856,7 @@ jobs:
           compression-level: 0
 
       - name: Upload AISBench outputs
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
