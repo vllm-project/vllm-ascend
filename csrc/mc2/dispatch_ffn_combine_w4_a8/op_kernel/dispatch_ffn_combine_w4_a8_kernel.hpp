@@ -582,7 +582,10 @@ private:
             LayoutA layoutA = params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
             LayoutB layoutB1 = params.layoutB1;
             LayoutScale layoutScale = params.layoutScale1;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.problemShape.k());
+            // C rows hold N elements (GMM1 output width); the workspace row stride is max(N, K)
+            // (see the max(N, n2) C-region sizing in the tiling and workspace carving).
+            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(),
+                inGroupProblemShape.n() > inGroupProblemShape.k() ? inGroupProblemShape.n() : inGroupProblemShape.k());
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             // Determine the starting loopIdx of the current core under the current groupIdx
@@ -634,7 +637,8 @@ private:
             if (params.listLen == 1) {
                 gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.k();
+            gmGroupOffsetC += inGroupProblemShape.m() *
+                (inGroupProblemShape.n() > inGroupProblemShape.k() ? inGroupProblemShape.n() : inGroupProblemShape.k());
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
 
@@ -1036,6 +1040,11 @@ private:
             static_cast<int32_t>(peermemInfo.offsetD)};
 
         uint32_t n = params.problemShape.n();
+        // Row stride of the shared C workspace: GMM1 writes N cols/row, GMM2 writes n2=K
+        // cols/row into the same max(N, n2)-wide region (see workspace carving above).
+        uint32_t cRowStride = params.problemShape.n() > params.problemShape.k()
+                                  ? params.problemShape.n()
+                                  : params.problemShape.k();
         BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
         BlockEpilogue1 blockEpilogue1(resource, n);
 #ifdef SYNC_MODE
@@ -1051,14 +1060,14 @@ private:
                 uint32_t rowStartThisCore = dequantSum[syncIdx];
                 MatrixCoord offsetC{rowStartThisCore, 0};
                 MatrixCoord shapeC{curRowNum, params.problemShape.n()};
-                LayoutC layoutC{curRowNum, params.problemShape.k()};
+                LayoutC layoutC{curRowNum, params.problemShape.n(), cRowStride};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
                     blockEpilogue1(gmC[gmOffsetC * 2], shapeC, gmPerTokenScale1[rowStartThisCore], params.ptrMAux1,
                                     gmA2I4_I8[gmOffsetD], cumsumMM, rowStartThisCore, gmPerTokenScale2[rowStartThisCore],
                                     params.expertPerRank, params.EP, gmCGMM1[gmOffsetC], params.rank, params.listLen, resource,
-                                    params.epilogueCoreNum, params.swigluLimit, params.problemShape.k());
+                                    params.epilogueCoreNum, params.swigluLimit, cRowStride);
                 }
             }
             AscendC::SyncAll<true>();
