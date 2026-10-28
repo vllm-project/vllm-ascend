@@ -133,7 +133,7 @@ class _DirtyRows:
         self._mask[rows] = True
 
     def take(self) -> list[tuple[int, int]]:
-        """Return the contiguous ``[start, stop)`` runs to copy, then reset."""
+        """Return the coalesced ``[start, stop)`` runs to copy, then reset."""
         runs: list[tuple[int, int]] = []
         covered = 0
         if self._prefix:
@@ -146,7 +146,13 @@ class _DirtyRows:
                 index += covered
                 breaks = np.flatnonzero(np.diff(index) != 1) + 1
                 for run in np.split(index, breaks):
-                    runs.append((int(run[0]), int(run[-1]) + 1))
+                    start, stop = int(run[0]), int(run[-1]) + 1
+                    if runs and runs[-1][1] == start:
+                        # The first scattered run can touch the prefix; one
+                        # H2D copy covers both.
+                        runs[-1] = (runs[-1][0], stop)
+                    else:
+                        runs.append((start, stop))
         self._prefix = 0
         return runs
 
