@@ -1,0 +1,7 @@
+pr: 20007
+entries:
+  - category: bugfix
+    text: >-
+      Serialized multi-program grammar-bitmask launches against Triton-Ascend
+      lock-workspace reuse, preventing structured-output sampling from leaving
+      the grammar AIV task active and timing out the P engine.
