@@ -5,13 +5,15 @@
 #include <limits>
 
 aclnnStatus Invoke(const aclTensor* projection, const aclTensor* addend, const aclTensor* outputNorm, aclTensor* output,
-                   double eps = 1e-5, double outputEps = 1e-4, bool nullWorkspace = false, bool nullExecutor = false, int64_t bankStride = 12) {
-  aclTensor prefix{1, 4}, bank{1, 3, 4}, norm{4}, raw{1, 4}, materialized{1, 4};
+                   double eps = 1e-5, double outputEps = 1e-4, bool nullWorkspace = false, bool nullExecutor = false,
+                   int64_t bankStride = 12, int64_t valid = 2, int64_t writeIndex = 2, int64_t tokens = 1) {
+  aclTensor prefix{tokens, 4}, bank{tokens, 3, 4}, norm{4}, raw{tokens, 4}, materialized{tokens, 4};
   uint64_t workspaceSize = 0;
   aclOpExecutor* executor = nullptr;
-  const auto status = aclnnAttnResFwdGetWorkspaceSize(
-      &prefix, &bank, projection, &norm, addend, outputNorm, eps, 2, bankStride, 2, outputEps, true, true, true, false, output,
-      &raw, &materialized, nullWorkspace ? nullptr : &workspaceSize, nullExecutor ? nullptr : &executor);
+  const auto status =
+      aclnnAttnResFwdGetWorkspaceSize(&prefix, &bank, projection, &norm, addend, outputNorm, eps, valid, bankStride,
+                                      writeIndex, outputEps, true, true, true, false, output, &raw, &materialized,
+                                      nullWorkspace ? nullptr : &workspaceSize, nullExecutor ? nullptr : &executor);
   delete executor;
   return status;
 }
@@ -39,6 +41,20 @@ int main() {
   assert(Invoke(&projection, &addend, &gamma, &output, 1e-5, 1e-4, false, true) == ACLNN_ERR_PARAM_INVALID);
   assert(Invoke(&projection, &addend, &gamma, &output, 1e-5, 1e-4, false, false, int64_t{1} << 30) ==
          ACLNN_ERR_PARAM_INVALID);
+  // Both nonempty and empty calls validate attributes before the fast return.
+  for (int64_t valid : {-1, 4}) {
+    assert(Invoke(&projection, &addend, &gamma, &output, 1e-5, 1e-4, false, false, 12, valid) ==
+           ACLNN_ERR_PARAM_INVALID);
+  }
+  for (int64_t writeIndex : {-2, 0, 3}) {
+    assert(Invoke(&projection, &addend, &gamma, &output, 1e-5, 1e-4, false, false, 12, 2, writeIndex) ==
+           ACLNN_ERR_PARAM_INVALID);
+  }
+  aclTensor emptyAddend{0, 4}, emptyOutput{0, 4};
+  assert(Invoke(&projection, &emptyAddend, &gamma, &emptyOutput, 1e-5, 1e-4, false, false, 12, -1, 2, 0) ==
+         ACLNN_ERR_PARAM_INVALID);
+  assert(Invoke(&projection, &emptyAddend, &gamma, &emptyOutput, 1e-5, 1e-4, false, false, 12, 2, 2, 0) ==
+         ACLNN_SUCCESS);
   projection.strides[1] = 2;
   assert(Invoke(&projection, &addend, &gamma, &output) == ACLNN_ERR_PARAM_INVALID);
   // No rejected call may reach the fake backend launcher.

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "aclnn_attn_res_fwd.h"
+#include <limits>
+#include "../attn_res_fwd_parallel_plan.h"
 #include "../../attn_res_fwd_validation.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
@@ -89,7 +91,9 @@ extern "C" aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
         return ACLNN_ERR_PARAM_INVALID;
     }
     const auto &bankStrides = blocks->GetViewStrides();
-    if (bankStrides[2] != 1 || bankStrides[1] != prefixShape.GetDim(1) || bankStrides[0] != blockTokenStride ||
+    if (!AttnResFwd::IsValidBankExtent(prefixShape.GetDim(0), bankShape.GetDim(1), prefixShape.GetDim(1),
+                                      validBlocks, blockTokenStride, blockWriteIdx) ||
+        bankStrides[2] != 1 || bankStrides[1] != prefixShape.GetDim(1) || bankStrides[0] != blockTokenStride ||
         !HasContiguousView(prefix) || !HasContiguousView(proj) || !HasContiguousView(norm) ||
         !HasContiguousView(output) || !HasContiguousView(prefixOut) || !HasContiguousView(materialized) ||
         (fuseAdd && !HasContiguousView(addend)) || (outputNormEps > 0 && !HasContiguousView(outputNorm))) {

@@ -319,8 +319,7 @@ ge::graphStatus AttnResFwdTiling::PostTiling()
                         rawTilingData->GetCapacity(), tilingDataSize),
                 return ge::GRAPH_FAILED);
 
-    errno_t ret = memcpy_s(rawTilingData->GetData(), rawTilingData->GetCapacity(),
-                           reinterpret_cast<void *>(&tilingData_), tilingDataSize);
+    errno_t ret = memcpy_s(rawTilingData->GetData(), rawTilingData->GetCapacity(), &tilingData_, tilingDataSize);
     if (ret != EOK) {
         OP_LOGE(context_->GetNodeName(), "memcpy_s failed, ret=%d", ret);
         return ge::GRAPH_FAILED;

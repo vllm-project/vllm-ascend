@@ -76,7 +76,6 @@ Host 将新增输入 buffer 计入 UB 预算，H 分段路径仍使用单缓冲�
 保留必要的 Vector 依赖屏障，退出循环后恢复 mask。
 BF16 Copy 使用多 repeat 批量调用，归约只初始化未对齐的尾块。
 
-
 在 40 个 AIV、N=8、H=7168 下，T=1 启动 9 核，T=4 启动 36 核；
 打分结束后分别由 1 核、4 核完成输出。用户 workspace 分别为 288B、1152B，
 仅保存分数，不含系统空间。Host 日志显示 `rowParallel=1`、
@@ -98,12 +97,13 @@ RESIDENT 或 RELOAD；prefill 缓存策略和公开 Torch 入口不变。
 所有启动核都参加同样的同步，不依赖输出核数量。
 
 A2/A3 的原 RESIDENT/RELOAD 路径保留按 token 分核，并修正了标量 Brcb
-临时区不足 256B、非对齐 H 归约尾部未初始化的问题。Host 也禁止 bank 写回
+临时区不足 256B、非对齐 H 归约尾部未初始化的问题；较多候选行的广播分批执行，
+避免 repeat 字段溢出，softmax 填充值也覆盖极大负分数。Host 也禁止 bank 写回
 槽覆盖有效历史行，与 Torch 入口的约束一致。
 Host 还会在整数收窄前检查 shape、候选行数、stride 和写槽范围，拒绝会导致
 `N+1`、对齐或 buffer 字节长度溢出的元数据；平台信息缺失和属性指针缺失时返回失败。
 投影必须严格为 `[1,H]`，epsilon 必须为 FP32 可表示的有限值。
-
+原生 ACLNN 入口在空输出快速返回前同样校验 bank 属性，拒绝非法有效行数和写槽。
 
 单卡精度用例位于
 `tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py`，
@@ -116,6 +116,10 @@ Host 还会在整数收窄前检查 shape、候选行数、stride 和写槽范�
 CPU API 替身直接运行生产 kernel 的分核、地址和数值逻辑。替身将搬运和流水
 视为同步操作，不模拟真实硬件归约指令的加法树，也不代替 CANN 编译和上板验证。
 
+当前提交在 Ascend910B3、CANN 9.3.0 上完成编译和安装；重新编译生产 Torch
+入口后，40 个 NPU 用例通过，4 个大 H 用例按测试范围排除。4 项 CPU 测试通过，
+其中生产 kernel 替身覆盖 22 个协作场景和 5 个原路径场景。A3 和大 H 的 NPU
+验证仍需补充。
 
 ### Ascend910B3 性能对照
 
