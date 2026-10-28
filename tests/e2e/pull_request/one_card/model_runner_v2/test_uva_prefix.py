@@ -10,6 +10,13 @@ from vllm.v1.worker.gpu import buffer_utils
 from vllm_ascend.patch.worker import patch_uva
 
 
+def _assert_idle(buf) -> None:
+    """Nothing is left dirty, so reusing the slot copies no stale row."""
+    assert buf._dirty._prefix == 0
+    mask = buf._dirty._mask
+    assert mask is None or not mask.any()
+
+
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.uint64])
 @pytest.mark.parametrize("source", ["numpy", "tensor", "list"])
 def test_uva_prefix_pool_reuse(monkeypatch, dtype, source):
@@ -31,8 +38,7 @@ def test_uva_prefix_pool_reuse(monkeypatch, dtype, source):
         assert saved.cpu().tolist() == cpu.tolist()
         buf = pool._uva_bufs[pool._curr]
         assert buf._cpu.is_pinned()
-        assert not buf._modified_indices
-        assert buf._dirty_prefix_end == 0
+        _assert_idle(buf)
 
 
 def test_uva_prefix_and_sparse_npu(monkeypatch):
@@ -57,5 +63,4 @@ def test_uva_multidimensional_prefix_and_contiguous_range(monkeypatch, source, c
     output = buf.uva().clone()
     torch.npu.synchronize()
     torch.testing.assert_close(output.cpu(), buf._cpu)
-    assert not buf._modified_indices
-    assert buf._dirty_prefix_end == 0
+    _assert_idle(buf)
