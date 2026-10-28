@@ -100,6 +100,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    embedding_tp_enable,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -288,6 +289,27 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
+
+    def _find_embed_tp_module(self):
+        """Return the token embedding that owns the fine-grained exchange group.
+
+        The lookup walks ``named_modules`` once and is cached. A ``None``
+        result (model without a fine-grained embedding, e.g. non-first PP
+        ranks) makes the callers skip the exchange entirely.
+        """
+        if not getattr(self, "_embed_tp_module_resolved", False):
+            from vllm_ascend.ops.vocab_parallel_embedding import (
+                AscendVocabParallelEmbedding,
+            )
+
+            embed_tp_module = None
+            for _, module in self.model.named_modules():
+                if isinstance(module, AscendVocabParallelEmbedding) and module.token_exchange_group is not None:
+                    embed_tp_module = module
+                    break
+            self._embed_tp_module = embed_tp_module
+            self._embed_tp_module_resolved = True
+        return self._embed_tp_module
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
@@ -668,6 +690,22 @@ class NPUModelRunner(GPUModelRunner):
         )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        if dummy_run and not is_profile and embedding_tp_enable():
+            # Embedding TP dummy join (mirrors the LM-head join below): real
+            # batches run the token exchange inside the embedding lookup, while
+            # idle dummy batches feed inputs_embeds directly and skip the
+            # exchange entirely, leaving the busy ranks' cross-DP collectives
+            # unpaired until HCCL times out. Join at the group-agreed capacity
+            # so every rank contributes the same exchange length per step.
+            join_module = self._find_embed_tp_module()
+            if join_module is not None:
+                join_module(
+                    torch.zeros(
+                        join_module.embedding_tp_capacity,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                )
         with dp_coordination_context:
             try:
                 output = super().execute_model(

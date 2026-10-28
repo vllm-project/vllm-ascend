@@ -379,6 +379,89 @@ def test_execute_model_skips_dp_coordination_when_safe():
     mock_execute_model.assert_called_once()
 
 
+class _FakeEmbedTpModule:
+    """Stand-in for the embedding that owns the fine-grained exchange group."""
+
+    def __init__(self, capacity: int = 32):
+        self.token_exchange_group = object()
+        self.embedding_tp_capacity = capacity
+        self.join_inputs: list[torch.Tensor] = []
+
+    def __call__(self, input_ids: torch.Tensor) -> None:
+        self.join_inputs.append(input_ids)
+
+
+@pytest.mark.parametrize("embedding_tp", [True, False])
+def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp):
+    runner = _make_runner(need_timing=False)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
+    )
+    embed_tp_module = _FakeEmbedTpModule()
+    model = MagicMock()
+    model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.model = model
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None) as mock_execute_model,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=embedding_tp,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=True)
+
+    if embedding_tp:
+        # One capacity-sized zero-id join per dummy step, paired across ranks.
+        assert len(embed_tp_module.join_inputs) == 1
+        join_ids = embed_tp_module.join_inputs[0]
+        assert join_ids.shape == (32,)
+        assert join_ids.dtype == torch.int64
+    else:
+        assert embed_tp_module.join_inputs == []
+    mock_execute_model.assert_called_once()
+
+
+def test_execute_model_real_run_skips_embedding_tp_join():
+    """Real batches exchange inside the model forward; no runner-side join."""
+    runner = _make_runner(need_timing=False)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
+    )
+    embed_tp_module = _FakeEmbedTpModule()
+    runner.model = MagicMock()
+    runner.model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=False)
+
+    assert embed_tp_module.join_inputs == []
+
+
 def test_full_decode_only_keeps_graph_descriptor_request_count():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
