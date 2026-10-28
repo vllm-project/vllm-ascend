@@ -574,31 +574,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Take performance evaluation of `Qwen3.8-27B-w8a8` as an example.
-
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-| Parameter | Standard deployment | Performance test |
-| --- | ---: | ---: |
-| `--max-model-len` | 256000 | 250000 |
-| `--max-num-batched-tokens` | 16384 | 8192 |
-| `--gpu-memory-utilization` | 0.9 | 0.95 |
-
-There are three `vllm bench` subcommands:
-
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
-
-Take the `serve` as an example. Run the code as follows.
-
-```bash
-export VLLM_USE_MODELSCOPE=True
-# For Qwen3.8-27B-w8a8:
-vllm bench serve --model Eco-Tech/Qwen3.8-27B-w8a8 --served-model-name qwen3.8 --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
-```
-
-After about several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
