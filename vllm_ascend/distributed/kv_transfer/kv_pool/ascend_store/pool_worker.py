@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import suppress
 from typing import Any, cast
 
@@ -1521,7 +1521,7 @@ class KVPoolWorker:
                     ret,
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_block_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -1536,7 +1536,7 @@ class KVPoolWorker:
                     [1] * len(block_id_list_c),
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_block_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -2444,11 +2444,22 @@ class KVPoolWorker:
                 request.load_gva_block_offset = 0
         return None
 
-    def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
-        if not block_ids:
+    def _record_invalid_block_ids(self, block_ids: Iterable[int]) -> None:
+        """Record block IDs whose KV load failed.
+
+        Called from the worker thread and from the transfer threads while the
+        model runner drains ``get_block_ids_with_load_errors`` at the end of
+        each forward pass. Materialize the iterable before acquiring the lock
+        so only the set update runs inside it.
+        """
+        new_block_ids = tuple(block_ids)
+        if not new_block_ids:
             return
         with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+            self._invalid_block_ids.update(new_block_ids)
+
+    def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
+        self._record_invalid_block_ids(block_ids)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
         # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
@@ -3015,9 +3026,10 @@ class KVPoolWorker:
         # A hybrid block ID can belong to SWA, compressed KV or compressor
         # state. Do not feed partially restored state to the attention kernel.
         with self._invalid_block_ids_lock:
-            if self._invalid_block_ids:
-                self._layer_load_aborted.set()
-                raise RuntimeError("Hybrid layerwise load failed; refusing incomplete KV/state")
+            has_invalid_blocks = bool(self._invalid_block_ids)
+        if has_invalid_blocks:
+            self._layer_load_aborted.set()
+            raise RuntimeError("Hybrid layerwise load failed; refusing incomplete KV/state")
 
     def _record_failed_request(self, request: ReqMeta) -> None:
         request.can_save = False
@@ -3601,12 +3613,10 @@ class KVPoolWorker:
             return False
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            self._record_invalid_block_ids(missing_block_ids)
         elif ret is None:
             missing_block_ids = record_failed_blocks(block_ids_c, [1] * len(block_ids_c))
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            self._record_invalid_block_ids(missing_block_ids)
         logger.debug(
             "KV pool worker tp_mismatch get returned keys=%d",
             len(keys_c),
