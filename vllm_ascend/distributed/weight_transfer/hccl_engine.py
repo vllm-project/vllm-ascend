@@ -92,7 +92,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
         # vLLM releases before metadata reuse do not define this attribute.
-        self._last_update_info = {}
+        self._last_update_info: dict[torch.nn.Module, NCCLWeightTransferUpdateInfo] = {}
         # Preserve the parent's handshake attributes, resetting omitted values
         # on re-init. _wire_params still supports legacy per-update overrides.
         self.packed = init_info.packed if init_info.packed is not None else False
@@ -144,12 +144,13 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
         params = self._wire_params(update_info)
+        metadata_info: NCCLWeightTransferUpdateInfo = update_info
         # Upstream trainers omit unchanged metadata after the first round.
         # Keep the per-update wire parameters separate from cached metadata.
         if update_info.names:
             self._last_update_info[self.model] = update_info
         else:
-            update_info = self._last_update_info.get(self.model, update_info)
+            metadata_info = self._last_update_info.get(self.model, update_info)
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,
@@ -158,7 +159,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         # The worker is handed an explicit NPU device, so bind it before touching
         # any stream: the packed helpers resolve the ambient device.
         with torch.npu.device(self.device), disable_mtp_completeness_check():
-            metadata = zip(update_info.names, update_info.shapes, update_info.dtype_names)
+            metadata = zip(metadata_info.names, metadata_info.shapes, metadata_info.dtype_names)
             if params["packed"]:
                 packed_broadcast_consumer(
                     iterator=((name, (shape, getattr(torch, dtype))) for name, shape, dtype in metadata),

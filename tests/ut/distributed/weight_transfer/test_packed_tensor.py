@@ -183,11 +183,13 @@ def test_packed_cross_chunk_event_orders_loader_and_tracks_clones(num_buffers):
         stream.pending.append(lambda: packed.view(torch.float32).fill_(value))
 
     def clone(raw, *args, **kwargs):
+        assert active is not None
         owned = torch.zeros_like(raw)
         active.pending.append(lambda: owned.copy_(raw))
         return owned
 
     def load(weights):
+        assert active is not None
         operations.append("load")
         retained.extend(tensor for _, tensor in weights)
         if len(retained) == 1:
