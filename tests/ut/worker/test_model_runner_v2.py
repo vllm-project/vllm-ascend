@@ -1601,8 +1601,8 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     return runner, scheduler_output, batch_req_state, batch_desc
 
 
-def _fake_async_copy(src, device=None, out=None):
-    tensor = torch.as_tensor(src, dtype=torch.int32)
+def _fake_async_copy(src, device=None, dtype=None, out=None):
+    tensor = torch.as_tensor(src, dtype=dtype or torch.int32)
     if out is not None:
         n = min(out.numel(), tensor.numel())
         out.view(-1)[:n].copy_(tensor.view(-1)[:n])
