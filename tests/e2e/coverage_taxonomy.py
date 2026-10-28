@@ -99,6 +99,8 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "A5",
     },
     "quantization": {
+        "MXFP4",
+        "MXFP8",
         "FP16",
         "BF16",
         "W8A8",
