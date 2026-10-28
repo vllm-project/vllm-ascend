@@ -161,7 +161,7 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
-        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (0, 1), (1, 1), (0, 2), (1, 2)):
             with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
                 clear_ascend_config()
                 config = VllmConfig()
@@ -173,7 +173,7 @@ class TestAscendConfig(TestBase):
                     },
                     "scheduler_config": {"recompute_scheduler_enable": False},
                 }
-                if otp_size > 1 or mlp_size > 0:
+                if otp_size > 1 or mlp_size > 1:
                     with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
                         init_ascend_config(config)
                 else:
