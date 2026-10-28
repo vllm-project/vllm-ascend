@@ -11,6 +11,7 @@ from vllm_ascend.ops.gbsa import (
 GBSA_COMPRESS_RATIO = 4
 GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
 GBSA_PAGE_SIZE = 128
+GBSA_MAX_SPARSE_BLOCKS = 512
 
 
 def qsa_gbsa_attention(
@@ -66,10 +67,36 @@ def qsa_gbsa_attention(
         GBSA_COMPRESS_RATIO,
         rounding_mode="floor",
     )
+    has_residual_block = row_visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0)
     valid = (sparse_idx >= 0) & (sparse_idx < full_blocks.unsqueeze(1))
     order = torch.argsort((~valid).to(torch.int32), dim=1, stable=True)
     sparse_idx = sparse_idx.gather(1, order)
-    sparse_count = valid.sum(dim=1).to(torch.int32)
+    full_sparse_count = valid.sum(dim=1).to(torch.int32)
+
+    # A3 GBSA does not accept residual_block_mode=1 in its metadata
+    # scheduler. Represent the incomplete visible tail as an explicit sparse
+    # block instead. The LI-v2 groups are restricted to full blocks above, so
+    # the tail block cannot duplicate an existing valid selection.
+    # A3 GBSA accepts at most 512 sparse entries. Normally append one slot so
+    # every LI-v2 full-block selection is preserved. If LI-v2 already fills
+    # the operator limit, reuse the final slot by dropping the last
+    # (lowest-priority) full-block selection.
+    if sparse_idx.shape[1] < GBSA_MAX_SPARSE_BLOCKS:
+        sparse_idx = torch.cat(
+            (sparse_idx, torch.full_like(sparse_idx[:, :1], -1)),
+            dim=1,
+        )
+    sparse_capacity = torch.full_like(full_sparse_count, sparse_idx.shape[1])
+    sparse_capacity = sparse_capacity - has_residual_block.to(torch.int32)
+    sparse_count = torch.minimum(full_sparse_count, sparse_capacity)
+    columns = torch.arange(sparse_idx.shape[1], device=sparse_idx.device)
+    tail_slot = columns.unsqueeze(0).eq(sparse_count.long().unsqueeze(1))
+    sparse_idx = torch.where(
+        tail_slot & has_residual_block.unsqueeze(1),
+        full_blocks.unsqueeze(1),
+        sparse_idx,
+    )
+    sparse_count = sparse_count + has_residual_block.to(torch.int32)
     sparse_idx = sparse_idx.unsqueeze(0).expand(num_kv_heads, -1, -1).contiguous()
     sparse_count = sparse_count.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
 
@@ -84,7 +111,7 @@ def qsa_gbsa_attention(
         mask_mode=1,
         quant_mode=0,
         softmax_precision=0,
-        residual_block_mode=1,
+        residual_block_mode=0,
         is_consistent_topk=False,
     )
     metadata = generic_block_sparse_attention_metadata(
