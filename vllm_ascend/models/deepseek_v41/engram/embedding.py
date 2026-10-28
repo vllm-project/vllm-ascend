@@ -116,7 +116,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if param is None:
                 continue
             set_weight_attrs(param, {"weight_loader": self._weight_loader, "engram_vocab_start": self.vocab_start_idx})
-        if cpu_offload:
+        if cpu_offload and not self.weight.is_meta:
             set_weight_attrs(self.weight, {"dummy_weight_value": 0})
             if self.weight_scale_inv is not None:
                 scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
@@ -140,8 +140,13 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         codes_shape = (self.part_num_embeddings, self.dim)
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
-        device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        if torch.get_default_device().type == "meta":
+            return (
+                torch.empty(codes_shape, dtype=self.storage_dtype),
+                torch.empty(scales_shape, dtype=self.scale_dtype) if quantized else None,
+            )
+        device = torch.device("npu", torch.npu.current_device())
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
