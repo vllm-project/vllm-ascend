@@ -20,18 +20,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncak
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import (
     integer_results,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
     KVPoolConfig,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
-    ContextRank,
-    CPPartitionSpec,
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
-    KVPoolTopology,
-    PPPartitionSpec,
-    TPPartitionSpec,
-    context_replica_groups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
@@ -42,6 +32,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     StoreCommandBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    ContextRank,
+    CPPartitionSpec,
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
+    KVPoolTopology,
+    PPPartitionSpec,
+    TPPartitionSpec,
+    context_replica_groups,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
@@ -51,26 +51,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
 )
 
 
-def make_pool_config(topology, backend_name="mooncake", **changes):
+def make_pool_config(topology=None, backend_name="mooncake", **changes):
+    if topology is not None:
+        return replace(topology.config, backend_name=backend_name, **changes)
     config = KVPoolConfig(
         backend_name=backend_name,
+        model_name="model",
+        tp_size=1,
+        pp_size=1,
+        expected_worker_count=1,
+        use_hybrid=False,
         use_layerwise=False,
         load_async=False,
         load_enabled=True,
         store_enabled=True,
         save_decode_cache=False,
+        discard_partial_chunks=True,
         use_eagle=False,
         layerwise_prefetch_layers=2,
         lookup_rpc_timeout_ms=-1,
-        transfer_group_ids=topology.transfer_group_ids,
-        group_specs=tuple(group.kv_cache_spec for group in topology.groups),
-        align_state_group_ids=frozenset(group.group_id for group in topology.groups if group.uses_align_state),
-        cache_transfer_granularity=topology.cache_transfer_granularity,
-        hash_block_size=topology.hash_block_size,
-        tp_partition=topology.tp_partition,
-        pp_partition=topology.pp_partition,
-        cp_partition=topology.cp_partition,
-        put_step=topology.put_step,
+        transfer_group_ids=(0,),
+        group_specs=(FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),),
+        align_state_group_ids=frozenset(),
+        eagle_group_ids=frozenset(),
+        cache_transfer_granularity=4,
+        hash_block_size=4,
+        tp_partition=TPPartitionSpec(False, 1, 1),
+        pp_partition=PPPartitionSpec(),
+        cp_partition=CPPartitionSpec(),
+        put_step=1,
         retention_interval=None,
     )
     return replace(config, **changes)
@@ -231,8 +240,8 @@ def make_coordinator(
 ) -> Coordinator:
     return Coordinator(
         topology.transfer_groups,
-        topology.cache_transfer_granularity,
-        topology.hash_block_size,
+        topology.config.cache_transfer_granularity,
+        topology.config.hash_block_size,
         max_model_len,
         retention_interval=retention_interval,
     )
@@ -255,7 +264,7 @@ def make_topology(
     head_or_tp_rank: int | None = None,
     key_rank_count: int | None = None,
     key_slices_per_rank: int | None = None,
-    consumer_pipeline_partitions: tuple[int, ...] | None = None,
+    target_layer_counts: tuple[int, ...] | None = None,
     context_ranks: tuple[ContextRank, ...] | None = None,
     global_rank: int | None = None,
 ) -> KVPoolTopology:
@@ -278,23 +287,25 @@ def make_topology(
             for pcp in range(pcp_size)
             for tp in range(tp_size)
         )
-    return KVPoolTopology(
-        tp_rank=tp_rank,
+    config = make_pool_config(
         tp_size=tp_size,
         pp_size=pp_size,
-        pcp_rank=pcp_rank,
         put_step=put_step,
-        cache_transfer_granularity=4,
-        hash_block_size=4,
+        group_specs=tuple(group.kv_cache_spec for group in groups),
+        transfer_group_ids=group_ids,
         tp_partition=TPPartitionSpec(
             tp_mismatch,
             key_rank_count if key_rank_count is not None else (2 if tp_mismatch else 1),
             key_slices_per_rank if key_slices_per_rank is not None else (2 if tp_mismatch else 1),
         ),
-        groups=groups,
-        transfer_group_ids=group_ids,
-        pp_partition=PPPartitionSpec(consumer_pipeline_partitions),
+        pp_partition=PPPartitionSpec(target_layer_counts),
         cp_partition=CPPartitionSpec(pcp_size, dcp_size),
+    )
+    return KVPoolTopology(
+        config=config,
+        tp_rank=tp_rank,
+        pcp_rank=pcp_rank,
+        groups=groups,
         stage_layer_start=0,
         stage_layer_count=len(physical_layers),
         object_shard_index=0,
@@ -334,11 +345,11 @@ class FakeResources(KVPoolResources):
         # Keep real views alive so both routes bind the same address geometry.
         self.kv_caches: dict[str, torch.Tensor] | None = {}
         for group in self._topology.transfer_groups:
-            for name in group.layer_names:
+            for name in (name for layer in group.layers for name in layer.layer_names):
                 if group.uses_align_state:
                     cache = torch.empty_strided((64, 8), (16, 1), dtype=torch.float32)
                 else:
-                    heads = 2 if self._topology.tp_partition.tp_mismatch else max(8 // group.block_size, 1)
+                    heads = 2 if self._topology.config.tp_partition.tp_mismatch else max(8 // group.block_size, 1)
                     cache = torch.empty_strided(
                         (64, group.block_size, heads, 1),
                         (max(16, group.block_size * heads), heads, 1, 1),

@@ -63,7 +63,7 @@ class RecordingBackend(FakeBackend):
 
 
 def make_caches(topology, *, shared_storage: bool = False):
-    layer_names = topology.groups[0].layer_names
+    layer_names = tuple(name for layer in topology.groups[0].layers for name in layer.layer_names)
     if not shared_storage:
         return {layer_name: torch.empty((8, 4, 1, 1), dtype=torch.float32) for layer_name in layer_names}
     storage = torch.empty((8 * len(layer_names), 4, 1, 1), dtype=torch.float32)

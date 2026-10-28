@@ -1,12 +1,21 @@
 """Memcache adapter; native registration and session mechanics stay in this package."""
 
-from ...infrastructure.configuration.naming import KeyNamingConfig
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from ..naming import WireKeyBuilder
 from .backend import MemcacheBackend
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
-def create_key_builder(config: KeyNamingConfig) -> WireKeyBuilder:
-    group_count = len(config.group_block_sizes)
+    from ...infrastructure.configuration import KVPoolConfig
+
+
+def create_key_builder(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, config: KVPoolConfig) -> WireKeyBuilder:
+    group_count = len(config.group_specs)
     return WireKeyBuilder(
         tuple(
             tuple(

@@ -22,7 +22,10 @@ from .registration import (
 )
 
 if TYPE_CHECKING:
-    from ..infrastructure.configuration.naming import KeyNamingConfig
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    from ..infrastructure.configuration import KVPoolConfig
     from .naming import WireKeyBuilder
 
 BackendFactory = Callable[..., KVStoreBackend]
@@ -74,8 +77,7 @@ class BackendSpec:
     backend_factory: BackendFactory
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
-    layerwise_key_factory: Callable[[KeyNamingConfig], WireKeyBuilder] | None = None
-    key_requires_layout_identity: bool = False
+    layerwise_key_factory: Callable[[VllmConfig, KVCacheConfig, KVPoolConfig], WireKeyBuilder] | None = None
 
     def create(
         self,
@@ -99,7 +101,6 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
         LAYERWISE_ACCESS.get(backend_name),
         bool(getattr(backend_factory, "requires_exists_before_put", True)),
         getattr(module, "create_key_builder", None),
-        bool(getattr(module, "KEY_REQUIRES_LAYOUT_IDENTITY", False)),
     )
 
 

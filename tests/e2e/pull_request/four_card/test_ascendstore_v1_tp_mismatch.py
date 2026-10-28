@@ -124,10 +124,9 @@ def _exercise_pair(
 
 
 def _start_server(model_path, connector, devices, port, lookup_port, pool_envs, producer) -> RemoteOpenAIServer:
-    _, connector_name, connector_module = connector
+    _, connector_name = connector
     transfer_config = {
         "kv_connector": connector_name,
-        "kv_connector_module_path": connector_module,
         "kv_role": "kv_producer" if producer else "kv_consumer",
         "kv_load_failure_policy": "fail",
         "kv_connector_extra_config": {

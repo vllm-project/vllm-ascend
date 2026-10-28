@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     """Delegate vLLM hooks to one Scheduler or Worker owner."""
 
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """Keep per-layer transfer hooks active between captured graph pieces."""
+        return extra_config.get("use_layerwise", False)
+
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
 

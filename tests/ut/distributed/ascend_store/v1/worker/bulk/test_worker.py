@@ -39,12 +39,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BackendSpec,
     LayerwiseAccessKind,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
-    resolve as configuration,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
-    resolve_group_layers,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import configuration
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import topology as topology_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution import Executor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     CheckpointStoreCommand,
@@ -56,6 +52,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     KVPoolResources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    resolve_group_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     AsynchronousBulkScheduler,
@@ -138,9 +137,9 @@ def test_memcache_multi_spec_store_lookup_load_preserves_payloads_and_private_st
     backend = TensorBytesBackend()
     backend_spec = BackendSpec("memcache", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.GVA, True)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: backend_spec)
-    monkeypatch.setattr(configuration, "_kvpp_size", lambda _config: 1)
-    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
-    monkeypatch.setattr(configuration, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(factory_module, "_kvpp_size", lambda _config: 1)
+    monkeypatch.setattr(topology_module, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
+    monkeypatch.setattr(topology_module, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(configuration, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
     monkeypatch.setattr(configuration.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (32, 32))
     config = SimpleNamespace(
@@ -694,7 +693,9 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
     block_scale = cache_block_size // kernel_block_size
     caches = {}
     expected = {}
-    for layer_index, name in enumerate(topology.groups[0].layer_names):
+    for layer_index, name in enumerate(
+        tuple(name for layer in topology.groups[0].layers for name in layer.layer_names)
+    ):
         entries = []
         expected_entries = []
         for entry_index, head_dim in enumerate((2, 3)):
@@ -827,7 +828,9 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
     )
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
     cache_values = torch.arange(8 * 2 * 16, dtype=torch.float32).reshape(8, 16, 1, 2)
-    caches = {group.layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups}
+    caches = {
+        group.layers[0].layer_names[0]: cache_values + group.group_id * 1000 for group in topology.transfer_groups
+    }
     source_blocks = ((), (1, 2, 3, 4, 5, 6), (), (1, 2, 3, 4, 5, 6))
     try:
         worker.bind_kv_caches(caches)
@@ -900,17 +903,21 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     for index, cache in enumerate(attention_caches):
         cache.copy_(torch.arange(cache.numel()).reshape(cache.shape) + index * 1000)
     state_cache = torch.arange(8, dtype=torch.float32).reshape(8, 1)
-    hashes = tuple(bytes([index]) for index in range(1, topology.cache_transfer_granularity // 8 + 1))
+    hashes = tuple(bytes([index]) for index in range(1, topology.config.cache_transfer_granularity // 8 + 1))
     source_blocks = (1, 2) if attention_block_size == 16 else (1,)
     destination_blocks = (5, 6) if attention_block_size == 16 else (5,)
     config = replace(
-        make_config(granularity=topology.cache_transfer_granularity, groups=(0, 1), align_groups=frozenset((1,))),
+        make_config(
+            granularity=topology.config.cache_transfer_granularity, groups=(0, 1), align_groups=frozenset((1,))
+        ),
         hash_block_size=8,
     )
     lookup = SimpleNamespace(lookup=worker.lookup, close=lambda: None)
     scheduler = scheduler_type(config, lookup)
     try:
-        worker.bind_kv_caches({attention.layer_names[0]: attention_caches, state.layer_names[0]: state_cache})
+        worker.bind_kv_caches(
+            {attention.layers[0].layer_names[0]: attention_caches, state.layers[0].layer_names[0]: state_cache}
+        )
         boundaries = (hit_end,) if tail_end == hit_end else (hit_end, tail_end)
         for index, boundary in enumerate(boundaries):
             command = CheckpointStoreCommand(
@@ -926,8 +933,8 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
 
         request = make_request(
             "consumer",
-            prompt_tokens=topology.cache_transfer_granularity,
-            tokens=topology.cache_transfer_granularity + 1,
+            prompt_tokens=topology.config.cache_transfer_granularity,
+            tokens=topology.config.cache_transfer_granularity + 1,
         )
         request.block_hashes = list(hashes)
         raw = worker.lookup(LookupRequest(0, request.num_prompt_tokens, (0, 1), hashes))
@@ -1140,7 +1147,7 @@ def test_hybrid_checkpoint_requires_unique_exact_align_state_sources() -> None:
 
 
 def test_consumer_pipeline_store_keeps_key_memory_and_layer_provenance_atomic() -> None:
-    topology = make_topology(physical_layers=(0, 1, 2, 3), consumer_pipeline_partitions=(2, 2))
+    topology = make_topology(physical_layers=(0, 1, 2, 3), target_layer_counts=(2, 2))
     backend = FakeBackend()
     backend.presence = [1, 0]
     worker, resources, _ = make_worker(backend, topology=topology, requires_exists_before_put=True)

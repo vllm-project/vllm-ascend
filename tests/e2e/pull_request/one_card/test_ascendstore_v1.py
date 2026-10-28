@@ -69,14 +69,14 @@ def _exercise_connector(
     tokenizer: TokenizerLike,
     inputs: list[SampleRequest],
     warmup: list[SampleRequest],
-    connector: tuple[str, str, str],
+    connector: tuple[str, str],
     observations: list[dict[str, Any]],
     *,
     use_layerwise: bool = False,
     worker_extension: str = WORKER_EXTENSION,
     accuracy_directory: Path | None = None,
 ) -> None:
-    _, connector_name, connector_module = connector
+    _, connector_name = connector
     master_port, metrics_port, lookup_port, server_port = get_open_ports_list(4)
     pool_config = MooncakeKVPoolConfig(
         config={
@@ -91,7 +91,6 @@ def _exercise_connector(
     )
     transfer_config = {
         "kv_connector": connector_name,
-        "kv_connector_module_path": connector_module,
         "kv_role": "kv_both",
         "kv_load_failure_policy": "fail",
         "kv_connector_extra_config": {

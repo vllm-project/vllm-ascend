@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 
-    from .configuration.topology import KVPoolGroupTopology, KVPoolLayerTopology, KVPoolTopology
+    from .topology import KVPoolGroupTopology, KVPoolLayerTopology, KVPoolTopology
 
 
 _ALL_SEGMENTS = slice(None)
@@ -91,7 +91,9 @@ def build_mappings(
     if group is None:
         raise KeyError(group_id)
     metadata = group.key_metadata
-    head_partition_count = topology.tp_partition.key_slices_per_rank if topology.tp_partition.tp_mismatch else 1
+    head_partition_count = (
+        topology.config.tp_partition.key_slices_per_rank if topology.config.tp_partition.tp_mismatch else 1
+    )
     first_head_rank = metadata.head_or_tp_rank * head_partition_count
     # HND/LBHNC caches arrive as per-layer head-major views.
     head_axis = 1 if kv_cache_layout in ("HND", "LBHNC") else 2
@@ -101,7 +103,7 @@ def build_mappings(
     keys: KeyTable = {}
     local: LocalTable = {}
     layer_slices: LayerTable | None = {} if layerwise else None
-    for pp_rank, layers in select_layers(group, topology.consumer_pipeline_partitions).items():
+    for pp_rank, layers in select_layers(group, topology.config.pp_partition.target_layer_counts).items():
         # DCP tokens are already sliced upstream; PCP does not change local selection.
         partitions = tuple(
             (pp_rank, metadata.dcp_rank, first_head_rank + head_partition_index)
@@ -171,13 +173,13 @@ def build_lookup_keys(topology: KVPoolTopology, group_id: int) -> tuple[tuple[st
     by this Worker. Align-state groups use TP ranks instead of attention heads.
     """
     group = next(group for group in topology.transfer_groups if group.group_id == group_id)
-    partitions = topology.consumer_pipeline_partitions or ()
-    pp_size = len(partitions) if len(partitions) > 1 else topology.pp_size
-    head_count = topology.tp_size if group.uses_align_state else topology.tp_partition.key_rank_count
+    partitions = topology.config.pp_partition.target_layer_counts or ()
+    pp_size = len(partitions) if len(partitions) > 1 else topology.config.pp_size
+    head_count = topology.config.tp_size if group.uses_align_state else topology.config.tp_partition.key_rank_count
     return tuple(
         _default_key_builder(replace(group.key_metadata, pp_rank=pp, dcp_rank=dcp, head_or_tp_rank=head))
         for pp in range(pp_size)
-        for dcp in range(topology.dcp_size)
+        for dcp in range(topology.config.cp_partition.dcp_size)
         for head in range(head_count)
     )
 
@@ -255,7 +257,7 @@ def build_gva_remote(topology: KVPoolTopology, local: LocalTable, layer_slices: 
             continue
         boundaries = _segment_byte_boundaries(segments["lengths"], len(segments["bases"]))
         layer_spans = layer_slices[pp_rank]
-        if topology.pp_partition.global_layer_count is not None:
+        if topology.config.pp_partition.global_layer_count is not None:
             layer_sizes = {int(boundaries[span.stop]) - int(boundaries[span.start]) for span in layer_spans.values()}
             if len(layer_sizes) > 1:
                 raise ValueError("Global layer spans require uniform per-layer payloads")
@@ -280,7 +282,7 @@ def _segment_byte_boundaries(lengths: UInt64Array, segment_count: int) -> UInt64
 
 def _gva_object_span(topology: KVPoolTopology, payload_bytes: int, layer_count: int) -> tuple[int, int]:
     shard_bytes, origin = payload_bytes, 0
-    global_layers = topology.pp_partition.global_layer_count
+    global_layers = topology.config.pp_partition.global_layer_count
     if global_layers is not None:
         reserved_layers = max(global_layers, topology.stage_layer_count, layer_count)
         if topology.stage_layer_start < 0 or topology.stage_layer_start + layer_count > reserved_layers:
@@ -288,8 +290,8 @@ def _gva_object_span(topology: KVPoolTopology, payload_bytes: int, layer_count: 
         bytes_per_layer = payload_bytes // layer_count
         shard_bytes = reserved_layers * bytes_per_layer
         origin = topology.stage_layer_start * bytes_per_layer
-    count = topology.cp_partition.object_shard_count
-    alignment = topology.cp_partition.shard_alignment_bytes
+    count = topology.config.cp_partition.object_shard_count
+    alignment = topology.config.cp_partition.shard_alignment_bytes
     shard_index = topology.object_shard_index
     if count <= 0 or alignment <= 0 or not 0 <= shard_index < count:
         raise ValueError("Invalid remote shard count, alignment or index")

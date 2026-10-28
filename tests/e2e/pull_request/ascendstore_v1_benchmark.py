@@ -35,12 +35,8 @@ CONCURRENCY = 8
 ROUNDS_PER_RUN = 2
 WORKER_EXTENSION = "tests.e2e.pull_request.one_card.ascendstore_v1_performance.AscendStoreBenchmarkWorkerExtension"
 CONNECTORS = (
-    (
-        "production",
-        "AscendStoreConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-    ),
-    ("v1", "AscendStoreV1Connector", "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector"),
+    ("production", "AscendStoreConnector"),
+    ("v1", "AscendStoreV1Connector"),
 )
 # Separate server lifetimes balance early/late execution without colocating competing implementations.
 CROSSOVER_RUNS = CONNECTORS + CONNECTORS[::-1]
@@ -323,7 +319,7 @@ def compare_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
                 if run["implementation"] == implementation
                 for row in run["measurements"]
             ]
-            for implementation, _, _ in CONNECTORS
+            for implementation, _ in CONNECTORS
         }
         production, candidate = observations["production"], observations["v1"]
         comparison: dict[str, Any] = {"rounds_per_implementation": len(production), "text_comparisons": []}

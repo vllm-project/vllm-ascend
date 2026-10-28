@@ -39,8 +39,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     BackendSpec,
     LayerwiseAccessKind,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
-    resolve as configuration,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import (
+    configuration,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import (
+    topology as topology_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
@@ -133,7 +136,7 @@ def test_backend_supplied_binders_are_resolved_before_registration_and_applied_o
         }
         worker.bind_kv_caches(caches)
         builder.assert_called_once_with(topology.groups[0].key_metadata)
-        builder.lookup_parts.assert_called_once_with(0, topology.tp_partition.key_rank_count)
+        builder.lookup_parts.assert_called_once_with(0, topology.config.tp_partition.key_rank_count)
         assert tuple(map_keys(parts, (b"a",)) for parts in worker._keys[0].values()) == (("custom-wire-61",),)
     finally:
         worker.close()
@@ -216,7 +219,11 @@ def test_factory_selects_source_protection_by_route(
         spec = MLAAttentionSpec(**geometry)
     else:
         spec = FullAttentionSpec(**geometry)
-    cache_config = SimpleNamespace(transfer_group_ids=(0,), kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    cache_config = SimpleNamespace(
+        transfer_group_ids=(0,),
+        prefix_cache_retention_interval=None,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, is_eagle_group=False)],
+    )
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_consumer" if "consumer_is_to_put" in extra else "kv_both",
@@ -228,15 +235,21 @@ def test_factory_selects_source_protection_by_route(
             },
         ),
         parallel_config=SimpleNamespace(
-            world_size=2, tensor_parallel_size=2, prefill_context_parallel_size=1, decode_context_parallel_size=1
+            world_size=2,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
         ),
         model_config=SimpleNamespace(
+            model="model",
             use_mla=spec_kind == "mla",
             get_total_num_kv_heads=lambda: 2,
             get_total_num_hidden_layers=lambda: 2,
             hf_text_config=SimpleNamespace(num_hidden_layers=2),
         ),
         speculative_config=None,
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
     scheduler = factory_module.create_kv_pool_scheduler(config, cache_config, "unused")
     pool = FakeBlockPool()
@@ -355,7 +368,10 @@ def test_memcache_bulk_factory_binds_hybrid_buffers_without_gva_constraints(monk
         config.model_config.get_layers_start_end_indices.assert_not_called()
         config.model_config.get_total_num_hidden_layers.assert_not_called()
         caches = {
-            name: torch.empty((8, 4), dtype=torch.float32) for group in topology.groups for name in group.layer_names
+            name: torch.empty((8, 4), dtype=torch.float32)
+            for group in topology.groups
+            for layer in group.layers
+            for name in layer.layer_names
         }
         worker.bind_kv_caches(caches)
         registered_regions = [entry for entry in backend.calls if entry[0] == "register_region"]
@@ -408,6 +424,9 @@ def factory_worker(monkeypatch, name, layerwise, topology, objects):
     access = LayerwiseAccessKind.KEY_RANGE if name == "mooncake" else LayerwiseAccessKind.GVA
     spec = BackendSpec(name, lambda *_args, **_kwargs: backend, access, True)
     pool_config = make_pool_config(topology, name, use_layerwise=layerwise)
+    # This mapping-assembly test injects admitted sparse groups; Factory support
+    # rejection is exercised separately with real configuration inputs.
+    monkeypatch.setattr(factory_module, "_validate_support", lambda *_args: None)
     monkeypatch.setattr(factory_module, "resolve_kv_pool_config", lambda *_args: pool_config)
     monkeypatch.setattr(factory_module, "resolve_worker_topology", lambda *_args: topology)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: spec)
@@ -434,7 +453,7 @@ def factory_worker(monkeypatch, name, layerwise, topology, objects):
                 ),
             )
     worker.bind_kv_caches(caches)
-    assert tuple(worker._local) == topology.transfer_group_ids
+    assert tuple(worker._local) == topology.config.transfer_group_ids
     assert not hasattr(worker, "_mappings")
     return worker, caches, sdk
 
@@ -470,7 +489,7 @@ def test_factory_default_keys_share_complete_objects(
     )
     objects: dict[str, ctypes.Array[ctypes.c_char]] = {}
     writer, source, write_sdk = factory_worker(monkeypatch, backend_name, layerwise_store, topology, objects)
-    block_ids = tuple((1,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
+    block_ids = tuple((1,) if group_id in topology.config.transfer_group_ids else () for group_id in range(4))
     command = RangeStoreCommand("request", 0, 4, block_ids, (b"a",), 4, 17)
     expected = {name: tuple(tensor[1].clone() for tensor in tensors) for name, tensors in source.items()}
     try:
@@ -507,7 +526,7 @@ def test_factory_default_keys_share_complete_objects(
         assert {map_keys(next(iter(parts.values())), (b"a",))[0] for parts in reader._keys.values()} == keys
         if pp_rank == 0:
             assert reader.lookup(LookupRequest(0, 4, (0, 3), (b"a",))).available_end_token == 4
-        target_ids = tuple((6,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
+        target_ids = tuple((6,) if group_id in topology.config.transfer_group_ids else () for group_id in range(4))
         begin_step(reader, load=(LoadCommand("request", 0, 4, target_ids, (b"a",)),))
         reader.start_load()
         if not layerwise_store:
@@ -541,7 +560,7 @@ def test_speculative_factories_follow_upstream_eagle_policy(
     spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _: spec)
     for name in ("get_tp_group", "get_pp_group"):
-        monkeypatch.setattr(configuration, name, lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
+        monkeypatch.setattr(topology_module, name, lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
     monkeypatch.setattr(factory_module, "LookupClient", lambda *_args, **_kwargs: FakeLookupClient(8))
     scheduler = factory_module.create_kv_pool_scheduler(config, cache, "unused")
     worker = factory_module.create_kv_pool_worker(config, cache)
@@ -559,8 +578,8 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: object())
     monkeypatch.setattr(configuration.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_args: (4, 4))
     monkeypatch.setattr(configuration, "resolve_dcp_kv_cache_spec", lambda spec, _size: spec)
-    monkeypatch.setattr(configuration, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
-    monkeypatch.setattr(configuration, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(topology_module, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0]))
+    monkeypatch.setattr(topology_module, "get_pp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(factory_module, "LookupClient", lambda _address, **_kwargs: SimpleNamespace(close=lambda: None))
 
     attention = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
@@ -582,9 +601,9 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     scheduler.close()
 
     pool_config = configuration.resolve_kv_pool_config(config, cache_config)
-    topology = configuration.resolve_worker_topology(config, cache_config, pool_config)
+    topology = topology_module.resolve_worker_topology(config, cache_config, pool_config)
     assert tuple(group.group_id for group in topology.groups) == (0, 1)
-    assert topology.transfer_group_ids == (0,)
+    assert topology.config.transfer_group_ids == (0,)
 
     backend = FakeBackend()
     worker, resources, _ = make_worker(backend, topology=topology)
@@ -617,7 +636,7 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
     tracked = {}
     for name in (
         "resolve_dcp_kv_cache_spec",
-        "_resolve_tp_partition",
+        "resolve_tp_partition",
         "resolve_consumer_pipeline_partitions",
         "resolve_object_partitions",
     ):
@@ -635,7 +654,7 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
     monkeypatch.setattr(factory_module, "resolve_kv_pool_config", resolve_once)
     rank = Mock(return_value=SimpleNamespace(rank_in_group=0, ranks=[0]))
     for name in ("get_tp_group", "get_pp_group", "get_dcp_group"):
-        monkeypatch.setattr(configuration, name, rank)
+        monkeypatch.setattr(topology_module, name, rank)
     backend = FakeBackend()
     backend_spec = BackendSpec("mooncake", lambda *_args, **_kwargs: backend, LayerwiseAccessKind.KEY_RANGE, True)
     monkeypatch.setattr(factory_module, "resolve_backend_spec", lambda _name: backend_spec)
@@ -649,39 +668,39 @@ def test_factories_derive_geometry_once_and_consume_the_same_specs(configuration
         assert len(observed) == 1
         admitted = observed[0]
         assert tracked["resolve_dcp_kv_cache_spec"].call_count == group_count
-        tracked["_resolve_tp_partition"].assert_called_once()
+        tracked["resolve_tp_partition"].assert_called_once()
         tracked["resolve_consumer_pipeline_partitions"].assert_called_once()
         tracked["resolve_object_partitions"].assert_called_once()
         block_sizes.assert_called_once()
         config.model_config.get_total_num_kv_heads.assert_called_once()
         if side == "scheduler":
             rank.assert_not_called()
-            assert all(spec is admitted.group_specs[group_id] for group_id, spec, _ in owner._config.store_group_specs)
+            assert owner._config is admitted
         else:
             assert all(group.kv_cache_spec is admitted.group_specs[group.group_id] for group in owner._topology.groups)
-            assert owner._topology.tp_partition is admitted.tp_partition
-            assert owner._topology.pp_partition is admitted.pp_partition
-            assert owner._topology.cp_partition is admitted.cp_partition
+            assert owner._topology.config.tp_partition is admitted.tp_partition
+            assert owner._topology.config.pp_partition is admitted.pp_partition
+            assert owner._topology.config.cp_partition is admitted.cp_partition
     finally:
         owner.close()
 
 
-@pytest.mark.parametrize("invalid", ("boolean", "geometry", "partial_before_empty_groups"))
+@pytest.mark.parametrize("invalid", ("boolean", "partial", "unsupported_route"))
 def test_factories_reject_configuration_before_ranks_and_resource_creation(configuration_case, monkeypatch, invalid):
     config, cache = configuration_case
     if invalid == "boolean":
         config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = "false"
         message = "use_layerwise must be a boolean"
-    elif invalid == "geometry":
-        cache.kv_cache_groups[0].kv_cache_spec = replace(cache.kv_cache_groups[0].kv_cache_spec, block_size=3)
-        message = "transfer group 0 block size"
-    else:
+    elif invalid == "partial":
         config.kv_transfer_config.kv_connector_extra_config["discard_partial_chunks"] = False
-        cache.transfer_group_ids = ()
         message = "discard_partial_chunks=False"
+    else:
+        config.kv_transfer_config.kv_connector_extra_config.update(use_layerwise=True, prefill_tp_size=2)
+        config.kv_transfer_config.kv_role = "kv_consumer"
+        message = "TP mismatch"
     acquire = Mock(side_effect=AssertionError("Configuration must precede runtime dependencies"))
     for module, names in (
-        (configuration, ("get_tp_group", "get_pp_group")),
+        (topology_module, ("get_tp_group", "get_pp_group")),
         (factory_module, ("LookupClient", "resolve_backend_spec", "KVPoolResources")),
     ):
         for name in names:

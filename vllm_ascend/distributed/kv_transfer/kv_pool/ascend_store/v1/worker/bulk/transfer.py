@@ -7,8 +7,8 @@ from itertools import repeat
 
 import numpy as np
 
-from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import LocalTable, local_addresses, local_lengths
+from ...infrastructure.topology import KVPoolTopology
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
 
@@ -76,15 +76,15 @@ def bind_store_writer_selection(
 
     if tp_mismatch or align_state:
         replica_count = 1
-    elif topology.dcp_size > 1:
+    elif topology.config.cp_partition.dcp_size > 1:
         # The Adapter rejects topologies where one (head, dcp) key still has
         # multiple writers or where DCP spans PCP. Every remaining local key is
         # therefore unique and must publish the complete row set.
         replica_count = 1
     else:
-        replica_count = topology.put_step
+        replica_count = topology.config.put_step
     shard_rank = topology.pcp_rank * replica_count + topology.tp_rank % replica_count
-    shard_count = topology.pcp_size * replica_count
+    shard_count = topology.config.cp_partition.pcp_size * replica_count
     if shard_count <= 1:
         return None
     return slice(shard_rank, None, shard_count)

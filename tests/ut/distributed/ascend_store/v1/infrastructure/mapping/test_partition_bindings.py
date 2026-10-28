@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
-    CPPartitionSpec,
-    PPPartitionSpec,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
     build_gva_remote,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    CPPartitionSpec,
+    PPPartitionSpec,
 )
 
 
@@ -45,8 +45,10 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
     expected = pool_worker.KVPoolWorker._build_group_layer_builders(production)[0]
     shared = dcp_size > 1 and put_step > 1
     topology = SimpleNamespace(
-        pp_partition=PPPartitionSpec(global_layer_count=7),
-        cp_partition=CPPartitionSpec(1, dcp_size, dcp_size if shared else 1, 2 * 1024 * 1024 if shared else 1),
+        config=SimpleNamespace(
+            pp_partition=PPPartitionSpec(global_layer_count=7),
+            cp_partition=CPPartitionSpec(1, dcp_size, dcp_size if shared else 1, 2 * 1024 * 1024 if shared else 1),
+        ),
         stage_layer_start=3 if pp_rank else 0,
         stage_layer_count=4,
         object_shard_index=dcp_rank if shared else 0,

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
 
+from ..infrastructure.configuration import KVPoolConfig
 from ..infrastructure.protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
@@ -20,7 +21,7 @@ from ..infrastructure.protocol.messages import (
 from ..infrastructure.protocol.rpc import LookupClient
 from .lookup import resolve_load_candidate
 from .source_leases import StoreSourceLeases
-from .state import LoadCandidate, RequestAllocation, RequestProgress, SchedulerConfig
+from .state import LoadCandidate, RequestAllocation, RequestProgress
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
@@ -35,7 +36,7 @@ class KVPoolScheduler:
     load_is_deferred = False
     store_with_scheduled_load = False
 
-    def __init__(self, config: SchedulerConfig, lookup_client: LookupClient) -> None:
+    def __init__(self, config: KVPoolConfig, lookup_client: LookupClient) -> None:
         self._config = config
         self._lookup_client = lookup_client
         self._pending_lookups: dict[str, LoadCandidate] = {}
@@ -260,7 +261,11 @@ class KVPoolScheduler:
             raise ValueError(f"Scheduled RUNNING request {request_id} has no Scheduler progress")
 
         is_decoding = num_computed_tokens >= progress.prefill_end_token
-        if is_decoding and not self._config.save_decode_cache and not self._config.align_state_group_ids:
+        if (
+            is_decoding
+            and not self._config.save_decode_cache
+            and self._config.align_state_group_ids.isdisjoint(self._config.transfer_group_ids)
+        ):
             # No decode transfer consumes these snapshots. Resumption rebuilds
             # them from the confirmed allocation; state checkpoints still need progress.
             return None, None

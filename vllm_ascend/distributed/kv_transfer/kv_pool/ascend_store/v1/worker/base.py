@@ -13,12 +13,12 @@ from typing import Any, Concatenate, ParamSpec, TypeVar
 import torch
 from vllm.logger import logger
 
-from ..infrastructure.configuration.topology import KVPoolTopology
 from ..infrastructure.coordinator import Coordinator
 from ..infrastructure.execution import Executor
 from ..infrastructure.mapping import KeyTable, map_keys
 from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from ..infrastructure.resources import KVPoolResources
+from ..infrastructure.topology import KVPoolTopology
 from .transfer.batch import (
     KeysByPartition,
     KVGroupBatch,
@@ -86,11 +86,10 @@ class KVPoolWorker(ABC):
         self._kv_cache_layout = kv_cache_layout
         self._keys: dict[int, KeyTable] = {}
         self._lookup_key_parts: dict[int, tuple[tuple[str, str], ...]] = {}
-        self._state_group_ids = frozenset(
-            group.group_id for group in topology.transfer_groups if group.uses_align_state
-        )
+        self._state_group_ids = topology.config.align_state_group_ids.intersection(topology.config.transfer_group_ids)
         self._fine_grained_lookup = any(
-            group.uses_align_state and group.block_size > topology.hash_block_size for group in topology.transfer_groups
+            group.uses_align_state and group.block_size > topology.config.hash_block_size
+            for group in topology.transfer_groups
         )
         self._resources = resources
         self._backend = resources.backend
@@ -131,10 +130,10 @@ class KVPoolWorker(ABC):
     def lookup(self, request: LookupRequest) -> LookupResult:
         if not self._execution_started:
             raise RuntimeError("KV caches must be bound before Lookup")
-        if request.transfer_group_ids != self._topology.transfer_group_ids:
+        if request.transfer_group_ids != self._topology.config.transfer_group_ids:
             raise ValueError(
                 f"Lookup groups {request.transfer_group_ids} do not match configured groups "
-                f"{self._topology.transfer_group_ids}"
+                f"{self._topology.config.transfer_group_ids}"
             )
         masks = self._coordinator.select_for_lookup(request.end_token)
         observations = []
@@ -144,7 +143,7 @@ class KVPoolWorker(ABC):
                 request.end_token,
                 request.block_hashes,
                 block_size=group.block_size,
-                hash_block_size=self._topology.hash_block_size,
+                hash_block_size=self._topology.config.hash_block_size,
                 start_token=request.start_token,
                 mask=mask,
             )
@@ -185,7 +184,7 @@ class KVPoolWorker(ABC):
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         block_size=group.block_size,
-                        hash_block_size=self._topology.hash_block_size,
+                        hash_block_size=self._topology.config.hash_block_size,
                         start_token=command.start_token,
                         tail_boundary_token=boundaries.get(group_id),
                         mask=mask,

@@ -15,7 +15,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
 def test_factory_retains_cleanup_before_worker_initialization(configuration_case, monkeypatch, failure):
     config, cache = configuration_case
     topology = make_topology(tp_size=2, dcp_size=2, put_step=2)
-    topology = replace(topology, cp_partition=replace(topology.cp_partition, object_shard_count=2))
+    topology = replace(
+        topology,
+        config=replace(topology.config, cp_partition=replace(topology.config.cp_partition, object_shard_count=2)),
+    )
     backend = FakeBackend()
     sessions = Mock()
     create_sessions = Mock(return_value=sessions)

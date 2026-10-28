@@ -22,7 +22,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
 )
@@ -43,11 +43,17 @@ def make_align_state_topology(
         MambaSpec(block_size=state_block_size, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
         (KVPoolLayerTopology(1, ("layers.1.state",)),),
         replace(base.groups[1].key_metadata, cache_family="state"),
+        uses_align_state=True,
     )
     return replace(
         base,
-        cache_transfer_granularity=lcm(attention_block_size, state_block_size),
-        hash_block_size=hash_block_size,
+        config=replace(
+            base.config,
+            cache_transfer_granularity=lcm(attention_block_size, state_block_size),
+            hash_block_size=hash_block_size,
+            align_state_group_ids=frozenset((1,)),
+            group_specs=(attention.kv_cache_spec, state.kv_cache_spec),
+        ),
         groups=(attention, state),
     )
 
@@ -72,7 +78,11 @@ def make_sparse_group_topology(*, block_size: int = 4, sliding_window: int = 8):
         (KVPoolLayerTopology(1, ("layers.1.swa",)),),
         replace(base.groups[3].key_metadata, cache_family="swa"),
     )
-    return replace(base, groups=(attention, sliding), cache_transfer_granularity=block_size, hash_block_size=block_size)
+    return replace(
+        base,
+        config=replace(base.config, cache_transfer_granularity=block_size, hash_block_size=block_size),
+        groups=(attention, sliding),
+    )
 
 
 class TensorBytesBackend(FakeBackend):

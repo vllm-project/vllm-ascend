@@ -26,17 +26,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     GVA_SHARD_ALIGNMENT_BYTES,
     resolve_backend_spec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
     resolve_object_partitions,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
-    ContextRank,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LoadCommand,
     LookupRequest,
     RangeStoreCommand,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    ContextRank,
 )
 
 
@@ -47,39 +47,51 @@ def production_worker(monkeypatch, name, topology, objects, readable, *, store=T
     pool = make_pool_config(topology, name, use_layerwise=True, store_enabled=store)
     monkeypatch.setattr(factory, "resolve_backend_spec", lambda _name: spec)
     monkeypatch.setattr(factory, "resolve_kv_pool_config", lambda *_args: pool)
+    # Synthetic sparse groups exercise wire compatibility independently of admission.
+    monkeypatch.setattr(factory, "_validate_support", lambda *_args: None)
     monkeypatch.setattr(factory, "resolve_worker_topology", lambda *_args: topology)
     if collective is not None:
         monkeypatch.setattr(factory, "StoreCollective", lambda _ranks: collective)
-    config = TestBoundLayerwiseKeys.make_config(topology.pp_size)
-    config.parallel_config.tensor_parallel_size = topology.tp_size
-    config.parallel_config.decode_context_parallel_size = topology.dcp_size
-    config.parallel_config.prefill_context_parallel_size = topology.pcp_size
-    config.parallel_config.rank = topology.groups[0].key_metadata.pp_rank * topology.tp_size + topology.tp_rank
+    config = TestBoundLayerwiseKeys.make_config(topology.config.pp_size)
+    config.parallel_config.tensor_parallel_size = topology.config.tp_size
+    config.parallel_config.decode_context_parallel_size = topology.config.cp_partition.dcp_size
+    config.parallel_config.prefill_context_parallel_size = topology.config.cp_partition.pcp_size
+    config.parallel_config.rank = topology.groups[0].key_metadata.pp_rank * topology.config.tp_size + topology.tp_rank
     config.model_config.max_model_len = 64
     config.model_config.get_layers_start_end_indices = lambda p: (
-        (0, 7) if topology.pp_size == 1 else ((0, 3), (3, 7))[p.rank // topology.tp_size]
+        (0, 7) if topology.config.pp_size == 1 else ((0, 3), (3, 7))[p.rank // topology.config.tp_size]
     )
-    config.model_config.get_num_layers = lambda p: 7 if topology.pp_size == 1 else (3, 4)[p.rank // topology.tp_size]
+    config.model_config.get_num_layers = lambda p: (
+        7 if topology.config.pp_size == 1 else (3, 4)[p.rank // topology.config.tp_size]
+    )
     config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
     config.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
-    cache = SimpleNamespace(num_blocks=8, kv_cache_groups=topology.groups)
+    cache = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=group.kv_cache_spec,
+                layer_names=[name for layer in group.layers for name in layer.layer_names],
+            )
+            for group in topology.groups
+        ],
+    )
     pp, cp = resolve_object_partitions(
         config,
         name,
         use_layerwise=True,
-        put_step=topology.put_step,
-        target_layer_counts=topology.consumer_pipeline_partitions,
+        put_step=topology.config.put_step,
+        target_layer_counts=topology.config.pp_partition.target_layer_counts,
     )
     stage_start, _ = config.model_config.get_layers_start_end_indices(config.parallel_config)
     topology = replace(
         topology,
-        pp_partition=pp,
-        cp_partition=cp,
-        stage_layer_start=stage_start if topology.pp_size > 1 else 0,
+        config=replace(pool, pp_partition=pp, cp_partition=cp),
+        stage_layer_start=stage_start if topology.config.pp_size > 1 else 0,
         stage_layer_count=config.model_config.get_num_layers(config.parallel_config),
         object_shard_index=topology.groups[0].key_metadata.dcp_rank if cp.object_shard_count > 1 else 0,
     )
-    pool = replace(pool, pp_partition=pp, cp_partition=cp)
+    pool = topology.config
     worker = factory.create_kv_pool_worker(config, cache)
     worker._source_ready_event_factory = FakeEvent
     worker._start_gate_factory = lambda: FakeLoadStartGate(opened=True)
@@ -96,7 +108,7 @@ def production_worker(monkeypatch, name, topology, objects, readable, *, store=T
 
 
 def command(topology):
-    ids = tuple((1,) if group.group_id in topology.transfer_group_ids else () for group in topology.groups)
+    ids = tuple((1,) if group.group_id in topology.config.transfer_group_ids else () for group in topology.groups)
     return RangeStoreCommand("request", 0, 4, ids, (b"a",), 4, 17)
 
 

@@ -34,8 +34,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from .configuration.topology import KVPoolGroupTopology
 from .protocol.messages import TailKeyBoundary
+from .topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]
 LookupChunkRanges: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]

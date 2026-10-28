@@ -52,7 +52,10 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
     topology = make_topology(physical_layers=(4, 5))
     registration_backend = FakeBackend()
     resources = KVPoolResources(registration_backend, make_gva_spec(), topology.groups)
-    caches = {layer_name: torch.empty((8, 4), dtype=torch.float32) for layer_name in topology.groups[0].layer_names}
+    caches = {
+        layer_name: torch.empty((8, 4), dtype=torch.float32)
+        for layer_name in tuple(name for layer in topology.groups[0].layers for name in layer.layer_names)
+    }
     register_caches(resources, caches)
     assert resources.kv_caches is caches
     assert registration_backend.calls[-1][0] == "register_buffer"
@@ -212,7 +215,7 @@ def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> Non
     )
     cache = torch.empty((8, 4), dtype=torch.float32)
 
-    worker.bind_kv_caches({topology.groups[0].layer_names[0]: cache})
+    worker.bind_kv_caches({topology.groups[0].layers[0].layer_names[0]: cache})
     worker.close()
 
     lifecycle = [call for call in backend.calls if call[0] in ("register_buffer", "unregister_buffer", "backend_close")]

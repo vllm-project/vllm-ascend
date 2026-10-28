@@ -1,4 +1,4 @@
-"""Immutable Scheduler configuration, Lookup facts, and request progress."""
+"""Lookup facts and Scheduler request progress."""
 
 from __future__ import annotations
 
@@ -6,28 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from ..infrastructure.protocol.messages import TailKeyBoundary
-
-
-@dataclass(frozen=True, slots=True)
-class SchedulerConfig:
-    """Static facts that select and constrain one Scheduler route."""
-
-    cache_transfer_granularity: int
-    hash_block_size: int
-    transfer_group_ids: tuple[int, ...]
-    align_state_group_ids: frozenset[int]
-    load_enabled: bool
-    store_enabled: bool
-    save_decode_cache: bool
-    use_eagle_block_drop: bool
-    has_private_state: bool
-    expected_worker_count: int
-    # Empty for Layerwise and load-only routes. Original group IDs remain intact.
-    store_group_specs: tuple[tuple[int, KVCacheSpec, bool], ...] = ()
-    retention_interval: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

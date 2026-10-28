@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from vllm.utils.math_utils import cdiv
 
+from ..infrastructure.configuration import KVPoolConfig
 from ..infrastructure.protocol.messages import LookupResult
-from .state import LoadCandidate, SchedulerConfig
+from .state import LoadCandidate
 
 
 def resolve_load_candidate(
-    config: SchedulerConfig,
+    config: KVPoolConfig,
     lookup_result: LookupResult,
     *,
     query_start_token: int,
@@ -28,7 +29,7 @@ def resolve_load_candidate(
     store_skip_end = readable_end
     safe_load_end = readable_end
     granularity = config.cache_transfer_granularity
-    if config.use_eagle_block_drop and request_token_count > 0:
+    if config.use_eagle and request_token_count > 0:
         final_block_start = (request_token_count - 1) // granularity * granularity
         if safe_load_end > final_block_start:
             safe_load_end = max(local_cached_tokens, safe_load_end - granularity)

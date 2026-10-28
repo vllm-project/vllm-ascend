@@ -7,12 +7,11 @@ from types import SimpleNamespace
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MambaSpec, SlidingWindowSpec
 
+from tests.ut.distributed.ascend_store.v1.helpers import make_pool_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import KVPoolConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LookupResult,
     TailKeyBoundary,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
-    SchedulerConfig,
 )
 
 
@@ -66,9 +65,9 @@ def make_config(
     private: bool = False,
     workers: int = 1,
     recycling: bool = False,
-) -> SchedulerConfig:
+) -> KVPoolConfig:
     group_specs = []
-    for group_id in groups:
+    for group_id in range(max(groups, default=-1) + 1 + int(private)):
         spec: KVCacheSpec
         if group_id in align_groups:
             spec = MambaSpec(block_size=granularity, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
@@ -78,8 +77,8 @@ def make_config(
             )
         else:
             spec = FullAttentionSpec(block_size=granularity, num_kv_heads=1, head_size=1, dtype=torch.float32)
-        group_specs.append((group_id, spec, False))
-    return SchedulerConfig(
+        group_specs.append(spec)
+    return make_pool_config(
         cache_transfer_granularity=granularity,
         hash_block_size=4,
         transfer_group_ids=groups,
@@ -87,10 +86,9 @@ def make_config(
         load_enabled=load,
         store_enabled=store,
         save_decode_cache=save_decode,
-        use_eagle_block_drop=eagle,
-        has_private_state=private,
+        use_eagle=eagle,
         expected_worker_count=workers,
-        store_group_specs=tuple(group_specs),
+        group_specs=tuple(group_specs),
     )
 
 

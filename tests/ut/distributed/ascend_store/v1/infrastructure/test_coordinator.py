@@ -16,10 +16,6 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
 )
 from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import make_config
 from tests.ut.distributed.ascend_store.v1.worker.bulk.fixtures import make_sparse_group_topology
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
     ReachablePrefix,
@@ -27,6 +23,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     LookupResult,
     TailKeyBoundary,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.lookup import resolve_load_candidate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.rows import (
@@ -121,6 +121,7 @@ def test_coordinator_preserves_contiguous_prefixes_and_covering_tail_keys(attent
             MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align"),
             (KVPoolLayerTopology(1, ("layers.1",)),),
             replace(make_topology().groups[0].key_metadata, kv_cache_group_id=1),
+            uses_align_state=True,
         ),
     )
     hybrid = Coordinator(groups, 16, 4, 64)

@@ -31,6 +31,8 @@ import platform
 import statistics
 import sys
 import time
+from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -208,7 +210,7 @@ def current_workloads(case, bound, row_count, mask_kind):
         )
     )
     group = case.topology.transfer_groups[0]
-    by_pp = select_layers(group, case.topology.consumer_pipeline_partitions)
+    by_pp = select_layers(group, case.topology.config.pp_partition.target_layer_counts)
     memberships = tuple(tuple(layer.physical_layer_id for layer in by_pp[pp]) for pp, _, _ in local)
     sizes = bind_bulk_sizes({3: local})
     remote = build_key_range_remote(local) if layers is not None else None
@@ -308,7 +310,17 @@ def main():
         if args.routes and name not in args.routes:
             continue
         case = make_case(layers=tuple(range(32)), block_size=128, vector=16, blocks=1, fill=False, **options)
-        before = case.bind(baseline)
+        # Historical Mapping snapshots consume the former flat topology fields.
+        baseline_case = replace(
+            case,
+            topology=SimpleNamespace(
+                **vars(case.topology),
+                **vars(case.topology.config),
+                dcp_size=case.topology.config.cp_partition.dcp_size,
+                pcp_size=case.topology.config.cp_partition.pcp_size,
+            ),
+        )
+        before = baseline_case.bind(baseline)
         bind_current = lambda case=case: build_mappings(
             case.topology, case.caches, group_id=3, kv_cache_layout=case.layout
         )
@@ -319,11 +331,11 @@ def main():
         result = {
             "route": name,
             "bulk_binding": measure(
-                lambda case=case: case.bind(baseline), bind_current, args.samples, args.target_sample_ms
+                lambda case=baseline_case: case.bind(baseline), bind_current, args.samples, args.target_sample_ms
             ),
         }
         if args.layerwise:
-            before_layer = case.bind_layers(baseline)
+            before_layer = baseline_case.bind_layers(baseline)
 
             def bind_current_layer(case=case):
                 tables = build_mappings(
@@ -333,7 +345,7 @@ def main():
 
             after_layer, _ = bind_current_layer()
             result["layer_binding"] = measure(
-                lambda case=case: case.bind_layers(baseline),
+                lambda case=baseline_case: case.bind_layers(baseline),
                 bind_current_layer,
                 args.samples,
                 args.target_sample_ms,

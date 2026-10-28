@@ -41,19 +41,22 @@ def _using_sparse_sfa_c8(vllm_config, model_config) -> bool:
 
 def _using_kv_store(vllm_config) -> bool:
     """
-    Check whether AscendStoreConnector is used.
+    Check whether an AscendStore connector is used.
     In the scenario where only PD separation is used, mamba_cache_mode is not automatically set to align.
     """
     if not vllm_config.kv_transfer_config:
         return False
-    if vllm_config.kv_transfer_config.kv_connector == "AscendStoreConnector":
+    if vllm_config.kv_transfer_config.kv_connector in ("AscendStoreConnector", "AscendStoreV1Connector"):
         return True
     if vllm_config.kv_transfer_config.kv_connector == "MultiConnector":
         kv_connector_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         if not kv_connector_extra_config:
             return False
         if connectors := kv_connector_extra_config.get("connectors"):
-            return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
+            return any(
+                connector.get("kv_connector") in ("AscendStoreConnector", "AscendStoreV1Connector")
+                for connector in connectors
+            )
     return False
 
 

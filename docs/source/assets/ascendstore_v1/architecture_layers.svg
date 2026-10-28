@@ -9,9 +9,9 @@
 <text x="48" y="68" class="title">AscendStore v1 分层架构</text><text x="48" y="94" class="muted">业务层组合基础设施能力；Backend 适配原生访问；第三方系统负责实际传输与存储</text><text x="1232" y="68" class="code" text-anchor="end">1e3d0a705</text>
 
 <g data-node="integration"><rect x="48" y="112" width="1184" height="64" rx="6" class="band"/>
-<text x="64" y="139" class="name">接入与装配</text><text x="64" y="160" class="code">connector / factory</text>
+<text x="64" y="139" class="name">接入与装配</text><text x="64" y="160" class="code">Connector / Factory</text>
 <text x="240" y="139" class="name">vLLM / AscendStoreV1Connector</text><text x="240" y="160" class="muted">框架钩子与角色适配</text>
-<text x="816" y="139" class="name">factory</text><text x="816" y="160" class="muted">依据已校验的配置装配 Scheduler、Worker、Backend</text></g>
+<text x="816" y="139" class="name">Factory</text><text x="816" y="160" class="muted">依据已校验的配置装配 Scheduler、Worker、Backend</text></g>
 
 <rect x="48" y="192" width="1184" height="96" rx="6" class="band"/>
 <text x="64" y="228" class="name">业务层</text><text x="64" y="253" class="muted">请求决策与结果归属</text>
@@ -22,10 +22,10 @@
 
 <rect x="48" y="304" width="1184" height="168" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.5"/>
 <text x="64" y="370" class="name">基础设施层</text><text x="64" y="395" class="muted">稳定规则与执行能力</text><text x="64" y="420" class="code">infrastructure/</text>
-<g data-node="configuration"><rect x="224" y="320" width="320" height="60" rx="4" class="module"/><text x="240" y="344" class="name">configuration</text><text x="240" y="367" class="muted">配置准入 · 缓存组与并行拓扑</text></g>
+<g data-node="configuration"><rect x="224" y="320" width="320" height="60" rx="4" class="module"/><text x="240" y="344" class="name">Configuration / Topology</text><text x="240" y="367" class="muted">静态配置与分区 · 本地拓扑绑定</text></g>
 <g data-node="coordinator"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Coordinator</text><text x="576" y="367" class="muted">恢复条件 · 共同前缀 · 选择掩码</text></g>
 <g data-node="mapping"><rect x="896" y="320" width="320" height="60" rx="4" class="module"/><text x="912" y="344" class="name">Mapping</text><text x="912" y="367" class="muted">对象身份 · 静态布局 · 字节位置</text></g>
-<g data-node="protocol"><rect x="224" y="396" width="320" height="60" rx="4" class="module"/><text x="240" y="420" class="name">protocol</text><text x="240" y="443" class="muted">消息契约 · Lookup 编解码与 RPC</text></g>
+<g data-node="protocol"><rect x="224" y="396" width="320" height="60" rx="4" class="module"/><text x="240" y="420" class="name">Protocol</text><text x="240" y="443" class="muted">消息契约 · Lookup 编解码与 RPC</text></g>
 <g data-node="execution"><rect x="560" y="396" width="320" height="60" rx="4" class="module"/><text x="576" y="420" class="name">Execution</text><text x="576" y="443" class="muted">Executor / Session · 排队、预取、同步</text></g>
 <g data-node="resources"><rect x="896" y="396" width="320" height="60" rx="4" class="module"/><text x="912" y="420" class="name">Resources</text><text x="912" y="443" class="muted">资源持有 · 注册 · 安全关闭</text></g>
 

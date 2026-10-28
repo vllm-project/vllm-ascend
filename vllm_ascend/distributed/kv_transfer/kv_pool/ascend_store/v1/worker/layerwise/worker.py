@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import ObjectSessions
 from ...backend.naming import WireKeyBuilder
-from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.coordinator import Coordinator
 from ...infrastructure.execution import Executor, Session
 from ...infrastructure.mapping import (
@@ -30,6 +29,7 @@ from ...infrastructure.mapping import (
 )
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.resources import KVPoolResources
+from ...infrastructure.topology import KVPoolTopology
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeysByPartition,
@@ -146,14 +146,16 @@ class LayerwiseWorker(KVPoolWorker):
             self._local[group_id] = local
             self._layer_slices[group_id] = layer_slices
             head_count = (
-                self._topology.tp_size if group.uses_align_state else self._topology.tp_partition.key_rank_count
+                self._topology.config.tp_size
+                if group.uses_align_state
+                else self._topology.config.tp_partition.key_rank_count
             )
             self._lookup_key_parts[group_id] = (
                 build_lookup_keys(self._topology, group_id)
                 if self._key_builder is None
                 else self._key_builder.lookup_parts(group_id, head_count)
             )
-            layers_by_pp = select_layers(group, self._topology.consumer_pipeline_partitions)
+            layers_by_pp = select_layers(group, self._topology.config.pp_partition.target_layer_counts)
             self._physical_layer_ids_by_partition[group_id] = tuple(
                 tuple(layer.physical_layer_id for layer in layers_by_pp[pp]) for pp, _, _ in keys
             )
@@ -253,12 +255,12 @@ class LayerwiseWorker(KVPoolWorker):
         if not self._layerwise_store_leader:
             return StoreTransferCandidates(())
         transfer_records_by_group: list[list[StoreTransferRecords]] = [
-            [] for _group_id in self._topology.transfer_group_ids
+            [] for _group_id in self._topology.config.transfer_group_ids
         ]
-        keys_by_group: list[list[KeysByPartition]] = [[] for _group_id in self._topology.transfer_group_ids]
+        keys_by_group: list[list[KeysByPartition]] = [[] for _group_id in self._topology.config.transfer_group_ids]
         for command in commands:
             for group_index, (group_id, rows) in enumerate(
-                zip(self._topology.transfer_group_ids, self._store_transfer_records(command), strict=True)
+                zip(self._topology.config.transfer_group_ids, self._store_transfer_records(command), strict=True)
             ):
                 transfer_records_by_group[group_index].append(rows)
                 keys_by_group[group_index].append(
@@ -270,7 +272,7 @@ class LayerwiseWorker(KVPoolWorker):
                     group_id, tuple(rows), merge_keys_by_partition(group_id, keys_by_group[group_index])
                 )
                 for group_index, (group_id, rows) in enumerate(
-                    zip(self._topology.transfer_group_ids, transfer_records_by_group, strict=True)
+                    zip(self._topology.config.transfer_group_ids, transfer_records_by_group, strict=True)
                 )
             )
         )
@@ -284,11 +286,11 @@ class LayerwiseWorker(KVPoolWorker):
                 command.block_hashes,
                 command.block_ids_by_group[group_id],
                 block_size=self._groups[group_id].block_size,
-                hash_block_size=self._topology.hash_block_size,
+                hash_block_size=self._topology.config.hash_block_size,
                 start_token=command.start_token,
                 mask=mask,
             )
-            for group_id, mask in zip(self._topology.transfer_group_ids, masks, strict=True)
+            for group_id, mask in zip(self._topology.config.transfer_group_ids, masks, strict=True)
         )
 
     def _prepare_step_store(self, commands: tuple[StoreCommand, ...]) -> None:

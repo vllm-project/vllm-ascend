@@ -37,16 +37,17 @@ def make_case(*, layout="NHD", layers=(0, 1, 2, 3), head_partition_count=2, pp_c
         layers=tuple(SimpleNamespace(physical_layer_id=layer, layer_names=(f"layer{layer}",)) for layer in layers),
     )
     topology = SimpleNamespace(
+        config=SimpleNamespace(
+            tp_partition=SimpleNamespace(
+                tp_mismatch=head_partition_count > 1, key_slices_per_rank=head_partition_count
+            ),
+            pp_partition=SimpleNamespace(global_layer_count=None, target_layer_counts=pp_counts),
+            cp_partition=SimpleNamespace(object_shard_count=1, shard_alignment_bytes=1, dcp_size=2, pcp_size=2),
+        ),
         transfer_groups=(group,),
-        consumer_pipeline_partitions=pp_counts,
-        tp_partition=SimpleNamespace(tp_mismatch=head_partition_count > 1, key_slices_per_rank=head_partition_count),
-        pp_partition=SimpleNamespace(global_layer_count=None),
-        cp_partition=SimpleNamespace(object_shard_count=1, shard_alignment_bytes=1),
         stage_layer_start=0,
         stage_layer_count=len(layers),
         object_shard_index=0,
-        dcp_size=2,
-        pcp_size=2,
         pcp_rank=1,
     )
     caches = {}
@@ -196,10 +197,10 @@ def test_uniform_and_mixed_geometry_preserves_layer_bytes(vary_stride, vary_leng
 @pytest.mark.parametrize("layout", ("NHD", "HND"))
 def test_key_range_and_gva_have_distinct_remote_placement(layout):
     topology, caches = make_case(layout=layout, layers=(3, 4), kernels=2, padding=1)
-    topology.pp_partition.global_layer_count = 7
+    topology.config.pp_partition.global_layer_count = 7
     topology.stage_layer_start = 3
-    topology.cp_partition.object_shard_count = 2
-    topology.cp_partition.shard_alignment_bytes = 1024
+    topology.config.cp_partition.object_shard_count = 2
+    topology.config.cp_partition.shard_alignment_bytes = 1024
     topology.object_shard_index = 1
     _, local, layer_slices = build_mappings(topology, caches, group_id=3, kv_cache_layout=layout, layerwise=True)
     for mode in ("key_range", "gva"):
@@ -315,7 +316,7 @@ def test_component_shapes_storage_aliases_and_sparse_pp_identity():
     caches["layer7"][1][2, 1, 2, 0] = -123
     for (pp, dcp, head), segments in local.items():
         assert read_local(segments, 2) == expected_bytes(caches, (4,) if pp == 2 else (7,), head - 2, 2)
-    topology.consumer_pipeline_partitions = None
+    topology.config.pp_partition.target_layer_counts = None
     topology.transfer_groups[0].key_metadata.pp_rank = 2
     keys, _, _ = build_mappings(topology, caches, group_id=3)
     assert list(keys) == [(2, 1, 2), (2, 1, 3)]
@@ -349,13 +350,13 @@ def test_empty_components_layers_and_groups():
 def test_nonuniform_layers_are_valid_without_uniform_global_reservation():
     topology, caches = make_case(layers=(0, 1))
     caches["layer1"] = tuple(tensor[..., :1] if tensor.numel() else tensor for tensor in caches["layer1"])
-    topology.pp_partition.global_layer_count = 4
+    topology.config.pp_partition.global_layer_count = 4
     _, local, layer_slices = build_mappings(topology, caches, group_id=3, layerwise=True)
     remote = build_key_range_remote(local)
     assert remote[0]["size_bytes"] == 128
     with pytest.raises(ValueError, match="uniform"):
         build_gva_remote(topology, local, layer_slices)
-    topology.pp_partition.global_layer_count = None
+    topology.config.pp_partition.global_layer_count = None
     remote = build_gva_remote(topology, local, layer_slices)
     assert remote[0]["size_bytes"] == 128
 
@@ -376,7 +377,7 @@ def test_invalid_head_partition_and_pp_span_are_rejected():
     caches["layer0"] = (caches["layer0"][0][:, :, :3],)
     with pytest.raises(RuntimeError, match="unflatten"):
         build_mappings(topology, caches, group_id=3)
-    topology.consumer_pipeline_partitions = (0, 0)
+    topology.config.pp_partition.target_layer_counts = (0, 0)
     with pytest.raises(ValueError, match="do not cover"):
         build_mappings(topology, caches, group_id=3)
 
@@ -384,8 +385,8 @@ def test_invalid_head_partition_and_pp_span_are_rejected():
 @pytest.mark.parametrize("count,alignment,index", ((0, 1, 0), (1, 0, 0), (2, 1, 2)))
 def test_invalid_gva_slots_are_rejected(count, alignment, index):
     topology, caches = make_case(layers=(0,))
-    topology.cp_partition.object_shard_count = count
-    topology.cp_partition.shard_alignment_bytes = alignment
+    topology.config.cp_partition.object_shard_count = count
+    topology.config.cp_partition.shard_alignment_bytes = alignment
     topology.object_shard_index = index
     _, local, layer_slices = build_mappings(topology, caches, group_id=3, layerwise=True)
     with pytest.raises(ValueError, match="Invalid remote shard"):
@@ -394,9 +395,9 @@ def test_invalid_gva_slots_are_rejected(count, alignment, index):
 
 def test_gva_reservations_compose_with_pp_and_head_partitions():
     topology, caches = make_case(pp_counts=(1, 0, 3))
-    topology.pp_partition.global_layer_count = 7
-    topology.cp_partition.object_shard_count = 2
-    topology.cp_partition.shard_alignment_bytes = 1024
+    topology.config.pp_partition.global_layer_count = 7
+    topology.config.cp_partition.object_shard_count = 2
+    topology.config.cp_partition.shard_alignment_bytes = 1024
     topology.object_shard_index = 1
     keys, local, layer_slices = build_mappings(topology, caches, group_id=3, layerwise=True)
     remote = build_gva_remote(topology, local, layer_slices)

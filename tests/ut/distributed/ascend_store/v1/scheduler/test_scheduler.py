@@ -425,7 +425,7 @@ def test_running_window_sources_are_not_reused_until_every_worker_releases() -> 
     command = step.store.commands[0]
 
     manager = SlidingWindowManager(
-        config.store_group_specs[0][1],
+        config.group_specs[0],
         block_pool=pool,
         enable_caching=False,
         kv_cache_group_id=0,
@@ -633,4 +633,28 @@ def test_scheduler_close_rejects_active_store_source_leases() -> None:
     assert lookup.closed
 
     scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
+    scheduler.close()
+
+
+def test_nontransferred_align_state_does_not_keep_decode_snapshots():
+    config = make_config(groups=(0,), align_groups=frozenset((1,)), private=True, load=False, store=True)
+    scheduler = SynchronousBulkScheduler(config, FakeLookupClient())
+    scheduler.bind_gpu_block_pool(FakeBlockPool())
+    request = make_request(prompt_tokens=4)
+    scheduler.confirm_allocation(request, FakeBlocks([1], [10]), 0)
+    scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1], [10]), 0),), scheduled_tokens={"request": 4})
+    )
+    progress = scheduler._request_progress["request"]
+    request.num_tokens = 8
+    request.block_hashes.append(b"decode")
+    step = scheduler.build_step(
+        make_output(
+            cached=(("request", ([2], [11]), 4),),
+            scheduled_tokens={"request": 4},
+            checkpoints={"request": [(1, 11, 8)]},
+        )
+    )
+    assert step.store.commands == ()
+    assert scheduler._request_progress["request"] is progress
     scheduler.close()

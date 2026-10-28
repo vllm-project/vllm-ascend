@@ -30,7 +30,7 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
     # Execute the actual orchestration with boundary doubles; do not import pytest's NPU E2E conftest.
     module = ast.Module(body=[entry], type_ignores=[])
     launches, reports = [], []
-    connectors = (("production", "production", "module"), ("v1", "v1", "module"))
+    connectors = (("production", "production"), ("v1", "v1"))
 
     def exercise(path, model, tokenizer, inputs, warmup, connector, observations, **kwargs):
         diagnostic = kwargs.pop("after_measurements")
@@ -114,7 +114,7 @@ def test_output_differences_are_reported_alongside_performance_results():
     compare = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "compare_runs")
     namespace: dict[str, Any] = {
         "Any": Any,
-        "CONNECTORS": (("production", "", ""), ("v1", "", "")),
+        "CONNECTORS": (("production", ""), ("v1", "")),
         "SUMMARY_METRICS": ("median_ttft_ms", "output_throughput"),
         "median": median,
     }

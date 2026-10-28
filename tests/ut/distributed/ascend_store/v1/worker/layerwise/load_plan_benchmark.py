@@ -90,8 +90,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
     topology = make_topology(physical_layers=tuple(range(_LAYERS)))
     topology = replace(
         topology,
-        hash_block_size=_BLOCK_SIZE,
-        cache_transfer_granularity=_BLOCK_SIZE,
+        config=replace(topology.config, hash_block_size=_BLOCK_SIZE, cache_transfer_granularity=_BLOCK_SIZE),
         groups=tuple(
             replace(group, kv_cache_spec=replace(group.kv_cache_spec, block_size=_BLOCK_SIZE))
             for group in topology.groups

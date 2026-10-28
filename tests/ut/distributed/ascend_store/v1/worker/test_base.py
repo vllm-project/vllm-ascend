@@ -32,10 +32,6 @@ from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
     make_gva_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.topology import (
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
@@ -47,6 +43,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     KVPoolResources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
@@ -666,7 +666,7 @@ def test_store_admission_preserves_missing_rows_in_each_group(layerwise) -> None
     "topology,presence,partition_keys",
     (
         (make_topology(tp_mismatch=True), [1, 0], "@head_or_tp_rank:1@"),
-        (make_topology(consumer_pipeline_partitions=(1, 1)), [0, 1], "@pp_rank:0@"),
+        (make_topology(target_layer_counts=(1, 1)), [0, 1], "@pp_rank:0@"),
     ),
     ids=("tp_head", "pipeline_stage"),
 )
@@ -704,9 +704,20 @@ def test_checkpoint_store_uses_exact_state_source_after_admission() -> None:
             MambaSpec(block_size=8, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
             (KVPoolLayerTopology(1, ("layers.1.state",)),),
             base.groups[1].key_metadata,
+            uses_align_state=True,
         ),
     )
-    topology = replace(base, cache_transfer_granularity=8, hash_block_size=4, groups=groups)
+    topology = replace(
+        base,
+        config=replace(
+            base.config,
+            cache_transfer_granularity=8,
+            hash_block_size=4,
+            align_state_group_ids=frozenset((1,)),
+            group_specs=tuple(group.kv_cache_spec for group in groups),
+        ),
+        groups=groups,
+    )
     backend = FakeBackend()
     backend.presence = [1, 0]
     worker, resources, _ = make_worker(backend, topology=topology, requires_exists_before_put=True)
@@ -739,11 +750,11 @@ def test_lookup_requires_every_remote_partition_even_when_local_keys_are_present
         key_slices_per_rank=2,
         dcp_size=2,
         dcp_rank=1,
-        consumer_pipeline_partitions=target_pp,
+        target_layer_counts=target_pp,
     )
     worker, _, backend = make_worker(topology=topology, store=False)
     request = LookupRequest(0, 8, (1, 3), (b"a", b"b"))
-    pp_size = len(target_pp) if target_pp else topology.pp_size
+    pp_size = len(target_pp) if target_pp else topology.config.pp_size
     expected = [
         tuple(
             PoolKey(

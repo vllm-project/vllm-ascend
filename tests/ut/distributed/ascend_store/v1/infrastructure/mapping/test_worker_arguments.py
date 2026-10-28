@@ -44,7 +44,7 @@ def transfer_arguments(case, group_id, hashes, ids, mask=None):
     )
     remote = build_key_range_remote(local)
     group = next(group for group in case.topology.transfer_groups if group.group_id == group_id)
-    by_pp = select_layers(group, case.topology.consumer_pipeline_partitions)
+    by_pp = select_layers(group, case.topology.config.pp_partition.target_layer_counts)
     batch = KVTransferBatch(
         ("request",),
         (

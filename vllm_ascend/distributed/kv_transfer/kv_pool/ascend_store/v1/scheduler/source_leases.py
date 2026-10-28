@@ -10,9 +10,9 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from ..infrastructure.configuration import KVPoolConfig
 from ..infrastructure.coordinator import checkpoint_companion_indices, store_block_range, store_group_mask
 from ..infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
-from .state import SchedulerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
@@ -23,18 +23,23 @@ StoreCommandT = TypeVar("StoreCommandT", bound=StoreCommand)
 class StoreSourceLeases:
     """Pin only sources that can be freed before the production reuse fence."""
 
-    def __init__(self, config: SchedulerConfig) -> None:
+    def __init__(self, config: KVPoolConfig) -> None:
         self._config = config
         self._expected_worker_count = config.expected_worker_count
         self._block_pool: BlockPool | None = None
         self._next_job_id = 0
         self._leases: dict[int, tuple[tuple[int, ...], int]] = {}
-        self._group_block_sizes = {group_id: spec.block_size for group_id, spec, _ in config.store_group_specs}
+        store_group_specs = (
+            tuple((group_id, config.group_specs[group_id]) for group_id in config.transfer_group_ids)
+            if config.store_enabled and not config.use_layerwise
+            else ()
+        )
+        self._group_block_sizes = {group_id: spec.block_size for group_id, spec in store_group_specs}
         effective_specs = tuple(
             (group_id, next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec)
-            for group_id, spec, _ in config.store_group_specs
+            for group_id, spec in store_group_specs
         )
-        eagle_specs = [spec for _, spec, is_eagle in config.store_group_specs if is_eagle]
+        eagle_specs = [spec for group_id, spec in store_group_specs if group_id in config.eagle_group_ids]
         eagle_specs = [
             next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             for spec in eagle_specs
@@ -55,7 +60,7 @@ class StoreSourceLeases:
                 and manager_cls.get_num_skipped_tokens is FullAttentionManager.get_num_skipped_tokens
             )
             if not retains_request_blocks:
-                use_eagle = spec in eagle_specs or (config.use_eagle_block_drop and not eagle_specs)
+                use_eagle = spec in eagle_specs or (config.use_eagle and not eagle_specs)
                 self._recycling_groups.append((group_id, spec, manager_cls, use_eagle))
 
     def bind_block_pool(self, block_pool: BlockPool) -> None:

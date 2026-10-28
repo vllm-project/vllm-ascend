@@ -16,7 +16,7 @@ from ..backend import (
 from .execution import Executor
 
 if TYPE_CHECKING:
-    from .configuration.topology import KVPoolGroupTopology
+    from .topology import KVPoolGroupTopology
 
 
 _GVA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024

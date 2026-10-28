@@ -46,9 +46,7 @@ def test_recycling_sources_respect_range_retention_and_original_group_ids(
     config = replace(
         make_config(granularity=16, groups=source_groups, store=True),
         hash_block_size=16,
-        store_group_specs=tuple(
-            item for item in ((1, attention, False), (3, window, False)) if item[0] in source_groups
-        ),
+        group_specs=(attention, attention, attention, window),
         retention_interval=retention_interval,
     )
     leases = StoreSourceLeases(config)
@@ -89,7 +87,7 @@ def test_partial_checkpoint_protects_only_state_and_required_companion_pages(
     state = MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
     config = replace(
         make_config(granularity=16, groups=(0, 1), align_groups=frozenset((1,)), store=True),
-        store_group_specs=((0, attention, False), (1, state, False)),
+        group_specs=(attention, state),
     )
     leases = StoreSourceLeases(config)
     pool = FakeBlockPool()
@@ -127,7 +125,7 @@ def test_unselected_recycling_rows_create_no_lease() -> None:
 )
 def test_recycling_manager_keeps_sources_even_when_spec_inherits_full_attention(spec_type, options) -> None:
     spec = spec_type(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32, **options)
-    config = replace(make_config(store=True), store_group_specs=((0, spec, False),))
+    config = replace(make_config(store=True), group_specs=(spec,))
     leases = StoreSourceLeases(config)
     pool = FakeBlockPool()
     leases.bind_block_pool(pool)

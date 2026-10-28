@@ -109,25 +109,26 @@ def make_case(
         key_metadata=KeyMetadata("mapping-test", tp_rank // replicas, 0, pp_rank, 3),
     )
     topology = SimpleNamespace(
-        pp_partition=SimpleNamespace(global_layer_count=None),
-        cp_partition=SimpleNamespace(object_shard_count=1, shard_alignment_bytes=1),
+        config=SimpleNamespace(
+            pp_partition=SimpleNamespace(global_layer_count=None, target_layer_counts=pp_layer_counts),
+            cp_partition=SimpleNamespace(object_shard_count=1, shard_alignment_bytes=1, dcp_size=1, pcp_size=1),
+            hash_block_size=block_size,
+            pp_size=pp_size,
+            tp_size=key_rank_count // (head_slices or 1) * replicas,
+            put_step=replicas,
+            tp_partition=SimpleNamespace(
+                tp_mismatch=head_slices is not None,
+                key_rank_count=key_rank_count,
+                key_slices_per_rank=head_slices or 1,
+            ),
+        ),
         stage_layer_start=0,
         stage_layer_count=len(layers),
         object_shard_index=0,
         transfer_groups=(group,),
         groups=(group,),
-        hash_block_size=block_size,
-        pp_size=pp_size,
-        dcp_size=1,
-        pcp_size=1,
         pcp_rank=0,
         tp_rank=tp_rank,
-        tp_size=key_rank_count // (head_slices or 1) * replicas,
-        put_step=replicas,
-        consumer_pipeline_partitions=pp_layer_counts,
-        tp_partition=SimpleNamespace(
-            tp_mismatch=head_slices is not None, key_rank_count=key_rank_count, key_slices_per_rank=head_slices or 1
-        ),
     )
     return MappingCase(
         topology,
@@ -204,7 +205,7 @@ def make_hybrid_case(
         array[9] = values
     case.topology.groups = (SimpleNamespace(group_id=1), attention, state)
     case.topology.transfer_groups = (state, attention)
-    case.topology.hash_block_size = 8
+    case.topology.config.hash_block_size = 8
     return case
 
 

@@ -1,7 +1,7 @@
 """Concrete Scheduler policies and shared request ownership."""
 
 from .scheduler import AsynchronousBulkScheduler, KVPoolScheduler, LayerwiseScheduler, SynchronousBulkScheduler
-from .state import LoadCandidate, RequestProgress, SchedulerConfig
+from .state import LoadCandidate, RequestProgress
 
 __all__ = (
     "AsynchronousBulkScheduler",
@@ -9,6 +9,5 @@ __all__ = (
     "LayerwiseScheduler",
     "LoadCandidate",
     "RequestProgress",
-    "SchedulerConfig",
     "SynchronousBulkScheduler",
 )

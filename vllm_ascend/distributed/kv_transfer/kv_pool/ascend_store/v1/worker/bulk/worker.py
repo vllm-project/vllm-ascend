@@ -9,7 +9,6 @@ from typing import Any
 
 from vllm.logger import logger
 
-from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.coordinator import Coordinator, checkpoint_companion_indices
 from ...infrastructure.execution import Executor
 from ...infrastructure.mapping import (
@@ -21,6 +20,7 @@ from ...infrastructure.mapping import (
 )
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.resources import KVPoolResources
+from ...infrastructure.topology import KVPoolTopology
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeysByPartition,
@@ -76,7 +76,7 @@ class BulkWorker(KVPoolWorker):
         )
         self._store_writer_selection = {
             group.group_id: bind_store_writer_selection(
-                topology, tp_mismatch=topology.tp_partition.tp_mismatch, align_state=group.uses_align_state
+                topology, tp_mismatch=topology.config.tp_partition.tp_mismatch, align_state=group.uses_align_state
             )
             for group in topology.transfer_groups
         }
@@ -113,7 +113,7 @@ class BulkWorker(KVPoolWorker):
             self._keys[group_id] = keys
             self._lookup_key_parts[group_id] = build_lookup_keys(self._topology, group_id)
             self._local[group_id] = local
-            layers_by_pp = select_layers(group, self._topology.consumer_pipeline_partitions)
+            layers_by_pp = select_layers(group, self._topology.config.pp_partition.target_layer_counts)
             physical_layer_ids_by_partition[group_id] = tuple(
                 tuple(layer.physical_layer_id for layer in layers_by_pp[pp_rank]) for pp_rank, _, _ in keys
             )
@@ -219,7 +219,7 @@ class BulkWorker(KVPoolWorker):
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
                         block_size=group.block_size,
-                        hash_block_size=self._topology.hash_block_size,
+                        hash_block_size=self._topology.config.hash_block_size,
                         start_token=command.start_token,
                         mask=mask,
                     )
@@ -257,7 +257,7 @@ class BulkWorker(KVPoolWorker):
         if len(boundaries) != 1:
             raise ValueError("State checkpoints for one request must share one token boundary")
         boundary = next(iter(boundaries))
-        checkpoint_hash = boundary_hash(boundary, command.block_hashes, self._topology.hash_block_size)
+        checkpoint_hash = boundary_hash(boundary, command.block_hashes, self._topology.config.hash_block_size)
 
         transfer_records_by_group: dict[int, StoreTransferRecords] = {}
         accepted_state_groups = []
@@ -289,7 +289,7 @@ class BulkWorker(KVPoolWorker):
                         continue
                     block_end = min((local_index + block_offset + 1) * group.block_size, boundary)
                     counts.append(group.block_size)
-                    hashes.append(boundary_hash(block_end, command.block_hashes, self._topology.hash_block_size))
+                    hashes.append(boundary_hash(block_end, command.block_hashes, self._topology.config.hash_block_size))
                     selected_block_ids.append(block_id)
                 selection = self._store_writer_selection[group_id]
                 transfer_records_by_group[group_id] = (

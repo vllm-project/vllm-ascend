@@ -11,7 +11,6 @@ from vllm.logger import logger
 from .....attention_fence import reset_attention_compute_start_gate
 from ....backend import GVABackend, GVAObjectSessions, GVARegion
 from ....backend.naming import WireKeyBuilder
-from ....infrastructure.configuration.topology import KVPoolTopology
 from ....infrastructure.coordinator import Coordinator
 from ....infrastructure.mapping import (
     LayerTable,
@@ -22,6 +21,7 @@ from ....infrastructure.mapping import (
     local_lengths,
 )
 from ....infrastructure.resources import KVPoolResources
+from ....infrastructure.topology import KVPoolTopology
 from ...transfer.batch import KVGroupBatch, KVTransferBatch
 from ...transfer.completion import LoadCompletion
 from ..transfer import (

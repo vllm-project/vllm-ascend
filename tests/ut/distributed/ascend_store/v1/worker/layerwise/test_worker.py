@@ -35,9 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     GVAObjectSessions,
     ObjectSessions,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration.resolve import (
-    resolve_group_layers,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
@@ -48,6 +45,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     KVPoolResources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    resolve_group_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -379,7 +379,7 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, coordinator=coordinator, source_ready_event_factory=FakeEvent)
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
-    caches = {group.layer_names[0]: torch.zeros((8, 2, 16, 1, 1)) for group in topology.transfer_groups}
+    caches = {group.layers[0].layer_names[0]: torch.zeros((8, 2, 16, 1, 1)) for group in topology.transfer_groups}
     try:
         worker.bind_kv_caches(caches)
         command = RangeStoreCommand(
@@ -387,7 +387,7 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
         )
         begin_step(worker, store=(command,))
         for group in topology.transfer_groups:
-            worker.save_layer(group.layer_names[0])
+            worker.save_layer(group.layers[0].layer_names[0])
         worker.finish_step()
         assert worker.take_released_store_job_ids() == {17}
         worker.end_step()
@@ -412,8 +412,7 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
     base = make_topology(group_ids=(0, 2), physical_layers=(2, 3))
     topology = replace(
         base,
-        cache_transfer_granularity=32,
-        hash_block_size=32,
+        config=replace(base.config, cache_transfer_granularity=32, hash_block_size=32),
         groups=tuple(
             replace(
                 group,
