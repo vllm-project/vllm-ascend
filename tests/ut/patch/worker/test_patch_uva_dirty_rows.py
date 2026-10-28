@@ -393,6 +393,18 @@ def test_torch_alias_writes_reach_the_device_shadow(alias):
     assert torch.equal(buf._uva, buf._cpu)
 
 
+@pytest.mark.parametrize("view", [lambda cpu: cpu.T, lambda cpu: cpu.mT, lambda cpu: cpu.real])
+def test_torch_attribute_views_publish_the_whole_buffer(view):
+    # These are attributes, not calls, but they still hand out a writable view
+    # of the mirror's storage.
+    buf = _make_uva_buffer(8)
+
+    view(buf.cpu)[0] = 9
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
+
+
 def test_numpy_explicit_inplace_dunder_is_refused():
     # ``buf.np += 5`` fails on the proxy (no __iadd__ on the type), and an
     # explicit __iadd__ call now fails on the read-only alias as well.
