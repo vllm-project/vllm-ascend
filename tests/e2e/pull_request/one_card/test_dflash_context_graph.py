@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""NPU cache-write integration; full-model accuracy/performance is separate."""
+"""NPU cache-write integration; full-model accuracy/performance is separate.
 
-from types import SimpleNamespace
+Context rows whose slot is ``PAD_SLOT_ID`` must not write K/V into the cache.
+Native vLLM produces those slots; this test checks the NPU write path honours
+them, which is the accuracy-critical half of the context prefix. Each layer is
+driven by its own physical slot table.
+"""
 
 import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.worker.v2.spec_decode.dflash.context import DFlashContextGraphMixin
+_INITIAL_CACHE_VALUE = 2
+_FIRST_REAL_SLOT = 1
 
 
 class ContextKV(nn.Module):
@@ -25,8 +30,8 @@ class ContextKV(nn.Module):
     def new_caches():
         return [
             (
-                torch.full((16, 8, 2, 128), 2, device="npu", dtype=torch.bfloat16),
-                torch.full((16, 8, 2, 128), 2, device="npu", dtype=torch.bfloat16),
+                torch.full((16, 8, 2, 128), _INITIAL_CACHE_VALUE, device="npu", dtype=torch.bfloat16),
+                torch.full((16, 8, 2, 128), _INITIAL_CACHE_VALUE, device="npu", dtype=torch.bfloat16),
             )
             for _ in range(3)
         ]
@@ -43,61 +48,35 @@ class ContextKV(nn.Module):
             )
 
 
-class ContextBuffers(DFlashContextGraphMixin):
-    def __init__(self):
-        self.num_speculative_steps = 7
-        self.max_num_tokens = 128
-        self.hidden_states = torch.zeros(128, 64, device="npu", dtype=torch.bfloat16)
-        self.context_positions = torch.zeros(128, device="npu", dtype=torch.int64)
-        self._context_slot_mappings = torch.full((2, 128), -1, device="npu", dtype=torch.int32)
-        self._layer_group_idx = [1, 0, 1]
-        self.model = ContextKV()
-
-
-@pytest.mark.parametrize("num_reqs_padded", [1, 2, 4, 8])
-def test_context_prefix_replay_keeps_padding_and_current_layer_slots(num_reqs_padded):
+@pytest.mark.parametrize("num_slots", [2, 4, 8])
+def test_context_padding_slots_skip_cache_writes(num_slots):
     torch.manual_seed(57632)
-    spec = ContextBuffers()
-    num_context = spec._compat_num_graph_context_tokens(num_reqs_padded)
-    captured_caches = spec.model.caches
-    stream = torch.npu.Stream()
-    stream.wait_stream(torch.npu.current_stream())
-    with torch.npu.stream(stream):
-        for _ in range(3):
-            spec._compat_precompute_context_kv(0, num_context)
-    stream.synchronize()
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph, stream=stream):
-        spec._compat_precompute_context_kv(0, num_context)
-    pointers = (spec.hidden_states.data_ptr(), spec._context_slot_mappings.data_ptr())
+    model = ContextKV()
+    actual = num_slots - 1
 
-    # Shrink, refill, and overflow the same captured prefix. Rejected rows
-    # remain PAD; each layer uses its current physical cache group's slots.
-    for actual in [num_context, 1, num_context - 3, num_context + 7]:
-        for key_cache, value_cache in captured_caches:
-            key_cache.fill_(2)
-            value_cache.fill_(2)
-        states = torch.randn(actual, 64, device="npu", dtype=torch.bfloat16)
-        positions = torch.arange(actual, device="npu", dtype=torch.int64)
-        ids = torch.arange(actual, device="npu", dtype=torch.int32) + 11
-        ids[::5] = -1
-        group_slots = torch.stack([ids, torch.where(ids < 0, ids, ids + 17)])
-        spec.hidden_states[:actual].copy_(states)
-        spec.context_positions[:actual].copy_(positions)
-        spec._context_slot_mappings[:, :actual].copy_(group_slots)
-        desc = SimpleNamespace(cg_mode=CUDAGraphMode.FULL, num_reqs=num_reqs_padded)
-        stream.wait_stream(torch.npu.current_stream())
-        with torch.npu.stream(stream):
-            spec._prepare_context_kv_for_graph(desc, actual)
-            graph.replay()
-        stream.synchronize()
+    states = torch.randn(actual, 64, device="npu", dtype=torch.bfloat16)
+    positions = torch.arange(actual, device="npu", dtype=torch.int64)
+    # Last row is padding; the real rows land on distinct per-layer slots.
+    layer_slots = []
+    for layer in range(3):
+        slots = torch.full((num_slots,), PAD_SLOT_ID, dtype=torch.int32, device="npu")
+        first = _FIRST_REAL_SLOT + layer
+        slots[:actual] = torch.arange(first, first + actual, device="npu", dtype=torch.int32)
+        layer_slots.append(slots)
 
-        reference_caches = spec.model.new_caches()
-        spec.model.caches = reference_caches
-        spec.model.precompute_and_store_context_kv(states, positions, [group_slots[index] for index in [1, 0, 1]])
-        torch.npu.synchronize()
-        for captured, reference in zip(captured_caches, reference_caches):
-            for produced, expected in zip(captured, reference):
-                torch.testing.assert_close(produced, expected, rtol=1e-2, atol=1e-2)
-        spec.model.caches = captured_caches
-        assert pointers == (spec.hidden_states.data_ptr(), spec._context_slot_mappings.data_ptr())
+    model.precompute_and_store_context_kv(states, positions, layer_slots)
+    torch.npu.synchronize()
+
+    for layer, ((key_cache, value_cache), slots) in enumerate(zip(model.caches, layer_slots)):
+        first = _FIRST_REAL_SLOT + layer
+        # Padding row (slot == PAD_SLOT_ID) wrote nothing: everything outside
+        # the real range keeps the initial value.
+        assert (key_cache[:first] == _INITIAL_CACHE_VALUE).all()
+        assert (value_cache[:first] == _INITIAL_CACHE_VALUE).all()
+        assert (key_cache[first + actual :] == _INITIAL_CACHE_VALUE).all()
+        assert (value_cache[first + actual :] == _INITIAL_CACHE_VALUE).all()
+        # Real rows did write.
+        assert not torch.equal(
+            key_cache[first : first + actual],
+            torch.full_like(key_cache[first : first + actual], _INITIAL_CACHE_VALUE),
+        )

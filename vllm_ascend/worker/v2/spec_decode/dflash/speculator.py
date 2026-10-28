@@ -24,7 +24,6 @@ from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import DFlashKVGroup, prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.dflash.context import DFlashContextGraphMixin
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -165,12 +164,9 @@ else:
         return prepare_with_block_size
 
 
-class AscendDFlashSpeculator(DFlashContextGraphMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     _deferred_draft_attn_metadata: tuple[Any, ...] | None
     _draft_query_lengths: tuple[tuple[int, int], list[int]] | None
-
-    def _supports_context_graph_backport(self) -> bool:
-        return type(self) is AscendDFlashSpeculator
 
     def load_draft_model(
         self,
@@ -548,12 +544,7 @@ class AscendDFlashSpeculator(DFlashContextGraphMixin, LmheadTPDraftSamplingMixin
                 sync_state = None
             try:
                 with build_attn_metadata_wrapper():
-                    propose = (
-                        self._propose_with_context_graph
-                        if getattr(self, "_compat_context_graph", False)
-                        else super().propose
-                    )
-                    return propose(
+                    return super().propose(
                         input_batch,
                         attn_metadata,
                         slot_mappings,
