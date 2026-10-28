@@ -23,6 +23,7 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     if vllm_config.speculative_config is None:
         raise ValueError("GLM RecoverSSM requires speculative decoding")
     cache = vllm_config.cache_config
+    # TODO: FP16 KV cache with RecoverSSM has not been validated.
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("GLM RecoverSSM does not support stochastic rounding")
     if cache.mamba_cache_mode != "none" or cache.enable_prefix_caching:
