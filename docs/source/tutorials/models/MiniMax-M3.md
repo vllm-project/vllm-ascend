@@ -33,6 +33,8 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 It is recommended to place the model weight in a shared cache directory.
 
+Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `EAGLE3_WEIGHT_PATH` to the downloaded EAGLE3 draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
+
 ### 3.2 Verify Multi-node Communication (Optional)
 
 For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
@@ -168,8 +170,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     - **MXFP8 weights** (`MiniMax-M3-MXFP8`): use `--quantization mxfp8`.
 
     Adding the wrong `--quantization` value (or adding it to BF16 weights) will cause the checkpoint to be misinterpreted and fail to load.
-
-Run the selected command inside the container. Replace the weight-path placeholders with the downloaded model directories from Section 3.1, accessible inside the container. `EAGLE3_WEIGHT_PATH` points to the draft model. `LOG_PATH` defaults to a file in the current directory; change it to another writable location if needed.
 
 === "A3 series (BF16)"
 
