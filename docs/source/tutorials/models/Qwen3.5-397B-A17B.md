@@ -255,7 +255,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "A3 series"
 
-    Run the following script for online inference with a 128k context on one Atlas 800I A3 node (64 GB x 16). W8A8 deployment requires `--quantization ascend`.
+    Run the following script for online inference with a 133k context on one Atlas 800I A3 node (64 GB x 16). W8A8 deployment requires `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -554,6 +554,20 @@ vllm serve "${MODEL_PATH}" \
   }'
 ```
 
+Run the Prefill script:
+
+```shell
+bash run_p.sh
+```
+
+If the Prefill service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44610]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 Common Issues Tip: If the Prefill service does not become ready, confirm that devices 0-7 are available, port 30060 and Mooncake port 55220 are unused, and `local_ip` belongs to `nic_name`.
 
 #### 5.4.2 Decode Service Group
@@ -653,6 +667,20 @@ vllm serve "${MODEL_PATH}" \
       }
     }
   }'
+```
+
+Run the Decode script in a separate terminal:
+
+```shell
+bash run_d.sh
+```
+
+If the Decode service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44611]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
 Common Issues Tip: If Decode fails to initialize, confirm that devices 8-15 are available and that `--data-parallel-size 2`, `--data-parallel-size-local 2`, `--tensor-parallel-size 4`, and the Mooncake topology describe the same TP4/DP2 layout. Ports 30050, 6884, and 56010 must be available.
@@ -799,6 +827,20 @@ vllm serve "${MODEL_PATH}" \
   }'
 ```
 
+Run the Prefill script on the Prefill node:
+
+```shell
+bash run_p.sh
+```
+
+If the Prefill service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44610]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 Common Issues Tip: If Prefill does not become ready, verify the checkpoint metadata, all eight visible NPUs, the selected high-speed IP/NIC pair, port 30060, Mooncake port 55220, and the host-specific `/etc/hixlep` resources.
 
 #### 5.5.2 Decode Node
@@ -895,6 +937,20 @@ vllm serve "${MODEL_PATH}" \
       }
     }
   }'
+```
+
+Run the Decode script on the Decode node:
+
+```shell
+bash run_d.sh
+```
+
+If the Decode service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44611]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
 Common Issues Tip: If Decode fails to initialize, confirm that `--data-parallel-size 2`, `--data-parallel-size-local 2`, `--tensor-parallel-size 4`, and the Mooncake topology describe the same DP2/TP4 layout. Verify ports 30050, 6884, and 56010, and confirm that both local DP engines start.
