@@ -278,9 +278,9 @@ class ModelWithContext(nn.Module):
     def get_original_model(self):
         return self.original_model
 
-    def compute_logits(self, hidden_states: torch.Tensor):
+    def compute_logits(self, hidden_states: torch.Tensor, spec_step_idx: int = 0):
         # draft model has `compute_logits`, which is not in ModelWithContext
-        return self.original_model.compute_logits(hidden_states)
+        return self.original_model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
 
     def compute_draft_logits(self, hidden_states: torch.Tensor):
         return self.original_model.compute_draft_logits(hidden_states)

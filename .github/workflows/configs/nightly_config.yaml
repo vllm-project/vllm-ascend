@@ -380,3 +380,7 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V4_Flash_K15_dspark_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: Step3_7_Flash_W8A8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Step3_7_Flash_W8A8_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Step
