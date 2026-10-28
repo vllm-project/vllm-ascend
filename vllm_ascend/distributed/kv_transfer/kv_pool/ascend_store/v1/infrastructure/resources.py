@@ -13,7 +13,7 @@ from ..backend import (
     ObjectSessions,
     Registration,
 )
-from .execution.executor import Executor
+from .execution import Executor
 
 if TYPE_CHECKING:
     from .configuration.topology import KVPoolGroupTopology

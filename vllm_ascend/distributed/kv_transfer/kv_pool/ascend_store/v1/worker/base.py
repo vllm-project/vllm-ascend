@@ -15,7 +15,7 @@ from vllm.logger import logger
 
 from ..infrastructure.configuration.topology import KVPoolTopology
 from ..infrastructure.coordinator import Coordinator
-from ..infrastructure.execution.executor import Executor
+from ..infrastructure.execution import Executor
 from ..infrastructure.mapping import KeyTable, map_keys
 from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from ..infrastructure.resources import KVPoolResources

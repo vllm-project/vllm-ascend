@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 
 
 @pytest.fixture
@@ -47,10 +47,11 @@ def configuration_case():
         speculative_config=None,
     )
     spec = FullAttentionSpec(block_size=4, num_kv_heads=4, head_size=1, dtype=torch.float32)
-    cache = SimpleNamespace(
+    cache = KVCacheConfig(
         num_blocks=8,
-        transfer_group_ids=(0,),
+        kv_cache_tensors=[],
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0"], is_eagle_group=False)],
-        prefix_cache_retention_interval=None,
     )
+    cache.transfer_group_ids = (0,)
+    cache.prefix_cache_retention_interval = None
     return config, cache

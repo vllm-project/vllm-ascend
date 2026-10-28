@@ -20,7 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
 )
 
-from ....layerwise_cache_layout import (
+from ....layerwise.layerwise_cache_layout import (
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,

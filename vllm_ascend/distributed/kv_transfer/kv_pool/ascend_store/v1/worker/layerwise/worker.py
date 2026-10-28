@@ -18,8 +18,7 @@ from ...backend import ObjectSessions
 from ...backend.naming import WireKeyBuilder
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.coordinator import Coordinator
-from ...infrastructure.execution.executor import Executor
-from ...infrastructure.execution.session import Session
+from ...infrastructure.execution import Executor, Session
 from ...infrastructure.mapping import (
     LayerTable,
     LocalTable,

@@ -11,7 +11,7 @@ from vllm.logger import logger
 
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.coordinator import Coordinator, checkpoint_companion_indices
-from ...infrastructure.execution.executor import Executor
+from ...infrastructure.execution import Executor
 from ...infrastructure.mapping import (
     LocalTable,
     build_lookup_keys,

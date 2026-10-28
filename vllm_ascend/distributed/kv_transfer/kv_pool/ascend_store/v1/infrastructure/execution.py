@@ -1,20 +1,48 @@
-"""Coordinate one model step's interleaved layer transfers without interpreting operation results."""
+"""Serial task execution and per-step Layerwise timing for caller-supplied operations."""
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from functools import partial
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, ParamSpec, TypeVar
 
 from vllm.logger import logger
 
 _COMPUTE_START_LOG_INTERVAL_S = 10
 
+Parameters = ParamSpec("Parameters")
+ResultT = TypeVar("ResultT")
 LoadResult = TypeVar("LoadResult")
 StoreResult = TypeVar("StoreResult")
+
+
+class Executor:
+    """Own one initialized worker thread; task results and exceptions belong to callers."""
+
+    def __init__(self, name: str, initializer: Callable[[], None]) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=name, initializer=initializer)
+        self._stopped = False
+
+    def start(self) -> None:
+        # The pool starts lazily; this barrier confirms its thread initializer has finished.
+        self._pool.submit(lambda: None).result()
+
+    def submit(
+        self, fn: Callable[Parameters, ResultT], /, *args: Parameters.args, **kwargs: Parameters.kwargs
+    ) -> Future[ResultT]:
+        return self._pool.submit(fn, *args, **kwargs)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
+        self._stopped = True
+
+    @property
+    def stopped(self) -> bool:
+        """Whether close has finished draining tasks and joining the worker thread."""
+        return self._stopped
 
 
 class Session(Generic[LoadResult]):
@@ -62,7 +90,7 @@ class Session(Generic[LoadResult]):
         """Advance the Load window, then wait for this layer and the final cleanup when due."""
         if not self.load_order:
             return None
-        self.prefetch_loads(layer_id, load)
+        self._prefetch_loads(layer_id, load)
         if self.loads_submitted:
             self.finish_load(finish)
         position = self._load_pos
@@ -75,7 +103,7 @@ class Session(Generic[LoadResult]):
             self.wait_load_finished()
         return result
 
-    def prefetch_loads(self, layer_id: int, load: Callable[[int], LoadResult]) -> None:
+    def _prefetch_loads(self, layer_id: int, load: Callable[[int], LoadResult]) -> None:
         """Submit only the newly exposed part of the Load window.
 
         Hooks reach every required physical layer in order; aliases may repeat.
@@ -205,23 +233,22 @@ class Session(Generic[LoadResult]):
 
     def end_step(self, finish_load: Callable[[], None] | None = None, *, wait: bool = True) -> None:
         """Detach compute callbacks and abort Load; Store remains caller-owned and is not drained here."""
-        self.clear_callbacks()
+        for gate in self._start_gates.values():
+            gate.on_start = None
         self.abort_load(finish_load, wait=wait)
 
     def abort_load(self, finish: Callable[[], None] | None = None, *, wait: bool = True) -> None:
         """Abort queued Load; wait=True drains submitted tasks and cleanup without claiming layer results."""
         self._load_aborted.set()
+        cancelled_gates: set[int] = set()
         for position, future in enumerate(self._load_futures):
             gate = self._load_gates[self.load_order[position]]
-            if gate is not None and not future.done():
+            if gate is not None and not future.done() and id(gate) not in cancelled_gates:
                 gate.cancel()
+                cancelled_gates.add(id(gate))
         if finish is not None:
             self.finish_load(finish)
         if wait:
             # Task completion must not depend on an optional cleanup or stop at the first failed layer.
             wait_futures(self._load_futures)
             self.wait_load_finished()
-
-    def clear_callbacks(self) -> None:
-        for gate in self._start_gates.values():
-            gate.on_start = None

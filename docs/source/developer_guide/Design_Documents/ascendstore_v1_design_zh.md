@@ -48,9 +48,7 @@ v1/
 │   │   ├── object_layout/   对象大小与段偏移
 │   │   ├── bulk.py         完整对象的传输视图
 │   │   └── layerwise.py    按物理层访问的传输视图
-│   ├── execution/
-│   │   ├── executor.py         单线程串行执行器
-│   │   └── session.py          一步内的逐层预取、等待与收尾协调
+│   ├── execution.py            串行执行器与一步内的逐层时序协调
 │   └── resources.py            执行器、对象会话、注册与客户端所有权
 └── backend/
     ├── interfaces.py           整对象、KeyRange、GVA 访问契约
@@ -149,13 +147,15 @@ Bulk 和 Layerwise 是同一对象布局的整体视图与分层视图。Bulk �
 
 ### 4.5 Execution
 
+`execution.py` 中保留两个职责独立的类：Executor 跨步提供执行队列，Session 只协调当前 step 的逐层时序。结束 Session 不会关闭执行器，也不会等待跨步 Store 完成。
+
 `Executor` 提供一个 FIFO 单线程队列。启动屏障确认线程初始化完成，提交返回 Future，关闭等待已提交任务完成并回收线程。任务结果和异常由调用者领取。Load 与 Store 可以使用不同队列，跨队列的依赖通过事件或显式等待建立。
 
 `Session` 协调一步内的逐层执行。模型钩子由一个调用线程推进，后台操作在传入的串行队列上运行。Session 维护 Load 顺序、有界预取窗口、计算开始 gate 和 Store 提交去重；业务回调负责实际传输和结果处理。gate 是一个同步门闩，用于让后台任务等待计算开始条件。
 
 预取分别记录提交位置和领取位置。例如 Load 顺序为 `[2, 5, 9, 12]`，窗口深度为 2，起初提交层 2、5；模型领取层 2 后补交层 9。层 5 在后台完成，只改变它的 Future 状态，领取位置仍由模型钩子推进。同一层的重复钩子保持幂等，完成回调按队列顺序执行一次。
 
-Store 钩子在调用线程记录来源就绪事件，再把工作交给队列。后台先准备参数，随后在读 KV 前等待该事件。`abort_load(wait=True)` 唤醒仍在等 gate 的任务，等待所有已提交 Load Future，再等待可选收尾；即使没有收尾回调，也要等已有 Load 结束。这个等待无法中断正在执行的原生操作，Load 的成功与失败仍需读取结果。
+Store 钩子在调用线程记录来源就绪事件，再把工作交给队列。后台先准备参数，随后在读 KV 前等待该事件。`abort_load(wait=True)` 对仍有 Load 等待的共享 gate 只取消一次，保留仅供 Store 使用的 gate，再等待所有已提交 Load Future 和可选收尾；即使没有收尾回调，也要等已有 Load 结束。这个等待无法中断正在执行的原生操作，Load 的成功与失败仍需读取结果。
 
 `end_step` 解除本步回调并结束 Load 协调。跨步 Store 的结果观察、来源保护和最终排空由 Worker 继续管理。
 
@@ -436,7 +436,7 @@ Memcache GVA 的共享对象可能由多个 rank 写入。Worker 从实际 `Cont
 | 静态数组与运行时行的隔离 | `mapping/test_bulk.py`、`mapping/test_layerwise.py` | 共享只读布局、重复行、掩码、输入快照与输出不别名 |
 | Bulk 与 Layerwise 的整体和分层视图 | `mapping/test_layerwise.py`、`mapping/test_composition.py` | 各层重组为完整对象、独立组合本地布局与命名 |
 | 对象偏移与 Backend 预留空间 | `mapping/test_object_offsets.py`、`mapping/test_partition_bindings.py` | PP 层位置、上下文槽位、对齐与完整对象大小 |
-| 预取、领取、abort 与收尾顺序 | `execution/test_session.py` | 提交与领取分离、gate 唤醒、已提交任务排空 |
+| 串行执行、预取、领取与收尾顺序 | `test_execution.py` | 队列排空、提交与领取分离、共享 gate 取消、跨步 Store |
 | Lookup 错误恢复与关闭 | `protocol/test_lookup.py`、`protocol/test_rpc.py` | 消息校验、超时连接重建、服务线程结束前保留资源 |
 | 注册与关闭所有权 | `test_resources.py` | 绑定与注册顺序、失败保留、执行器停止前禁止释放 |
 
