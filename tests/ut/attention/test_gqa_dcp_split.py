@@ -459,7 +459,6 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         seq_lens=advanced,
         dcp_local_seq_lens_cpu=get_dcp_local_seq_lens(advanced, dcp_size=2, dcp_rank=rank),
         _seq_lens_cpu=advanced,
-        seq_lens_cpu_is_exact=False,
         seq_lens_cpu=advanced,
         block_table_tensor=torch.zeros(4, 1, dtype=torch.int32),
         slot_mapping=torch.arange(16, dtype=torch.int32),
