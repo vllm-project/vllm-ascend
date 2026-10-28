@@ -1,0 +1,8 @@
+pr: 20100
+entries:
+  - category: config
+    text: >-
+      A5 C8 lightning indexing now uses the CANN V2 operator by default.
+      Set li_c8_v1 to true in additional_config to use the legacy torch-npu
+      operator; C4 and unquantized indexing are unchanged.
+    hardware: [A5]
