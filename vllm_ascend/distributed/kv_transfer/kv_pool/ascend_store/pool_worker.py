@@ -78,7 +78,9 @@ LENS_CACHE_MAX = 64
 
 class KVPoolWorker:
     # The main class for the cache engine.
-    # task #14140: KV cache tensor 段表 (base_addr, region_bytes, tensor)。
+    # task #14140: KV cache tensor 段表 (base_addr, region_bytes, flat uint8 view)。
+    # 第三项是注册时构造一次的展平字节视图，读侧热路径直接按字节偏移切片，
+    # 不再每次 view(torch.uint8).view(-1)。
     # register_kv_caches 正常初始化；仓库里部分既有单测用 __new__() 造骨架
     # 直接调 _infer_cache_group_metadata，此时由调用方 getattr 兜底。
     _kv_cache_addr_segments: list[tuple[int, int, torch.Tensor]]
@@ -707,7 +709,9 @@ class KVPoolWorker:
                     region_len = (
                         1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))
                     ) * cache.element_size()
-                    seg_table.append((cache.data_ptr(), int(region_len), cache))
+                    # 段表存的是展平后的 uint8 视图：它只在注册时构造一次，
+                    # 读侧热路径（每个 segment 一次）就不必反复 view/reshape。
+                    seg_table.append((cache.data_ptr(), int(region_len), cache.view(torch.uint8).view(-1)))
                 if combined is not None:
                     logger.info(
                         "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
@@ -737,9 +741,8 @@ class KVPoolWorker:
         在注册后按 base_addr 排序改 bisect。解析不到返回 None，
         调用方（读侧去重）据此回退全量读。
         """
-        for base, region_len, tensor in getattr(self, "_kv_cache_addr_segments", ()):
+        for base, region_len, flat in getattr(self, "_kv_cache_addr_segments", ()):
             if base <= addr and addr + size <= base + region_len:
-                flat = tensor.view(torch.uint8).view(-1)
                 start = addr - base
                 return flat[start : start + size]
         return None
@@ -778,10 +781,9 @@ class KVPoolWorker:
         contiguous run - so it is expressed as a strided view and copied once.
         """
         need = (n - 1) * stride + block_bytes
-        for base, length, tensor in getattr(self, "_kv_cache_addr_segments", ()):
+        for base, length, flat in getattr(self, "_kv_cache_addr_segments", ()):
             if base <= addr and addr + need <= base + length:
                 try:
-                    flat = tensor.view(torch.uint8).view(-1)
                     off = addr - base
                     # as_strided's storage_offset is relative to the *whole*
                     # storage: passing 0 re-bases on the storage start and
@@ -1162,9 +1164,18 @@ class KVPoolWorker:
             [size_list[i] for i in my_idx],
         )
         get_ms = (time.perf_counter() - t_get) * 1e3
-        # A non-zero code means some block is missing from the pool. Let the
-        # full path handle it: it is the one that records the invalid blocks.
-        if ret is not None and any(r != 0 for r in ret):
+        # Three outcomes mean "this shard is not (fully) in the pool", and all
+        # of them must hand the request back to the full read:
+        #   * ``None`` - backend not initialised, or the transport threw and the
+        #     backend swallowed it (memcache_backend.get returns None on both);
+        #   * a return vector shorter than the key list - the backend answered
+        #     for fewer blocks than asked;
+        #   * any non-zero code - that block is missing.
+        # Continuing here on ``None`` would be a *silent* correctness failure:
+        # the exchange would broadcast uninitialised KV to every rank and this
+        # method would still report success, so the full path - the only place
+        # that calls record_failed_blocks - would never run.
+        if ret is None or len(ret) != len(my_idx) or any(r != 0 for r in ret):
             logger.debug(
                 "KV pool read dedup: partial shard read (rank=%d blocks=%d), falling back",
                 self.tp_rank,
@@ -1298,7 +1309,7 @@ class KVPoolWorker:
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
-        # task #14140: KV cache tensor 段表 (base_addr, region_bytes, tensor)，
+        # task #14140: KV cache tensor 段表 (base_addr, region_bytes, flat uint8 view)，
         # 由 _infer_cache_group_metadata 注册时填充，供读侧去重的
         # addr->tensor 视图解析（_resolve_addr_tensor）使用。
         self._kv_cache_addr_segments = []

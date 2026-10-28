@@ -39,7 +39,10 @@ def make_worker(tp_rank: int, tp_size: int, num_blocks: int, seed: int = 0) -> K
     torch.manual_seed(seed)
     cache = torch.randint(0, 256, (num_blocks, SEGS_PER_BLOCK, SEG_BYTES), dtype=torch.uint8)
     base = cache.data_ptr()
-    worker._kv_cache_addr_segments = [(base, cache.numel(), cache)]
+    # 段表第三项与生产代码一致：注册时构造一次的展平 uint8 视图。
+    # 原始 3D tensor 另存一份供断言用。
+    worker._kv_cache_addr_segments = [(base, cache.numel(), cache.view(torch.uint8).view(-1))]
+    worker.test_cache = cache
     stride = SEGS_PER_BLOCK * SEG_BYTES
     worker.test_addr_list = [
         [base + b * stride + s * SEG_BYTES for s in range(SEGS_PER_BLOCK)] for b in range(num_blocks)
@@ -96,7 +99,7 @@ def test_pack_is_segment_major():
     worker = make_worker(1, tp_size, num_blocks)
     my_idx = list(range(1, num_blocks, tp_size))
     packed = worker._pack_blocks(my_idx, worker.test_addr_list, worker.test_size_list, num_blocks)
-    cache = worker._kv_cache_addr_segments[0][2]
+    cache = worker.test_cache
     # cat/stack 出来的形状是 (blocks*segs, SEG_BYTES)，必须展平才能和被
     # 测的扁平 uint8 buffer 比 —— 少了 reshape 这条断言恒 False（CI 抓到过）。
     expected = torch.cat([torch.stack([cache[i][s] for i in my_idx]).reshape(-1) for s in range(SEGS_PER_BLOCK)])
@@ -112,7 +115,7 @@ def test_strided_view_is_not_rebased_to_the_storage_start():
     num_blocks, tp_size = 12, 4
     rank = 3
     worker = make_worker(rank, tp_size, num_blocks)
-    cache = worker._kv_cache_addr_segments[0][2]
+    cache = worker.test_cache
     view = worker._resolve_stride_tensor(
         worker.test_addr_list[rank][0],
         SEG_BYTES,
@@ -144,10 +147,10 @@ def test_roundtrip_reproduces_the_full_kv_cache(tp_size: int, num_blocks: int):
     master = torch.randint(0, 256, (num_blocks, SEGS_PER_BLOCK, SEG_BYTES), dtype=torch.uint8)
     workers = [make_worker(r, tp_size, num_blocks, seed=r) for r in range(tp_size)]
     for w in workers:
-        w._kv_cache_addr_segments[0][2].zero_()
+        w.test_cache.zero_()
     # 1) each rank reads only its own shard out of the pool
     for r, w in enumerate(workers):
-        cache = w._kv_cache_addr_segments[0][2]
+        cache = w.test_cache
         for i in range(r, num_blocks, tp_size):
             cache[i].copy_(master[i])
     # 2) pack + all_gather + write-back, rank by rank
@@ -156,7 +159,7 @@ def test_roundtrip_reproduces_the_full_kv_cache(tp_size: int, num_blocks: int):
         w._writeback_shards(recv, lens, max_len, r, w.test_addr_list, w.test_size_list, num_blocks)
     # 3) every rank must hold the full KV cache byte for byte
     for r, w in enumerate(workers):
-        assert torch.equal(w._kv_cache_addr_segments[0][2], master), f"rank {r} did not rebuild the KV cache"
+        assert torch.equal(w.test_cache, master), f"rank {r} did not rebuild the KV cache"
 
 
 def test_writeback_reports_a_single_strided_copy_per_segment():
@@ -180,6 +183,52 @@ def test_falls_back_when_the_backend_reports_missing_blocks():
     worker.m_store = MagicMock()
     worker.m_store.get.return_value = [1, 0]
     assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is False
+
+
+@pytest.mark.parametrize("ret", [None, [0], [1, 0]])
+def test_every_not_in_pool_signal_falls_back(ret):
+    """``None``, a short vector and a non-zero code must all fall back.
+
+    ``memcache_backend.get`` returns ``None`` both when the store is not
+    initialised and when the transport raised (it swallows the exception), and
+    it can answer for fewer keys than asked. Before this guard, ``None`` passed
+    the old ``ret is not None and any(...)`` test, so the request went on to
+    the exchange and came back as *success* with uninitialised KV on every
+    rank - a silent correctness failure that this case pins down.
+    """
+    num_blocks, tp_size = 8, 4
+    worker = make_worker(0, tp_size, num_blocks)
+    worker.m_store = MagicMock()
+    worker.m_store.get.return_value = ret
+    assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is False
+
+
+def test_a_hit_reads_exactly_the_local_shard():
+    """On a clean hit rank r issues one get for its own shard, nothing more."""
+    num_blocks, tp_size, rank = 8, 4, 1
+    worker = make_worker(rank, tp_size, num_blocks)
+    worker.m_store = MagicMock()
+    my_idx = list(range(rank, num_blocks, tp_size))
+    worker.m_store.get.return_value = [0] * len(my_idx)
+    worker._exchange_read_shards = MagicMock(
+        return_value={
+            "pack_ms": 0.0,
+            "lens_ms": 0.0,
+            "gather_ms": 0.0,
+            "sync_ms": 0.0,
+            "wb_ms": 0.0,
+            "runs": 0,
+            "wb_ops": 0,
+            "stride_ops": 0,
+            "recv_bytes": 0,
+            "lens_local": 1,
+        }
+    )
+    assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is True
+    assert worker.m_store.get.call_count == 1
+    asked_keys = worker.m_store.get.call_args[0][0]
+    assert asked_keys == [worker.test_keys[i] for i in my_idx]
+    assert len(asked_keys) == num_blocks // tp_size
 
 
 def test_empty_request_is_not_handled(monkeypatch):
