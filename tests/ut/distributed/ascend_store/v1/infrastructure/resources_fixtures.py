@@ -7,7 +7,7 @@ import torch
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     make_backend_spec,
-    make_reachability,
+    make_coordinator,
     make_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -79,7 +79,7 @@ def make_resources(backend: RecordingBackend, *, physical_layers=(0, 1)):
 def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
     resources = KVPoolResources(backend, backend_spec, topology.groups)
-    worker = BulkWorker(topology, resources, reachability=make_reachability(topology, 64), store_enabled=False)
+    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology, 64), store_enabled=False)
     worker.bind_kv_caches(make_caches(topology))
     worker.close()
 

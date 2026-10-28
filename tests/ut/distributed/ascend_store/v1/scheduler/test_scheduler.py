@@ -21,14 +21,14 @@ from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
     make_request,
     new_request_data,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
+    Coordinator,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     CheckpointStoreCommand,
     StateCheckpointSource,
     StoreSourceReleaseMetadata,
     TailKeyBoundary,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
-    HybridReachability,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     AsynchronousBulkScheduler,
@@ -605,13 +605,13 @@ def test_private_state_recomputes_safe_frontier_without_erasing_store_skip(
     assert [(command.start_token, command.end_token) for command in running.store.commands] == [(readable_end, 16)]
 
 
-def test_worker_lookup_reports_raw_eagle_reachability() -> None:
+def test_eagle_hit_is_trimmed_once_by_scheduler() -> None:
     group = replace(make_topology().groups[0], is_eagle_group=True)
-    reachability = HybridReachability((group,), 4, 4, 64, use_eagle=True)
+    coordinator = Coordinator((group,), 4, 4, 64, use_eagle=True)
     block_hashes = (b"a", b"b")
     observation = ((np.asarray((0, 4)), np.asarray((4, 4)), block_hashes), (True, True))
 
-    assert reachability.resolve_available_end(0, 8, block_hashes, (observation,)).end_token == 8
+    assert coordinator.resolve_available_end(0, 8, block_hashes, (observation,)).end_token == 8
 
     scheduler = SynchronousBulkScheduler(make_config(eagle=True), FakeLookupClient(8))
     assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4, False)

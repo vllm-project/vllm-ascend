@@ -14,6 +14,7 @@ from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
 from ...backend.naming import WireKeyBuilder
 from ...infrastructure.configuration.topology import KVPoolTopology
+from ...infrastructure.coordinator import Coordinator
 from ...infrastructure.mapping import (
     LayerTable,
     LocalSegmentData,
@@ -23,7 +24,6 @@ from ...infrastructure.mapping import (
     local_addresses,
     local_lengths,
 )
-from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion
@@ -45,7 +45,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         topology: KVPoolTopology,
         resources: KVPoolResources,
         *,
-        reachability: UnitaryReachability | HybridReachability,
+        coordinator: Coordinator,
         kv_cache_layout: str = "NHD",
         store_enabled: bool = True,
         layerwise_prefetch_layers: int = 2,
@@ -62,7 +62,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
             resources,
             sessions,
             store_enabled=store_enabled,
-            reachability=reachability,
+            coordinator=coordinator,
             kv_cache_layout=kv_cache_layout,
             layerwise_prefetch_layers=layerwise_prefetch_layers,
             start_gate_factory=start_gate_factory,

@@ -8,7 +8,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeEvent,
     FakeResources,
-    make_reachability,
+    make_coordinator,
     make_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -182,7 +182,7 @@ def make_gva_worker(*, topology=None, source_ready_event_factory=FakeEvent):
     worker = GVALayerwiseWorker(
         topology,
         resources,  # type: ignore[arg-type]
-        reachability=make_reachability(topology),
+        coordinator=make_coordinator(topology),
         source_ready_event_factory=source_ready_event_factory,
     )
     worker.bind_kv_caches({"cache": object()})
@@ -196,7 +196,7 @@ def make_gva_binding(local_block_ids: tuple[int, ...] = (1, 3)):
     backend_spec = make_gva_spec()
     resources = FakeResources(backend, backend_spec, topology)
     # Exercise Worker copy methods without starting background executors.
-    worker = GVALayerwiseWorker(topology, resources, reachability=make_reachability(topology))
+    worker = GVALayerwiseWorker(topology, resources, coordinator=make_coordinator(topology))
     resources.prepare_kv_caches({"cache": object()})
     worker._bind_mappings()
     sessions = worker._backend_sessions

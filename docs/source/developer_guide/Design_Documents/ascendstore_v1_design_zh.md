@@ -14,7 +14,7 @@ vLLM 负责请求调度、缓存分配与模型执行。`AscendStoreV1Connector`
 
 业务层由 Scheduler 和 Worker 构成。Scheduler 持有请求进度、采用的命中范围和缓存分配信息；Worker 使用已经分配好的 KV Tensor，持有本地 Mapping 与执行上下文，并处理传输结果。Bulk 按完整对象传输，Layerwise 将对象的传输分解到物理层。逐层访问又分为 KeyRange 和 GVA：前者按对象 key 与字节范围访问，后者按全局地址访问。
 
-基础设施层提供可组合的能力。configuration 确定静态事实，protocol 定义两侧交接的消息及 Lookup 通信，Reachability 判断哪些缓存可以支持恢复，Mapping 描述对象身份与字节位置，Execution 安排调用的执行顺序，Resources 管理需要显式释放的资源。业务路径按需组合这些能力，例如 Lookup 使用 Reachability、Mapping 的命名能力和 Backend。
+基础设施层提供可组合的能力。configuration 确定静态事实，protocol 定义两侧交接的消息及 Lookup 通信，Coordinator 判断哪些缓存可以支持恢复，Mapping 描述对象身份与字节位置，Execution 安排调用的执行顺序，Resources 管理需要显式释放的资源。业务路径按需组合这些能力，例如 Lookup 使用 Coordinator、Mapping 的命名能力和 Backend。
 
 Backend 适配层位于独立的 `backend/` 目录。它定义整对象、KeyRange 和 GVA 的访问约定，并将其转换为 Mooncake、Memcache 原生客户端调用。第三方后端层包含这些客户端、传输能力与外部存储服务。
 
@@ -41,7 +41,7 @@ v1/
 ├── infrastructure/
 │   ├── configuration/          配置校验、缓存组与并行拓扑
 │   ├── protocol/               命令契约、Lookup 编解码与 RPC
-│   ├── reachability.py         单组 / 多组缓存的恢复条件与选择掩码
+│   ├── coordinator.py          单组 / 多组缓存的恢复条件与选择掩码
 │   ├── mapping/
 │   │   ├── local_layout/    本地字节段、TP 切片与 PP 层区间
 │   │   ├── object_naming/   对象坐标与 key 生成
@@ -74,7 +74,7 @@ Worker 从命令出发，建立对象行和来源归属，调用可复用能力�
 
 Worker 按以下顺序组织一次 Bulk Store。
 
-1. 从本步 Store 命令取得范围、hash、block 表和来源归属；结合 Reachability 形成需要保存的候选。
+1. 从本步 Store 命令取得范围、hash、block 表和来源归属；结合 Coordinator 形成需要保存的候选。
 2. 生成候选 key，根据 Backend 的写前存在性要求筛选对象，并按业务规则处理同批重复写入。
 3. 压缩入选对象，由各组 Mapping 计算地址和长度，再由 Worker 合并为本次 Backend 参数。
 4. 在后台执行路径中先准备参数，在 Backend 真正读取 KV 前等待来源就绪事件。
@@ -84,13 +84,13 @@ Mapping 因而不需要知道某个请求为什么要保存；Executor 不需要
 
 ### 3.3 职责划分
 
-infrastructure 可以包含领域规则。Reachability 必须理解不同缓存类型的恢复条件，Mapping 必须理解对象的分片身份，protocol 也包含 Load / Store 命令。这些领域规则构成可复用能力的一部分。
+infrastructure 可以包含领域规则。Coordinator 必须理解不同缓存类型的恢复条件，Mapping 必须理解对象的分片身份，protocol 也包含 Load / Store 命令。这些领域规则构成可复用能力的一部分。
 
 应当留在业务侧的是：本次请求采用哪个候选、哪些对象参与、何时提交、如何解释失败、哪些对象已经满足发布条件，以及何时可以归还来源。基础设施返回计算结果或完成保证，业务层据此推进状态。
 
 | 需要解决的问题 | 可复用能力 | 业务层仍需完成的决定 |
 | --- | --- | --- |
-| 哪些缓存能支撑恢复 | Reachability 的范围与掩码计算 | 是否采用命中，如何与本次请求和分配对应 |
+| 哪些缓存能支撑恢复 | Coordinator 的范围与掩码计算 | 是否采用命中，如何与本次请求和分配对应 |
 | 数据在哪里 | Mapping 的 key、地址、长度与对象偏移 | 入选对象、writer 选择、跨组组批与结果归属 |
 | 调用怎样执行 | Executor / Session 的队列、预取与等待 | 提交哪个业务操作，如何处理结果及失败 |
 | 资源何时释放 | Resources 的持有、顺序释放和失败保留 | 确认结果、来源安全及允许关闭的时点 |
@@ -123,15 +123,21 @@ Lookup 编码将终点、组集合、起点和 hash 分成四个 frame；响应�
 
 来源释放回执用于归还 Scheduler 持有的来源引用，其计数含义是相关 Worker 已确认停止读源。Store 是否成功发布另由传输结果表达。
 
-### 4.3 Reachability
+### 4.3 Coordinator
 
-远端对象的存在性需要结合缓存恢复规则解释。FullAttention 依赖相应历史，滑动窗口缓存依赖终点附近的窗口，状态缓存还需要与恢复位置一致的状态。Reachability 将 Backend 的存在性观察与各组规则结合，求出所有参与组共同支持的恢复终点。
+Coordinator 在 Token 轴上统一理解本地与外部 KV 的逻辑可用性，判断共同可恢复终点，并选择各阶段所需的逻辑块。Full Attention 依赖相应历史，滑动窗口依赖终点附近的窗口，状态缓存依赖对应位置的检查点。请求进度由 Scheduler 推进，是否采用命中也由 Scheduler 决定。
 
-单个且不含 Mamba align 可变状态的传输组使用 `UnitaryReachability`，按顺序观察可用性并对齐传输粒度。多组或 align 状态使用 `HybridReachability`，借助各组 manager 的恢复规则求共同前缀。它通过 `ExternalCachedBlockPool` 的占位块表达远端存在性；这些占位标记只参与恢复计算，不进入远端 key 命名。
+单组与多组统一使用 `Coordinator`，复用 vLLM core 的 `SpecGroup` 和注册 Manager。标准 Full Attention 在满足粒度条件时直接扫描连续命中；其他情况通过 `ExternalCachedBlockPool` 将本地已确认前缀与外部命中提供给 Manager，协调共同恢复终点。占位块只参与逻辑计算，不进入对象 key 命名。
 
-Lookup 保留能够支持恢复的观察结果，包括输入尾部或其他请求留下的对象。Store 根据当前保存策略选择本次要留下的对象。两者使用各自的范围规则；将 Store 的稀疏保留条件套到 Lookup 上，会丢失有效命中。尾部 key 边界在结果中继续传递，重算裁剪也只在负责它的环节执行一次。
+| 阶段 | 已知条件 | Coordinator 的职责 |
+| --- | --- | --- |
+| Lookup | 查询上限与本地已确认前缀；查询后的外部命中 | 先选择可能支持候选终点的查询块，再根据可用性证据求各组共同支持的恢复终点 |
+| Load | Scheduler 已确定的加载终点 | 选择恢复到该终点所需的逻辑块，不再求解共同终点或重复裁剪 |
+| Store | 本次保存区间、prompt 边界与保留策略 | 选择应保存的逻辑块，mask 从本次起始块计数 |
 
-Reachability 输出终点和选择掩码。它不读写 KV 字节，也不计算 Tensor 地址。Scheduler 用结果规划命令；Worker 将选择对应到实际对象行，再交给 Mapping 生成位置参数。
+Lookup 的查询候选、外部实际命中和 Load 所需块是不同结果；Store 的稀疏保留规则也不能替代 Lookup 选择，否则会漏掉仍可恢复的终点。恢复终点与尾部对象边界不一致时，`ReachablePrefix` 保留读取所需的尾部 key 边界。
+
+Coordinator 输出逻辑终点与选择掩码，不查询 Backend、不读写 KV 字节，也不计算 Tensor 地址。Worker 执行查询，将选择对应到实际对象行，结合 Mapping 组织传输参数，再交给 Backend 执行。
 
 ### 4.4 Mapping
 

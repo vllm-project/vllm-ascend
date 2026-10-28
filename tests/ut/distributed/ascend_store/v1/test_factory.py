@@ -49,10 +49,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     RangeStoreCommand,
     StoreSourceReleaseMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
-    HybridReachability,
-    UnitaryReachability,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
@@ -551,13 +547,8 @@ def test_speculative_factories_follow_upstream_eagle_policy(
     worker = factory_module.create_kv_pool_worker(config, cache)
     try:
         assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4 if use_eagle else 7, False)
-        assert worker._reachability.group_ids == tuple(range(group_count))
-        if group_count == 2:
-            assert isinstance(worker._reachability, HybridReachability)
-            assert worker._reachability.use_eagle is use_eagle
-            assert worker._reachability.retention_interval == 32
-        else:
-            assert isinstance(worker._reachability, UnitaryReachability)
+        assert worker._coordinator.group_ids == tuple(range(group_count))
+        assert worker._coordinator.retention_interval == 32
     finally:
         scheduler.close()
         worker.close()

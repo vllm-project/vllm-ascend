@@ -12,9 +12,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import us
 from .backend import LayerwiseAccessKind, resolve_backend_spec
 from .infrastructure.configuration.naming import resolve_key_naming_config
 from .infrastructure.configuration.resolve import resolve_kv_pool_config, resolve_worker_topology
-from .infrastructure.configuration.topology import KVPoolTopology
+from .infrastructure.coordinator import Coordinator
 from .infrastructure.protocol.rpc import LookupClient
-from .infrastructure.reachability import HybridReachability, UnitaryReachability
 from .infrastructure.resources import KVPoolResources
 from .scheduler import (
     AsynchronousBulkScheduler,
@@ -77,8 +76,10 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
     """Acquire resources only after common configuration and local topology are resolved."""
     config = resolve_kv_pool_config(vllm_config, kv_cache_config)
     topology = resolve_worker_topology(vllm_config, kv_cache_config, config)
-    reachability = create_reachability(
-        topology,
+    coordinator = Coordinator(
+        topology.transfer_groups,
+        topology.cache_transfer_granularity,
+        topology.hash_block_size,
         vllm_config.model_config.max_model_len,
         use_eagle=config.use_eagle,
         retention_interval=config.retention_interval,
@@ -126,7 +127,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                     topology,
                     resources,
                     store_enabled=config.store_enabled,
-                    reachability=reachability,
+                    coordinator=coordinator,
                     kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                     layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                     key_builder=key_builder,
@@ -136,7 +137,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                 topology,
                 resources,
                 store_enabled=config.store_enabled,
-                reachability=reachability,
+                coordinator=coordinator,
                 kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                 layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                 key_builder=key_builder,
@@ -144,7 +145,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
         return BulkWorker(
             topology,
             resources,
-            reachability=reachability,
+            coordinator=coordinator,
             kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
             store_enabled=config.store_enabled,
             load_async=config.load_async,
@@ -158,25 +159,3 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
         except BaseException:
             logger.exception("Failed to close KV Pool Backend after Worker initialization failed")
         raise
-
-
-def create_reachability(
-    topology: KVPoolTopology,
-    max_model_len: int,
-    *,
-    use_eagle: bool = False,
-    retention_interval: int | None = None,
-) -> UnitaryReachability | HybridReachability:
-    """Assemble reusable cache algorithms from admitted static facts, without registered memory."""
-
-    groups = topology.transfer_groups
-    if len(groups) == 1 and not groups[0].uses_align_state:
-        return UnitaryReachability(groups[0].group_id, max_model_len, topology.cache_transfer_granularity)
-    return HybridReachability(
-        groups,
-        topology.cache_transfer_granularity,
-        topology.hash_block_size,
-        max_model_len,
-        use_eagle=use_eagle,
-        retention_interval=retention_interval,
-    )

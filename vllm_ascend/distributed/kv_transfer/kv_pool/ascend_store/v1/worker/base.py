@@ -14,10 +14,10 @@ import torch
 from vllm.logger import logger
 
 from ..infrastructure.configuration.topology import KVPoolTopology
+from ..infrastructure.coordinator import Coordinator
 from ..infrastructure.execution.executor import Executor
 from ..infrastructure.mapping import KeyTable, map_keys
 from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
-from ..infrastructure.reachability import HybridReachability, UnitaryReachability
 from ..infrastructure.resources import KVPoolResources
 from .transfer.batch import (
     KeysByPartition,
@@ -77,12 +77,12 @@ class KVPoolWorker(ABC):
         executors: Sequence[Executor],
         *,
         store_enabled: bool,
-        reachability: UnitaryReachability | HybridReachability,
+        coordinator: Coordinator,
         kv_cache_layout: str = "NHD",
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._topology = topology
-        self._reachability = reachability
+        self._coordinator = coordinator
         self._kv_cache_layout = kv_cache_layout
         self._keys: dict[int, KeyTable] = {}
         self._lookup_key_parts: dict[int, tuple[tuple[str, str], ...]] = {}
@@ -136,7 +136,7 @@ class KVPoolWorker(ABC):
                 f"Lookup groups {request.transfer_group_ids} do not match configured groups "
                 f"{self._topology.transfer_group_ids}"
             )
-        masks = self._reachability.select_for_lookup(request.block_hashes, request.end_token)
+        masks = self._coordinator.select_for_lookup(request.end_token)
         observations = []
         chunk_rows = fine_lookup_chunk_ranges if self._fine_grained_lookup else lookup_chunk_ranges
         for (group_id, group), mask in zip(self._groups.items(), masks, strict=True):
@@ -163,7 +163,7 @@ class KVPoolWorker(ABC):
                 for transfer_record_index in range(transfer_record_count)
             )
             observations.append(((starts, counts, hashes), available))
-        reachable = self._reachability.resolve_available_end(
+        reachable = self._coordinator.resolve_available_end(
             request.start_token, request.end_token, request.block_hashes, observations
         )
         return LookupResult(reachable.end_token, reachable.tail_key_boundaries)
@@ -171,7 +171,7 @@ class KVPoolWorker(ABC):
     def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
         transfer_records_by_request = []
         for command in commands:
-            masks = self._reachability.select_for_load(command.block_hashes, command.end_token)
+            masks = self._coordinator.select_for_load(command.block_hashes, command.end_token)
             boundaries = {item.group_id: item.boundary_token for item in command.tail_key_boundaries}
             if len(boundaries) != len(command.tail_key_boundaries):
                 raise ValueError("Load contains duplicate tail-key boundaries for one cache group")

@@ -17,7 +17,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeLoadStartGate,
     begin_step,
     make_backend_spec,
-    make_reachability,
+    make_coordinator,
     make_topology,
     make_worker,
 )
@@ -375,9 +375,9 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
     backend: FakeGVABackend | PublishedKeyRangeBackend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec(requires_exists_before_put=True)
     resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
-    reachability = make_reachability(topology, 256, retention_interval=retention_interval)
+    coordinator = make_coordinator(topology, 256, retention_interval=retention_interval)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
-    worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
+    worker = worker_type(topology, resources, coordinator=coordinator, source_ready_event_factory=FakeEvent)
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
     caches = {group.layer_names[0]: torch.zeros((8, 2, 16, 1, 1)) for group in topology.transfer_groups}
     try:
@@ -426,9 +426,9 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
     backend = FakeGVABackend() if use_gva else FakeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec()
     resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
-    reachability = make_reachability(topology)
+    coordinator = make_coordinator(topology)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
-    worker = worker_type(topology, resources, reachability=reachability, source_ready_event_factory=FakeEvent)
+    worker = worker_type(topology, resources, coordinator=coordinator, source_ready_event_factory=FakeEvent)
     source_blocks = {0: 1, 2: 3}
     try:
         worker.bind_kv_caches(caches)

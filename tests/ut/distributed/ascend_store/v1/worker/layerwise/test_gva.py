@@ -12,7 +12,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeEvent,
     begin_step,
-    make_reachability,
+    make_coordinator,
     make_topology,
 )
 from tests.ut.distributed.ascend_store.v1.infrastructure.resources_fixtures import register_caches
@@ -207,7 +207,7 @@ def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> Non
     worker = GVALayerwiseWorker(
         topology,
         resources,
-        reachability=make_reachability(topology),
+        coordinator=make_coordinator(topology),
         source_ready_event_factory=FakeEvent,
     )
     cache = torch.empty((8, 4), dtype=torch.float32)

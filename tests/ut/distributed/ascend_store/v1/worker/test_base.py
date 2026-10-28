@@ -18,7 +18,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeLoadStartGate,
     begin_step,
     make_backend_spec,
-    make_reachability,
+    make_coordinator,
     make_topology,
     make_worker,
     store_one,
@@ -70,7 +70,7 @@ def test_worker_mapping_failure_precedes_registration_and_closes_backend(monkeyp
     topology, resources = make_resources(backend, physical_layers=(0,))
     caches = make_caches(topology)
     monkeypatch.setattr(bulk_worker, "build_mappings", MagicMock(side_effect=RuntimeError("mapping binding failed")))
-    worker = BulkWorker(topology, resources, reachability=make_reachability(topology))
+    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology))
     with pytest.raises(RuntimeError, match="mapping binding failed"):
         worker.bind_kv_caches(caches)
 
@@ -90,7 +90,7 @@ def test_bulk_binding_uses_retained_tensors_without_consuming_registration_table
         return {}
 
     monkeypatch.setattr(resources, "prepare_kv_caches", prepare_without_tables)
-    worker = BulkWorker(topology, resources, reachability=make_reachability(topology), store_enabled=False)
+    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology), store_enabled=False)
     try:
         worker.bind_kv_caches(caches)
         assert resources.kv_caches is caches
@@ -110,7 +110,7 @@ def test_invalid_tp_tensor_geometry_fails_before_native_registration() -> None:
     topology = make_topology(physical_layers=(0,), tp_mismatch=True)
     backend = RecordingBackend()
     resources = KVPoolResources(backend, make_backend_spec(), topology.transfer_groups)
-    worker = BulkWorker(topology, resources, reachability=make_reachability(topology))
+    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology))
     with pytest.raises(RuntimeError, match="unflatten.*sizes.*multiply"):
         worker.bind_kv_caches(make_caches(topology))
     assert backend.calls == [("backend_close",)]
@@ -126,7 +126,7 @@ def test_layerwise_capability_binding_failure_precedes_registration_and_closes_b
     worker = KeyRangeLayerwiseWorker(
         topology,
         resources,
-        reachability=make_reachability(topology),
+        coordinator=make_coordinator(topology),
         key_builder=fail if phase == "naming" else None,
     )
     if phase == "object_layout":
@@ -150,7 +150,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     worker = BulkWorker(
         topology,
         resources,
-        reachability=make_reachability(topology, 64),
+        coordinator=make_coordinator(topology, 64),
         source_ready_event_factory=FakeEvent,
     )
     caches = make_caches(topology)

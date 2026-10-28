@@ -17,6 +17,7 @@ from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import ObjectSessions
 from ...backend.naming import WireKeyBuilder
 from ...infrastructure.configuration.topology import KVPoolTopology
+from ...infrastructure.coordinator import Coordinator
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.execution.session import Session
 from ...infrastructure.mapping import (
@@ -29,7 +30,6 @@ from ...infrastructure.mapping import (
     select_layers,
 )
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
-from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
@@ -83,7 +83,7 @@ class LayerwiseWorker(KVPoolWorker):
         resources: KVPoolResources,
         backend_sessions: ObjectSessions,
         *,
-        reachability: UnitaryReachability | HybridReachability,
+        coordinator: Coordinator,
         kv_cache_layout: str = "NHD",
         store_enabled: bool = True,
         layerwise_prefetch_layers: int = 2,
@@ -118,7 +118,7 @@ class LayerwiseWorker(KVPoolWorker):
                 executor for executor in (self._store_executor, self._load_executor) if executor is not None
             ),
             store_enabled=store_enabled,
-            reachability=reachability,
+            coordinator=coordinator,
             kv_cache_layout=kv_cache_layout,
             source_ready_event_factory=source_ready_event_factory,
         )
@@ -278,7 +278,7 @@ class LayerwiseWorker(KVPoolWorker):
 
     def _store_transfer_records(self, command: StoreCommand) -> tuple[StoreTransferRecords, ...]:
         assert not isinstance(command, CheckpointStoreCommand)
-        masks = self._reachability.select_for_store(command.block_hashes, command.end_token, command.num_prompt_tokens)
+        masks = self._coordinator.select_for_store(command.start_token, command.end_token, command.num_prompt_tokens)
         return tuple(
             store_transfer_records(
                 command.end_token,

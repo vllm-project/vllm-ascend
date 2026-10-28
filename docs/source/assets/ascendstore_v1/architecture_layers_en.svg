@@ -23,7 +23,7 @@
 <rect x="48" y="304" width="1184" height="168" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.5"/>
 <text x="64" y="370" class="name">Infrastructure</text><text x="64" y="395" class="muted">Reusable capabilities</text><text x="64" y="420" class="code">infrastructure/</text>
 <g data-node="configuration"><rect x="224" y="320" width="320" height="60" rx="4" class="module"/><text x="240" y="344" class="name">configuration</text><text x="240" y="367" class="muted">Validation · groups · topology</text></g>
-<g data-node="reachability"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Reachability</text><text x="576" y="367" class="muted">Recovery rules · prefix · selection</text></g>
+<g data-node="coordinator"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Coordinator</text><text x="576" y="367" class="muted">Recovery rules · prefix · selection</text></g>
 <g data-node="mapping"><rect x="896" y="320" width="320" height="60" rx="4" class="module"/><text x="912" y="344" class="name">Mapping</text><text x="912" y="367" class="muted">Object identity · layout · byte locations</text></g>
 <g data-node="protocol"><rect x="224" y="396" width="320" height="60" rx="4" class="module"/><text x="240" y="420" class="name">protocol</text><text x="240" y="443" class="muted">Messages · Lookup codec and RPC</text></g>
 <g data-node="execution"><rect x="560" y="396" width="320" height="60" rx="4" class="module"/><text x="576" y="420" class="name">Execution</text><text x="576" y="443" class="muted">Executor / Session · queues and prefetch</text></g>

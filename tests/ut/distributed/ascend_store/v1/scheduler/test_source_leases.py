@@ -37,13 +37,18 @@ def test_stable_sources_need_neither_references_nor_release_jobs(source_groups) 
 @pytest.mark.parametrize(
     "retention_interval,expected", ((None, (22, 23, 24, 25)), (0, (24, 25)), (64, (22, 23, 24, 25)))
 )
-def test_recycling_sources_respect_range_retention_and_original_group_ids(retention_interval, expected) -> None:
+@pytest.mark.parametrize("source_groups", ((3,), (1, 3)))
+def test_recycling_sources_respect_range_retention_and_original_group_ids(
+    retention_interval, expected, source_groups
+) -> None:
     attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
     window = SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=33)
     config = replace(
-        make_config(granularity=16, groups=(1, 3), store=True),
+        make_config(granularity=16, groups=source_groups, store=True),
         hash_block_size=16,
-        store_group_specs=((1, attention, False), (3, window, False)),
+        store_group_specs=tuple(
+            item for item in ((1, attention, False), (3, window, False)) if item[0] in source_groups
+        ),
         retention_interval=retention_interval,
     )
     leases = StoreSourceLeases(config)
@@ -66,8 +71,20 @@ def test_recycling_sources_respect_range_retention_and_original_group_ids(retent
     assert pool.freed == [tuple(reversed(expected))]
 
 
-@pytest.mark.parametrize("published_end,expected", ((0, (10, 1, 2, 3)), (8, (10, 3)), (12, (10, 3))))
-def test_partial_checkpoint_protects_only_state_and_required_companion_pages(published_end, expected) -> None:
+@pytest.mark.parametrize(
+    "boundary,published_end,attention_blocks,expected",
+    (
+        (12, 0, (1, 2, 3, 4), (10, 1, 2, 3)),
+        (12, 8, (1, 2, 3, 4), (10, 3)),
+        (12, 12, (1, 2, 3, 4), (10, 3)),
+        (18, 8, (4, 5), (10, 4, 5)),
+        (18, 20, (1, 2, 3, 4, 5), (10, 5)),
+        (16, 16, (1, 2, 3, 4), (10,)),
+    ),
+)
+def test_partial_checkpoint_protects_only_state_and_required_companion_pages(
+    boundary, published_end, attention_blocks, expected
+) -> None:
     attention = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
     state = MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
     config = replace(
@@ -79,10 +96,10 @@ def test_partial_checkpoint_protects_only_state_and_required_companion_pages(pub
     leases.bind_block_pool(pool)
     command = CheckpointStoreCommand(
         "request",
-        ((1, 2, 3, 4), (10, 11, 12)),
+        (attention_blocks, (10, 11, 12)),
         (b"a", b"b", b"c"),
         published_end,
-        (StateCheckpointSource(1, 10, 12),),
+        (StateCheckpointSource(1, 10, boundary),),
     )
 
     leased = leases.acquire(command)

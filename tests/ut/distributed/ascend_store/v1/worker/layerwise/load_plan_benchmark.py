@@ -27,7 +27,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeResources,
     make_backend_spec,
-    make_reachability,
+    make_coordinator,
     make_topology,
 )
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.benchmark import measure
@@ -131,7 +131,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
     else:
         layerwise = importlib.import_module(package + ".worker.layerwise")
         worker_type = layerwise.GVALayerwiseWorker if route == "gva" else layerwise.KeyRangeLayerwiseWorker
-    worker = worker_type(topology, resources, reachability=make_reachability(topology), store_enabled=False)
+    worker = worker_type(topology, resources, coordinator=make_coordinator(topology), store_enabled=False)
     if hasattr(mapping, "build_mappings"):
         # Bound numeric fixtures match historical synthetic addresses; no KV bytes are read.
         segments = {

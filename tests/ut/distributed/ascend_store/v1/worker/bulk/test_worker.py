@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
@@ -17,7 +16,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeResources,
     begin_step,
     make_backend_spec,
-    make_reachability,
+    make_coordinator,
     make_topology,
     make_worker,
     store_one,
@@ -65,7 +64,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.completion import (
     LoadCompletion,
     StoreCompletion,
@@ -78,7 +76,7 @@ def test_worker_preserves_configured_cache_layout(layout) -> None:
     topology = make_topology()
     backend = FakeBackend()
     resources = FakeResources(backend, SimpleNamespace(), topology)
-    worker = BulkWorker(topology, resources, reachability=make_reachability(topology), kv_cache_layout=layout)
+    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology), kv_cache_layout=layout)
     assert worker._kv_cache_layout == layout
     worker.close()
 
@@ -93,7 +91,7 @@ def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_
     worker = BulkWorker(
         topology,
         resources,
-        reachability=make_reachability(topology, 64),
+        coordinator=make_coordinator(topology, 64),
         source_ready_event_factory=FakeEvent,
     )
     caches = {name: torch.zeros((8, 4, 1, 2), dtype=torch.float32) for name in names}
@@ -731,7 +729,7 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
     worker = BulkWorker(
         topology,
         resources,
-        reachability=make_reachability(topology, 64),
+        coordinator=make_coordinator(topology, 64),
         kv_cache_layout=layout,
         source_ready_event_factory=FakeEvent,
     )
@@ -811,59 +809,6 @@ def test_tp_mismatch_roundtrip_preserves_tensor_values_in_each_layout(
             worker.close()
 
 
-def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group_dict(monkeypatch):
-    topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
-    worker, _, _ = make_worker(topology=topology)
-    events = []
-    key_group_ids = {parts: group_id for group_id, keys in worker._keys.items() for parts in keys.values()}
-    make_rows, make_keys = bulk_module.store_transfer_records, bulk_module.map_keys
-
-    def rows(end_token, hashes, local_block_ids, **kwargs):
-        events.append(("rows", tuple(local_block_ids)))
-        return make_rows(end_token, hashes, local_block_ids, **kwargs)
-
-    def keys(naming, hashes):
-        events.append(("keys", key_group_ids[naming]))
-        return make_keys(naming, hashes)
-
-    def reject_unused_empty_rows():
-        raise AssertionError("Present ordinary groups must not allocate fallback empty rows")
-
-    monkeypatch.setattr(bulk_module, "store_transfer_records", rows)
-    monkeypatch.setattr(bulk_module, "map_keys", keys)
-    monkeypatch.setattr(bulk_module, "empty_store_transfer_records", reject_unused_empty_rows)
-    command = RangeStoreCommand("request", 0, 4, ((1,), (), (), (7,)), (b"a",), 4, 17)
-    try:
-        candidates = worker._build_store_candidates((command,))
-        assert events == [("rows", (1,)), ("keys", 0), ("rows", (7,)), ("keys", 3)]
-        assert tuple(group.group_id for group in candidates.groups) == (0, 3)
-    finally:
-        worker.close()
-
-
-def test_bulk_registration_does_not_reassemble_reachability_or_checkpoint_policy(monkeypatch) -> None:
-    worker, _, _ = make_worker(topology=make_align_state_topology(), bind=False)
-    reachability = worker._reachability
-    assert worker._state_group_ids == frozenset((1,))
-    assert worker._companion_group_ids == (0,)
-    assert worker._fine_grained_lookup
-
-    def reject_static_selection(*_args, **_kwargs):
-        raise AssertionError("Registration must not select Reachability algorithms")
-
-    monkeypatch.setattr(KVCacheSpecRegistry, "get_manager_class", reject_static_selection)
-    try:
-        worker.bind_kv_caches({"cache": object()})
-        assert worker._reachability is reachability
-        assert tuple(worker._local) == (0, 1)
-        for mapping in worker._local.values():
-            assert not hasattr(mapping, "reachability")
-            assert not hasattr(mapping, "checkpoint_policy")
-            assert not hasattr(mapping, "fine_grained_lookup")
-    finally:
-        worker.close()
-
-
 @pytest.mark.parametrize(
     "retention_interval,stored_swa_boundaries,middle_end,fallback_end",
     ((None, (16, 32, 48, 64, 80, 96), 80, 64), (0, (80, 96), 0, 0), (64, (48, 64, 80, 96), 80, 64)),
@@ -877,7 +822,7 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
     worker = BulkWorker(
         topology,
         resources,
-        reachability=make_reachability(topology, 256, retention_interval=retention_interval),
+        coordinator=make_coordinator(topology, 256, retention_interval=retention_interval),
         source_ready_event_factory=FakeEvent,
     )
     block_hashes = tuple(bytes([index]) for index in range(1, 9))
@@ -942,7 +887,7 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     worker = BulkWorker(
         topology,
         resources,
-        reachability=make_reachability(topology, 256),
+        coordinator=make_coordinator(topology, 256),
         load_async=load_async,
         source_ready_event_factory=FakeEvent,
     )
@@ -1123,7 +1068,7 @@ def test_hybrid_bulk_worker_owns_fine_lookup_load_range_and_checkpoint_store(mon
     assert ["@head_or_tp_rank:1@" in key for key in exists_calls[1][1][::2]] == [False, True]
 
     backend.calls.clear()
-    monkeypatch.setattr(worker._reachability, "select_for_load", lambda *_args: (None, None))
+    monkeypatch.setattr(worker._coordinator, "select_for_load", lambda *_args: (None, None))
     load = LoadCommand("load", 0, 4, ((3,), (7,)), (b"a",), (TailKeyBoundary(0, 4), TailKeyBoundary(1, 4)))
     begin_step(worker, load=(load,))
     worker.start_load()

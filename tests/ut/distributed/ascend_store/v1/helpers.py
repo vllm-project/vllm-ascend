@@ -33,14 +33,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     TPPartitionSpec,
     context_replica_groups,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
+    Coordinator,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
     KVTransferStep,
     StoreCommand,
     StoreCommandBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.reachability import (
-    HybridReachability,
-    UnitaryReachability,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
@@ -227,14 +226,11 @@ def make_backend_spec(
     return BackendSpec(name, FakeBackend, layerwise_access, requires_exists_before_put)
 
 
-def make_reachability(
+def make_coordinator(
     topology: KVPoolTopology, max_model_len: int = 64, *, retention_interval: int | None = None
-) -> UnitaryReachability | HybridReachability:
-    groups = topology.transfer_groups
-    if len(groups) == 1 and not groups[0].uses_align_state:
-        return UnitaryReachability(groups[0].group_id, max_model_len, topology.cache_transfer_granularity)
-    return HybridReachability(
-        groups,
+) -> Coordinator:
+    return Coordinator(
+        topology.transfer_groups,
         topology.cache_transfer_granularity,
         topology.hash_block_size,
         max_model_len,
@@ -386,7 +382,7 @@ def make_worker(
         worker = worker_type(
             topology,
             resources,
-            reachability=make_reachability(topology),
+            coordinator=make_coordinator(topology),
             store_enabled=store,
             **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
             source_ready_event_factory=source_ready_event_factory or FakeEvent,
@@ -395,7 +391,7 @@ def make_worker(
         worker = BulkWorker(
             topology,
             resources,
-            reachability=make_reachability(topology),
+            coordinator=make_coordinator(topology),
             store_enabled=store,
             load_async=async_load,
             source_ready_event_factory=source_ready_event_factory or FakeEvent,

@@ -10,8 +10,8 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from ..infrastructure.coordinator import checkpoint_companion_indices, store_block_range, store_group_mask
 from ..infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
-from ..infrastructure.reachability import checkpoint_companion_indices, store_block_range, store_group_mask
 from .state import SchedulerConfig
 
 if TYPE_CHECKING:
@@ -57,7 +57,6 @@ class StoreSourceLeases:
             if not retains_request_blocks:
                 use_eagle = spec in eagle_specs or (config.use_eagle_block_drop and not eagle_specs)
                 self._recycling_groups.append((group_id, spec, manager_cls, use_eagle))
-        self._uses_hybrid_masks = len(config.store_group_specs) > 1 or bool(config.align_state_group_ids)
 
     def bind_block_pool(self, block_pool: BlockPool) -> None:
         self._block_pool = block_pool
@@ -146,19 +145,15 @@ class StoreSourceLeases:
                 if not indices:
                     continue
                 block_offset = max(indices.stop - len(block_ids), 0)
-                mask = (
-                    store_group_mask(
-                        spec,
-                        manager_cls,
-                        command.end_token,
-                        command.num_prompt_tokens,
-                        alignment_tokens=self._config.cache_transfer_granularity,
-                        use_eagle=use_eagle,
-                        retention_interval=self._config.retention_interval,
-                        start_block=indices.start,
-                    )
-                    if self._uses_hybrid_masks
-                    else None
+                mask = store_group_mask(
+                    spec,
+                    manager_cls,
+                    command.end_token,
+                    command.num_prompt_tokens,
+                    alignment_tokens=self._config.cache_transfer_granularity,
+                    use_eagle=use_eagle,
+                    retention_interval=self._config.retention_interval,
+                    start_block=indices.start,
                 )
                 if mask is None:
                     source_ids.extend(block_ids[indices.start - block_offset : indices.stop - block_offset])

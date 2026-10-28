@@ -10,6 +10,7 @@ from typing import Any
 from vllm.logger import logger
 
 from ...infrastructure.configuration.topology import KVPoolTopology
+from ...infrastructure.coordinator import Coordinator, checkpoint_companion_indices
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.mapping import (
     LocalTable,
@@ -19,7 +20,6 @@ from ...infrastructure.mapping import (
     select_layers,
 )
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
-from ...infrastructure.reachability import HybridReachability, UnitaryReachability, checkpoint_companion_indices
 from ...infrastructure.resources import KVPoolResources
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
@@ -65,7 +65,7 @@ class BulkWorker(KVPoolWorker):
         topology: KVPoolTopology,
         resources: KVPoolResources,
         *,
-        reachability: UnitaryReachability | HybridReachability,
+        coordinator: Coordinator,
         kv_cache_layout: str = "NHD",
         store_enabled: bool = True,
         load_async: bool = False,
@@ -92,7 +92,7 @@ class BulkWorker(KVPoolWorker):
                 executor for executor in (self._store_executor, self._load_executor) if executor is not None
             ),
             store_enabled=store_enabled,
-            reachability=reachability,
+            coordinator=coordinator,
             kv_cache_layout=kv_cache_layout,
             source_ready_event_factory=source_ready_event_factory,
         )
@@ -207,8 +207,8 @@ class BulkWorker(KVPoolWorker):
                     )
                 continue
 
-            masks = self._reachability.select_for_store(
-                command.block_hashes, command.end_token, command.num_prompt_tokens
+            masks = self._coordinator.select_for_store(
+                command.start_token, command.end_token, command.num_prompt_tokens
             )
             for (group_id, group), mask in zip(self._groups.items(), masks, strict=True):
                 if group_id in self._state_group_ids:

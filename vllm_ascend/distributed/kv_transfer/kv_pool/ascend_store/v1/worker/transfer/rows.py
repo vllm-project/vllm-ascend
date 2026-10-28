@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 
-from ...infrastructure.reachability import store_block_range
+from ...infrastructure.coordinator import store_block_range
 
 if TYPE_CHECKING:
     from .batch import KeysByPartition
@@ -147,13 +147,14 @@ def store_transfer_records(
     mask: Sequence[bool] | None = None,
     minimum_block_id: int = 0,
 ) -> StoreTransferRecords:
-    """Select Store rows before Backend admission or writer partitioning."""
+    """Select Store rows; mask positions start at the block containing start_token."""
 
     if not block_hashes or end_token <= 0:
         return [], [], []
     grouped_hashes = get_block_hashes(block_hashes, block_size, hash_block_size)
     indices = store_block_range(start_token, end_token, block_size, len(grouped_hashes), len(local_block_ids))
     block_offset = max(indices.stop - len(local_block_ids), 0)
+    mask_start_block = max(start_token // block_size, 0)
     counts: list[int] = []
     hashes: list[BlockHash | str] = []
     selected_block_ids: list[int] = []
@@ -161,7 +162,8 @@ def store_transfer_records(
         start = block_index * block_size
         end = min(start + block_size, end_token)
         local_index = block_index - block_offset
-        if mask is not None and (block_index >= len(mask) or not mask[block_index]):
+        mask_index = block_index - mask_start_block
+        if mask is not None and (mask_index >= len(mask) or not mask[mask_index]):
             continue
         block_id = local_block_ids[local_index]
         if block_id < minimum_block_id:

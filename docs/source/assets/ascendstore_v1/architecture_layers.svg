@@ -23,7 +23,7 @@
 <rect x="48" y="304" width="1184" height="168" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.5"/>
 <text x="64" y="370" class="name">基础设施层</text><text x="64" y="395" class="muted">稳定规则与执行能力</text><text x="64" y="420" class="code">infrastructure/</text>
 <g data-node="configuration"><rect x="224" y="320" width="320" height="60" rx="4" class="module"/><text x="240" y="344" class="name">configuration</text><text x="240" y="367" class="muted">配置准入 · 缓存组与并行拓扑</text></g>
-<g data-node="reachability"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Reachability</text><text x="576" y="367" class="muted">恢复条件 · 共同前缀 · 选择掩码</text></g>
+<g data-node="coordinator"><rect x="560" y="320" width="320" height="60" rx="4" class="module"/><text x="576" y="344" class="name">Coordinator</text><text x="576" y="367" class="muted">恢复条件 · 共同前缀 · 选择掩码</text></g>
 <g data-node="mapping"><rect x="896" y="320" width="320" height="60" rx="4" class="module"/><text x="912" y="344" class="name">Mapping</text><text x="912" y="367" class="muted">对象身份 · 静态布局 · 字节位置</text></g>
 <g data-node="protocol"><rect x="224" y="396" width="320" height="60" rx="4" class="module"/><text x="240" y="420" class="name">protocol</text><text x="240" y="443" class="muted">消息契约 · Lookup 编解码与 RPC</text></g>
 <g data-node="execution"><rect x="560" y="396" width="320" height="60" rx="4" class="module"/><text x="576" y="420" class="name">Execution</text><text x="576" y="443" class="muted">Executor / Session · 排队、预取、同步</text></g>
