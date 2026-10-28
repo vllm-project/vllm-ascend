@@ -2206,7 +2206,7 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
 ) -> None:
     # Exercise metadata and forward together: an unguarded metadata, dummy,
     # or forward TP branch must fail even when the other branches are correct.
-    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", True)
     monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_PREFILL", True)
     group = SimpleNamespace(world_size=tp_size, rank_in_group=0, all_gather=MagicMock())
