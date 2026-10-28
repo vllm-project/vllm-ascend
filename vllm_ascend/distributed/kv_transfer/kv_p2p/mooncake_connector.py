@@ -60,6 +60,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.transfer_backend import build_transfer_engine
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -2224,9 +2225,12 @@ class MooncakeConnectorWorker:
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
-        self.engine = global_te.get_transfer_engine(
+        self.transfer_te, self.engine = build_transfer_engine(
+            vllm_config,
             self.side_channel_host,
             device_name=device_name,
+            kv_role=self.kv_role,
+            mooncake_registry=global_te,
         )
         self.te_rpc_port = self.engine.get_rpc_port()
 
@@ -2706,7 +2710,7 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self.transfer_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
