@@ -86,49 +86,64 @@ class _DirtyRows:
         self._mask_pending = False
 
     def mark(self, key) -> None:
-        """Record the rows touched by an ``arr[key] = value`` write."""
+        """Record the rows touched by an ``arr[key] = value`` write.
+
+        NumPy has already performed the write by the time this runs, so the
+        only job here is to classify the key: whole buffer, a slice, a single
+        row, or an explicit row list/mask.
+        """
         if isinstance(key, tuple):
             if not key:
                 # ``arr[()] = value`` addresses the whole buffer in NumPy.
                 self._mark_whole()
                 return
-            rows = key[0]
-        else:
-            rows = key
-        if rows is None or rows is Ellipsis:
+            # The buffers are two-dimensional and writes are row-wise, so only
+            # the first axis selects which rows change.
+            key = key[0]
+        if key is None or key is Ellipsis:
+            # ``arr[None] = v`` broadcasts over the whole buffer, and so does
+            # ``arr[...] = v``.
             self._mark_whole()
-            return
-        if isinstance(rows, slice):
-            start, stop, step = rows.indices(self._size)
-            if step < 0:
-                # A negative step can never extend the prefix, and an empty
-                # one must not be confused with a reversed range.
-                if stop >= start:
-                    return
+        elif isinstance(key, slice):
+            self._mark_slice(key)
+        elif isinstance(key, (bool, np.bool_)):
+            # NumPy reads a scalar boolean as a mask over the whole array.
+            self._mark_whole()
+        elif isinstance(key, (int, np.integer)):
+            self._mark_index(int(key))
+        else:
+            self._mark_rows(key if isinstance(key, np.ndarray) else np.asarray(key))
+
+    def _mark_slice(self, key: slice) -> None:
+        """Rows selected by a slice, in both directions and when empty."""
+        start, stop, step = key.indices(self._size)
+        if step < 0:
+            # A reversed slice can never extend the prefix, and its empty form
+            # is ``stop >= start`` - the opposite of the forward case.
+            if stop < start:
                 self._mark_rows(np.arange(start, stop, step))
-                return
-            if stop <= start:
-                return
-            if step == 1 and start <= self._prefix:
-                # Extends (or stays inside) the dirty prefix: O(1).
-                if stop > self._prefix:
-                    self._prefix = stop
-                return
-            self._mark_rows(np.arange(start, stop, step))
             return
-        if isinstance(rows, (int, np.integer)) and not isinstance(rows, bool):
-            index = int(rows)
-            if index < 0:
-                index += self._size
-            if index < 0 or index >= self._size:
-                raise IndexError(f"row index {rows} out of [0, {self._size})")
-            if index == self._prefix:
-                self._prefix += 1
-            elif index > self._prefix:
-                # A row below the prefix is already covered by it.
-                self._mark_rows(np.array([index], dtype=np.intp))
+        if stop <= start:
             return
-        self._mark_rows(rows if isinstance(rows, np.ndarray) else np.asarray(rows))
+        if step == 1 and start <= self._prefix:
+            # Joining [0, _prefix) with [start, stop) is still a prefix, so the
+            # whole run is covered without touching the mask.
+            if stop > self._prefix:
+                self._prefix = stop
+            return
+        self._mark_rows(np.arange(start, stop, step))
+
+    def _mark_index(self, index: int) -> None:
+        """A single row, resolved against negative indices like NumPy does."""
+        row = index + self._size if index < 0 else index
+        if row < 0 or row >= self._size:
+            raise IndexError(f"row index {index} out of [0, {self._size})")
+        if row == self._prefix:
+            # Appending to the prefix keeps it contiguous.
+            self._prefix += 1
+        elif row > self._prefix:
+            # A row below the prefix is already covered by it.
+            self._mark_rows(np.array([row], dtype=np.intp))
 
     def _mark_whole(self) -> None:
         self._prefix = self._size
