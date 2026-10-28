@@ -76,6 +76,16 @@ from vllm_ascend.distributed.utils import (
 # the cache must not grow without bound under a long running server.
 LENS_CACHE_MAX = 64
 
+# One status byte per rank is appended to the payload slot of the shard
+# exchange. The pool answers ``get`` per key, so a block missing from the pool
+# is seen only by the rank whose shard contains it - a *local* decision. The
+# fallback to the full read is a collective decision though: the exchange is an
+# all_gather, so a rank that leaves early leaves its peers waiting on it. The
+# byte rides along in the payload the exchange already transfers, so the
+# decision costs no extra collective.
+EXCHANGE_STATUS_BYTES = 1
+
+
 class KVPoolWorker:
     # The main class for the cache engine.
     # task #14140: KV cache tensor 段表 (base_addr, region_bytes, flat uint8 view)。
@@ -941,11 +951,19 @@ class KVPoolWorker:
         my_idx: list[int],
         addr_list: list[list[int]],
         size_list: list[list[int]],
+        local_ok: int = 1,
     ) -> dict:
         """Gather every peer's shard into the local KV cache buffers.
 
         Four stages, all measured so the breakdown stays auditable:
         pack (local gather) -> shard lengths -> all_gather -> write back.
+
+        ``local_ok`` is this rank's own verdict on its shard read. It is
+        published inside the gather payload, and ``all_ok`` in the result tells
+        the caller whether *every* rank is healthy: the write-back is skipped
+        when any rank is not, so a partially populated pool degrades the whole
+        group to the full read instead of splitting it into a rank that returns
+        early and ranks that block in the collective.
         """
         tp_group = get_tp_group()
         step = self.put_step
@@ -965,12 +983,13 @@ class KVPoolWorker:
         if checked:
             max_len = max(self._lens_cache[total])
             send = self._ex_send_buf
-            if send is None or send.numel() < max_len or send.device != dev:
-                send = torch.empty(max_len, dtype=torch.uint8, device=dev)
+            slot = max_len + EXCHANGE_STATUS_BYTES
+            if send is None or send.numel() < slot or send.device != dev:
+                send = torch.empty(slot, dtype=torch.uint8, device=dev)
                 self._ex_send_buf = send
             else:
-                send = send[:max_len]
-            my_buf = self._pack_blocks(my_idx, addr_list, size_list, total, out=send)
+                send = send[:slot]
+            my_buf = self._pack_blocks(my_idx, addr_list, size_list, total, out=send[:max_len])
         else:
             my_buf = self._pack_blocks(my_idx, addr_list, size_list, total)
         my_bytes = int(my_buf.numel())
@@ -1014,17 +1033,23 @@ class KVPoolWorker:
         t2 = time.perf_counter()
 
         # ---- 3) all_gather with padding (buffers are reused) ----
+        # Slot layout per rank: [shard bytes ....][status byte]. The status sits
+        # at the tail so the shard bytes stay at offset 0, where the strided
+        # copies expect them.
+        slot = max_len + EXCHANGE_STATUS_BYTES
         send = self._ex_send_buf
-        if send is None or send.numel() < max_len or send.device != dev:
-            send = torch.empty(max_len, dtype=torch.uint8, device=dev)
+        if send is None or send.numel() < slot or send.device != dev:
+            send = torch.empty(slot, dtype=torch.uint8, device=dev)
             self._ex_send_buf = send
         else:
-            send = send[:max_len]
+            send = send[:slot]
         if my_bytes and my_buf.data_ptr() != send.data_ptr():
             send[:my_bytes] = my_buf
-        # The padding tail is deliberately left dirty: receivers trim by
-        # lens[k], so those bytes never reach the KV cache.
-        need = max_len * step
+        # The padding between my_bytes and max_len is deliberately left dirty:
+        # receivers trim by lens[k], so those bytes never reach the KV cache.
+        # The tail byte is a *bad* flag: 0 means this shard is complete.
+        send[max_len] = 0 if local_ok else 1
+        need = slot * step
         recv = self._ex_recv_buf
         if recv is None or recv.numel() < need or recv.device != dev:
             recv = torch.empty(need, dtype=torch.uint8, device=dev)
@@ -1044,8 +1069,27 @@ class KVPoolWorker:
             pass
         t3 = time.perf_counter()
 
+        # ---- 3b) one collective decision: is every shard healthy? ----
+        # All ranks read the same bytes here, so they reach the same verdict
+        # without another collective; a single reduction keeps it to one
+        # device-to-host sync.
+        if not self._exchange_all_ok(recv, slot, max_len, step):
+            return {
+                "pack_ms": (t1 - t0) * 1e3,
+                "lens_ms": (t2 - t1) * 1e3,
+                "gather_ms": (t3a - t2) * 1e3,
+                "wb_ms": 0.0,
+                "sync_ms": sync_ms,
+                "runs": 0,
+                "wb_ops": 0,
+                "recv_bytes": need,
+                "lens_local": int(checked),
+                "stride_ops": 0,
+                "all_ok": 0,
+            }
+
         # ---- 4) write the peer shards back into the local KV cache ----
-        runs, wb_ops, stride_ops = self._writeback_shards(recv, lens, max_len, rank, addr_list, size_list, total)
+        runs, wb_ops, stride_ops = self._writeback_shards(recv, lens, slot, rank, addr_list, size_list, total)
         t4 = time.perf_counter()
         return {
             "pack_ms": (t1 - t0) * 1e3,
@@ -1055,16 +1099,29 @@ class KVPoolWorker:
             "sync_ms": sync_ms,
             "runs": runs,
             "wb_ops": wb_ops,
-            "recv_bytes": max_len * step,
+            "recv_bytes": need,
             "lens_local": int(checked),
             "stride_ops": stride_ops,
+            "all_ok": 1,
         }
+
+    def _exchange_all_ok(self, recv: torch.Tensor, slot: int, max_len: int, step: int) -> bool:
+        """True when no rank published the "shard incomplete" flag.
+
+        One reduction, one device-to-host sync - doing it per rank would add
+        ``put_step`` small transfers and synchronisation points, which is
+        exactly the pattern to avoid as TP grows.
+        """
+        if step <= 1:
+            return int(recv[max_len]) == 0 if recv.numel() > max_len else True
+        flags = recv.view(step, slot)[:, max_len]
+        return int(flags.sum().item()) == 0
 
     def _writeback_shards(
         self,
         recv: torch.Tensor,
         lens: list[int],
-        max_len: int,
+        slot: int,
         rank: int,
         addr_list: list[list[int]],
         size_list: list[list[int]],
@@ -1075,6 +1132,9 @@ class KVPoolWorker:
         The incoming shard is contiguous (the peer packed it segment-major)
         while the destination inside a shard is arithmetic, so each segment is
         written with a single strided copy.
+
+        ``slot`` is the per-rank stride of ``recv`` (shard bytes plus the
+        trailing status byte), not the shard length.
 
         Returns ``(runs, wb_ops, stride_ops)`` for diagnostics.
         """
@@ -1087,7 +1147,7 @@ class KVPoolWorker:
         for k in range(step):
             if k == rank:
                 continue  # already written by m_store.get
-            shard = recv[k * max_len : k * max_len + lens[k]]
+            shard = recv[k * slot : k * slot + lens[k]]
             cursor = 0
             for item in self._seg_plan(list(range(k, total, step)), addr_list, size_list, total):
                 if item[0] == "stride":
@@ -1153,17 +1213,9 @@ class KVPoolWorker:
             return False
         step = self.put_step
         my_idx = list(range(self.tp_rank % step, total, step))
-        if not my_idx:
-            return False
 
         # 1) read only this rank's shard
-        t_get = time.perf_counter()
-        ret = self.m_store.get(
-            [key_list[i] for i in my_idx],
-            [addr_list[i] for i in my_idx],
-            [size_list[i] for i in my_idx],
-        )
-        get_ms = (time.perf_counter() - t_get) * 1e3
+        #
         # Three outcomes mean "this shard is not (fully) in the pool", and all
         # of them must hand the request back to the full read:
         #   * ``None`` - backend not initialised, or the transport threw and the
@@ -1171,27 +1223,54 @@ class KVPoolWorker:
         #   * a return vector shorter than the key list - the backend answered
         #     for fewer blocks than asked;
         #   * any non-zero code - that block is missing.
-        # Continuing here on ``None`` would be a *silent* correctness failure:
-        # the exchange would broadcast uninitialised KV to every rank and this
-        # method would still report success, so the full path - the only place
-        # that calls record_failed_blocks - would never run.
-        if ret is None or len(ret) != len(my_idx) or any(r != 0 for r in ret):
+        # A raise from the backend has to be caught here as well, because the
+        # verdict is published in the exchange below: letting it escape would
+        # skip the collective on this rank only.
+        # Continuing on ``None`` would otherwise be a *silent* correctness
+        # failure: the exchange would broadcast uninitialised KV to every rank
+        # and this method would still report success, so the full path - the
+        # only place that calls record_failed_blocks - would never run.
+        t_get = time.perf_counter()
+        local_ok = 1
+        if my_idx:
+            try:
+                ret = self.m_store.get(
+                    [key_list[i] for i in my_idx],
+                    [addr_list[i] for i in my_idx],
+                    [size_list[i] for i in my_idx],
+                )
+            except Exception as err:  # noqa: BLE001 - a failed shard read is a fallback, not a crash
+                ret = None
+                logger.warning(
+                    "KV pool read dedup: shard read raised on rank=%d blocks=%d, falling back: %s",
+                    self.tp_rank,
+                    len(my_idx),
+                    err,
+                )
+            if ret is None or len(ret) != len(my_idx) or any(r != 0 for r in ret):
+                local_ok = 0
+        get_ms = (time.perf_counter() - t_get) * 1e3
+
+        # 2) exchange the shards inside the TP group. Even with a bad local
+        # shard this rank takes part: the peers are already entering the
+        # collective, and the status byte tells all of them to fall back
+        # together instead of leaving this rank behind in the full read.
+        t_ex = time.perf_counter()
+        stats = self._exchange_read_shards(total, my_idx, addr_list, size_list, local_ok)
+        ex_ms = (time.perf_counter() - t_ex) * 1e3
+        if not stats["all_ok"]:
             logger.debug(
-                "KV pool read dedup: partial shard read (rank=%d blocks=%d), falling back",
+                "KV pool read dedup: rank=%d blocks=%d local_ok=%d, another rank is missing a shard, falling back",
                 self.tp_rank,
-                len(my_idx),
+                total,
+                local_ok,
             )
             return False
-
-        # 2) exchange the shards inside the TP group
-        t_ex = time.perf_counter()
-        stats = self._exchange_read_shards(total, my_idx, addr_list, size_list)
-        ex_ms = (time.perf_counter() - t_ex) * 1e3
         logger.debug(
             "KV pool read dedup: rank=%d/%d layer=%d blocks=%d local_get=%d "
             "put_step=%d get_ms=%.3f exchanged_ms=%.3f pack_ms=%.3f lens_ms=%.3f "
             "gather_ms=%.3f sync_ms=%.3f wb_ms=%.3f runs=%d wb_ops=%d "
-            "stride_ops=%d recv_mb=%.2f lens_local=%d",
+            "stride_ops=%d recv_mb=%.2f lens_local=%d local_ok=%d",
             self.tp_rank,
             self.tp_size,
             self.current_layer,

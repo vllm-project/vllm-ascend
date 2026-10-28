@@ -18,7 +18,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+    EXCHANGE_STATUS_BYTES,
+    KVPoolWorker,
+)
 
 SEG_BYTES = 64  # bytes per segment
 SEGS_PER_BLOCK = 3  # e.g. MLA: latent + rope, per layer
@@ -52,18 +55,43 @@ def make_worker(tp_rank: int, tp_size: int, num_blocks: int, seed: int = 0) -> K
     return worker
 
 
-def gather_sim(workers: list[KVPoolWorker], num_blocks: int, rank: int) -> tuple[torch.Tensor, list[int], int]:
-    """Return the buffer ``all_gather_into_tensor`` would give ``rank``."""
+def gather_sim(
+    workers: list[KVPoolWorker], num_blocks: int, rank: int, bad_ranks: tuple[int, ...] = ()
+) -> tuple[torch.Tensor, list[int], int]:
+    """Return the buffer ``all_gather_into_tensor`` would give ``rank``.
+
+    Mirrors the production slot layout: shard bytes first, one status byte at
+    the tail, ``slot = max_len + 1`` bytes per rank.
+    """
     shards = []
     for r, w in enumerate(workers):
         my_idx = list(range(r, num_blocks, w.put_step))
         shards.append(w._pack_blocks(my_idx, w.test_addr_list, w.test_size_list, num_blocks))
     lens = [int(s.numel()) for s in shards]
     max_len = max(lens)
-    recv = torch.zeros(max_len * len(workers), dtype=torch.uint8)
+    slot = max_len + EXCHANGE_STATUS_BYTES
+    recv = torch.zeros(slot * len(workers), dtype=torch.uint8)
     for k, shard in enumerate(shards):
-        recv[k * max_len : k * max_len + shard.numel()] = shard
-    return recv, lens, max_len
+        recv[k * slot : k * slot + shard.numel()] = shard
+        recv[k * slot + max_len] = 1 if k in bad_ranks else 0
+    return recv, lens, slot
+
+
+def stats_stub(all_ok: int = 1) -> dict:
+    """The result shape ``_exchange_read_shards`` returns."""
+    return {
+        "pack_ms": 0.0,
+        "lens_ms": 0.0,
+        "gather_ms": 0.0,
+        "sync_ms": 0.0,
+        "wb_ms": 0.0,
+        "runs": 0,
+        "wb_ops": 0,
+        "stride_ops": 0,
+        "recv_bytes": 0,
+        "lens_local": 1,
+        "all_ok": all_ok,
+    }
 
 
 def test_seg_plan_emits_one_strided_entry_per_segment():
@@ -155,8 +183,8 @@ def test_roundtrip_reproduces_the_full_kv_cache(tp_size: int, num_blocks: int):
             cache[i].copy_(master[i])
     # 2) pack + all_gather + write-back, rank by rank
     for r, w in enumerate(workers):
-        recv, lens, max_len = gather_sim(workers, num_blocks, r)
-        w._writeback_shards(recv, lens, max_len, r, w.test_addr_list, w.test_size_list, num_blocks)
+        recv, lens, slot = gather_sim(workers, num_blocks, r)
+        w._writeback_shards(recv, lens, slot, r, w.test_addr_list, w.test_size_list, num_blocks)
     # 3) every rank must hold the full KV cache byte for byte
     for r, w in enumerate(workers):
         assert torch.equal(w.test_cache, master), f"rank {r} did not rebuild the KV cache"
@@ -166,9 +194,9 @@ def test_writeback_reports_a_single_strided_copy_per_segment():
     """The strided plan must collapse the write-back into one copy per segment."""
     num_blocks, tp_size = 65, 8
     workers = [make_worker(r, tp_size, num_blocks, seed=r) for r in range(tp_size)]
-    recv, lens, max_len = gather_sim(workers, num_blocks, 0)
+    recv, lens, slot = gather_sim(workers, num_blocks, 0)
     runs, wb_ops, stride_ops = workers[0]._writeback_shards(
-        recv, lens, max_len, 0, workers[0].test_addr_list, workers[0].test_size_list, num_blocks
+        recv, lens, slot, 0, workers[0].test_addr_list, workers[0].test_size_list, num_blocks
     )
     peer_segments = SEGS_PER_BLOCK * (tp_size - 1)
     assert stride_ops == peer_segments
@@ -177,12 +205,20 @@ def test_writeback_reports_a_single_strided_copy_per_segment():
 
 
 def test_falls_back_when_the_backend_reports_missing_blocks():
-    """A partial shard read must hand the request back to the full read path."""
+    """A partial shard read must hand the request back to the full read path.
+
+    The verdict is *published* in the exchange instead of returning early: the
+    peers are already inside the collective, so leaving here would strand them
+    in the all_gather while this rank runs the full read alone.
+    """
     num_blocks, tp_size = 8, 4
     worker = make_worker(0, tp_size, num_blocks)
     worker.m_store = MagicMock()
     worker.m_store.get.return_value = [1, 0]
+    worker._exchange_read_shards = MagicMock(return_value=stats_stub(all_ok=0))
     assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is False
+    assert worker._exchange_read_shards.call_count == 1
+    assert worker._exchange_read_shards.call_args[0][-1] == 0
 
 
 @pytest.mark.parametrize("ret", [None, [0], [1, 0]])
@@ -200,7 +236,9 @@ def test_every_not_in_pool_signal_falls_back(ret):
     worker = make_worker(0, tp_size, num_blocks)
     worker.m_store = MagicMock()
     worker.m_store.get.return_value = ret
+    worker._exchange_read_shards = MagicMock(return_value=stats_stub(all_ok=0))
     assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is False
+    assert worker._exchange_read_shards.call_args[0][-1] == 0
 
 
 def test_a_hit_reads_exactly_the_local_shard():
@@ -210,20 +248,7 @@ def test_a_hit_reads_exactly_the_local_shard():
     worker.m_store = MagicMock()
     my_idx = list(range(rank, num_blocks, tp_size))
     worker.m_store.get.return_value = [0] * len(my_idx)
-    worker._exchange_read_shards = MagicMock(
-        return_value={
-            "pack_ms": 0.0,
-            "lens_ms": 0.0,
-            "gather_ms": 0.0,
-            "sync_ms": 0.0,
-            "wb_ms": 0.0,
-            "runs": 0,
-            "wb_ops": 0,
-            "stride_ops": 0,
-            "recv_bytes": 0,
-            "lens_local": 1,
-        }
-    )
+    worker._exchange_read_shards = MagicMock(return_value=stats_stub())
     assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is True
     assert worker.m_store.get.call_count == 1
     asked_keys = worker.m_store.get.call_args[0][0]
@@ -234,6 +259,46 @@ def test_a_hit_reads_exactly_the_local_shard():
 def test_empty_request_is_not_handled(monkeypatch):
     worker = make_worker(0, 4, 8)
     assert worker._load_with_read_dedup([], [], [], []) is False
+
+
+def test_backend_raise_becomes_a_published_fallback():
+    """A raising backend must not escape: escaping skips the collective."""
+    num_blocks, tp_size, rank = 8, 4, 2
+    worker = make_worker(rank, tp_size, num_blocks)
+    worker.m_store = MagicMock()
+    worker.m_store.get.side_effect = RuntimeError("transport down")
+    worker._exchange_read_shards = MagicMock(return_value=stats_stub(all_ok=0))
+    assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is False
+    assert worker._exchange_read_shards.call_args[0][-1] == 0
+
+
+def test_short_request_still_participates_in_the_exchange():
+    """Fewer blocks than ranks means empty shards, not an early return."""
+    num_blocks, tp_size, rank = 3, 8, 5
+    worker = make_worker(rank, tp_size, num_blocks)
+    worker.m_store = MagicMock()
+    worker._exchange_read_shards = MagicMock(return_value=stats_stub())
+    assert worker._load_with_read_dedup(worker.test_keys, worker.test_addr_list, worker.test_size_list, []) is True
+    worker.m_store.get.assert_not_called()
+    assert worker._exchange_read_shards.call_args[0][1] == []
+    assert worker._exchange_read_shards.call_args[0][-1] == 1
+
+
+def test_exchange_all_ok_reads_the_status_bytes():
+    """One unhealthy rank must make the whole group fall back."""
+    num_blocks, tp_size = 8, 4
+    workers = [make_worker(r, tp_size, num_blocks, seed=r) for r in range(tp_size)]
+    # 每个分片的字节数在这里是等长的，直接算，不必 pack 一遍
+    max_len = (num_blocks // tp_size) * SEGS_PER_BLOCK * SEG_BYTES
+    slot = max_len + EXCHANGE_STATUS_BYTES
+
+    recv, _lens, slot_ok = gather_sim(workers, num_blocks, 0)
+    assert slot_ok == slot
+    assert workers[0]._exchange_all_ok(recv, slot, max_len, tp_size)
+
+    for bad in range(tp_size):
+        recv_bad, _l, _s = gather_sim(workers, num_blocks, 0, bad_ranks=(bad,))
+        assert not workers[0]._exchange_all_ok(recv_bad, slot, max_len, tp_size), f"rank {bad} not detected"
 
 
 def test_guards(monkeypatch):
