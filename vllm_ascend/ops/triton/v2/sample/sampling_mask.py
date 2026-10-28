@@ -46,6 +46,8 @@ def _pack_sampling_mask_kernel_ascend(
         )
         keep = (logits > -float("inf")) & (logits < float("inf"))
         keep_i32 = keep.to(tl.int32)
+        # Triton-Ascend reduces an i1 tensor as a boolean. Cast before the sum
+        # so counts contains the number of finite logits, not the tile count.
         count += tl.sum(keep_i32)
 
         bits = tl.trans(tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)))
@@ -109,6 +111,9 @@ def sampling_mask_from_logits_npu(
             BLOCK_SIZE=_BLOCK_SIZE,
         )
 
+    # Keep compact token IDs zero-width so upstream tolists() decodes the exact
+    # packed mask for every non-empty row. This avoids the cumsum-based dynamic
+    # scatter that hangs on Triton-Ascend 3.2.2, but may increase CPU decoding work.
     logger.warning_once(
         "Compact sampling-mask token IDs are temporarily unsupported on Ascend; "
         "falling back to exact packed-mask decoding, which may increase CPU work.",
