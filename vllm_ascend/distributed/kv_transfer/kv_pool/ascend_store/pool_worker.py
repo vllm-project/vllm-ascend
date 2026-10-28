@@ -78,6 +78,10 @@ LENS_CACHE_MAX = 64
 
 class KVPoolWorker:
     # The main class for the cache engine.
+    # task #14140: KV cache tensor 段表 (base_addr, region_bytes, tensor)。
+    # register_kv_caches 正常初始化；仓库里部分既有单测用 __new__() 造骨架
+    # 直接调 _infer_cache_group_metadata，此时由调用方 getattr 兜底。
+    _kv_cache_addr_segments: list[tuple[int, int, torch.Tensor]]
 
     def __init__(
         self,
@@ -1297,7 +1301,7 @@ class KVPoolWorker:
         # task #14140: KV cache tensor 段表 (base_addr, region_bytes, tensor)，
         # 由 _infer_cache_group_metadata 注册时填充，供读侧去重的
         # addr->tensor 视图解析（_resolve_addr_tensor）使用。
-        self._kv_cache_addr_segments: list[tuple[int, int, torch.Tensor]] = []
+        self._kv_cache_addr_segments = []
         self.kv_caches = kv_caches
         if self.use_kvpp:
             self.physical_layer_to_group_layers.clear()
