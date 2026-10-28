@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PCP gathered C8 payloads must retain their matching compact cache addresses."""
+"""PCP gathered packed KV must retain its matching compact cache addresses."""
 
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -21,15 +21,16 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
 
 @pytest.mark.parametrize("impl_cls", [AscendSFAPCPImpl, AscendSFAPCPDCPImpl])
 @pytest.mark.parametrize("num_decode_tokens", [0, 2, 5])
-@pytest.mark.parametrize("rope_dim", [0, 2], ids=["nope", "rope"])
-def test_native_pcp_c8_preserves_gathered_payload_addresses(impl_cls, num_decode_tokens, rope_dim):
+@pytest.mark.parametrize("cache_mode,rope_dim", [("c8", 0), ("c8", 2), ("tq4", 2)])
+def test_native_pcp_packed_kv_preserves_gathered_payload_addresses(impl_cls, num_decode_tokens, cache_mode, rope_dim):
     impl = impl_cls.__new__(impl_cls)
     impl.is_pcp_decode_sharded = False
     impl.qk_rope_head_dim = rope_dim
     impl.kv_lora_rank = 3
     impl.num_kv_heads = 1
-    impl.enable_sparse_sfa_c8 = True
-    impl.enable_sparse_sfa_turboquant = False
+    impl.enable_sparse_sfa_c8 = cache_mode == "c8"
+    impl.enable_sparse_sfa_turboquant = cache_mode == "tq4"
+    impl.turboquant = Mock()
     impl.c8_cache_dtype = torch.int8
     impl.sfa_qsfa_tile_size = 32
     impl.sfa_qsfa_packed_kv_head_dim = 4 + rope_dim
@@ -107,6 +108,7 @@ def test_native_pcp_c8_preserves_gathered_payload_addresses(impl_cls, num_decode
     with (
         patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
         patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", side_effect=quantize),
+        patch("vllm_ascend.attention.sfa_v1.turboquant_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.DeviceOperator.scatter_cache", side_effect=scatter),
         patch.object(
             sparse_mla, "get_forward_context", return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)

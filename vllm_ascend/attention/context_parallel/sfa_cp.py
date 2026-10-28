@@ -391,7 +391,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         kv_outputs = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         # Packed native KV is scattered later. Its addresses must follow the
         # same removal of replicated decode rows as the gathered payload.
-        if len(kv_outputs) == 3:
+        if self.uses_packed_sfa_main_cache:
             return (*kv_outputs, slots)
         return kv_outputs
 
