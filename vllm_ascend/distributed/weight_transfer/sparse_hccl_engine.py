@@ -29,6 +29,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseWeightPatch as SparseWeightPatch,
 )
 
+from vllm_ascend.distributed.weight_transfer import hccl_common
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
@@ -164,7 +165,7 @@ class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngin
                     engine.client.init_weight_transfer_engine,
                     asdict(worker_init_info),
                 )
-                engine.model_update_group = HCCLWeightTransferEngine.trainer_init(asdict(init_info))
+                engine.model_update_group = hccl_common.trainer_init(init_info, rank=init_info.rank)
                 future.result()
             cleanup.pop_all()
 
