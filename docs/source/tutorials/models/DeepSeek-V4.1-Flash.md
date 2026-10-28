@@ -1028,7 +1028,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ### 5.3 1P1D Deployment with Memcache KV Cache Pool
 
-This configuration extends the A3 1P1D deployment in Section 5.2 with a
+This configuration extends the A3 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
 Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
 cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
 cache in Memcache. Both connectors are configured as children of
@@ -1044,7 +1044,7 @@ to install `memfabric-hybrid` and `memcache-hybrid`, configure
 `meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`, and start the
 Memcache MetaService. The
 Prefill and Decode nodes must use the same MetaService endpoint. Keep the
-`/etc/hccn.conf` container mount from Section 4.1.
+`/etc/hccn.conf` container mount from [Section 4.1](#41-docker-image-installation).
 
 This example uses separated Memcache deployment so that the pool reserves host
 memory before vLLM loads the model. Prepare one MetaService configuration and
@@ -1135,7 +1135,7 @@ python3 memcache_standalone.py
 For additional parameters and capacity constraints, refer to
 [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-Reuse `launch_online_dp.py` from Section 5.2.1.1. Set `MEMCACHE_INSTALL_PATH` to
+Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher). Set `MEMCACHE_INSTALL_PATH` to
 the `Location` reported by `pip show memcache_hybrid`, and set
 `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
 files above on both nodes.
@@ -1239,7 +1239,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.1.2 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from [Section 5.2.1.2](#5212-start-the-prefill-node) after all Decode engines are ready.
 
 #### 5.3.3 Start the Decode Node with Pooling
 
@@ -1342,8 +1342,8 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from Section
-5.2.1.3.
+Start the eight DP8/TP2 Decode engines with the launcher command from [Section
+5.2.1.3](#5213-start-the-decode-node).
 
 #### 5.3.4 Startup and Verification
 
@@ -1354,7 +1354,7 @@ PD proxy.
 Wait until both standalone Memcache processes report successful initialization
 before starting the Decode engines. Then wait until every Decode engine reports
 `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-same endpoint mapping described in Section 5.2.1.4.
+same endpoint mapping described in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs
 show Memcache lookup, get, put, and hit activity, and that Decode logs still
@@ -1375,7 +1375,7 @@ For Memcache configuration, capacity tuning, and troubleshooting, refer to the
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
-This configuration extends the A2 1P1D deployment in Section 5.2 with a
+This configuration extends the A2 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
 Mooncake KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
 cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
 cache in Mooncake. Both connectors are configured as children of
@@ -1521,7 +1521,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.2 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from [Section 5.2.2.2](#5222-start-the-prefill-nodes) after all Decode engines are ready.
 
 #### 5.4.3 Start the Decode Node with Pooling
 
@@ -1631,12 +1631,12 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2.2.3.
+Start the eight DP8/TP2 Decode engines with the launcher command from [Section 5.2.2.3](#5223-start-the-decode-nodes).
 
 #### 5.4.4 Startup and Verification
 
 Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
-Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in Section 5.2.2.4.
+Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs show Mooncake lookup, get, put, and hit activity, and that Decode logs still show normal Prefill-to-Decode KV transfer.
 
@@ -1834,7 +1834,7 @@ No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 
-The values in Sections 5.1 and 5.2 are starting points rather than globally
+The values in [Section 5.1](#51-single-node-colocated-deployment) and [Section 5.2](#52-1p1d-pd-disaggregated-deployment) are starting points rather than globally
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target input length, image sizes,
 output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,

@@ -23,7 +23,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -78,11 +78,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
-        prepare_kwargs: dict[str, Any] = (
-            {"precompute_context_kv": precompute_context_kv}
-            if vllm_version_is("0.31.0")
-            else {"prepare_forward": prepare_forward}
-        )
+        prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
                 forward_fn,
