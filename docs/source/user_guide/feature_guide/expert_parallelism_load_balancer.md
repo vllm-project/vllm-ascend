@@ -1,10 +1,25 @@
 # Expert Parallelism Load Balancer (EPLB)
 
-## Overview
+## Feature Introduction
 
 Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language Model) serving is essential for optimal performance.
 Dynamically rearranging experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token), as it requires global synchronization pauses that stall all in-flight requests.
-Our solution aims to minimize the impact of these pauses.
+Our solution aims to minimize the impact of these pauses. EPLB feature provides the following benefits:
+
+- Reduced Latency: Dynamically balances expert loads to minimize TTFT and TPOT by distributing workloads evenly across experts.
+- Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance.
+
+### Usage Scenarios
+
+EPLB is not recommended in the following scenarios because the load-balancing benefit may not offset its runtime overhead:
+
+- P node workloads with input sequences shorter than `1024` tokens.
+- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
+
+!!!WARNING
+
+    Meeting the above conditions may lead to performance degradation.
+    When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
 
 vLLM Ascend provides two EPLB integration paths:
 
@@ -33,14 +48,9 @@ The two paths use different switches and configuration schemas:
     configuration. Mixed configurations fail during startup with an explicit
     error instead of being silently ignored.
 
-## EPLB Effects
+### Constraints and Limitations
 
-- Reduced Latency: Dynamically balances expert loads to minimize TTFT and TPOT by distributing workloads evenly across experts.
-- Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance.
-
-## Support Scenarios
-
-### Models
+#### Models
 
 EPLB applies only to MoE models that support expert parallelism and whose MoE
 quantization method exposes a complete expert-weight movement layout. Support
@@ -55,7 +65,7 @@ traffic before production deployment.
 
     A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0` in both runners. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
-### Model Runner V2 Weight Formats
+#### Model Runner V2 Weight Formats
 
 The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is covered by an in-repository model-level regression test that runs on Ascend NPUs (`tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py`). Other enabled formats have not undergone the same level of validation and must be validated with the target model and hardware configuration before production deployment.
 
@@ -74,7 +84,7 @@ The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is co
 declare EPLB support (`supports_eplb = False`). This rejection is independent
 of hardware generation.
 
-### Model Runner V1 Quantization and Hardware
+#### Model Runner V1 Quantization and Hardware
 
 | QuantType                       | Supported Hardware          |
 | ------------------------------- | --------------------------- |
@@ -83,19 +93,7 @@ of hardware generation.
 | MXFP4                           | 950PR&950DT Products         |
 | MXFP8                           | 950PR&950DT Products         |
 
-### Usage Recommendations
-
-EPLB is not recommended in the following scenarios because the load-balancing benefit may not offset its runtime overhead:
-
-- P node workloads with input sequences shorter than `1024` tokens.
-- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
-
-!!!WARNING
-
-    Meeting the above conditions may lead to performance degradation.
-    When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
-
-## How to Use EPLB
+## Feature Usage
 
 ### Model Runner V2: Asynchronous EPLB
 
