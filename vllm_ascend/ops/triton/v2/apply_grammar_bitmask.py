@@ -74,11 +74,13 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        # Each unique mapped row/block owns this full writeback region.
+        if position_is_active:
+            valid = block_offset < vocab_size
+            ptrs = logits_ptr + logits_idx * logits_stride + block_offset
+            old = tl.load(ptrs, mask=valid, other=0)
+            value = tl.where(blocked, -float("inf"), old)
+            tl.store(ptrs, value, mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
