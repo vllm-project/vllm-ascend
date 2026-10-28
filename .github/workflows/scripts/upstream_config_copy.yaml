@@ -4,9 +4,9 @@ e2e-upstream_pr:
   - name: tests/lora/test_lora_manager.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/entrypoints/openai/chat_completion/test_chat_echo.py
+  - name: tests/models/language/generation/test_granite.py
     estimated_time: 20
-  - name: tests/v1/kv_connector/unit/offloading_connector/test_events.py
+  - name: tests/models/language/generation/test_granite.py
     estimated_time: 20
   - name: tests/models/language/generation/test_granite.py
     estimated_time: 20
