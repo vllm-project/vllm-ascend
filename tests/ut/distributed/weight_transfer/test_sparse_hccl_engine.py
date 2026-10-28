@@ -13,6 +13,7 @@ from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
     SparseHCCLTrainerWeightTransferEngine,
     SparseHCCLWeightTransferEngine,
     SparseWeightPatch,
+    _checkpoint_weight_loader_view,
     checkpoint_loader_views,
 )
 
@@ -92,7 +93,7 @@ def test_upstream_broadcast_filters_empty_patches_and_syncs_npu(empty_only):
 
 
 @pytest.mark.parametrize("failure", [None, "entry", "loading"])
-def test_checkpoint_loader_views_unwind_all_layers(failure):
+def test_checkpoint_loader_views_unwind_all_layers(monkeypatch, failure):
     events = []
 
     @contextmanager
@@ -109,8 +110,10 @@ def test_checkpoint_loader_views_unwind_all_layers(failure):
     for name in ("first", "second"):
         layer = torch.nn.Module()
         layer.name = name
-        layer.quant_method = SimpleNamespace(checkpoint_weight_loader_view=view)
         model.add_module(name, layer)
+    module = "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine"
+    monkeypatch.setattr(f"{module}._checkpoint_loader_layers", lambda model: model.children())
+    monkeypatch.setattr(f"{module}._checkpoint_weight_loader_view", view)
     expected = [("enter", "first")]
     if failure != "entry":
         expected.append(("enter", "second"))
@@ -120,3 +123,37 @@ def test_checkpoint_loader_views_unwind_all_layers(failure):
             raise RuntimeError("loading")
     expected += [("exit", name) for _, name in reversed(expected)]
     assert events == expected
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_checkpoint_loader_view_preserves_storage_and_restores_layout(monkeypatch, fail):
+    monkeypatch.setattr("torch_npu.get_npu_format", lambda parameter: 2, raising=False)
+    layer = torch.nn.Module()
+    layer.w13_weight = torch.nn.Parameter(torch.zeros(2, 3, 8))
+    layer.w2_weight = torch.nn.Parameter(torch.zeros(2, 4, 3))
+    addresses = [p.data_ptr() for p in layer.parameters()]
+    try:
+        with torch.no_grad(), _checkpoint_weight_loader_view(layer):
+            assert layer.w13_weight.shape == (2, 8, 3)
+            assert layer.w2_weight.shape == (2, 3, 4)
+            layer.w13_weight[1, 7, 2] = 9
+            layer.w2_weight[0, 2, 3] = 5
+            if fail:
+                raise RuntimeError("loader failed")
+    except RuntimeError:
+        assert fail
+    assert layer.w13_weight.shape == (2, 3, 8)
+    assert layer.w2_weight.shape == (2, 4, 3)
+    assert layer.w13_weight[1, 2, 7] == 9
+    assert layer.w2_weight[0, 3, 2] == 5
+    assert [p.data_ptr() for p in layer.parameters()] == addresses
+
+
+@pytest.mark.parametrize("nz", [False, True])
+def test_checkpoint_loader_view_rejects_unsupported_expert_storage(monkeypatch, nz):
+    monkeypatch.setattr("torch_npu.get_npu_format", lambda parameter: 29, raising=False)
+    layer = SimpleNamespace()
+    if nz:
+        layer.w13_weight = layer.w2_weight = torch.nn.Parameter(torch.zeros(2, 3, 4))
+    with pytest.raises(NotImplementedError), _checkpoint_weight_loader_view(layer):
+        pytest.fail("unsupported layout entered")

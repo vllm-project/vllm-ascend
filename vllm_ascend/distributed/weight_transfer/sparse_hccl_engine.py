@@ -43,15 +43,48 @@ __all__ = [
 ]
 
 
+def _checkpoint_loader_layers(model: torch.nn.Module) -> Iterator[torch.nn.Module]:
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+
+    for layer in model.modules():
+        if isinstance(getattr(layer, "quant_method", None), AscendUnquantizedFusedMoEMethod):
+            yield layer
+
+
+def _validate_checkpoint_weight_loader_view(layer: torch.nn.Module) -> None:
+    import torch_npu
+
+    parameters = [getattr(layer, name, None) for name in ("w13_weight", "w2_weight")]
+    if any(parameter is None for parameter in parameters):
+        raise NotImplementedError("Checkpoint sparse updates require unsplit ND expert weights")
+    if any(torch_npu.get_npu_format(parameter) not in (0, 2) for parameter in parameters):
+        raise NotImplementedError("Checkpoint sparse updates require ND expert weights")
+
+
+@contextmanager
+def _checkpoint_weight_loader_view(layer: torch.nn.Module) -> Iterator[None]:
+    """Expose [expert, output, input] views over Ascend's transposed storage.
+
+    Restore inference views even if loading fails; written values are not rolled back.
+    """
+    _validate_checkpoint_weight_loader_view(layer)
+    parameters = [layer.w13_weight, layer.w2_weight]
+    originals = [parameter.data for parameter in parameters]
+    try:
+        for parameter, original in zip(parameters, originals):
+            parameter.data = original.transpose(1, 2)
+        yield
+    finally:
+        for parameter, original in zip(parameters, originals):
+            parameter.data = original
+
+
 @contextmanager
 def checkpoint_loader_views(model: torch.nn.Module) -> Iterator[None]:
     """Expose loader layouts while preserving the inference tensor storage."""
     with ExitStack() as stack:
-        for layer in model.modules():
-            method = getattr(layer, "quant_method", None)
-            view = getattr(method, "checkpoint_weight_loader_view", None)
-            if view is not None:
-                stack.enter_context(view(layer))
+        for layer in _checkpoint_loader_layers(model):
+            stack.enter_context(_checkpoint_weight_loader_view(layer))
         yield
 
 
@@ -76,10 +109,8 @@ class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
             raise NotImplementedError("Sparse HCCL does not support EPLB")
         if self.model_config.quantization is not None:
             raise NotImplementedError("Sparse HCCL requires unquantized floating-point weights")
-        for layer in self.model.modules():
-            validate = getattr(getattr(layer, "quant_method", None), "validate_checkpoint_weight_loader_view", None)
-            if validate is not None:
-                validate(layer)
+        for layer in _checkpoint_loader_layers(self.model):
+            _validate_checkpoint_weight_loader_view(layer)
         for parameter in self.model.parameters():
             if parameter.device.type == "npu":
                 import torch_npu
