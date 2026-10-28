@@ -352,6 +352,41 @@ def test_torch_data_handle_is_refused():
         _ = buf.cpu.data
 
 
+@pytest.mark.parametrize(
+    "alias",
+    [
+        lambda cpu: cpu.to(torch.int32),  # no-op cast: returns the mirror itself
+        lambda cpu: cpu.detach(),
+        lambda cpu: cpu.view(-1),
+        lambda cpu: cpu.reshape(-1),
+        lambda cpu: cpu.contiguous(),
+        lambda cpu: cpu.t(),
+        lambda cpu: cpu.narrow(0, 0, 2),
+        lambda cpu: cpu.split(2)[0],
+    ],
+)
+def test_torch_alias_writes_reach_the_device_shadow(alias):
+    # Every one of these hands out a tensor over the mirror's storage, so a
+    # write through it must publish the whole buffer.
+    buf = _make_uva_buffer(8)
+
+    alias(buf.cpu).fill_(9)
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
+
+
+def test_numpy_explicit_inplace_dunder_reaches_the_device_shadow():
+    # ``buf.np += 5`` fails on the proxy (no __iadd__ on the type), but an
+    # explicit __iadd__ call mutates the mirror in place and must publish it.
+    buf = _make_uva_buffer(8)
+
+    buf.np.__iadd__(5)
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
+
+
 def test_uint64_shadow_copies_through_int64_storage():
     buf = _make_uva_buffer(4, cols=1, dtype=torch.uint64)
 

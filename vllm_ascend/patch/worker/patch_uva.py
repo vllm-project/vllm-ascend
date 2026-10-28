@@ -259,11 +259,12 @@ class MonitoredNumPyArray:
 
         def _call(*args, **kwargs):
             result = attr(*args, **kwargs)
-            if result is None:
+            if result is None or (name.startswith("__i") and name.endswith("__")):
                 # ndarray's in-place methods (fill, put, sort, partition, ...)
-                # mutate the receiver and return None.
+                # mutate the receiver and return None; an explicit __iadd__
+                # and friends mutate it and return themselves.
                 self._callback(slice(None))
-            elif isinstance(result, np.ndarray):
+            if isinstance(result, np.ndarray):
                 return self._seal(result)
             return result
 
@@ -287,6 +288,7 @@ class MonitoredTorchTensor:
     def __init__(self, tensor: torch.Tensor, callback: Callable):
         self._tensor = tensor
         self._callback = callback
+        self._storage_ptr = tensor.untyped_storage().data_ptr()
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
@@ -296,6 +298,14 @@ class MonitoredTorchTensor:
         # See the class docstring: a view write is the one remaining way to
         # reach the mirror unnoticed, and readers need a real tensor here.
         return self._tensor[key]
+
+    def _is_mirror_alias(self, value) -> bool:
+        """Whether ``value`` is a tensor, or a tuple of tensors, over our memory."""
+        if isinstance(value, torch.Tensor):
+            return value.untyped_storage().data_ptr() == self._storage_ptr
+        if isinstance(value, tuple) and value:
+            return self._is_mirror_alias(value[0])
+        return False
 
     def __getattr__(self, name):
         if name == "data":
@@ -313,16 +323,23 @@ class MonitoredTorchTensor:
             # Raw storage access can write any element; publish everything.
             self._callback(slice(None))
             return attr
-        if callable(attr) and name.endswith("_") and not name.startswith("__"):
+        if not callable(attr):
+            return attr
 
-            def _inplace(*args, **kwargs):
-                # torch's in-place methods always mutate the receiver, so the
-                # whole buffer is dirty whichever rows they touch.
+        def _call(*args, **kwargs):
+            inplace = name.endswith("_") and not name.startswith("__")
+            if inplace:
+                # torch's in-place convention: the receiver always changes, so
+                # the whole buffer is dirty whichever rows it touches.
                 self._callback(slice(None))
-                return attr(*args, **kwargs)
+            result = attr(*args, **kwargs)
+            if not inplace and self._is_mirror_alias(result):
+                # ``to``/``detach``/``view``/``split``... handed out an alias
+                # of the mirror; a write through it has to be published.
+                self._callback(slice(None))
+            return result
 
-            return _inplace
-        return attr
+        return _call
 
 
 def _zeros_on_npu(cpu: torch.Tensor) -> torch.Tensor:
