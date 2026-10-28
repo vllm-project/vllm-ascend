@@ -112,7 +112,7 @@ Required layer fields:
 Internal kernel arguments consist of the tensors above, INT64 base-address and
 per-layer stride tables, element-stride scalars, `NULL_BLOCK_ID` and shape/tile
 attributes. `K`, `V`, `BK`, `BV`, `NUM_HEADS`, `SPEC_QUERY_LEN`, `UNROLL_COMMIT`, gate/align flags,
-`BLOCK_D`, `BLOCK_HISTORY`, `DIM_STRIDE`, `COPY_PER_HISTORY` and grouped-head tile
+`BLOCK_D`, `BLOCK_HISTORY`, `DIM_STRIDE`, `USE_1D_CHANNEL_GATHER` and grouped-head tile
 `BH` specialize their respective kernels. The plan's `HAS_REQUEST_INDICES` and `ALIGN_MODE` are derived
 from optional pointer presence by `triton.heuristics`. Address tables and context
 buffers are implementation-owned, not user outputs to replace between replays.
@@ -160,8 +160,9 @@ buffers are implementation-owned, not user outputs to replace between replays.
   lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
   The estimate covers two matrix buffers normally and six with align enabled.
   Two rows' worth of vector temporaries
-  are reserved before rounding down to a power of two. Context creation initializes and caches the UB budget
-  outside graph capture. Missing device properties use the utility's existing
+  are reserved before rounding down to a power of two. Context creation initializes
+  the shared device-property cache outside graph capture; kernel launch reads its UB budget.
+  Missing device properties use the utility's existing
   conservative 192 KiB fallback, including on A5; this is not a hardware-size claim.
   A3 strided compaction copies one history position at a time, preserving exact
   in-place shifts and graph support on Triton-Ascend 3.2.2.
@@ -341,8 +342,8 @@ Including plan and compact, context latency changes range from -20.03% to
 -10.44% on A3, -0.11% to +0.19% for A5 grouped, and -1.34% to +0.81%
 for A5 ordinary. These are operator graph measurements; serving TPOT/ITL
 was not remeasured for this UB compatibility change. `UNROLL_COMMIT` and
-`COPY_PER_HISTORY` are fixed by device/layout; UB selection is cached by
-the context and does not create a new per-iteration compilation parameter.
+`USE_1D_CHANNEL_GATHER` are fixed by device/layout; UB selection reads the shared
+device-property cache and does not create a new per-iteration compilation parameter.
 
 ## Example
 

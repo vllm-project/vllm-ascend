@@ -317,7 +317,7 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         BLOCK_HISTORY=4,
         ALIGN_MODE=align,
         DIM_STRIDE=views[0].stride(1),
-        COPY_PER_HISTORY=not is_950(),
+        USE_1D_CHANNEL_GATHER=not is_950(),
         num_warps=4,
     )
     for actual, expected in zip(backings, expected_backings):
@@ -850,7 +850,8 @@ def test_commit_window_uses_device_path(
                 if not grouped_commit:
                     matrix_buffers = 2
                     assert (
-                        kwargs["BV"] * kwargs["BK"] * torch.float32.itemsize * matrix_buffers <= context.ub_size_bytes
+                        kwargs["BV"] * kwargs["BK"] * torch.float32.itemsize * matrix_buffers
+                        <= recoverssm_module.get_ub_size_bytes()
                     )
                     assert kwargs["UNROLL_COMMIT"] == is_950()
                 return launch(*args, **kwargs)
