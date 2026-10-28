@@ -121,3 +121,22 @@ def test_no_grammar_requests_skip_host_and_device_work(monkeypatch):
 
     assert not kernel.calls
     assert not worker._copies_pending
+    assert worker._host_grammar_bitmask is None
+    assert worker._host_logits_indices is None
+
+
+def test_host_buffers_are_allocated_lazily_on_first_grammar_request(monkeypatch):
+    worker, kernel = make_worker(monkeypatch)
+    input_batch = SimpleNamespace(
+        req_ids=["a"],
+        cu_num_logits=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    bitmask = np.full((1, 2), -1, dtype=np.int32)
+
+    assert worker._host_grammar_bitmask is None
+    worker.apply_grammar_bitmask(torch.zeros(1, 64), input_batch, ["a"], bitmask)
+
+    assert worker._host_grammar_bitmask is not None
+    assert worker._host_grammar_bitmask.shape == (8, 2)
+    assert worker._host_logits_indices is not None
+    assert kernel.calls

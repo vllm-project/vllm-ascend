@@ -28,22 +28,33 @@ class AscendStructuredOutputsWorker(StructuredOutputsWorker):
         if "num_bonus_tokens" in inspect.signature(super().__init__).parameters:
             kwargs["num_bonus_tokens"] = num_bonus_tokens
         super().__init__(max_num_logits, vocab_size, device, mask_stride, **kwargs)
+        self._max_num_logits = max_num_logits
+        self._vocab_size = vocab_size
+        self._host_logits_indices: torch.Tensor | None = None
+        self._host_logits_indices_np = None
+        self._host_grammar_bitmask: torch.Tensor | None = None
+        self._copy_event = torch.cuda.Event()
+        self._copies_pending = False
+        self._mapping_key: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+
+    def _ensure_host_buffers(self) -> None:
+        if self._host_grammar_bitmask is not None:
+            return
+        # Allocated lazily: workloads without grammar requests never pin
+        # host huge pages (required on 310P unified-memory hosts).
         self._host_logits_indices = torch.empty(
-            max_num_logits,
+            self._max_num_logits,
             dtype=torch.int32,
             device="cpu",
             pin_memory=PIN_MEMORY,
         )
         self._host_logits_indices_np = self._host_logits_indices.numpy()
         self._host_grammar_bitmask = torch.empty(
-            (max_num_logits, cdiv(vocab_size, 32)),
+            (self._max_num_logits, cdiv(self._vocab_size, 32)),
             dtype=torch.int32,
             device="cpu",
             pin_memory=PIN_MEMORY,
         )
-        self._copy_event = torch.cuda.Event()
-        self._copies_pending = False
-        self._mapping_key: tuple[tuple[str, ...], tuple[str, ...]] | None = None
 
     def _wait_for_host_buffers(self) -> None:
         if self._copies_pending:
@@ -90,6 +101,9 @@ class AscendStructuredOutputsWorker(StructuredOutputsWorker):
             assert num_masks == len(mapping)
 
         self._wait_for_host_buffers()
+        self._ensure_host_buffers()
+        assert self._host_grammar_bitmask is not None
+        assert self._host_logits_indices is not None
         host_bitmask = self._host_grammar_bitmask[:num_masks]
         host_bitmask.copy_(torch.from_numpy(grammar_bitmask))
 
@@ -102,6 +116,7 @@ class AscendStructuredOutputsWorker(StructuredOutputsWorker):
                 logits_indices = self.logits_indices[:num_masks]
             else:
                 assert mapping is not None
+                assert self._host_logits_indices_np is not None
                 self._host_logits_indices_np[:num_masks] = mapping
                 logits_indices = self.logits_indices[:num_masks].copy_(
                     self._host_logits_indices[:num_masks],
