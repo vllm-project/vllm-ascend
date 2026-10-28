@@ -55,27 +55,107 @@ def is_uva_available() -> bool:
     )
 
 
-def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
-    """get the set of row indices involved in the given key."""
-    if isinstance(key, int):
-        # parse index such as np[1]
-        key = key if key >= 0 else dim_size + key
-        # handle negative index
-        if key < 0 or key >= dim_size:
-            raise IndexError(f"row index {key} out of [0, {dim_size})")
-        return {key}
-    elif isinstance(key, slice):
-        # parse slice such as np[1:3]
-        start, stop, step = key.indices(dim_size)
-        return set(range(start, stop, step))
-    elif isinstance(key, tuple):
-        # parse row slice such as np[1,:100]
-        if len(key) == 0:
-            return set(range(dim_size))
-        return get_row_indices_from_key(key[0], dim_size)
-    else:
-        # for other types such as list/ndarray, we return all rows.
-        return set(range(dim_size))
+class _DirtyRows:
+    """Track which rows of the host shadow need a device refresh.
+
+    These buffers are sized like the flattened block table, so ``dim_size`` can
+    reach millions of rows. Recording the dirty rows as
+    ``set(range(dim_size))`` (what an arbitrary key used to do) and calling a
+    Python callback once per row made a single ``np[:n] = x`` cost hundreds of
+    milliseconds on the host.
+
+    The common write pattern is a contiguous prefix (``buf.np[:n] = x``), which
+    is tracked in O(1). Anything scattered falls back to a vectorised boolean
+    mask, so the per-write cost stays in NumPy instead of Python.
+    """
+
+    __slots__ = ("_size", "_prefix", "_count", "_mask")
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+        # Rows in [0, _prefix) are known to be dirty. _count may over-count
+        # (a row can be marked twice), but it never under-counts, which is all
+        # the "prefix is fully covered" proof needs.
+        self._prefix = 0
+        self._count = 0
+        self._mask: np.ndarray | None = None
+
+    def mark(self, key) -> None:
+        """Record the rows touched by an ``arr[key] = value`` write."""
+        if isinstance(key, tuple):
+            if not key:
+                # ``arr[()] = value`` addresses the whole buffer in NumPy.
+                self._mark_whole()
+                return
+            rows = key[0]
+        else:
+            rows = key
+        if rows is None or rows is Ellipsis:
+            self._mark_whole()
+            return
+        if isinstance(rows, slice):
+            start, stop, step = rows.indices(self._size)
+            if step < 0:
+                # A negative step can never extend the prefix, and an empty
+                # one must not be confused with a reversed range.
+                if stop >= start:
+                    return
+                self._mark_rows(np.arange(start, stop, step))
+                return
+            if stop <= start:
+                return
+            if step == 1 and start <= self._prefix:
+                # Extends (or stays inside) the dirty prefix: O(1).
+                self._count += stop - start
+                if stop > self._prefix:
+                    self._prefix = stop
+                return
+            self._mark_rows(np.arange(start, stop, step))
+            return
+        if isinstance(rows, (int, np.integer)) and not isinstance(rows, bool):
+            index = int(rows)
+            if index < 0:
+                index += self._size
+            if index < 0 or index >= self._size:
+                raise IndexError(f"row index {rows} out of [0, {self._size})")
+            if index == self._prefix:
+                self._prefix += 1
+                self._count += 1
+            elif index < self._prefix:
+                self._count += 1
+            else:
+                self._mark_rows(np.array([index], dtype=np.intp))
+            return
+        self._mark_rows(rows if isinstance(rows, np.ndarray) else np.asarray(rows))
+
+    def _mark_whole(self) -> None:
+        self._count += self._size
+        self._prefix = self._size
+
+    def _mark_rows(self, rows: np.ndarray) -> None:
+        if self._mask is None:
+            self._mask = np.zeros(self._size, dtype=bool)
+        self._mask[rows] = True
+
+    def take(self) -> list[tuple[int, int]]:
+        """Return the contiguous ``[start, stop)`` runs to copy, then reset."""
+        runs: list[tuple[int, int]] = []
+        covered = 0
+        if self._prefix:
+            # _count >= _prefix, so every row below _prefix was marked.
+            runs.append((0, self._prefix))
+            covered = self._prefix
+        if self._mask is not None:
+            index = np.flatnonzero(self._mask[covered:])
+            self._mask[:] = False
+            if index.size:
+                index += covered
+                breaks = np.flatnonzero(np.diff(index) != 1) + 1
+                for run in np.split(index, breaks):
+                    runs.append((int(run[0]), int(run[-1]) + 1))
+        self._prefix = 0
+        self._count = 0
+        return runs
 
 
 class MonitoredNumPyArray:
@@ -87,10 +167,7 @@ class MonitoredNumPyArray:
 
     def __setitem__(self, key, value):
         self._array[key] = value
-        dim_size = self._array.shape[0]
-        row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        self._callback(key)
 
     def __getitem__(self, key):
         return self._array[key]
@@ -108,10 +185,7 @@ class MonitoredTorchTensor:
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
-        dim_size = self._tensor.size(0)
-        row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        self._callback(key)
 
     def __getitem__(self, key):
         return self._tensor[key]
@@ -150,7 +224,7 @@ class UvaBufferWrapper:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
-        self._modified_indices: set[int] = set()
+        self._dirty = _DirtyRows(self._cpu.size(0))
         requested_real_uva = is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
@@ -160,41 +234,40 @@ class UvaBufferWrapper:
         if requested_real_uva and not self._use_real_uva:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
         self._uva: torch.Tensor = view if view is not None else _zeros_on_npu(self._cpu)
+        # Views are either raw (real UVA) or monitored wrappers (emulated path),
+        # so both attributes are explicitly typed as a union.
+        self._cpu_view: torch.Tensor | MonitoredTorchTensor
+        self._np_view: np.ndarray | MonitoredNumPyArray
+        if self._use_real_uva:
+            self._cpu_view = self._cpu
+            self._np_view = self._np
+        else:
+            self._cpu_view = MonitoredTorchTensor(self._cpu, self._dirty.mark)
+            self._np_view = MonitoredNumPyArray(self._np, self._dirty.mark)
 
-    def _mark_cpu_modified(self, key: int):
-        self._modified_indices.add(key)
+    def _mark_cpu_modified(self, key) -> None:
+        self._dirty.mark(key)
 
     @property
     def cpu(self):
-        return self._cpu if self._use_real_uva else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return self._cpu_view
 
     @property
     def np(self):
-        return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return self._np_view
 
     def _sync_dirty_rows(self) -> None:
-        if not self._use_real_uva and self._modified_indices:
-            dirty_rows = sorted(self._modified_indices)
-            n_dirty = len(dirty_rows)
-            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
-                # Common path: dirty rows are a contiguous prefix [0..n-1].
-                # This is always the case when copy_to_uva writes via
-                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
-                # pinned and enables true async DMA without an intermediate
-                # tensor or stream sync.
-                _int64_storage(self._uva[:n_dirty]).copy_(_int64_storage(self._cpu[:n_dirty]), non_blocking=True)
+        if self._use_real_uva:
+            return
+        for start, stop in self._dirty.take():
+            src = self._cpu[start:stop]
+            dst = self._uva[start:stop]
+            # A slice of the pinned host buffer is still pinned, so the copy
+            # stays asynchronous without an intermediate staged tensor.
+            if src.dtype == torch.uint64:
+                dst.view(torch.int64).copy_(src.view(torch.int64), non_blocking=True)
             else:
-                # Sparse modification pattern — fall back to indexed copy.
-                # Explicitly re-pin the CPU source so that non_blocking is
-                # not silently degraded. uint64 is copied through its int64
-                # storage because NPU rejects DT_UINT64 in the copy kernel.
-                src = self._cpu[dirty_rows].pin_memory()
-                if src.dtype == torch.uint64:
-                    copied = _int64_storage(src).to(device="npu", non_blocking=True)
-                    _int64_storage(self._uva)[dirty_rows] = copied
-                else:
-                    self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
-            self._modified_indices.clear()
+                dst.copy_(src, non_blocking=True)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         """Get the device data of the buffer.
