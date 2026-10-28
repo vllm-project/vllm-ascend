@@ -5,8 +5,7 @@
 
 Context rows whose slot is ``PAD_SLOT_ID`` must not write K/V into the cache.
 Native vLLM produces those slots; this test checks the NPU write path honours
-them, which is the accuracy-critical half of the context prefix. Each layer is
-driven by its own physical slot table.
+them, which is the accuracy-critical half of the context prefix.
 """
 
 import pytest
@@ -54,29 +53,37 @@ def test_context_padding_slots_skip_cache_writes(num_slots):
     model = ContextKV()
     actual = num_slots - 1
 
-    states = torch.randn(actual, 64, device="npu", dtype=torch.bfloat16)
-    positions = torch.arange(actual, device="npu", dtype=torch.int64)
-    # Last row is padding; the real rows land on distinct per-layer slots.
+    # One state row per slot; the trailing row is padding (slot == PAD_SLOT_ID).
+    # ``npu_scatter_pa_kv_cache`` requires slot_mapping and key rows to match,
+    # so the padded row must be present in both.
+    states = torch.randn(num_slots, 64, device="npu", dtype=torch.bfloat16)
+    positions = torch.arange(num_slots, device="npu", dtype=torch.int64)
     layer_slots = []
     for layer in range(3):
+        first = _FIRST_REAL_SLOT + layer * num_slots
         slots = torch.full((num_slots,), PAD_SLOT_ID, dtype=torch.int32, device="npu")
-        first = _FIRST_REAL_SLOT + layer
         slots[:actual] = torch.arange(first, first + actual, device="npu", dtype=torch.int32)
         layer_slots.append(slots)
 
     model.precompute_and_store_context_kv(states, positions, layer_slots)
     torch.npu.synchronize()
+    with_padding = [(key.clone(), value.clone()) for key, value in model.caches]
 
-    for layer, ((key_cache, value_cache), slots) in enumerate(zip(model.caches, layer_slots)):
-        first = _FIRST_REAL_SLOT + layer
-        # Padding row (slot == PAD_SLOT_ID) wrote nothing: everything outside
-        # the real range keeps the initial value.
-        assert (key_cache[:first] == _INITIAL_CACHE_VALUE).all()
-        assert (value_cache[:first] == _INITIAL_CACHE_VALUE).all()
-        assert (key_cache[first + actual :] == _INITIAL_CACHE_VALUE).all()
-        assert (value_cache[first + actual :] == _INITIAL_CACHE_VALUE).all()
-        # Real rows did write.
-        assert not torch.equal(
-            key_cache[first : first + actual],
-            torch.full_like(key_cache[first : first + actual], _INITIAL_CACHE_VALUE),
-        )
+    # Reference: same weights, fresh cache, only the real rows written.
+    model.caches = ContextKV.new_caches()
+    model.precompute_and_store_context_kv(
+        states[:actual], positions[:actual], [slots[:actual] for slots in layer_slots]
+    )
+    torch.npu.synchronize()
+
+    for (key_cache, value_cache), (ref_key, ref_value) in zip(with_padding, model.caches):
+        # Padding wrote nothing: the padded pass is byte-identical to real-only.
+        torch.testing.assert_close(key_cache, ref_key, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(value_cache, ref_value, rtol=1e-2, atol=1e-2)
+
+    # Sanity: the real rows actually landed (a no-op scatter must not pass).
+    for (key_cache, _), slots in zip(model.caches, layer_slots):
+        flat = key_cache.reshape(-1, *key_cache.shape[2:])
+        written = flat[slots[:actual].long()]
+        initial = torch.full_like(written, _INITIAL_CACHE_VALUE)
+        assert not torch.equal(written, initial), "real slots were not written"
