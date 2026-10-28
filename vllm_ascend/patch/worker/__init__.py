@@ -67,6 +67,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_staged_writes  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_runner  # noqa
 

@@ -1678,3 +1678,38 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 37. File: worker/patch_v2/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.sample.sampler.Sampler.add_request`,
+#      `vllm.v1.worker.gpu.sample.sampler.Sampler.apply_staged_writes`
+#    Why:
+#      All sampler sub-states stage data only via add_request, but upstream
+#      calls apply_staged_writes on every step. On steps without new requests
+#      each flush still issues ~10 copy_to_uva calls; on the UVA fallback path
+#      (no mapped pinned host memory) every one of them is a real H2D copy,
+#      adding measurable CPU overhead to every decode step.
+#    How:
+#      Wrap add_request to set a staged flag and skip apply_staged_writes
+#      entirely when nothing was staged since the last flush. Data flow and
+#      ordering are unchanged; only no-op flushes are skipped.
+#    Related PR (if no, explain why):
+#      No, upstream has no issue for this yet; same dirty-flag pattern as
+#      upstream ThinkingBudgetState._budget_dirty.
+#    Future Plan:
+#      Remove when upstream guards no-op staged-write flushes.
+#
+#   2. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched.
+#    Related PR (if no, explain why):
+#      No, same as above.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
