@@ -209,7 +209,6 @@ import vllm.envs as envs_vllm  # noqa: E402 - sectioned/lazy import (port layout
 from vllm.config import (  # noqa: E402 - sectioned/lazy import (port layout)
     VllmConfig,
     get_current_vllm_config,
-    get_current_vllm_config_or_none,
 )
 from vllm.distributed import (  # noqa: E402 - sectioned/lazy import (port layout)
     get_tensor_model_parallel_rank,
@@ -267,10 +266,6 @@ from vllm_ascend.device.hardware_profile import (  # noqa: E402 - sectioned/lazy
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (  # noqa: E402 - sectioned/lazy import (port layout)
     attention_transfer_window,  # noqa: E402 - sectioned/lazy import (port layout)
-)
-from vllm_ascend.utils import (  # noqa: E402 - sectioned/lazy import (port layout)
-    MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE,
-    is_minimax_m3_fp8_kv_cache,
 )
 
 logger = logging.getLogger(__name__)
