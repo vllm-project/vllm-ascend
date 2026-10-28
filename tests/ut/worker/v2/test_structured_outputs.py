@@ -42,13 +42,18 @@ def fake_stream_context(stream):
     yield
 
 
-def make_worker(monkeypatch, mask_stride=1):
+def make_worker(monkeypatch, mask_stride=1, supports_pinned_buffers=False):
     stream = FakeStream()
     monkeypatch.setattr(torch.cuda, "Stream", lambda: stream)
     monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
     monkeypatch.setattr(torch.cuda, "stream", fake_stream_context)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: FakeStream())
     monkeypatch.setattr(worker_module, "PIN_MEMORY", False)
+    monkeypatch.setattr(
+        worker_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda capability: supports_pinned_buffers),
+    )
     kernel = FakeKernel()
     monkeypatch.setattr(worker_module.structured_outputs, "_apply_grammar_bitmask_kernel", kernel)
     worker = AscendStructuredOutputsWorker(8, 64, torch.device("cpu"), mask_stride)
@@ -141,3 +146,13 @@ def test_host_buffers_are_allocated_lazily_on_first_grammar_request(monkeypatch)
     assert worker._host_grammar_bitmask.shape == (8, 2)
     assert worker._host_logits_indices is not None
     assert kernel.calls
+
+
+def test_supported_profiles_allocate_host_buffers_eagerly(monkeypatch):
+    worker, kernel = make_worker(monkeypatch, supports_pinned_buffers=True)
+    input_batch = SimpleNamespace(req_ids=[], cu_num_logits=torch.tensor([0]))
+
+    assert worker._host_grammar_bitmask is not None
+    assert worker._host_logits_indices is not None
+    worker.apply_grammar_bitmask(torch.zeros(0, 64), input_batch, [], np.empty((0, 2), dtype=np.int32))
+    assert not kernel.calls

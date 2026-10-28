@@ -12,6 +12,8 @@ from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 GRAMMAR_BITMASK_BLOCK_SIZE = 8192
 
 
@@ -33,27 +35,32 @@ class AscendStructuredOutputsWorker(StructuredOutputsWorker):
         self._host_logits_indices: torch.Tensor | None = None
         self._host_logits_indices_np = None
         self._host_grammar_bitmask: torch.Tensor | None = None
+        self._allocate_host_buffers_eagerly = get_current_hardware_profile().supports(
+            HardwareCapability.PINNED_HOST_STAGING_BUFFERS
+        )
+        self._pin_host_buffers = PIN_MEMORY and self._allocate_host_buffers_eagerly
         self._copy_event = torch.cuda.Event()
         self._copies_pending = False
         self._mapping_key: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        if self._allocate_host_buffers_eagerly:
+            self._ensure_host_buffers()
 
     def _ensure_host_buffers(self) -> None:
         if self._host_grammar_bitmask is not None:
             return
-        # Allocated lazily: workloads without grammar requests never pin
-        # host huge pages (required on 310P unified-memory hosts).
+        # Compatibility profiles use unpinned, first-use staging buffers.
         self._host_logits_indices = torch.empty(
             self._max_num_logits,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=PIN_MEMORY,
+            pin_memory=self._pin_host_buffers,
         )
         self._host_logits_indices_np = self._host_logits_indices.numpy()
         self._host_grammar_bitmask = torch.empty(
             (self._max_num_logits, cdiv(self._vocab_size, 32)),
             dtype=torch.int32,
             device="cpu",
-            pin_memory=PIN_MEMORY,
+            pin_memory=self._pin_host_buffers,
         )
 
     def _wait_for_host_buffers(self) -> None:
