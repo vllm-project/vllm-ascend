@@ -1641,17 +1641,32 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.buffer_utils.UvaBuffer`
 #    Why:
-#       ASCEND NPUs do not support UVA in general. The default UVA buffer must be
-#       replaced with a wrapper that keeps CPU and NPU views of the same buffer.
+#       An Ascend NPU cannot address a pinned host buffer unless torch_npu
+#       registers it (`PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True`), while
+#       upstream `UvaBuffer` hands the same memory to the host and the device
+#       and never copies. Without that mapping there is no device view to give
+#       the kernels.
 #    How：
-#       Bind `UvaBuffer` to `UvaBufferWrapper`, which allocates a pinned CPU
-#       tensor and either maps it for real NPU UVA (when
-#       `pinned_mem_register:True` and a compatible triton-ascend is installed)
-#       or falls back to an independent NPU tensor with explicit dirty-row
-#       copying. It exposes `.cpu` / `.np` / `.uva()` to mimic the upstream
-#       `UvaBuffer` interface.
+#       Replace `UvaBuffer` with a wrapper that keeps the pinned host mirror, a
+#       device copy, and an async H2D copy of the rows the host wrote. Writes
+#       are tracked per row (a contiguous prefix in O(1), scattered writes
+#       through a mask) and published on `uva()`. A write the tracker cannot
+#       observe is refused or widened to a whole-buffer copy instead of leaving
+#       the device copy stale. With
+#       `PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True` the pinned buffer is
+#       mapped for the device, `uva()` returns it directly and nothing is
+#       copied.
+#    Test:
+#       `tests/ut/patch/worker/test_patch_uva_dirty_rows.py`,
+#       `tests/ut/patch/worker/test_patch_uva_zeros.py` and
+#       `tests/e2e/nightly/single_node/ops/singlecard_ops/test_uva_view.py`.
+#    Related PR (if no, explain why):
+#       No. Upstream only falls back to `NonUvaBuffer`, which copies the whole
+#       buffer on every `uva()` and blocks the host.
 #    Future Plan:
-#       Remove this patch when NPU supports UVA natively.
+#       Remove this patch once every supported deployment can map the pinned
+#       buffer (i.e. `get_npu_view_from_cpu_tensor` always succeeds), so the
+#       upstream UVA path can be used as is.
 #
 # ** 30. File: worker/patch_dspark.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
