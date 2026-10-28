@@ -837,7 +837,7 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device, dtype=torch.int32)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
