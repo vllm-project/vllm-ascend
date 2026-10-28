@@ -1,0 +1,7 @@
+pr: 20076
+entries:
+  - category: performance
+    text: >-
+      Reduced prefill time-to-first-token by 37-47% on NPU deployments that use the
+      emulated UVA path, by tracking host-shadow dirty rows in O(1) instead of
+      calling a Python callback once per row.
