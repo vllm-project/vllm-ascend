@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
 )
+from vllm_ascend.distributed.kv_transfer.utils.transfer_backend import ensure_mooncake_backend
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     tensor_storage_key,
@@ -153,6 +154,7 @@ class MooncakeBaseConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
 
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        ensure_mooncake_backend(vllm_config, type(self).__name__)
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
             device_name=device_name,
