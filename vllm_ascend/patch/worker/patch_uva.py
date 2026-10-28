@@ -142,8 +142,14 @@ class _DirtyRows:
             # Appending to the prefix keeps it contiguous.
             self._prefix += 1
         elif row > self._prefix:
-            # A row below the prefix is already covered by it.
-            self._mark_rows(np.array([row], dtype=np.intp))
+            # A row below the prefix is already covered by it. Set the bit
+            # directly: the 310P staged-write path lands here once per request
+            # and tensor, so a single-row write must not allocate an index
+            # array of its own.
+            if self._mask is None:
+                self._mask = np.zeros(self._size, dtype=bool)
+            self._mask[row] = True
+            self._mask_pending = True
 
     def _mark_whole(self) -> None:
         self._prefix = self._size
