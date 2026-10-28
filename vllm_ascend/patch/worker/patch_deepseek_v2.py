@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import vllm.envs as envs
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
@@ -10,6 +11,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -23,10 +25,12 @@ from vllm.model_executor.layers.mla import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2DecoderLayer,
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
     DeepseekV2Model,
+    DeepseekV2MoE,
     Indexer,
     _get_llama_4_scaling,
     yarn_get_mscale,
@@ -36,7 +40,13 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
-from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
+from vllm_ascend.utils import is_mtp_layer, oproj_tp_enable, should_reuse_topk
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -289,6 +299,81 @@ def _deepseek_v2_mla_attention_init(
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
+def _use_glm_sp_pp(vllm_config: VllmConfig) -> bool:
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    return (
+        getattr(getattr(vllm_config, "model_config", None), "architecture", None) == "GlmMoeDsaForCausalLM"
+        and vllm_config.use_v2_model_runner
+        and parallel_config.pipeline_parallel_size > 1
+        and parallel_config.use_sequence_parallel_moe
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and not oproj_tp_enable()
+    )
+
+
+_original_deepseek_v2_decoder_init = DeepseekV2DecoderLayer.__init__
+_original_deepseek_v2_decoder_forward = DeepseekV2DecoderLayer.forward
+
+
+def _patched_deepseek_v2_decoder_init(self, vllm_config, prefix, config=None, *args, **kwargs):
+    _original_deepseek_v2_decoder_init(self, vllm_config, prefix, config, *args, **kwargs)
+    self._glm_sp_pp = _use_glm_sp_pp(vllm_config) and not is_mtp_layer(
+        config or vllm_config.model_config.hf_config, prefix
+    )
+    if self._glm_sp_pp and isinstance(self.mlp, DeepseekV2MoE):
+        self.use_sequence_parallel_moe = True
+        self.self_attn.o_proj.reduce_results = False
+
+
+def _patched_deepseek_v2_decoder_forward(
+    self,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    llama_4_scaling: torch.Tensor | None = None,
+    input_is_sequence_parallel: bool | None = None,
+):
+    if not getattr(self, "_glm_sp_pp", False) or input_is_sequence_parallel is None:
+        return _original_deepseek_v2_decoder_forward(self, positions, hidden_states, residual, llama_4_scaling)
+
+    full_num_tokens = positions.shape[0]
+    if not self.use_sequence_parallel_moe:
+        if input_is_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            assert residual is not None
+            residual = sp_all_gather(residual)[:full_num_tokens]
+        return _original_deepseek_v2_decoder_forward(self, positions, hidden_states, residual, llama_4_scaling)
+
+    # Mirror the upstream MoE path with an explicit layout, including T=1.
+    # Remove this override when upstream accepts the PP input layout directly.
+    if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+    else:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+    if input_is_sequence_parallel:
+        hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+    if self.use_mha:
+        hidden_states = self.self_attn(positions, hidden_states)
+    else:
+        hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
+    if not self.use_mha and hidden_states.dtype == torch.float16:
+        hidden_states *= 1.0 / self.routed_scaling_factor
+        if self.layer_idx == 0:
+            residual *= 1.0 / self.routed_scaling_factor
+    hidden_states = sp_reduce_scatter(hidden_states)
+    if not input_is_sequence_parallel:
+        residual = sp_shard(residual)
+    hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+    hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+    return hidden_states, residual
+
+
+DeepseekV2DecoderLayer.__init__ = _patched_deepseek_v2_decoder_init
+DeepseekV2DecoderLayer.forward = _patched_deepseek_v2_decoder_forward
+
+
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
@@ -303,17 +388,27 @@ def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
+    vllm_config = kwargs["vllm_config"]
+    self.pp_sharded_tensor_keys = ("hidden_states", "residual") if _use_glm_sp_pp(vllm_config) else ()
     # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
-    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
+    self._use_upstream_aux_relay = vllm_config.use_v2_model_runner
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
     transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
     if not self._use_upstream_aux_relay:
         transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
     transport_data_types = tuple(transport_data_type_list)
     configure_pp_topk_transport(self, transport_data_types)
+    tensor_factory = self.make_empty_intermediate_tensors
+
+    def make_main_tensors(batch_size, dtype, device):
+        if self.pp_sharded_tensor_keys:
+            tp_size = get_tensor_model_parallel_world_size()
+            batch_size = (batch_size + tp_size - 1) // tp_size
+        return tensor_factory(batch_size, dtype, device)
+
     self.make_empty_intermediate_tensors = pp_transport.make_empty_intermediate_tensors(
         self,
-        self.make_empty_intermediate_tensors,
+        make_main_tensors,
         transport_data_types,
     )
 
@@ -345,11 +440,15 @@ def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
 DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
 
 
-def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, residual, positions):
+def _capture_aux_hidden_state(
+    self, aux_hidden_states, layer_id, hidden_states, residual, positions, is_sequence_parallel=None
+):
     if layer_id not in self.aux_hidden_state_layers:
         return
     aux_hidden_state = hidden_states if residual is None else hidden_states + residual
-    if aux_hidden_state.shape[0] != positions.shape[0]:
+    if is_sequence_parallel is None:
+        is_sequence_parallel = aux_hidden_state.shape[0] != positions.shape[0]
+    if is_sequence_parallel:
         aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
         aux_hidden_state = aux_hidden_state[: positions.shape[0]]
     aux_hidden_states.append(aux_hidden_state)
@@ -363,6 +462,8 @@ def _patched_forward(
     inputs_embeds: torch.Tensor | None = None,
 ) -> torch.Tensor | IntermediateTensors:
     pp_group = get_pp_group()
+    pp_sharded = bool(getattr(self, "pp_sharded_tensor_keys", ()))
+    hidden_states_are_sp = pp_sharded and not pp_group.is_first_rank
     if pp_group.is_first_rank:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -396,16 +497,60 @@ def _patched_forward(
         llama_4_scaling = None
 
     if pp_group.is_first_rank:
-        _capture_aux_hidden_state(self, aux_hidden_states, 0, hidden_states, residual, positions)
+        _capture_aux_hidden_state(
+            self,
+            aux_hidden_states,
+            0,
+            hidden_states,
+            residual,
+            positions,
+            is_sequence_parallel=False if pp_sharded else None,
+        )
+    sp_forward_context = None
+    original_is_padding = None
+    sp_is_padding = None
+    if pp_sharded and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        sp_forward_context = get_forward_context()
+        original_is_padding = sp_forward_context.is_padding
+        sp_is_padding = sp_padding_mask(original_is_padding, positions)
     for idx, layer in enumerate(
         islice(self.layers, self.start_layer, self.end_layer),
         start=self.start_layer,
     ):
-        hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+        if pp_sharded:
+            if sp_forward_context is not None:
+                sp_forward_context.is_padding = (
+                    sp_is_padding if layer.use_sequence_parallel_moe else original_is_padding
+                )
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                input_is_sequence_parallel=hidden_states_are_sp,
+            )
+            hidden_states_are_sp = layer.use_sequence_parallel_moe
+        else:
+            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
         # A boundary state belongs to the stage producing it, including end_layer.
-        _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
+        _capture_aux_hidden_state(
+            self,
+            aux_hidden_states,
+            idx + 1,
+            hidden_states,
+            residual,
+            positions,
+            is_sequence_parallel=hidden_states_are_sp if pp_sharded else None,
+        )
+
+    if sp_forward_context is not None:
+        sp_forward_context.is_padding = original_is_padding
 
     if not pp_group.is_last_rank:
+        if pp_sharded and not hidden_states_are_sp:
+            residual = torch.zeros_like(hidden_states) if residual is None else residual
+            hidden_states = sp_shard(hidden_states)
+            residual = sp_shard(residual)
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
         if self._use_upstream_aux_relay:
             # vLLM's buffer-mutation check also sees names in traced-out branches.
@@ -429,7 +574,8 @@ def _patched_forward(
             )
         return pp_output
 
-    if hidden_states.shape[0] != positions.shape[0]:
+    gather_final = hidden_states_are_sp if pp_sharded else hidden_states.shape[0] != positions.shape[0]
+    if gather_final:
         combined_states = torch.cat([hidden_states, residual], dim=-1)
         combined_states = tensor_model_parallel_all_gather(combined_states, 0)
         combined_states = combined_states[: positions.shape[0]]

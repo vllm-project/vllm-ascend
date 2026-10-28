@@ -14,6 +14,8 @@ The test AST-loads production forwards, buffer views and GroupCoordinator's
 P2P methods to avoid model weights and unrelated optional model dependencies.
 Decoder bodies are deterministic test doubles; attention/kernel numerics and
 ACL graph capture are outside this test's scope.
+GLM cases execute production decoder control flow with native Torch RMSNorm,
+real TP collectives and deterministic attention/MLP replacements.
 """
 
 from __future__ import annotations
@@ -47,6 +49,9 @@ MODEL_SOURCES = (
     ("dsv4", "deepseek_v4/model.py", "DeepseekV4Model"),
     ("kimi", "kimi_k3.py", "AscendKimiLinearModel"),
     ("minimax", "minimax_m3/minimax_m3.py", "MiniMaxM3Model"),
+    ("glm_moe", None, None),
+    ("glm_dense_sender", None, None),
+    ("glm_dense_receiver", None, None),
 )
 
 
@@ -145,6 +150,113 @@ def _values(rows, lane, device):
     return values + 1000 * (lane + 1)
 
 
+def _glm_model_forward(repo, namespace, model_name, pp, lane, tp_group, device, num_tokens, receiver, tp_size):
+    rows = (num_tokens + tp_size - 1) // tp_size
+    full_values = torch.cat([_values(rows, source_lane, device) for source_lane in range(tp_size)])[:num_tokens]
+    layer_is_sp = not (("dense_sender" in model_name and not receiver) or ("dense_receiver" in model_name and receiver))
+    norm_rows = []
+    topk = torch.arange(num_tokens * TOPK_WIDTH, dtype=torch.int32, device=device).reshape(num_tokens, TOPK_WIDTH)
+
+    def normalize(hidden, residual=None):
+        norm_rows.append(hidden.shape[0])
+        combined = hidden if residual is None else hidden + residual
+        output = torch.nn.functional.rms_norm(combined, (HIDDEN_SIZE,), eps=1e-5)
+        return output if residual is None else (output, combined)
+
+    def reduce_scatter(hidden):
+        padding = (-hidden.shape[0]) % tp_size
+        if padding:
+            hidden = torch.cat([hidden, hidden.new_zeros(padding, HIDDEN_SIZE)])
+        output = torch.empty(rows, HIDDEN_SIZE, dtype=hidden.dtype, device=device)
+        dist.reduce_scatter_tensor(output, hidden.contiguous(), group=tp_group)
+        return output
+
+    namespace.update(
+        {
+            "sp_reduce_scatter": reduce_scatter,
+            "get_tensor_model_parallel_world_size": lambda: tp_size,
+            "tensor_model_parallel_all_gather": lambda hidden, dim=0: namespace["sp_all_gather"](hidden),
+            "sequence_parallel_chunk": namespace["sp_shard"],
+            "DeepseekAttention": type("UnusedMHA", (), {}),
+            "DeepseekV2MLP": type("UnusedDenseMLP", (), {}),
+            "pp_transport": SimpleNamespace(**namespace),
+        }
+    )
+    vllm_root = namespace["vllm_root"]
+    _load_nodes(
+        vllm_root / "vllm/model_executor/models/deepseek_v2.py", ("forward",), namespace, "DeepseekV2DecoderLayer"
+    )
+    namespace["_original_deepseek_v2_decoder_forward"] = namespace.pop("forward")
+    _load_nodes(
+        repo / "vllm_ascend/patch/worker/patch_deepseek_v2.py",
+        ("_patched_deepseek_v2_decoder_forward", "_capture_aux_hidden_state", "_patched_forward"),
+        namespace,
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(),
+        hidden_size=HIDDEN_SIZE,
+        _glm_sp_pp=True,
+        _use_upstream_aux_relay=True,
+        pp_sharded_tensor_keys=("hidden_states", "residual"),
+        aux_hidden_state_layers=(1,),
+        start_layer=1 if receiver else 0,
+        end_layer=2 if receiver else 1,
+        send_pp_topk_indices=not receiver,
+        topk_indices_buffer=torch.empty_like(topk),
+        collect_remote_aux_hidden_states=lambda tensors: [tensors[AUX_KEY]],
+        pack_local_aux_hidden_states=lambda states: {AUX_KEY: states[0]} if states else {},
+    )
+
+    def attention(positions, hidden, scaling=None):
+        assert hidden.shape == (num_tokens, HIDDEN_SIZE)
+        if receiver:
+            # Mirrors the receive-factory alias used by shared indexer layers.
+            torch.testing.assert_close(model.topk_indices_buffer, topk)
+        else:
+            model.topk_indices_buffer.copy_(topk)
+        return hidden * ((lane + 1) / (tp_size * (tp_size + 1) / 2)) if layer_is_sp else hidden
+
+    def mlp(hidden, already_sequence_parallel=False):
+        assert already_sequence_parallel is layer_is_sp
+        wanted_input = full_values if receiver else torch.zeros_like(full_values)
+        wanted_residual = wanted_input + torch.nn.functional.rms_norm(wanted_input, (HIDDEN_SIZE,), eps=1e-5)
+        wanted = torch.nn.functional.rms_norm(wanted_residual, (HIDDEN_SIZE,), eps=1e-5)
+        if layer_is_sp:
+            wanted = namespace["sp_shard"](wanted)
+        torch.testing.assert_close(hidden, wanted)
+        return _values(rows, lane, device) if layer_is_sp else full_values.clone()
+
+    decoder = SimpleNamespace(
+        _glm_sp_pp=True,
+        use_sequence_parallel_moe=layer_is_sp,
+        input_layernorm=normalize,
+        post_attention_layernorm=normalize,
+        self_attn=attention,
+        use_mha=False,
+        mlp=mlp,
+        routed_scaling_factor=1.0,
+        layer_idx=1 if receiver else 0,
+    )
+
+    def layer(*args, **kwargs):
+        hidden, residual = namespace["_patched_deepseek_v2_decoder_forward"](decoder, *args, **kwargs)
+        expected_rows = rows if layer_is_sp else num_tokens
+        assert hidden.shape == residual.shape == (expected_rows, HIDDEN_SIZE)
+        if receiver:
+            assert norm_rows == [expected_rows, expected_rows]
+            wanted_residual = full_values + torch.nn.functional.rms_norm(full_values, (HIDDEN_SIZE,), eps=1e-5)
+            if layer_is_sp:
+                wanted_residual = namespace["sp_shard"](wanted_residual)
+            torch.testing.assert_close(residual, wanted_residual)
+            raise ReachedReceiverLayer
+        assert norm_rows == [num_tokens, expected_rows]
+        return hidden, residual
+
+    layer.use_sequence_parallel_moe = layer_is_sp
+    model.layers = [None, layer] if receiver else [layer]
+    return namespace["_patched_forward"], model, torch.arange(num_tokens, device=device)
+
+
 def _model_forward(repo, namespace, model_source, pp, lane, tp_group, device, num_tokens, receiver, tp_size):
     model_name, relative_path, class_name = model_source
     namespace = dict(namespace)
@@ -173,6 +285,10 @@ def _model_forward(repo, namespace, model_source, pp, lane, tp_group, device, nu
             "cdiv": lambda numerator, denominator: (numerator + denominator - 1) // denominator,
         }
     )
+    if model_name.startswith("glm"):
+        return _glm_model_forward(
+            repo, namespace, model_name, pp, lane, tp_group, device, num_tokens, receiver, tp_size
+        )
     _load_nodes(repo / "vllm_ascend/models" / relative_path, ("forward",), namespace, class_name)
     residual_keys = () if model_name == "dsv4" else ("residual",)
     model = SimpleNamespace(
@@ -254,9 +370,13 @@ def _run_case(
         payload = output.tensors
         assert payload["hidden_states"].shape[0] == rows
         assert payload[AUX_KEY].shape == (num_tokens, HIDDEN_SIZE)
-        payload[TOPK_KEY] = torch.arange(num_tokens * TOPK_WIDTH, dtype=torch.int32, device=device).reshape(
+        expected_topk = torch.arange(num_tokens * TOPK_WIDTH, dtype=torch.int32, device=device).reshape(
             num_tokens, TOPK_WIDTH
         )
+        if name.startswith("glm"):
+            torch.testing.assert_close(payload[TOPK_KEY], expected_topk)
+        else:
+            payload[TOPK_KEY] = expected_topk
         namespace["zero_pp_shard_padding"](payload, model.pp_sharded_tensor_keys, num_tokens, tp_size, lane)
         original_send = dist.isend
 
@@ -323,6 +443,8 @@ def _run_case(
         elif name == "minimax":
             expected_aux = 2 * expected_aux + 500
         torch.testing.assert_close(buffer.active[AUX_KEY], expected_aux)
+        if name.startswith("glm"):
+            model.topk_indices_buffer = buffer.active[TOPK_KEY]
         try:
             forward(model, None, positions, buffer.active)
         except ReachedReceiverLayer:
@@ -390,6 +512,7 @@ def main():
     dist.init_process_group("gloo", timeout=timedelta(seconds=120))
     try:
         coordinator_type, namespace = _load_production(repo, vllm_root)
+        namespace["vllm_root"] = vllm_root
         coordinator, tp_group = _make_groups(rank, backend, coordinator_type, args.tp_size)
         buffers = {}
         for model_source in MODEL_SOURCES:

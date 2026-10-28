@@ -50,13 +50,17 @@ Steps to follow to enable SP currently:
 
 ### Pipeline parallelism
 
-With Model Runner V2, DeepSeek-V4, Kimi-K3 with AttnRes, and MiniMax-M3
+With Model Runner V2, DeepSeek-V4, Kimi-K3 with AttnRes, MiniMax-M3, and GLM-5.2/5.3
 keep the main activations sequence-sharded between pipeline stages. Each
 TP rank sends its token shard to the same TP rank in the next stage;
 auxiliary hidden states and Top-K indices retain their full-token layout.
 This path requires PCP and DCP sizes of 1. Other models and configurations
 retain their existing PP transport. The last stage still gathers the final
 hidden states for the output head.
+
+GLM-5.2/5.3 keeps dense layers in their original full-token layout and
+uses sequence-sharded computation in MoE layers. Fine-grained O-projection
+TP retains its existing PP transport.
 
 ### Matmul reduce-scatter fusion
 

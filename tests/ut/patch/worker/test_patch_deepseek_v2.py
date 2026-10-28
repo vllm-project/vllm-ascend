@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,6 +10,7 @@ import torch
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.models.common.ops.sequence_parallel as sp_ops
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
 import vllm_ascend.worker.v2.pp_transport as pp_transport
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
@@ -196,7 +199,7 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
 
 @pytest.mark.parametrize("v2", [False, True])
 def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
-    factory = object()
+    factory = Mock()
     model = SimpleNamespace(layers=[], make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
     wrapped = object()
@@ -207,7 +210,12 @@ def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
     expected_data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.TOPK_INDICES,)
     if not model._use_upstream_aux_relay:
         expected_data_types = (PPTransportDataType.AUX_HIDDEN_STATES, *expected_data_types)
-    wrap_factory.assert_called_once_with(model, factory, expected_data_types)
+    wrap_factory.assert_called_once()
+    assert wrap_factory.call_args.args[0] is model
+    assert wrap_factory.call_args.args[2] == expected_data_types
+    main_factory = wrap_factory.call_args.args[1]
+    main_factory(3, torch.float32, "cpu")
+    factory.assert_called_once_with(3, torch.float32, "cpu")
     assert model.make_empty_intermediate_tensors is wrapped
 
 
@@ -388,3 +396,374 @@ def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
     topk = get_pp_transport_tensors(result, PPTransportDataType.TOPK_INDICES)
     assert len(aux) == 2 and len(topk) == 1
     assert topk[0].data_ptr() == topk_buffer.data_ptr()
+
+
+class _GLMCollectives:
+    """Run the TP collectives on CPU while retaining distinct rank values."""
+
+    def __init__(self, context, tp):
+        self.context = context
+        self.tp = tp
+        self.barrier = threading.Barrier(tp, timeout=10)
+        self.values = [None] * tp
+        self.operations = [[] for _ in range(tp)]
+
+    def exchange(self, value, operation):
+        rank = self.context.rank
+        self.values[rank] = value.clone()
+        self.barrier.wait()
+        if operation == "gather":
+            result = torch.cat(self.values, dim=0)
+        else:
+            result = torch.stack(self.values).sum(dim=0)
+            if operation == "reduce_scatter":
+                result = result.chunk(self.tp, dim=0)[rank].clone()
+        self.operations[rank].append((self.context.layer_idx, operation))
+        self.barrier.wait()
+        return result
+
+
+class _GLMNorm(torch.nn.Module):
+    def forward(self, hidden, residual=None):
+        combined = hidden if residual is None else hidden + residual
+        normalized = combined * torch.rsqrt(combined.square().mean(dim=-1, keepdim=True) + 1e-5)
+        return normalized if residual is None else (normalized, combined)
+
+
+class _GLMAttention(torch.nn.Module):
+    def __init__(self, context, collectives, layer_idx, reduce_results, topk):
+        super().__init__()
+        self.context, self.collectives = context, collectives
+        self.layer_idx, self.topk = layer_idx, topk
+        self.o_proj = SimpleNamespace(reduce_results=reduce_results)
+
+    def forward(self, positions, hidden, scaling=None):
+        assert hidden.shape[0] == positions.shape[0]
+        if self.layer_idx == 0:
+            self.topk[: len(positions)].copy_(torch.stack((positions, positions + 100), dim=-1).int())
+        # Depend on preceding tokens as well as feature values, so gathering
+        # the wrong shard or leaving out a padded rank changes valid outputs.
+        output = hidden * 0.2 + hidden.cumsum(0) * 0.03 + positions[:, None] * 0.01 + 0.1
+        if self.context.tp == 1:
+            return output
+        fraction = (self.context.rank + 1) / (self.context.tp * (self.context.tp + 1) / 2)
+        partial = output * fraction
+        return self.collectives.exchange(partial, "all_reduce") if self.o_proj.reduce_results else partial
+
+
+class _GLMMLP(torch.nn.Module):
+    def __init__(self, context, layer_idx, sequence_parallel):
+        super().__init__()
+        self.context = context
+        self.layer_idx, self.sequence_parallel = layer_idx, sequence_parallel
+
+    def forward(self, hidden, *, already_sequence_parallel=False):
+        assert already_sequence_parallel is self.sequence_parallel
+        expected_padding = torch.zeros(hidden.shape[0], dtype=torch.bool)
+        if self.sequence_parallel:
+            expected_padding = (
+                torch.arange(hidden.shape[0]) + self.context.rank * hidden.shape[0] >= self.context.num_tokens
+            )
+        torch.testing.assert_close(self.context.forward.is_padding, expected_padding)
+        return torch.tanh(hidden * (0.3 + self.layer_idx * 0.05) + 0.07)
+
+
+class _GLMDecoder(torch.nn.Module):
+    def __init__(self, context, collectives, layer_idx, is_moe, sharded, topk):
+        super().__init__()
+        self.context = context
+        self.layer_idx = layer_idx
+        self._glm_sp_pp = sharded
+        self.use_sequence_parallel_moe = sharded and is_moe
+        self.use_mha = False
+        self.routed_scaling_factor = 1.0
+        self.input_layernorm = _GLMNorm()
+        self.post_attention_layernorm = _GLMNorm()
+        self.self_attn = _GLMAttention(context, collectives, layer_idx, not self.use_sequence_parallel_moe, topk)
+        self.mlp = _GLMMLP(context, layer_idx, self.use_sequence_parallel_moe)
+
+    def forward(self, *args, **kwargs):
+        self.context.layer_idx = self.layer_idx
+        return patch_deepseek_v2._patched_deepseek_v2_decoder_forward(self, *args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "tp,num_tokens,layer_types,cuts",
+    [
+        (2, 1, "ddmm", (0, 2, 4)),
+        (8, 1, "dmdm", (0, 2, 4)),
+        (2, 3, "dmdm", (0, 1, 4)),
+        (8, 3, "ddmm", (0, 3, 4)),
+        (2, 8, "ddmm", (0, 1, 3, 4)),
+        (8, 8, "dmdm", (0, 2, 3, 4)),
+        (2, 9, "ddmm", (0, 3, 4)),
+        (8, 9, "dmdm", (0, 1, 3, 4)),
+        (2, 17, "dmdm", (0, 2, 4)),
+        (8, 17, "ddmm", (0, 2, 4)),
+        (2, 1, "ddmm", (0, 0, 2, 4)),
+        (8, 17, "dmdm", (0, 0, 2, 4)),
+        (2, 3, "dmdm", (0, 2, 2, 4)),
+        (8, 9, "ddmm", (0, 2, 2, 4)),
+        (2, 8, "ddmm", (0, 2, 4, 4)),
+        (8, 1, "dmdm", (0, 2, 4, 4)),
+    ],
+)
+def test_glm_pipeline_shards_match_full_forward(monkeypatch, tp, num_tokens, layer_types, cuts):
+    """Production model/layer forward must preserve values across every cut."""
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+    context = threading.local()
+    collectives = _GLMCollectives(context, tp)
+    monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: context.pp)
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: context.tp)
+    monkeypatch.setattr(
+        patch_deepseek_v2,
+        "tensor_model_parallel_all_gather",
+        lambda value, dim: collectives.exchange(value, "gather"),
+    )
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: context.pp)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(patch_deepseek_v2.envs, "VLLM_MOE_SKIP_PADDING", True)
+    monkeypatch.setattr(patch_deepseek_v2, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(patch_deepseek_v2, "get_forward_context", lambda: context.forward)
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_rank", lambda: context.rank)
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_world_size", lambda: context.tp)
+    monkeypatch.setattr(sp_ops, "get_tp_group", lambda: SimpleNamespace(device_communicator=None))
+    monkeypatch.setattr(
+        sp_ops, "tensor_model_parallel_all_gather", lambda value, dim: collectives.exchange(value, "gather")
+    )
+    monkeypatch.setattr(
+        sp_ops,
+        "tensor_model_parallel_reduce_scatter",
+        lambda value, dim: collectives.exchange(value, "reduce_scatter"),
+    )
+    for name in ("ascend_sp_shard_impl", "ascend_sp_reduce_scatter_impl", "ascend_sp_padding_mask_impl"):
+        monkeypatch.setattr(torch.ops.vllm, name, getattr(sp_ops, f"_{name}"), raising=False)
+    inputs = torch.arange(num_tokens * 3, dtype=torch.float32).reshape(num_tokens, 3) / 13 + 0.2
+    positions = torch.arange(num_tokens)
+    expected_topk = torch.stack((positions, positions + 100), dim=-1).int()
+
+    def model(start, end, sharded):
+        target = DeepseekV2Model.__new__(DeepseekV2Model)
+        torch.nn.Module.__init__(target)
+        target.config = SimpleNamespace(llama_4_scaling=None)
+        target.hidden_size = 3
+        target.start_layer, target.end_layer = start, end
+        target.pp_sharded_tensor_keys = ("hidden_states", "residual") if sharded else ()
+        target._use_upstream_aux_relay = True
+        target.send_pp_topk_indices = True
+        # Supply relay storage to isolate forward layout, including empty stages.
+        # A real empty stage has no local Indexer to allocate this buffer.
+        target.topk_indices_buffer = torch.zeros(num_tokens, 2, dtype=torch.int32)
+        target.layers = torch.nn.ModuleList(
+            _GLMDecoder(context, collectives, idx, kind == "m", sharded, target.topk_indices_buffer)
+            for idx, kind in enumerate(layer_types)
+        )
+        target.norm = _GLMNorm()
+        target._set_aux_hidden_state_layers(tuple(range(len(layer_types) + 1)))
+        return target
+
+    context.tp, context.rank, context.layer_idx = 1, 0, -1
+    context.num_tokens = num_tokens
+    context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1)
+    context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
+    reference = model(0, len(layer_types), False)
+    expected, expected_aux = _patched_forward(reference, None, positions, None, inputs_embeds=inputs)
+
+    def run_rank(rank):
+        context.tp, context.rank, context.layer_idx = tp, rank, -1
+        context.num_tokens = num_tokens
+        incoming = None
+        try:
+            for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
+                context.pp = SimpleNamespace(
+                    is_first_rank=stage == 0,
+                    is_last_rank=stage == len(cuts) - 2,
+                    world_size=len(cuts) - 1,
+                )
+                context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
+                target = model(start, end, True)
+                if incoming is not None:
+                    # The production receiver restores TP-only padding to zero.
+                    shard_rows = (num_tokens + tp - 1) // tp
+                    valid_rows = max(0, min(shard_rows, num_tokens - rank * shard_rows))
+                    for key in target.pp_sharded_tensor_keys:
+                        incoming[key][valid_rows:].zero_()
+                    received_topk = get_pp_transport_tensors(incoming, PPTransportDataType.TOPK_INDICES)[0]
+                    target.topk_indices_buffer.copy_(received_topk)
+                output = _patched_forward(
+                    target, None, positions, incoming, inputs_embeds=inputs if stage == 0 else None
+                )
+                assert not context.forward.is_padding.any()
+                if context.pp.is_last_rank:
+                    return output
+                handler = SimpleNamespace(
+                    aux_hidden_state_relay_keys=[
+                        f"{target.AUX_HIDDEN_STATE_KEY}{i}" for i in range(target._aux_slot_base_cached)
+                    ]
+                )
+                output = PPHandler.relay_aux_hidden_states(handler, incoming, output)
+                shard_rows = (num_tokens + tp - 1) // tp
+                assert output["hidden_states"].shape == output["residual"].shape == (shard_rows, 3)
+                for key, value in output.tensors.items():
+                    if key.startswith(target.AUX_HIDDEN_STATE_KEY):
+                        assert value.shape == (num_tokens, 3)
+                topk = get_pp_transport_tensors(output, PPTransportDataType.TOPK_INDICES)[0]
+                assert topk.shape == (num_tokens, 2)
+                # An empty first stage has not run its first Indexer yet.
+                if end:
+                    torch.testing.assert_close(topk, expected_topk)
+                incoming = output
+        except BaseException:
+            collectives.barrier.abort()
+            raise
+
+    with ThreadPoolExecutor(max_workers=tp) as pool:
+        outputs = list(pool.map(run_rank, range(tp)))
+    for hidden, aux in outputs:
+        torch.testing.assert_close(hidden, expected)
+        assert len(aux) == len(expected_aux)
+        for value, expected_value in zip(aux, expected_aux):
+            torch.testing.assert_close(value, expected_value)
+    # Every MoE attention partial is reduced exactly once; dense attention
+    # uses its output projection's normal all-reduce instead.
+    for operations in collectives.operations:
+        for idx, kind in enumerate(layer_types):
+            assert operations.count((idx, "reduce_scatter")) == (kind == "m")
+            assert operations.count((idx, "all_reduce")) == (kind == "d")
+
+
+def _glm_sp_pp_config():
+    return SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            architecture="GlmMoeDsaForCausalLM", hf_config=SimpleNamespace(num_hidden_layers=4)
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            use_sequence_parallel_moe=True,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "override,expected",
+    [
+        ({}, True),
+        ({"use_v2_model_runner": False}, False),
+        ({"pipeline_parallel_size": 1}, False),
+        ({"use_sequence_parallel_moe": False}, False),
+        ({"prefill_context_parallel_size": 2}, False),
+        ({"decode_context_parallel_size": 2}, False),
+        ({"architecture": "DeepseekV3ForCausalLM"}, False),
+        ({"architecture": "Glm5NextForCausalLM"}, False),
+        ({"oproj_tp": True}, False),
+    ],
+)
+def test_glm_sp_pp_gate_preserves_other_configurations(monkeypatch, override, expected):
+    config = _glm_sp_pp_config()
+    monkeypatch.setattr(patch_deepseek_v2, "oproj_tp_enable", lambda: override.get("oproj_tp", False))
+    for key, value in override.items():
+        if key == "oproj_tp":
+            continue
+        if key == "use_v2_model_runner":
+            target = config
+        elif key == "architecture":
+            target = config.model_config
+        else:
+            target = config.parallel_config
+        setattr(target, key, value)
+    assert patch_deepseek_v2._use_glm_sp_pp(config) is expected
+
+
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("enabled,draft", [(True, False), (False, False), (True, True)])
+def test_glm_decoder_init_preserves_weight_objects_and_adjusts_one_reduction(monkeypatch, moe, enabled, draft):
+    config = _glm_sp_pp_config()
+    config.parallel_config.use_sequence_parallel_moe = enabled
+    prefix = "model.layers.4" if draft else "model.layers.1"
+    mlp = patch_deepseek_v2.DeepseekV2MoE.__new__(patch_deepseek_v2.DeepseekV2MoE) if moe else torch.nn.Linear(3, 3)
+    if moe:
+        torch.nn.Module.__init__(mlp)
+    weight = torch.nn.Parameter(torch.arange(9, dtype=torch.float32).reshape(3, 3))
+    projection = SimpleNamespace(weight=weight, reduce_results=True)
+    attention = SimpleNamespace(o_proj=projection)
+    topk, index_group = object(), object()
+
+    def original_init(target, cfg, layer_prefix, hf_config, *args, **kwargs):
+        assert cfg is config and layer_prefix == prefix
+        assert hf_config is config.model_config.hf_config
+        assert args == (topk, index_group)
+        assert not kwargs
+        target.mlp, target.self_attn = mlp, attention
+        target.use_sequence_parallel_moe = False
+
+    monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_decoder_init", original_init)
+    monkeypatch.setattr(patch_deepseek_v2, "oproj_tp_enable", lambda: False)
+    target = SimpleNamespace()
+    patch_deepseek_v2._patched_deepseek_v2_decoder_init(
+        target, config, prefix, config.model_config.hf_config, topk, index_group
+    )
+    active = enabled and not draft
+    assert target._glm_sp_pp is active
+    assert target.mlp is mlp and target.self_attn is attention
+    assert target.self_attn.o_proj is projection and projection.weight is weight
+    assert target.use_sequence_parallel_moe is (active and moe)
+    assert projection.reduce_results is not (active and moe)
+
+
+@pytest.mark.parametrize("enabled,layout", [(False, None), (False, False), (False, True), (True, None)])
+def test_glm_decoder_without_explicit_target_layout_uses_original_forward(monkeypatch, enabled, layout):
+    original = Mock(return_value=object())
+    monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_decoder_forward", original)
+    target = SimpleNamespace(_glm_sp_pp=enabled)
+    hidden, residual, positions = torch.ones(1, 3), torch.zeros(1, 3), torch.arange(1)
+    result = patch_deepseek_v2._patched_deepseek_v2_decoder_forward(
+        target, positions, hidden, residual, input_is_sequence_parallel=layout
+    )
+    assert result is original.return_value
+    original.assert_called_once_with(target, positions, hidden, residual, None)
+
+
+@pytest.mark.parametrize("tp", [2, 8])
+@pytest.mark.parametrize("num_tokens", [1, 17])
+def test_glm_receive_factory_shards_only_main_and_preserves_full_native_aux_topk(monkeypatch, tp, num_tokens):
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import reserve_aux_intermediate_tensor_slots
+
+    config = _glm_sp_pp_config()
+    topk = torch.arange(64, dtype=torch.int32).reshape(32, 2)
+    group = SimpleNamespace(is_first_rank=False, is_last_rank=True, world_size=2)
+
+    def original_init(model, **kwargs):
+        model.config = _config(num_hidden_layers=4, hidden_size=3, indexer_types=["full", "shared", "shared", "shared"])
+        model.start_layer, model.end_layer = 1, 3
+        model.layers = [SimpleNamespace(self_attn=SimpleNamespace(topk_indices_buffer=topk))]
+        model.make_empty_intermediate_tensors = lambda batch_size, dtype, device: IntermediateTensors(
+            {key: torch.zeros(batch_size, 3, dtype=dtype, device=device) for key in ("hidden_states", "residual")}
+        )
+
+    monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", original_init)
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: tp)
+    monkeypatch.setattr(patch_deepseek_v2, "oproj_tp_enable", lambda: False)
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    model = DeepseekV2Model.__new__(DeepseekV2Model)
+    torch.nn.Module.__init__(model)
+    _patched_deepseek_v2_model_init(model, vllm_config=config, prefix="")
+    model._set_aux_hidden_state_layers((0, 1, 3))
+    outer = SimpleNamespace(model=model, make_empty_intermediate_tensors=model.make_empty_intermediate_tensors)
+    reserve_aux_intermediate_tensor_slots(outer)
+    buffers = outer.make_empty_intermediate_tensors(num_tokens, torch.float32, "cpu")
+
+    assert model.pp_sharded_tensor_keys == ("hidden_states", "residual")
+    for key in model.pp_sharded_tensor_keys:
+        assert buffers[key].shape == ((num_tokens + tp - 1) // tp, 3)
+    assert buffers[f"{model.AUX_HIDDEN_STATE_KEY}0"].shape == (num_tokens, 3)
+    assert buffers[f"{model.AUX_HIDDEN_STATE_KEY}1"].shape == (num_tokens, 3)
+    received_topk = get_pp_transport_tensors(buffers, PPTransportDataType.TOPK_INDICES)[0]
+    assert received_topk.shape == (num_tokens, 2)
+    assert received_topk.data_ptr() == topk.data_ptr()

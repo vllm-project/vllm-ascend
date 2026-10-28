@@ -74,6 +74,7 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.pp_sharded_tensor_keys = getattr(self.model, "pp_sharded_tensor_keys", ())
         if vllm_config.use_v2_model_runner and vllm_config.parallel_config.pipeline_parallel_size > 1:
             # EPLB maps and expert weights must describe the same local layers.
             self.num_moe_layers = len(self.moe_layers)
