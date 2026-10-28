@@ -7,6 +7,7 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.worker.v2.sample.penalties import bincount
 
 
@@ -83,3 +84,64 @@ def test_bincount_kernel(dtype, prompt, prefill, vocab_size, pattern, request_id
         (device_prefill, prefill_len),
     ]:
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("length", [1047552, 1048576, 1049600])
+def test_bincount_launch_limit(length):
+    # 64 * ceil(length / 1024) straddles the 65535-program limit in issue #19958.
+    requests, rows, vocab_size = 64, 66, 32
+    mapping = torch.arange(requests, 0, -1, dtype=torch.int32, device="npu")
+    tokens = torch.full((rows, length), 7, dtype=torch.int32, device="npu")
+    prompt = torch.full((rows,), length, dtype=torch.int32, device="npu")
+    prefill = prompt.clone()
+    masks = torch.full((rows, 3), -12345, dtype=torch.int32, device="npu")
+    counts = torch.full((rows, vocab_size + 2), -12345, dtype=torch.int32, device="npu")
+    bincount(mapping, tokens, prompt, prefill, masks[:, 1:2], counts[:, 1:-1], length)
+
+    expected_mask = torch.full((rows, 3), -12345, dtype=torch.int32)
+    expected_counts = torch.full((rows, vocab_size + 2), -12345, dtype=torch.int32)
+    expected_mask[1 : requests + 1, 1] = 1 << 7
+    expected_counts[1 : requests + 1, 1:-1] = 0
+    torch.testing.assert_close(masks.cpu(), expected_mask, rtol=0, atol=0)
+    torch.testing.assert_close(counts.cpu(), expected_counts, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("rounds,tail", [(1, -1), (1, 0), (1, 1), (2, 1)])
+def test_bincount_vector_work_partition(rounds, tail):
+    init_device_properties_triton()
+    blocks = rounds * get_vectorcore_num() + tail
+    length = blocks * 1024
+    rows, vocab_size = 4, 4097
+    tokens = torch.arange(rows * (length + 17), dtype=torch.int32).reshape(rows, length + 17)
+    tokens = tokens.remainder(vocab_size)[:, :length]
+    mapping = torch.tensor([2], dtype=torch.int32)
+    prompt = torch.tensor([0, 0, length - 1, 0], dtype=torch.int32)
+    prefill = torch.tensor([0, 0, length, 0], dtype=torch.int32)
+    words = triton.cdiv(vocab_size, 32)
+    masks = torch.full((rows, words + 21), -12345, dtype=torch.int32)
+    counts = torch.full((rows, vocab_size + 21), -12345, dtype=torch.int32)
+    expected_masks, expected_counts = masks.clone(), counts.clone()
+    torch_bincount(
+        mapping, tokens, prompt, prefill, expected_masks[:, 2 : words + 2], expected_counts[:, 2 : vocab_size + 2]
+    )
+    token_gpu = torch.empty_strided(tokens.shape, tokens.stride(), dtype=torch.int32, device="npu")
+    token_gpu.copy_(tokens)
+    mask_gpu, count_gpu = masks.npu(), counts.npu()
+    bincount(
+        mapping.npu(),
+        token_gpu,
+        prompt.npu(),
+        prefill.npu(),
+        mask_gpu[:, 2 : words + 2],
+        count_gpu[:, 2 : vocab_size + 2],
+        length,
+    )
+    torch.testing.assert_close(mask_gpu.cpu(), expected_masks, atol=0, rtol=0)
+    torch.testing.assert_close(count_gpu.cpu(), expected_counts, atol=0, rtol=0)
+    torch.testing.assert_close(token_gpu.cpu(), tokens, atol=0, rtol=0)

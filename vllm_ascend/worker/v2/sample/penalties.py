@@ -21,6 +21,11 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+# Maximum program count accepted by the Ascend kernel launch API.
+MAX_GRID_PROGRAMS = 65535
+
 # Vocabulary words packed per program in _pack_prompt_bin_mask_kernel.
 WORDS_PER_BLOCK = 128
 
@@ -131,7 +136,7 @@ def apply_penalties(
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 4096
     num_vocab_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    vocab_grid_size = min(num_vocab_blocks, 65535 // num_tokens)
+    vocab_grid_size = min(num_vocab_blocks, MAX_GRID_PROGRAMS // num_tokens)
     _penalties_kernel[(num_tokens, vocab_grid_size)](
         logits,
         logits.stride(0),
@@ -181,35 +186,41 @@ def _bincount_kernel(
     prompt_flag_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
+    num_requests,
+    token_blocks,
     BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    prompt_len = tl.load(prompt_len_ptr + req_state_idx)
-    # Grid stride also covers a full prompt when prompt_len exceeds prefill_len.
-    for start in range(block_idx * BLOCK_SIZE, tl.maximum(prompt_len, prefill_len), tl.num_programs(1) * BLOCK_SIZE):
-        block = start + tl.arange(0, BLOCK_SIZE)
-        if start < prompt_len:
-            mask = block < prompt_len
-            prompt_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
-            # Same-value byte writes avoid a packed-word read-modify-write.
-            tl.store(
-                prompt_flag_ptr + token_idx * prompt_flag_stride + prompt_tokens,
-                tl.full((BLOCK_SIZE,), 1, tl.int8),
-                mask=mask,
-            )
-
-        if start + BLOCK_SIZE >= prompt_len:
-            mask = (block < prefill_len) & (block >= prompt_len)
-            output_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
-            tl.atomic_add(
-                output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + output_tokens,
-                1,
-                mask=mask,
-            )
+    pid = tl.program_id(0)
+    programs = tl.num_programs(0)
+    work_items = num_requests * token_blocks
+    quotient = work_items // programs
+    remainder = work_items % programs
+    first = pid * quotient + tl.minimum(pid, remainder)
+    count = quotient + (pid < remainder)
+    for work_item in range(first, first + count):
+        token_idx = work_item // token_blocks
+        block_idx = work_item - token_idx * token_blocks
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+        prefill_len = tl.load(prefill_len_ptr + req_state_idx)
+        prompt_len = tl.load(prompt_len_ptr + req_state_idx)
+        for start in range(block_idx * BLOCK_SIZE, tl.maximum(prompt_len, prefill_len), token_blocks * BLOCK_SIZE):
+            block = start + tl.arange(0, BLOCK_SIZE)
+            if start < prompt_len:
+                mask = block < prompt_len
+                prompt_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
+                tl.store(
+                    prompt_flag_ptr + token_idx * prompt_flag_stride + prompt_tokens,
+                    tl.full((BLOCK_SIZE,), 1, tl.int8),
+                    mask=mask,
+                )
+            if start + BLOCK_SIZE >= prompt_len:
+                mask = (block < prefill_len) & (block >= prompt_len)
+                output_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
+                tl.atomic_add(
+                    output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + output_tokens,
+                    1,
+                    mask=mask,
+                )
 
 
 @triton.jit
@@ -256,6 +267,8 @@ def bincount(
     vocab_size = output_bin_counts.shape[1]
     BLOCK_SIZE = 1024
     num_blocks = max(1, triton.cdiv(max_prefill_len, BLOCK_SIZE))
+    init_device_properties_triton()
+    statistics_grid = min(get_vectorcore_num(), num_tokens * num_blocks)
     # Scratch flags for the prompt bitmask, one byte per vocabulary entry per
     # request being counted. Freed on return; num_tokens is the number of newly
     # added penalty requests, so this stays small.
@@ -265,7 +278,7 @@ def bincount(
         dtype=torch.int8,
         device=prompt_bin_mask.device,
     )
-    _bincount_zero_kernel[(num_tokens, min(triton.cdiv(num_words * 32, 4096), 65535 // num_tokens))](
+    _bincount_zero_kernel[(num_tokens, min(triton.cdiv(num_words * 32, 4096), MAX_GRID_PROGRAMS // num_tokens))](
         expanded_idx_mapping,
         prompt_flag,
         prompt_flag.stride(0),
@@ -274,7 +287,7 @@ def bincount(
         vocab_size,
         BLOCK=4096,
     )
-    _bincount_kernel[(num_tokens, num_blocks)](
+    _bincount_kernel[(statistics_grid,)](
         expanded_idx_mapping,
         all_token_ids,
         all_token_ids.stride(0),
@@ -284,6 +297,8 @@ def bincount(
         prompt_flag.stride(0),
         output_bin_counts,
         output_bin_counts.stride(0),
+        num_tokens,
+        num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
     )
     # Writes every word of each row, so prompt_bin_mask needs no pre-zeroing.

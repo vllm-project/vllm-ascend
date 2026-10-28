@@ -2,7 +2,11 @@ pr: 20085
 entries:
   - category: performance
     text: >-
-      Reduced the cost of Model Runner V2 penalty statistics for longer prompts
-      by removing prompt-bit atomic OR operations and optimizing initialization
-      and bitmap packing. Large-vocabulary short prompts can still be slower
-      than the previous implementation.
+      Improved Model Runner V2 penalty-statistics initialization with a
+      Vector-core-sized grid, byte prompt flags, fused initialization and
+      bitmap packing. Performance remains dependent on workload shape.
+  - category: bugfix
+    text: >-
+      Fixed bincount launch failures for large request histories, including
+      the 64-request, 1M-token boundary, by distributing token tiles within
+      the device's Vector-core count.
