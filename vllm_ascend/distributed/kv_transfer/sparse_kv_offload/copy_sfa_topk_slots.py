@@ -81,6 +81,10 @@ class CopySfaRequestStates:
     def __init__(self) -> None:
         self._requests: dict[str, _CopySfaRequestState] = {}
         self._retired_requests: set[str] = set()
+        # Monotonic per-slot owner eras. The delayed D2H pipeline matches
+        # retirement against the owner generation, never the request id.
+        self._slot_generations: dict[int, int] = {}
+        self._generation_counter = 0
 
     def remove_request(self, req_id: str) -> None:
         self._requests.pop(req_id, None)
@@ -100,14 +104,19 @@ class CopySfaRequestStates:
         hot_tokens: int,
         dummy: bool,
         lim_cache_histories: Sequence[Tensor],
+        generations: np.ndarray | None = None,
     ) -> tuple[bool, dict[int, tuple[int, int]], tuple[int, ...]]:
         """Return tail restoration, dense fills, and slots needing LIM reset."""
         capacity = len(slots)
         if not 0 <= len(req_ids) <= padded_reqs <= capacity or len(active) != capacity:
             raise ValueError("fused_copy_sfa request rows exceed the slot buffer capacity")
+        if generations is not None and len(generations) != capacity:
+            raise ValueError("fused_copy_sfa generation rows do not match the slot buffer capacity")
         if block_size <= 0:
             raise ValueError("fused_copy_sfa block size must be positive")
         prepare_copy_sfa_dummy_slots(slots, active, padded_reqs)
+        if generations is not None:
+            generations[:padded_reqs] = -1
         if dummy:
             return False, {}, ()
         if len(set(req_ids)) != len(req_ids):
@@ -150,6 +159,8 @@ class CopySfaRequestStates:
                 new_slot = next(available, None)
             if new_slot is None:
                 raise RuntimeError(f"fused_copy_sfa topk slot pool exhausted (capacity={capacity})")
+            self._generation_counter += 1
+            self._slot_generations[new_slot] = self._generation_counter
             pending[req] = _CopySfaRequestState(new_slot)
         # Publish bindings only after validating the entire ownership transition.
         invalidated_slots = tuple(state.slot for state in pending.values())
@@ -166,6 +177,8 @@ class CopySfaRequestStates:
             state = retained[req]
             slots[row] = state.slot
             active[row] = True
+            if generations is not None:
+                generations[row] = self._slot_generations.get(state.slot, -1)
             if computed_tokens is None:
                 continue
             prefix = (int(computed_tokens[row]) // block_size) * block_size
