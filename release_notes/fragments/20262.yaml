@@ -1,8 +1,0 @@
-pr: 20262
-entries:
-  - category: feature
-    text: >-
-      Added experimental GLM-5.3-Flash Prefill main-cache reuse with the Memcache
-      backend, retaining logical cache groups and private tail storage. Initial
-      validation requires eager execution without speculative decoding and a
-      standalone AscendStoreConnector; MultiConnector/P2P integration is not supported.
