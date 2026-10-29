@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, attr-defined, method-assign, misc"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
@@ -30,7 +31,10 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
 def test_calc_next_seq_lens_cpu():
     """Test calculation of the next CPU sequence lengths."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.max_model_len = 100
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 100
+    else:
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=100))
     seq_lens_cpu = torch.tensor([10, 20, 98, 66], dtype=torch.int32)
     result = speculator._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs=3, num_reqs_padded=4, step=3)
     expected = torch.tensor([13, 23, 100, 0], dtype=torch.int32)
@@ -507,7 +511,10 @@ def test_update_decode_attn_metadata_gqa():
     """Test updating decode attention metadata for GQA."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
-    speculator.max_model_len = 32
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 32
+    else:
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = False
     metadata = SimpleNamespace(
         seq_lens_cpu=torch.zeros(4, dtype=torch.int32),
@@ -546,7 +553,10 @@ def test_build_fia_params_decode():
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
     speculator.num_speculative_steps = 3
-    speculator.max_model_len = 30
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 30
+    else:
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=30))
     result = speculator.build_fia_params(3, {"draft": metadata}, False)
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
@@ -797,7 +807,10 @@ def test_update_decode_attn_metadata_mla_with_dcp():
     """Test MLA decode metadata updates with DCP enabled."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "MLA"
-    speculator.max_model_len = 32
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 32
+    else:
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = True
 
     local_seq_lens = torch.tensor([6, 11, 0], dtype=torch.int32)
