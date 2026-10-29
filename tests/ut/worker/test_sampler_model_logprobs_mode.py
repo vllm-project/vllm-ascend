@@ -12,7 +12,7 @@ TREE = ast.parse((ROOT / SOURCE_PATH).read_text(encoding="utf-8"))
 
 class TestSamplerMode(unittest.TestCase):
     def test_model_mode_reaches_constructor(self):
-        calls = [
+        calls: list[ast.stmt] = [
             n
             for n in ast.walk(TREE)
             if isinstance(n, ast.Assign)
@@ -29,12 +29,13 @@ class TestSamplerMode(unittest.TestCase):
         ]
         self.assertEqual(len(calls), 1)
         statement = compile(ast.Module(body=calls, type_ignores=[]), SOURCE_PATH, "exec")
-        for mode in ("raw_logprobs", "processed_logprobs", "raw_logits", "processed_logits"):
+        for mode in ("raw_logprobs", "processed_logprobs", "raw_logits", "processed_logits", None):
             with self.subTest(mode=mode):
                 constructor = Mock()
-                instance = SimpleNamespace(model_config=SimpleNamespace(logprobs_mode=mode))
+                config = SimpleNamespace() if mode is None else SimpleNamespace(logprobs_mode=mode)
+                instance = SimpleNamespace(model_config=config)
                 exec(statement, {"self": instance, "AscendSampler": constructor})
-                constructor.assert_called_once_with(logprobs_mode=mode)
+                constructor.assert_called_once_with(logprobs_mode=mode or "raw_logprobs")
                 self.assertIs(instance.sampler, constructor.return_value)
 
 
