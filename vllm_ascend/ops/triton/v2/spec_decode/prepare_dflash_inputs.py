@@ -86,6 +86,7 @@ def _dflash_local_slot(
 def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
+    out_is_padding_ptr,
     out_query_positions_ptr,
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
@@ -121,6 +122,7 @@ def _prepare_dflash_inputs_kernel(
     max_model_len,
     cp_rank,
     KV_CACHE_BLOCK_SIZE: tl.constexpr,
+    HAS_IS_PADDING: tl.constexpr,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
@@ -219,6 +221,8 @@ def _prepare_dflash_inputs_kernel(
     )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
+    if HAS_IS_PADDING:
+        tl.store(out_is_padding_ptr + query_idx, False, mask=query_mask)
     tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
 
@@ -295,6 +299,10 @@ def _prepare_dflash_inputs_kernel(
     for i in range(qp_begin, qp_end, QUERY_PADDING_BLOCK_SIZE):
         qp_off = i + tl.arange(0, QUERY_PADDING_BLOCK_SIZE)
         tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
+        if HAS_IS_PADDING:
+            tl.store(out_is_padding_ptr + qp_off, True, mask=qp_off < qp_end)
+            tl.store(out_input_ids_ptr + qp_off, 0, mask=qp_off < qp_end)
+            tl.store(out_query_positions_ptr + qp_off, 0, mask=qp_off < qp_end)
 
 
 def prepare_dflash_inputs_triton(
@@ -373,6 +381,7 @@ def prepare_dflash_inputs_triton(
 
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
         input_buffers.input_ids,
+        getattr(input_buffers, "is_padding", input_buffers.input_ids),
         input_buffers.positions,
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
@@ -404,6 +413,7 @@ def prepare_dflash_inputs_triton(
         max_model_len,
         cp_rank,
         KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
+        HAS_IS_PADDING=hasattr(input_buffers, "is_padding"),
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
