@@ -14,7 +14,8 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
-from dataclasses import replace
+import os
+from dataclasses import dataclass, replace
 from typing import Protocol, TypeAlias, cast
 
 import torch
@@ -36,6 +37,12 @@ from vllm.utils.torch_utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackendImpl,
+    AscendAttentionMetadataBuilder,
+    AscendAttentionState,
+    AscendMetadata,
+)
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.models.qwen4_exp.qsa_fia import (
     qsa_fia_shortseq_attention,
@@ -114,6 +121,89 @@ def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
     if isinstance(kv_cache, tuple):
         return len(kv_cache) == 2 and all(cache.numel() for cache in kv_cache)
     return bool(kv_cache.numel())
+
+
+
+def qsa_full_attention_enabled() -> bool:
+    """Full-attention fallback switch (vllm-ascend issue 20117, default on)."""
+    return os.environ.get("VLLM_ASCEND_QSA_FULL_ATTENTION", "1") != "0"
+
+
+_FULL_ATTENTION_BLOCK_SIZE = 128
+
+
+def _expand_full_attention_block_table(block_table: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Repage a QSA block table to the FIA paged-attention block size."""
+    target_block_size = min(block_size, _FULL_ATTENTION_BLOCK_SIZE)
+    if block_size % target_block_size:
+        raise ValueError("QSA cache block size must be divisible by the full-attention block size")
+    pages_per_block = block_size // target_block_size
+    if pages_per_block == 1:
+        return block_table.contiguous()
+    page_offsets = torch.arange(pages_per_block, dtype=block_table.dtype, device=block_table.device)
+    return (block_table.unsqueeze(-1) * pages_per_block + page_offsets).flatten(1).contiguous()
+
+
+def _prepare_full_attention_cache(
+    kv_cache: QSAKVCache,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expose QSA cache as standard-attention pages without changing ownership."""
+    key_cache, value_cache = _split_qsa_kv_cache(kv_cache, head_size)
+    block_size = key_cache.shape[1]
+    target_block_size = min(block_size, _FULL_ATTENTION_BLOCK_SIZE)
+    if block_size % target_block_size:
+        raise ValueError("QSA cache block size must be divisible by the full-attention block size")
+    cache_shape = (-1, target_block_size, key_cache.shape[2], head_size)
+    key_cache = key_cache.contiguous().view(cache_shape)
+    value_cache = value_cache.contiguous().view(cache_shape)
+    return key_cache, value_cache
+
+
+@dataclass
+class AscendQSAFullAttentionMetadata(AscendMetadata):
+    qsa_full_attention: bool = True
+
+
+class AscendQSAFullAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
+    """Build FIA lengths and repaged block tables before entering the captured model."""
+
+    metadata_cls = AscendQSAFullAttentionMetadata
+
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        num_input_tokens = getattr(common_attn_metadata, "num_input_tokens", 0)
+        query_tokens = metadata.actual_seq_lengths_q[-1] if metadata.actual_seq_lengths_q else 0
+        if num_input_tokens > query_tokens:
+            padding_tokens = num_input_tokens - query_tokens
+            metadata.actual_seq_lengths_q = [*metadata.actual_seq_lengths_q, num_input_tokens]
+            metadata.seq_lens_list = [*metadata.seq_lens_list, padding_tokens]
+            metadata.seq_lens = torch.cat([metadata.seq_lens, metadata.seq_lens.new_tensor([padding_tokens])])
+            metadata.seq_lens_cpu = metadata.seq_lens
+            metadata.query_start_loc = torch.cat(
+                [
+                    metadata.query_start_loc,
+                    metadata.query_start_loc.new_tensor([num_input_tokens]),
+                ]
+            )
+            metadata.block_tables = torch.cat(
+                [
+                    metadata.block_tables[: len(metadata.seq_lens_list) - 1],
+                    metadata.block_tables.new_zeros((1, metadata.block_tables.shape[1])),
+                ]
+            )
+        metadata.block_tables = _expand_full_attention_block_table(
+            metadata.block_tables, self.kv_cache_spec.block_size
+        )
+        metadata.attn_state = AscendAttentionState.PrefillCacheHit
+        return metadata
+
+    def build_for_graph_capture(self, common_attn_metadata, attn_state=None, **kwargs):
+        return self.build(0, common_attn_metadata)
+
+    def build_for_drafting(self, common_attn_metadata, draft_index: int = 0, **kwargs):
+        del draft_index, kwargs
+        return self.build(0, common_attn_metadata)
 
 
 def apply_qsa_rope(
@@ -400,6 +490,25 @@ class AscendQSAImpl:
         self.sliding_window = (-1, -1)
         self.supports_quant_query_input = False
         self.shortseq_fia = qsa_shortseq_fia_enabled()
+        # Full-attention fallback (vllm-ascend issue 20117): a standard FIA
+        # impl that attends over the repaged QSA main K/V cache. Built with
+        # explicit positional arguments because this constructor drops
+        # **kwargs before using them.
+        if qsa_full_attention_enabled():
+            self.full_attention_impl = AscendAttentionBackendImpl(
+                self.num_heads,
+                self.head_size,
+                self.scale,
+                self.num_kv_heads,
+                None,  # alibi_slopes
+                None,  # sliding_window
+                self.kv_cache_dtype,
+                None,  # logits_soft_cap
+                self.attn_type,
+                None,  # kv_sharing_target_layer_name
+            )
+            self.full_attention_impl._use_layer_aware_fia_graph_replay = True
+            self.full_attention_impl._use_max_workspace_for_fia_graph = True
 
     def _shortseq_fia_gate(
         self,
@@ -546,6 +655,17 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
     def get_impl_cls() -> type[AscendQSAImpl]:
         return AscendQSAImpl
 
+    @staticmethod
+    def get_builder_cls():
+        # Full-attention fallback (vllm-ascend issue 20117): repage block
+        # tables and force PrefillCacheHit so FIA attends densely.
+        if qsa_full_attention_enabled():
+            return AscendQSAFullAttentionMetadataBuilder
+        # upstream_qsa.Qwen4ExpQSAFlashAttentionBackend is monkey-patched to
+        # this class at module bottom, so going through it would recurse.
+        # Return the vllm-side builder directly instead.
+        return upstream_qsa.Qwen4ExpQSAMetadataBuilder
+
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Store main K/V in two page-major slots of one descriptor page."""
@@ -672,6 +792,38 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
+        if getattr(self.impl, "full_attention_impl", None) is not None:
+            # Full-attention fallback (vllm-ascend issue 20117): run standard
+            # FIA over the repaged QSA main K/V cache instead of the GBSA
+            # sparse selection. The side cache is not written on this path;
+            # it is stale but also never consumed while the fallback is on.
+            num_query_tokens = main_metadata.actual_seq_lengths_q[-1]
+            if num_query_tokens > query.shape[0]:
+                raise ValueError("Full-attention query offsets exceed the input buffer")
+            full_impl = self.impl.full_attention_impl
+            self.impl.do_kv_cache_update(
+                self,
+                key,
+                value,
+                self.kv_cache,
+                main_metadata.slot_mapping,
+            )
+            full_cache = _prepare_full_attention_cache(self.kv_cache, self.impl.head_size)
+            full_impl.key_cache, full_impl.value_cache = full_cache
+            try:
+                full_impl.forward(
+                    self,
+                    query[:num_query_tokens].contiguous(),
+                    None,
+                    None,
+                    full_cache,
+                    main_metadata,
+                    output=output[:num_query_tokens],
+                )
+            finally:
+                full_impl.key_cache = None
+                full_impl.value_cache = None
+            return
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
