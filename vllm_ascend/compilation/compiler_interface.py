@@ -29,7 +29,7 @@ from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tu
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
 
@@ -112,7 +112,7 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
     # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
     incompatible_ops = [
         "TopKV2",  # minimax-m3 910C
-        "GenericBlockSparseAttn",  # minimax-m3 910C
+        "GenericBlockSparseAttention",  # minimax-m3 910C
         "QuantBatchMatmulV3",  # glm5.2 910C
         "TransposeQuantBatchMatMul",  # dsv4 950
         "QuantLightningIndexer",  # glm5.2 950
@@ -285,7 +285,7 @@ class AscendCompiler(CompilerInterface):
         self.disable_cache = disable_cache
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
-            _initialize_static_kernel_runtime(get_current_vllm_config())
+            _initialize_static_kernel_runtime(self.vllm_config)
 
     def compile(
         self,

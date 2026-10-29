@@ -73,7 +73,9 @@ def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
         )
     monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
-    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_kwarg = "dp_sync_state"
+    assert spec.propose(batch, *[None for _ in range(10)], **{dp_sync_kwarg: target_sync}) == "draft"
 
 
 def make_target():
@@ -270,10 +272,12 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         object(),
         128,
     )
-    args = (*forward_args, False, "capture")
+    # vLLM main renamed the hook to
+    # ``prepare_forward(num_reqs, attn_metadata)``.
+    args = (*forward_args, False, None, "capture")
     expected_kwargs = {
         "causal": False,
-        "precompute_context_kv": "capture",
+        "prepare_forward": "capture",
         "progress_bar_desc": "Capturing CUDA graphs",
     }
 

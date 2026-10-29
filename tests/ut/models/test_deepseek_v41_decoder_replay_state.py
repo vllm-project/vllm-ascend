@@ -76,6 +76,61 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
 
 
+@pytest.mark.parametrize(
+    ("local_end", "expected_kept"),
+    [(4, 0), (8, 2)],
+    ids=["owner-before-global-tail", "owner-of-global-tail"],
+)
+def test_pcp_decoder_replay_keeps_only_original_tail_owners(state, local_end, expected_kept):
+    state.config.parallel_config.prefill_context_parallel_size = 2
+    local_batch = SimpleNamespace(
+        num_reqs=1,
+        num_tokens_after_padding=4,
+        query_start_loc_np=np.array([0, 4], dtype=np.int32),
+        seq_lens_np=np.array([local_end], dtype=np.int32),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_np=np.array([0, 8], dtype=np.int32),
+        seq_lens_np=np.array([8], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        local_batch,
+        (),
+        torch.empty(1, 8),
+        [],
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(global_batch=global_batch),
+    )
+    kept_lens, padded, replay_start = state._pcp_kept_lengths(replay_inputs)
+    assert kept_lens.tolist() == [expected_kept]
+    assert padded == 2
+    assert replay_start.tolist() == [6]
+
+
+def test_pcp_decoder_replay_keeps_prompt_logprob_rows(state):
+    state.keeps_rows[0] = True
+    local_batch = SimpleNamespace(num_reqs=1, num_tokens_after_padding=4)
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_np=np.array([0, 8], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        local_batch,
+        (),
+        torch.empty(1, 8),
+        [],
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(global_batch=global_batch),
+    )
+    assert state._pcp_kept_lengths(replay_inputs) is None
+
+
 def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
     class Backend:
         def get_builder_cls(self):
@@ -95,6 +150,29 @@ def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
     )
     state.prepare(replay_inputs, CUDAGraphMode.FULL)
     state._gather.assert_called_once()
+
+
+def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
+    prepared = Mock()
+
+    class Builder:
+        def __init__(self, *args):
+            pass
+
+        def prepare_source_rope(self):
+            prepared()
+
+    monkeypatch.setattr(replay_mod, "AscendDSAV41MetadataBuilder", Builder)
+    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
+    state.slots = None
+    group = SimpleNamespace(
+        kv_cache_spec=object(),
+        layer_names=["decoder.swa_cache"],
+        backend=SimpleNamespace(get_builder_cls=lambda: Builder),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(inputs().batch, (), torch.empty(1, 13), [[group]], torch.zeros(3))
+    state._initialize(replay_inputs)
+    prepared.assert_called_once_with()
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])

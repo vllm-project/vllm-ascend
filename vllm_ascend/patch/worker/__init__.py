@@ -29,6 +29,9 @@ if HAS_TRITON:
 # worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
 import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 
+# Apply before model construction on every device, including 310P.
+import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
@@ -42,7 +45,11 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
-import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
+# NOTE: the former patch_rejection_sampler.py has been removed.
+# vllm_ascend/sample/rejection_sampler.py subclasses RejectionSampler and
+# defines its own forward, so the upstream vllm.v1.sample.rejection_sampler
+# helpers never run on Ascend and there is nothing left to rebind. That module
+# is MRv1-only, so MRv2 processes never import vllm_ascend.sample.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
@@ -71,7 +78,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _ar_spec
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as _ar_spec
 
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
         AutoRegressiveAclGraphManager310,

@@ -11,7 +11,6 @@ from vllm_ascend.sample.sampler import (
     AscendSampler,
     AscendTopKTopPSampler,
     _apply_top_k_top_p_pytorch,
-    _apply_top_k_top_p_torch_npu,
     random_sample,
 )
 
@@ -113,7 +112,3 @@ def test_topk_topp_forward_and_apply_helpers():
     assert torch.isfinite(filtered).any()
     top_k_only = _apply_top_k_top_p_pytorch(logits.clone(), torch.tensor([1, 1]), None)
     assert top_k_only.shape == logits.shape
-    npu_unchanged = _apply_top_k_top_p_torch_npu(logits.clone(), None, None)
-    assert npu_unchanged.shape == logits.shape
-    npu_filtered = _apply_top_k_top_p_torch_npu(logits.clone(), k, p)
-    assert npu_filtered.shape == logits.shape

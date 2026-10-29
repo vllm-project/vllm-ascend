@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
+import ctypes
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -20,13 +21,126 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
+from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("tokens", [0, 3])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tokens, quantized):
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.dim, table.block_size = 64, 32
+    table.n_hash_cols, table.part_n_hash_cols = 24, 24 // tp
+    table.head_start = 24 - table.part_n_hash_cols
+    table.vocab_start_idx, table.vocab_end_idx = 5, 8
+    table.tp_size, table.dp_size = tp, dp
+    table._codes_uva = None
+    codes = torch.arange(3 * 64).reshape(3, 64).remainder(31).sub(15)
+    table.weight = torch.nn.Parameter(codes.to(torch.int8 if quantized else torch.bfloat16), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.full((3, 2), 0.125), requires_grad=False) if quantized else None
+    # Match the non-contiguous layer slice passed by prepare_engram.
+    ids = torch.tensor([-1, 5, 6, 8]).repeat(tokens * dp * 12).reshape(tokens * dp, 2, 24)[:, 1]
+    columns = ids[:, table.head_start :]
+    owned = (columns >= 5) & (columns < 8)
+    local = torch.where(owned, columns - 5, 0)
+    expected = (codes[local].float() * (0.125 if quantized else 1)).bfloat16()
+    expected = torch.where(owned.unsqueeze(-1), expected, 0)
+    original_empty = torch.empty
+
+    def dirty_empty(*args, **kwargs):
+        return original_empty(*args, **kwargs).fill_(float("nan"))
+
+    def exchange(out, count):
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        return out[-count:] if count else out[:0]
+
+    def gather(out, dim):
+        torch.testing.assert_close(out, expected[:tokens], rtol=0, atol=0)
+        return torch.cat([out] * tp, dim=dim)
+
+    monkeypatch.setattr(embedding_mod.torch, "empty", dirty_empty)
+    monkeypatch.setattr(embedding_mod, "exchange_engram_rows", exchange)
+    monkeypatch.setattr(embedding_mod, "tensor_model_parallel_all_gather", gather)
+    result = table.embed_gathered(ids, tokens)
+    torch.testing.assert_close(result, torch.cat([expected[:tokens]] * tp, dim=1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("failure", [None, "malloc", "null", "register", "device_pointer"])
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("offset", [0, 4096, 65535])
+def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure, dtype, offset):
+    alignment, size = 65536, 4096
+
+    class Library:
+        def __init__(self):
+            self.storage = ctypes.create_string_buffer(size + 4 * alignment)
+            base = ctypes.addressof(self.storage)
+            self.original = (base + alignment - 1) // alignment * alignment + offset
+            self.registered = self.unregistered = self.freed = None
+            self.free_count = self.unregister_count = 0
+
+        def aclrtMallocHost(self, output, count, flags):
+            assert count == size + alignment - 1
+            if failure == "malloc":
+                return 1
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = (
+                None if failure == "null" else self.original
+            )
+            return 0
+
+        def aclrtHostRegisterV2(self, pointer, count, flags):
+            assert count == size and pointer.value % alignment == 0
+            self.registered = pointer.value
+            return 1 if failure == "register" else 0
+
+        def aclrtHostGetDevicePointer(self, pointer, output, flags):
+            assert pointer.value == self.registered
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x100000000
+            return 1 if failure == "device_pointer" else 0
+
+        def aclrtHostUnregister(self, pointer):
+            self.unregistered = pointer.value
+            self.unregister_count += 1
+            return 0
+
+        def aclrtFreeHost(self, pointer):
+            self.freed = pointer.value
+            self.free_count += 1
+            return 0
+
+    lib = Library()
+    monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    shape = (size // torch.empty((), dtype=dtype).element_size(),)
+    if failure:
+        message = "NULL pointer" if failure == "null" else "failed: rc=1"
+        with pytest.raises(RuntimeError, match=message):
+            npu.HostUvaBuffer(shape, dtype, "cpu")
+    else:
+        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
+        assert buffer.tensor.data_ptr() == lib.registered
+        assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
+        buffer.tensor.fill_(17)
+        value = torch.frombuffer(
+            lib.storage, dtype=dtype, count=1, offset=lib.registered - ctypes.addressof(lib.storage)
+        )
+        assert value.item() == 17
+        buffer.close()
+        buffer.close()
+    if failure in ("malloc", "null"):
+        assert lib.registered is lib.unregistered is lib.freed is None
+        assert lib.free_count == lib.unregister_count == 0
+    else:
+        assert lib.unregistered == lib.registered
+        assert lib.freed == lib.original
+        assert lib.free_count == lib.unregister_count == 1
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -114,7 +228,7 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(

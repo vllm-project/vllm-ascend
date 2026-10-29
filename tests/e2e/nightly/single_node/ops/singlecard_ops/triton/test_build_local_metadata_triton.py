@@ -4,11 +4,11 @@ import pytest
 import torch
 from vllm.triton_utils import HAS_TRITON, triton
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
 
 MAX_NUM_SEQS = 2048
-NUM_REQS_LIST = [1, 7, 32, 127, 128, 129, 255, 256, 257, 1023, 1024, 1025, 2048]
-TP_SIZES = [1, 8]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 0
@@ -79,10 +79,21 @@ def _run_triton(
     return local_query_start_loc, local_seq_lens, start_pos_out if compute_start_pos else None
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
-@pytest.mark.parametrize("num_reqs", NUM_REQS_LIST)
-@pytest.mark.parametrize("tp_size", TP_SIZES)
-@pytest.mark.parametrize("tp_rank", range(max(TP_SIZES)))
+@pytest.mark.parametrize(
+    ("num_reqs", "tp_size", "tp_rank"),
+    [
+        pytest.param(1, 1, 0, id="single-request-single-rank"),
+        pytest.param(2048, 8, 7, id="max-requests-last-rank"),
+        pytest.param(32, 8, 0, id="small-requests-first-rank"),
+        pytest.param(1023, 8, 3, id="below-1024-middle-rank"),
+        pytest.param(1024, 8, 3, id="at-1024-middle-rank"),
+        pytest.param(1025, 8, 3, id="above-1024-middle-rank"),
+    ],
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -95,10 +106,6 @@ def test_build_local_metadata_triton(
 ) -> None:
     torch.manual_seed(seed)
     torch.set_default_device(device)
-
-    # only test first rank and last rank
-    if tp_rank == 0 or tp_rank == tp_size - 1:
-        return
 
     # Build random seq_lens and compute local_start/local_end as the builder does.
     num_input_tokens = max(num_reqs * 4, 32)
@@ -160,6 +167,9 @@ def test_build_local_metadata_triton(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()

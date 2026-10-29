@@ -78,7 +78,8 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                         component = kv_cache
                     elif isinstance(kv_cache, (tuple, list)) and component_id < len(kv_cache):
                         component = kv_cache[component_id]
-                    if component is not None:
+                    # Ascend Block Zeroer unpacks tuple/list KV caches; skip empty views to avoid zero-sized launches.
+                    if isinstance(component, torch.Tensor) and component.numel() > 0:
                         layer_names.append(layer_name)
                         component_context[layer_name] = SimpleNamespace(kv_cache=component)
                 if layer_names:

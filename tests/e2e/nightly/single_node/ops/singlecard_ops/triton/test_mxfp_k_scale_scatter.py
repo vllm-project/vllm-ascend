@@ -18,6 +18,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     scatter_mxfp_k_scale_cache,
 )
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.mxfp_k_scale import _scatter_k_scale_kernel
 
 
@@ -26,6 +28,10 @@ def _write_reference(raw, slots, values, blocks, heads, pitch, offset):
     cache[slots // 512, :, slots % 512 // 16, :, slots % 16, :] = values
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("heads", [1, 2])
 @pytest.mark.parametrize("padding", [0, 256])
 @pytest.mark.parametrize("offset", [0, 4096])
@@ -69,6 +75,10 @@ def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, nonc
     torch.testing.assert_close(raw.cpu(), expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("heads", [1, 2])
 def test_token_counts_reuse_compilation(heads, monkeypatch):
     """Changing token counts must preserve bytes and reuse the compiled kernel."""
@@ -102,6 +112,10 @@ def test_token_counts_reuse_compilation(heads, monkeypatch):
         assert len(compile_events) == first_count, (tokens, compile_events)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_empty_scatter_preserves_cache():
     raw = torch.full((2 * mxfp_packet_size_bytes(1, 512, 256, 256),), 13, dtype=torch.int8, device="npu")
     cache = mxfp_paged_cache_views(raw, 2, 1, 256, 256, 512)[2]
@@ -111,6 +125,10 @@ def test_empty_scatter_preserves_cache():
     torch.testing.assert_close(raw.cpu(), before, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("heads", [1, 2])
 @pytest.mark.parametrize("source_tokens", [0, 1, 3])
 def test_mismatched_source_size_is_rejected_before_launch(heads, source_tokens, monkeypatch):
@@ -132,6 +150,10 @@ def test_mismatched_source_size_is_rejected_before_launch(heads, source_tokens, 
     torch.testing.assert_close(raw.cpu(), before, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_graph_scatter_preserves_concurrent_transfer_to_unselected_page():
     acl = pytest.importorskip("acl")
     blocks, heads, dim, tokens = 2048, 2, 256, 32
@@ -201,6 +223,10 @@ def test_graph_scatter_preserves_concurrent_transfer_to_unselected_page():
             release(resource)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_scatter_preserves_unselected_dense_view_elements():
     cache = torch.full((3, 2, 2, 4, 16, 2), 13, dtype=torch.uint8, device="npu")
     expected = cache.cpu()
@@ -264,6 +290,10 @@ class TestKScaleScatterPadding(TestCase):
         cache[block, :, seg, :, frag] = 0
         return cache
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
+    )
     def test_scatter_valid_and_padded_slots(self):
         key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
         key_scale[2] = 77  # the padded row's own (meaningless) scale
@@ -282,6 +312,10 @@ class TestKScaleScatterPadding(TestCase):
             block, seg, frag = self._at(slot)
             self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
+    )
     def test_scatter_all_padding_rows_touch_only_the_null_slot(self):
         """A pure-padding batch (all -1, e.g. a dummy run) must leave every
         slot a request can own alone."""
@@ -289,6 +323,10 @@ class TestKScaleScatterPadding(TestCase):
         self._scatter(key_scale, torch.tensor([-1, -1], dtype=torch.int64))
         self.assertTrue(torch.all(self._without_null_slot(self.key_scale_cache) == 0))
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
+    )
     def test_scatter_padding_and_real_at_nonzero_slot_coexist(self):
         key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
         key_scale[0] = 200  # real token at slot 3
@@ -301,6 +339,10 @@ class TestKScaleScatterPadding(TestCase):
         expected[block, :, seg, :, frag] = 200
         self.assertTrue(torch.equal(self._without_null_slot(self.key_scale_cache), expected))
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
+    )
     def test_prefill_shaped_batch_is_bit_identical_to_the_read_modify_write(self):
         # Eager batches are sliced to num_actual_tokens, so they carry no -1
         # rows and the old read + select was an identity there.
@@ -310,6 +352,10 @@ class TestKScaleScatterPadding(TestCase):
         old = self._read_modify_write_reference(key_scale, slots, torch.zeros_like(self.key_scale_cache))
         self.assertTrue(torch.equal(new, old))
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
+    )
     def test_padded_decode_batch_differs_only_in_the_null_slot(self):
         # FULL-graph replays pad the batch up to the captured size with -1.
         # Real slots start past block 0: the pool never hands block 0 out.

@@ -16,6 +16,20 @@ from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
 
+def allow_guidance_tokenizer(monkeypatch) -> None:
+    """Accept the dummy tokenizer for the guidance backend.
+
+    Both supported vLLM lanes gate the guidance backend on
+    ``GuidanceBackend.is_tokenizer_supported``. The tests pass
+    ``tokenizer=object()``, so make the backend accept it.
+    """
+    monkeypatch.setattr(
+        backend_guidance.GuidanceBackend,
+        "is_tokenizer_supported",
+        staticmethod(lambda tokenizer: True),
+    )
+
+
 class FakeBackend:
     def __init__(self, vllm_config, tokenizer, vocab_size):
         self.vllm_config = vllm_config
@@ -41,6 +55,9 @@ def make_manager() -> StructuredOutputManager:
     manager.vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_vocab_size=lambda: 128))
     manager.tokenizer = object()
     manager._use_async_grammar_compilation = False
+    # vLLM main's ``StructuredOutputManager.grammar_init`` reads this; it is
+    # set by ``__init__``, which this stub bypasses.
+    manager.backend_name = None
     return manager
 
 
@@ -71,6 +88,8 @@ def validate_structured_outputs(params, config):
 
 
 def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
+    allow_guidance_tokenizer(monkeypatch)
+
     def fake_validate_xgrammar(sampling_params):
         schema = sampling_params.structured_outputs.json
         if schema.get("force_guidance"):
@@ -105,6 +124,7 @@ def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
 
 
 def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
+    allow_guidance_tokenizer(monkeypatch)
     monkeypatch.setattr(
         backend_guidance,
         "has_guidance_unsupported_json_features",
@@ -126,6 +146,7 @@ def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
 
 
 def test_failed_first_validation_does_not_lock_config(monkeypatch):
+    allow_guidance_tokenizer(monkeypatch)
     monkeypatch.setattr(
         backend_xgrammar,
         "validate_xgrammar_grammar",

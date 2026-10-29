@@ -4,6 +4,7 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
@@ -11,7 +12,8 @@ from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
-def test_decoder_replay_enabled_with_prefix_caching():
+@pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -24,10 +26,11 @@ def test_decoder_replay_enabled_with_prefix_caching():
         topk_lengths_buffer=torch.zeros(8),
     )
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=True),
+        cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+            data_parallel_size=1,
             decode_context_parallel_size=1,
             use_ubatching=False,
         ),
@@ -90,6 +93,28 @@ def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
     assert aux[:, 0].tolist() == [20, 0, 0, 0, 24, 25]
     assert mix[:, 0].tolist() == [0, 0, 0, 0, 4, 5]
     assert buffer[:4, 0].tolist() == [0, 4, 5, 0]
+
+
+def test_pcp_replay_empty_owner_runs_padded_rows_without_scattering(monkeypatch):
+    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    buffer = torch.arange(4).reshape(4, 1)
+
+    def run_layers(hidden, mix, positions):
+        assert hidden.shape[0] == 2
+        assert not hidden.count_nonzero()
+        assert not mix.count_nonzero()
+        assert not positions.count_nonzero()
+        return hidden + 1, mix
+
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [buffer])
+    replay.rows = torch.empty(0, dtype=torch.int64)
+    replay.num_actual_rows = 0
+    replay.num_padded_rows = 2
+    replay.context_factory = nullcontext
+    hidden, mix = replay(torch.arange(4).float().reshape(4, 1), torch.ones(4, 1), torch.arange(4))
+    assert not hidden.count_nonzero()
+    assert not mix.count_nonzero()
+    assert buffer[:2, 0].tolist() == [0, 0]
 
 
 def test_replay_without_rows_keeps_inputs():

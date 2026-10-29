@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
@@ -29,12 +30,18 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+# Native npu_attention_update accepts at most 16 output/LSE pairs.
+ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
@@ -69,9 +76,9 @@ def supports_strided_mla_cache(
     ):
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         return False
-    if getattr(impl, "dcp_enabled", False):
+    if getattr(impl, "use_dcp", False):
         buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
         if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
             return False
@@ -107,8 +114,8 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
             return None
         raise
 
-    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
-    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    attention_op = getattr(ops, "flash_mla", None)
+    metadata_op = getattr(ops, "flash_mla_metadata", None)
     if callable(attention_op) and callable(metadata_op):
         return attention_op, metadata_op
     return None
@@ -314,15 +321,31 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
     )
 
 
-@lru_cache(maxsize=1)
-def enable_dcp():
+def is_dcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
 
 
-def enable_pcp():
+def is_pcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1
+
+
+def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:
+    """Return whether this step should use the PCP-sharded layout.
+
+    Under PCP, metadata built without a PCP context (e.g. a replicated draft
+    decode) runs replicated on every rank, so its slot mapping must not be
+    expanded to every rank's tokens.
+    """
+    if not use_pcp:
+        return False
+    if common_attn_metadata.pcp_context is None:
+        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
+            "PCP metadata without a PCP context must keep a rank-local slot mapping."
+        )
+        return False
+    return True
 
 
 @dataclass
@@ -407,6 +430,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # cacheable groups -- and only the shared prefix is there. ``None`` means
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
+
+    # Global PCP view of the current target step and this cache group's index
+    # into its per-group tensors. ``None`` when the step is not PCP-partitioned.
+    pcp_context: "AscendPCPAttentionContext | None" = None
+    pcp_cache_group_idx: int | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -716,3 +744,26 @@ def _select_seq_lens(
         if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
+
+
+def merge_prefill_chunks(
+    out_list: list[torch.Tensor],
+    lse_list: list[torch.Tensor],
+    lse_anchor: torch.Tensor | None,
+    *,
+    return_lse: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Merge bounded FP32 pairs with a separate anchor for relative LSEs.
+
+    Adding the anchor to an intermediate LSE would round away small relative
+    weights at large common offsets. Fused preparation retains this split
+    representation without synchronizing the host. The first group contains
+    current causal attention, so every real query has a finite prefix LSE.
+    """
+    assert 1 < len(out_list) == len(lse_list) <= ATTENTION_UPDATE_MAX_INPUTS
+    if lse_anchor is None and not return_lse:
+        output, lse = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
+        return output, lse, None
+    relative_lse, anchor = prepare_attention_update(lse_list, lse_anchor)
+    output, lse = torch_npu.npu_attention_update(relative_lse, tuple(out_list), int(return_lse))
+    return output, lse, anchor

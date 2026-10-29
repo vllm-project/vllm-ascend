@@ -13,11 +13,11 @@ a2:
     test_config:
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
-        os: linux-aarch64-a2b3-4
+        os: linux-aarch64-a2b3-8
         config_file_path: Qwen3-30B-A3B-BF16-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-30b-a3b-w8a8-a2-performance
-        os: linux-aarch64-a2b3-4
+        os: linux-aarch64-a2b3-8
         config_file_path: Qwen3-30B-A3B-W8A8-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-vl-32b-instruct-w8a8
@@ -162,6 +162,9 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: singlecard-ops-a3
+        os: linux-aarch64-a3-800i-8
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
@@ -209,6 +212,10 @@ a3-560t:
       - name: glm-5.2-W4A8C8-DSpark-PCP
         os: linux-aarch64-a3-800i-16
         config_file_path: glm-5.2-W4A8C8-DSpark-PCP.yaml
+        config_base_path: tests/e2e/cases/features/context_parallel
+      - name: DeepSeek-V4.1-Flash-W8A8-DSpark-PCP
+        os: linux-aarch64-a3-800i-16
+        config_file_path: DeepSeek-V4.1-Flash-W8A8-DSpark-PCP.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
       - name: Qwen3.5-397B-A17B-w8a8-mtp
         os: linux-aarch64-a3-800i-16
@@ -308,6 +315,10 @@ a3-560t:
         os: linux-aarch64-310p-8
         config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
+      - name: Qwen3VL-8B-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3VL-8B-310p.yaml
+        config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
 #   multi_node:
@@ -322,6 +333,9 @@ a5:
 #         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
   single_node:
     test_config:
+      - name: singlecard-ops-a5
+        os: linux-aarch64-a5-8
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3_235b_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_235b_w8a8_A5.yaml
@@ -357,4 +371,16 @@ a5:
       - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: Gemma4_26B_A4B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_26B_A4B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma
+      - name: Gemma4_31B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_31B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma
+      - name: DeepSeek_V4_Flash_K15_dspark_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V4_Flash_K15_dspark_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek

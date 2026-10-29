@@ -89,6 +89,8 @@ hooks:
   # Sets per-page and per-section titles for the active language.
   # See docs/hooks/nav_titles.py for the title mapping.
   - docs/hooks/nav_titles.py
+  # Extend the TOC only on MiniMax-M3; other pages keep the site-wide depth.
+  - docs/hooks/minimax_m3_toc.py
 
 # ---- Markdown extensions ----
 markdown_extensions:
@@ -102,6 +104,8 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      # Site-wide TOC display depth: affects every model guide.
+      # Do not change this value to customize a single model's TOC.
       toc_depth: 3
   # Python Markdown Extensions
   - pymdownx.arithmatex:
@@ -228,7 +232,6 @@ nav:
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
-        - tutorials/models/DeepSeek-V4-Flash-Vision.md
         - tutorials/models/DeepSeek-V4.1-Flash.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
@@ -236,8 +239,7 @@ nav:
         - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
-        - tutorials/models/GLM5.2.md
-        - tutorials/models/GLM5.3.md
+        - "GLM-5.2 & GLM-5.3": tutorials/models/GLM5.2.md
         - tutorials/models/GLM5.3-Flash.md
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
@@ -246,6 +248,7 @@ nav:
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
+        - tutorials/models/MiniMax-M3.1-Flash.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md
@@ -263,7 +266,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
     - faqs.md

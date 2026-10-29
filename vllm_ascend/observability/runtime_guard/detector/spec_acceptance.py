@@ -150,6 +150,9 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         if not req_ids:
             return []
 
+        if accepted_token_nums is None:
+            return []
+
         num_reqs = len(req_ids)
         if torch.is_tensor(accepted_token_nums):
             accepted_list = accepted_token_nums[:num_reqs].tolist()

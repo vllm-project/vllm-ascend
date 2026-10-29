@@ -48,6 +48,41 @@ class TestAscendDSACPLayerMetadata:
         assert layer_metadata.indexer_state is indexer_state_metadata
 
 
+class TestAscendDSAPCPMetadataBuilderWithoutContext:
+    def test_builds_ordinary_metadata_without_pcp_context(self):
+        """A replicated draft decode reaches the PCP builder without a PCP
+        context; it must build the ordinary DSA metadata like PCP=1."""
+        builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+        builder._is_decode_sharded = True
+        builder.use_pcp = True
+        common = SimpleNamespace(
+            pcp_context=None, pcp_cache_group_idx=None, slot_mapping=torch.zeros(1), num_input_tokens=1
+        )
+        sas_metadata: dict[Any, Any] = {}
+        ordinary = object()
+        with (
+            patch.object(dsa_cp.dsa_v1.AscendDSAMetadataBuilder, "build", return_value=ordinary) as build,
+            patch.object(builder, "_prepare_graph_pcp_context") as prepare,
+        ):
+            metadata = builder.build(
+                0,
+                common,
+                num_actual_reqs=2,
+                common_ratio_to_sas_metadata=sas_metadata,
+                full_graph_mode=True,
+            )
+        assert metadata is ordinary
+        prepare.assert_not_called()
+        build.assert_called_once_with(
+            0,
+            common,
+            False,
+            num_actual_reqs=2,
+            common_ratio_to_sas_metadata=sas_metadata,
+            full_graph_mode=True,
+        )
+
+
 class TestAscendDSAPCPGraphPadding:
     @pytest.mark.parametrize(
         "full_graph_mode,expected_num_tokens",

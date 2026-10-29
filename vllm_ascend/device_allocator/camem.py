@@ -16,7 +16,7 @@
 #
 # CANN-mem-based pytorch pluggable allocator to implement sleep mode.
 #
-import dataclasses
+import atexit
 import gc
 import os
 from collections.abc import Callable
@@ -25,33 +25,10 @@ from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
+from vllm.device_allocator import AllocationData, HandleType  # noqa: F401
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.logger import logger
-
-
-def find_loaded_library(lib_name) -> str | None:
-    """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
-    the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    a loaded library.
-    """  # noqa
-    found_line = None
-    with open("/proc/self/maps") as f:
-        for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), f"Unexpected filename: {filename} for library {lib_name}"
-    return path
-
+from vllm.utils.system_utils import find_loaded_library
 
 camem_available = False
 try:
@@ -69,17 +46,6 @@ except ImportError as e:
     python_create_and_map = None
     python_unmap_and_release = None
     lib_name = None
-    libcudart = None
-
-# py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = tuple[int, int, int, int]
-
-
-@dataclasses.dataclass
-class AllocationData:
-    handle: HandleType
-    tag: str
-    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -91,8 +57,8 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 
 def get_pluggable_allocator(
-    python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
-    python_free_func: Callable[[int], tuple[int, int, int, int]],
+    python_malloc_fn: Callable[[HandleType], None],
+    python_free_func: Callable[[int], HandleType],
 ) -> torch.npu.memory.NPUPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, "my_malloc", "my_free")
@@ -101,8 +67,8 @@ def get_pluggable_allocator(
 
 @contextmanager
 def use_memory_pool_with_allocator(
-    python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
-    python_free_func: Callable[[int], tuple[int, int, int, int]],
+    python_malloc_fn: Callable[[HandleType], None],
+    python_free_func: Callable[[int], HandleType],
 ):
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.npu.memory.MemPool(new_alloc._allocator)
@@ -110,7 +76,7 @@ def use_memory_pool_with_allocator(
         yield mem_pool, new_alloc
 
 
-class CaMemAllocator:
+class CaMemAllocator(CuMemAllocator):
     """
     A singleton class that manages a memory pool for CANN tensors.
     The memory in this pool can be offloaded or discarded when the
@@ -134,8 +100,6 @@ class CaMemAllocator:
 
     instance = None
     default_tag: str = "default"
-    # Allocations with this tag stay mapped across sleep/wake cycles.
-    sleep_persistent_tag: str = "sleep_persistent"
 
     @staticmethod
     def get_instance() -> "CaMemAllocator":
@@ -144,9 +108,23 @@ class CaMemAllocator:
         We cannot call the constructor directly.
         Call this method to get the instance.
         """
+        assert camem_available, "camem allocator is not available"
         if CaMemAllocator.instance is None:
             CaMemAllocator.instance = CaMemAllocator()
+            # Ensure MemPool/allocator wrappers are released before interpreter
+            # finalization tears down PyTorch allocator internals.
+            atexit.register(CaMemAllocator._shutdown_singleton)
         return CaMemAllocator.instance
+
+    @staticmethod
+    def _shutdown_singleton() -> None:
+        instance = CaMemAllocator.instance
+        if instance is None:
+            return
+        try:
+            instance.release_pools()
+        except Exception:
+            logger.exception("CaMemAllocator singleton shutdown failed")
 
     def __init__(self):
         conf = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
@@ -155,26 +133,48 @@ class CaMemAllocator:
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
             "for the latest updates."
         )
-
-        self.pointer_to_data: dict[int, AllocationData] = {}
+        super().__init__()
         self.current_tag: str = CaMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
 
-    def python_malloc_callback(self, allocation_handle: HandleType) -> None:
-        """
-        Internal method to store the allocation data
-        when memory is allocated in the memory pool."""
-        py_d_mem = allocation_handle[2]
-        self.pointer_to_data[py_d_mem] = AllocationData(allocation_handle, self.current_tag)
-        return
+    def release_pools(self) -> None:
+        """Drop Python references to MemPool/pluggable allocators eagerly."""
+        if not self.allocator_and_pools:
+            return
 
-    def python_free_callback(self, ptr: int) -> HandleType:
+        pool_entries = list(self.allocator_and_pools.values())
+        self.allocator_and_pools.clear()
+
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
+        pool_entries.clear()
+
+        # Phase 1: drop MemPool refs while allocators are still strongly held.
+        mem_pools.clear()
+        gc.collect()
+
+        # Phase 2: now it is safe to release allocator wrappers.
+        allocators.clear()
+
+    def _python_free_callback(self, ptr: int) -> HandleType:
+        """Internal method to look up the allocation data
+        when memory is freed in the memory pool.
         """
-        Internal method to look up the allocation data
-        when memory is freed in the memory pool."""
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        # Drain pending kernels before the C extension's aclrtUnmapMem.
+        # The pluggable allocator path doesn't defer reclaim like the
+        # regular caching allocator, so without this, in-flight work
+        # (e.g. quant helpers' transient tensors during weight loading)
+        # races the unmap and surfaces as ACL error.
+        torch.npu.synchronize(data.handle[0])
+        logger.debug(
+            "Freed %s bytes for %s with address %s from camem allocator",
+            data.handle[1],
+            data.tag,
+            ptr,
+        )
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
@@ -206,9 +206,14 @@ class CaMemAllocator:
         # avoids rtMemcpy errors observed when releasing the mappings too early.
         torch.npu.synchronize()
 
+        has_policy_conflict = False
+
         for ptr, data in self.pointer_to_data.items():
-            if data.tag == CaMemAllocator.sleep_persistent_tag:
-                # This memory is not offloaded or released during sleep.
+            if data.is_asleep:
+                requests_offload = data.tag in offload_tags
+                was_offloaded = data.cpu_backup_tensor is not None
+                if requests_offload != was_offloaded:
+                    has_policy_conflict = True
                 continue
             handle = data.handle
             if data.tag in offload_tags:
@@ -219,16 +224,59 @@ class CaMemAllocator:
                 dest_max = cpu_ptr + size_in_bytes * 2
                 memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
                 data.cpu_backup_tensor = cpu_backup_tensor
-            unmap_and_release(handle)
+            try:
+                unmap_and_release(handle)
+            finally:
+                data.is_asleep = True
+
+        if has_policy_conflict:
+            logger.warning(
+                "CaMemAllocator: sleep cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
 
         gc.collect()
         torch.npu.empty_cache()
+
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Discard mapped allocations with the given tags without CPU backup."""
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        has_policy_conflict = False
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags:
+                continue
+            if data.is_asleep:
+                if data.cpu_backup_tensor is not None:
+                    has_policy_conflict = True
+                continue
+            torch.accelerator.synchronize(data.handle[0])
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            discarded_bytes += data.handle[1]
+
+        logger.info(
+            "CaMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
+        )
+
+        if has_policy_conflict:
+            logger.warning(
+                "CaMemAllocator: discard cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
+        gc.collect()
+        torch.accelerator.empty_cache()
+
         restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
             "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
@@ -237,12 +285,12 @@ class CaMemAllocator:
             tags or "all",
         )
         for ptr, data in self.pointer_to_data.items():
-            if data.tag == CaMemAllocator.sleep_persistent_tag:
-                # It was never released in sleep(), so there is nothing to remap.
+            if not data.is_asleep:
                 continue
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -252,16 +300,6 @@ class CaMemAllocator:
                         dest_max = ptr + size_in_bytes * 2
                         memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
                         data.cpu_backup_tensor = None
-
-    @contextmanager
-    def use_allocation_tag(self, tag: str):
-        """Temporarily override the tag assigned to new allocations."""
-        old_tag = self.current_tag
-        self.current_tag = tag
-        try:
-            yield
-        finally:
-            self.current_tag = old_tag
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -279,14 +317,16 @@ class CaMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
-            # start to hit another PyTorch bug in PyTorch 2.6,
-            # possibly because of gc-related issue w.r.t. the allocator and
-            # the memory pool.
-            # to avoid the issue, we keep a reference of the data.
-            # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools[tag] = data
-            yield
+        try:
+            with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
+                # start to hit another PyTorch bug in PyTorch 2.6,
+                # possibly because of gc-related issue w.r.t. the allocator and
+                # the memory pool.
+                # to avoid the issue, we keep a reference of the data.
+                # see https://github.com/pytorch/pytorch/issues/146431 .
+                self.allocator_and_pools[tag] = data
+                yield
+        finally:
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see
             # https://github.com/pytorch/pytorch/issues/145168 .
@@ -298,13 +338,3 @@ class CaMemAllocator:
             # TODO: we need to find a way to release the memory,
             # i.e. calling torch.cuda.empty_cache()
             self.current_tag = old_tag
-
-    def get_current_usage(self) -> int:
-        """
-        Get the total number of bytes allocated in the memory pool.
-        """
-        sum_bytes: int = 0
-        for ptr, data in self.pointer_to_data.items():
-            handle = data.handle
-            sum_bytes += handle[1]
-        return sum_bytes

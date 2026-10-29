@@ -29,10 +29,10 @@ import torch
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, set_current_vllm_config
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +168,9 @@ def test_dummy_run_basic():
         proposer.hidden_states = torch.zeros(1024, 4096, dtype=torch.float16)
         runner._sync_metadata_across_dp.return_value = (16, None, CUDAGraphMode.NONE)
 
-        with patch("vllm_ascend.spec_decode.extract_hidden_states_proposer.set_forward_context") as mock_context:
+        with patch(
+            "vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer.set_forward_context"
+        ) as mock_context:
             mock_context.return_value.__enter__ = MagicMock(return_value=None)
             mock_context.return_value.__exit__ = MagicMock(return_value=None)
 
@@ -203,7 +205,9 @@ def test_dummy_run_syncs_metadata_across_dp_as_draft_model():
         synced_tensor = torch.tensor([16, 16], dtype=torch.int32)
         runner._sync_metadata_across_dp.return_value = (16, synced_tensor, CUDAGraphMode.NONE)
 
-        with patch("vllm_ascend.spec_decode.extract_hidden_states_proposer.set_forward_context") as mock_context:
+        with patch(
+            "vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer.set_forward_context"
+        ) as mock_context:
             mock_context.return_value.__enter__ = MagicMock(return_value=None)
             mock_context.return_value.__exit__ = MagicMock(return_value=None)
 

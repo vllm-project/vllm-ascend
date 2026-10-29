@@ -149,16 +149,17 @@ def initialize_kv_cache(
             self.compilation_config.cudagraph_mode,
             piecewise_capture_available=piecewise_capture_available,
         )
+    # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
     cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
         use_v2_model_runner=True,
-        tensor_parallel_size=self.parallel_config.tensor_parallel_size,
         kv_cache_config=self.kv_cache_config,
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,
         piecewise_capture_available=piecewise_capture_available,
+        **{},
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,
