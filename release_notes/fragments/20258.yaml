@@ -1,0 +1,6 @@
+pr: 20258
+entries:
+  - category: performance
+    text: Improved V2 penalty prompt-mask packing with bounded Vector-core tile loops.
+  - category: bugfix
+    text: Fixed V2 penalty bincount launches exceeding the Ascend program limit for large request histories.
