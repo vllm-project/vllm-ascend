@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.utils import transfer_backend as tb
+from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import GlobalMemfabricTE
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     DEFAULT_TRANSFER_PROTOCOL,
     GlobalTE,
@@ -205,6 +206,17 @@ def test_memfabric_rejects_a_role_it_cannot_map(monkeypatch):
             device_name=None,
             kv_role="kv_both",
         )
+
+
+def test_memfabric_rejects_a_retry_after_a_failed_init():
+    """A failed native initialize() must not be retried into a second leaked
+    engine: the singleton mirrors GlobalTE's no-retry-on-failure guard."""
+    registry = GlobalMemfabricTE()
+    registry.configure(role="Prefill", device_id=0)
+    registry._initialization_attempted = True  # a prior initialize() failed
+
+    with pytest.raises(RuntimeError, match="previously failed"):
+        registry.get_transfer_engine("10.0.0.1")
 
 
 # --- Mooncake engine contract ------------------------------------------------
