@@ -63,7 +63,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots i
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
 )
-from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 
 def test_sfa_remote_d2h_connector_is_registered():
@@ -1802,15 +1801,9 @@ def test_producer_scheduler_reports_no_loaded_group():
 
 
 def test_loaded_group_ids_hook_is_version_gated():
-    # vLLM main added the scheduler hook `get_loaded_kv_cache_group_ids`;
-    # v0.31.0 has neither the hook nor its caller.
-    if vllm_version_is("0.31.0"):
-        assert "get_loaded_kv_cache_group_ids" not in SfaRemoteD2HConnector.__dict__
-    else:
-        assert "get_loaded_kv_cache_group_ids" in SfaRemoteD2HConnector.__dict__
+    assert "get_loaded_kv_cache_group_ids" in SfaRemoteD2HConnector.__dict__
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only scheduler hook")
 def test_connector_reports_the_groups_its_scheduler_restores():
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
     connector.connector_scheduler = MagicMock()

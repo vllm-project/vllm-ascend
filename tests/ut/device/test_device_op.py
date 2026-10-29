@@ -49,7 +49,7 @@ def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
         mock.patch.object(torch.ops._C_ascend, "npu_rms_norm_cast", create=True, return_value=outputs) as op,
     ):
         result = BaseDeviceAdaptor.rms_norm_cast(x, weight, 1e-6)
-    if device == AscendDeviceType.A3 and custom_ops:
+    if device in (AscendDeviceType.A2, AscendDeviceType.A3) and custom_ops:
         assert result is outputs
         op.assert_called_once_with(x, weight, 1e-6)
     else:

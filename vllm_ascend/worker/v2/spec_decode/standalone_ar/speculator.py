@@ -8,9 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
-    StandaloneARSpeculator,
-)
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import (

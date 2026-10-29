@@ -79,7 +79,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable DSA-CP for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. Supported only with Model Runner V1 and requires sequence parallelism. Enabling it automatically enables FlashComm. Setting this option to `true` with Model Runner V2 raises a configuration error; use [PCP](../feature_guide/context_parallel.md#prefill-context-parallel) instead. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
@@ -162,13 +161,14 @@ The accepted fields depend on the model runner:
 
 - **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
   Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy by default and asynchronous Gloo movement. Select
-  `default` or `stair` only through the upstream `--eplb-config.policy`
-  option. See the
-  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
+  uses the STAIR policy by default and moves expert weights asynchronously
+  over HIXL when it is available on every EPLB rank, falling back to Gloo
+  CPU staging otherwise. Select `default` or `stair` only through the
+  upstream `--eplb-config.policy` option. See the
+  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
   for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase`.
+  `load_collection_phase` and `stair_config`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
 
 Mixing the two schemas fails during startup instead of silently ignoring
@@ -184,7 +184,8 @@ configuration.
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 
@@ -204,7 +205,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
+| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
@@ -260,7 +261,7 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **scheduler_config.short_request_first_config**
 
-ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
+ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It can be combined with profiling-chunk scheduling, but it does not support batch-job-aware or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -378,13 +379,10 @@ An example of additional configuration is as follows:
 
 ### KV pipeline parallelism (KVPP)
 
-Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
-KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
-DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
-TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
+Set `enable_kvpp: true` in `--additional-config` to distribute persistent KV-cache layers across TP and PCP ranks within the same DP replica and PP stage. The group size is TP × PCP: TP4 + PCP2 uses eight ranks, and TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
 
-PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
-non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
-prefill KV before cache writes; layer broadcasts restore prior-forward cache
-contents before attention. The broadcast decision uses the global scheduled
-batch, not PCP-local segment offsets.
+KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` graphs. Full graph modes and DCP are not supported. For `PIECEWISE`, set `--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`; for eager execution, use `--enforce-eager` instead.
+
+KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
+
+PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.

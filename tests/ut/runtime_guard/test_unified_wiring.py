@@ -161,6 +161,9 @@ def test_d11_async_model_runner_output_defers_after_sample():
         def get_output(self) -> ModelRunnerOutput:
             raise AssertionError("run_sample_phase must not call get_output")
 
+        def get_kv_connector_output(self) -> None:
+            return None
+
     RuntimeGuardProcessor.reset_for_tests()
     p = bare_processor()
     calls: list[str] = []
