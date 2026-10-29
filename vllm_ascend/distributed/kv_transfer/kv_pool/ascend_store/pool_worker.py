@@ -281,6 +281,12 @@ class KVPoolWorker:
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         self.num_kv_cache_groups = len(self.grouped_block_size)
+        # Heterogeneous per-group block counts (window-capped per-group pools):
+        # the planner may size each cache group independently, in which case
+        # kv_cache_config.num_blocks only holds the maximum and every tensor is
+        # sized against its own group's count instead. None for stock
+        # homogeneous configs, where one count covers every group.
+        self.group_num_blocks = self._resolve_group_num_blocks(kv_cache_config)
         self.layerwise_keys = (
             self.layerwise_protocol.bind_layerwise_keys(
                 vllm_config=vllm_config,
@@ -977,16 +983,41 @@ class KVPoolWorker:
         # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
         return tuple(cache for cache in cache_or_caches if cache.numel())
 
-    def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
+    @staticmethod
+    def _resolve_group_num_blocks(kv_cache_config) -> tuple[int, ...] | None:
+        """Per-group block counts for heterogeneous (window-capped per-group) pools.
+
+        The KV cache planner records one block count per cache group when it
+        sizes groups independently (window-capped per-group pools); only the
+        maximum is kept in ``kv_cache_config.num_blocks``. Returns None for
+        stock homogeneous configs, where every tensor is sized against the
+        single ``num_blocks`` and consumers must keep the default path.
+        """
+        if kv_cache_config is None:
+            return None
+        group_num_blocks = getattr(kv_cache_config, "group_num_blocks", None)
+        if not group_num_blocks or len(group_num_blocks) != len(kv_cache_config.kv_cache_groups):
+            return None
+        return tuple(int(num_blocks) for num_blocks in group_num_blocks)
+
+    def _get_cache_block_metadata(
+        self, cache: torch.Tensor, num_blocks: int | None = None
+    ) -> tuple[int, int, int, int]:
+        # ``num_blocks`` overrides the kernel block count with this cache's own
+        # group count (heterogeneous per-group pools); the default keeps the
+        # stock single-count behavior.
+        kernel_num_blocks = self.num_blocks if num_blocks is None else num_blocks
         tensor_num_blocks = cache.shape[0]
-        assert tensor_num_blocks % self.num_blocks == 0, (
+        assert tensor_num_blocks % kernel_num_blocks == 0, (
             "The external block size must be an integer multiple of the kernel block size."
         )
-        block_size_scale = tensor_num_blocks // self.num_blocks
+        block_size_scale = tensor_num_blocks // kernel_num_blocks
         block_len = cache[0].numel() * cache.element_size() * block_size_scale
         block_stride = cache.stride(0) * cache.element_size() * block_size_scale
         # Registration covers the physical span, including gaps between kernel
         # blocks inside one scheduler block and non-contiguous inner views.
+        # The span is derived from the tensor itself, so a per-group tensor
+        # registers its own extent without consulting the kernel block count.
         region_len = (
             (1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))) * cache.element_size()
             if cache.numel()
@@ -994,13 +1025,15 @@ class KVPoolWorker:
         )
         return block_len, block_stride, region_len, block_size_scale
 
-    def _get_cache_transfer_segments(self, cache: torch.Tensor) -> list[tuple[int, int, int]]:
+    def _get_cache_transfer_segments(
+        self, cache: torch.Tensor, num_blocks: int | None = None
+    ) -> list[tuple[int, int, int]]:
         """Describe full-block pool transfers without crossing kernel-page gaps.
 
         Both bulk and layerwise transfers must preserve physical-block gaps.
         Partial layerwise transfers also retain each segment's token interval.
         """
-        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
+        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
         physical_bytes = block_len // scale
         physical_stride = block_stride // scale
         if scale == 1 or physical_stride == physical_bytes:
@@ -1010,7 +1043,7 @@ class KVPoolWorker:
         return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
 
     def _get_combined_cache_transfer_segments(
-        self, caches: tuple[torch.Tensor, ...], group_id: int
+        self, caches: tuple[torch.Tensor, ...], group_id: int, num_blocks: int | None = None
     ) -> list[tuple[int, int, int]] | None:
         """Coalesce adjacent MLA components for complete bulk pages only.
 
@@ -1046,8 +1079,8 @@ class KVPoolWorker:
             or not second[0].is_contiguous()
         ):
             return None
-        first_len, block_stride, _, scale = self._get_cache_block_metadata(first)
-        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second)
+        first_len, block_stride, _, scale = self._get_cache_block_metadata(first, num_blocks=num_blocks)
+        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second, num_blocks=num_blocks)
         if scale <= 1 or scale != second_scale or block_stride != second_stride:
             return None
         first_bytes = first_len // scale
@@ -1112,7 +1145,7 @@ class KVPoolWorker:
             return shard_stride * self.dcp_size
         return shard_bytes
 
-    def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
+    def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str], num_blocks: int | None = None):
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
@@ -1132,11 +1165,12 @@ class KVPoolWorker:
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 caches = self._as_cache_tuple(cache_or_caches)
-                combined = self._get_combined_cache_transfer_segments(caches, group_id)
+                kernel_num_blocks = self.num_blocks if num_blocks is None else num_blocks
+                combined = self._get_combined_cache_transfer_segments(caches, group_id, num_blocks=num_blocks)
                 cache_segments = (
                     [combined]
                     if combined is not None
-                    else [self._get_cache_transfer_segments(cache) for cache in caches]
+                    else [self._get_cache_transfer_segments(cache, num_blocks=num_blocks) for cache in caches]
                 )
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
@@ -1149,7 +1183,7 @@ class KVPoolWorker:
                         "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
                         layer_name,
                         group_id,
-                        2 * (caches[0].shape[0] // self.num_blocks),
+                        2 * (caches[0].shape[0] // kernel_num_blocks),
                         len(combined),
                     )
             layer_cache_entry_offsets.append(len(group_addrs))
@@ -1221,13 +1255,26 @@ class KVPoolWorker:
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         if draft_names:
             kv_caches = {name: cache for name, cache in kv_caches.items() if name not in draft_names}
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        first_layer_name, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
         first_kv_cache = first_kv_cache_tuple[0]
 
         self.num_blocks = (
             self.kv_cache_config.num_blocks if self.kv_cache_config is not None else first_kv_cache.shape[0]
         )
+        # Layer -> per-group block count, used to size every cache/region
+        # against its own group under heterogeneous per-group pools. Empty for
+        # stock homogeneous configs, where the lookup below yields None and the
+        # default single-count path applies.
+        self._layer_group_num_blocks: dict[str, int] = {}
+        if self.group_num_blocks is not None:
+            assert self.kv_cache_config is not None
+            self._layer_group_num_blocks = {
+                name: self.group_num_blocks[group_id]
+                for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+                for name in group.layer_names
+            }
+            logger.info("per-group num_blocks: %s", self.group_num_blocks)
         prefix_keys: DSparkPrefixKeys | None = getattr(self, "_dspark_prefix_keys", None)
         if prefix_keys is not None and self.pp_rank == self.pp_size - 1:
             self.dspark_prefix_cache = DSparkPrefixCache(
@@ -1249,8 +1296,9 @@ class KVPoolWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
         self.block_stride = []
+        first_layer_num_blocks = self._layer_group_num_blocks.get(first_layer_name)
         for cache in first_kv_cache_tuple:
-            block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+            block_len, block_stride, _, _ = self._get_cache_block_metadata(cache, num_blocks=first_layer_num_blocks)
             logger.info("block_shape: %s", cache.shape[1:])
             self.block_len.append(block_len)
             self.block_stride.append(block_stride)
@@ -1287,10 +1335,11 @@ class KVPoolWorker:
         registration_caches = (
             {**kv_caches, **draft_caches} if getattr(self, "dspark_prefix_cache", None) is not None else kv_caches
         )
-        for cache_or_caches in registration_caches.values():
+        for layer_name, cache_or_caches in registration_caches.items():
+            layer_num_blocks = self._layer_group_num_blocks.get(layer_name)
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
-                _, _, region_len, _ = self._get_cache_block_metadata(cache)
+                _, _, region_len, _ = self._get_cache_block_metadata(cache, num_blocks=layer_num_blocks)
                 if not isinstance(region_len, int):
                     region_len = 0
                 self.kv_caches_base_addr.append(base_addr)
@@ -1312,7 +1361,11 @@ class KVPoolWorker:
                 layer_names = [name for name in group_spec.layer_names if name not in draft_names]
                 if self.use_kvpp:
                     layer_names = [name for name in layer_names if name in kv_caches]
-                self._infer_cache_group_metadata(group_id, layer_names)
+                self._infer_cache_group_metadata(
+                    group_id,
+                    layer_names,
+                    num_blocks=None if self.group_num_blocks is None else self.group_num_blocks[group_id],
+                )
         else:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 

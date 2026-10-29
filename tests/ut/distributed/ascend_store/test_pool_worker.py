@@ -29,7 +29,13 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 # isort: split
 import torch
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -140,6 +146,108 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+
+
+class TestPerGroupBlockCounts(unittest.TestCase):
+    """Heterogeneous per-group block counts (window-capped per-group pools).
+
+    The planner may size each KV cache group independently, recording
+    ``group_num_blocks`` on the KV cache config while ``num_blocks`` keeps only
+    the maximum. Registration must then size every cache/region against its own
+    group's count instead of asserting a global multiple of the maximum.
+    """
+
+    @staticmethod
+    def _plan(full_names, sliding_names, group_num_blocks):
+        plan = SimpleNamespace(
+            num_blocks=max(group_num_blocks),
+            prefix_cache_retention_interval=0,
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=full_names,
+                    kv_cache_spec=FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16),
+                ),
+                KVCacheGroupSpec(
+                    layer_names=sliding_names,
+                    kv_cache_spec=SlidingWindowSpec(
+                        block_size=16,
+                        num_kv_heads=1,
+                        head_size=4,
+                        dtype=torch.bfloat16,
+                        sliding_window=64,
+                    ),
+                ),
+            ],
+        )
+        plan.group_num_blocks = tuple(group_num_blocks)
+        return plan
+
+    def test_resolve_group_num_blocks_variants(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        groups = [object(), object()]
+        plan = SimpleNamespace(num_blocks=4, kv_cache_groups=groups, group_num_blocks=(4, 2))
+        self.assertEqual(KVPoolWorker._resolve_group_num_blocks(plan), (4, 2))
+        # Absent attribute (stock homogeneous configs) -> single-count path.
+        stock = SimpleNamespace(num_blocks=4, kv_cache_groups=groups)
+        self.assertIsNone(KVPoolWorker._resolve_group_num_blocks(stock))
+        # Length mismatch with the group list -> ignored as well.
+        bad = SimpleNamespace(num_blocks=4, kv_cache_groups=groups, group_num_blocks=(4,))
+        self.assertIsNone(KVPoolWorker._resolve_group_num_blocks(bad))
+        self.assertIsNone(KVPoolWorker._resolve_group_num_blocks(None))
+
+    def test_get_cache_block_metadata_per_group_override(self):
+        worker = make_worker(self)
+        worker.num_blocks = 4
+        full = torch.zeros((4, 16, 1, 4), dtype=torch.bfloat16)
+        sliding = torch.zeros((2, 16, 1, 4), dtype=torch.bfloat16)
+        block_len, block_stride, region_len, scale = worker._get_cache_block_metadata(full)
+        self.assertEqual((block_len, block_stride, scale), (128, 128, 1))
+        self.assertEqual(region_len, 3 * block_stride + block_len)
+        # The homogeneous path keeps the stock strict assert.
+        with self.assertRaises(AssertionError):
+            worker._get_cache_block_metadata(sliding)
+        # The per-group override sizes the tensor against its own group count.
+        sliding_meta = worker._get_cache_block_metadata(sliding, num_blocks=2)
+        self.assertEqual(sliding_meta, (block_len, block_stride, block_stride + block_len, 1))
+
+    def test_register_kv_caches_with_heterogeneous_per_group_blocks(self):
+        full_names = [f"model.layers.{index}.attn" for index in (0, 5)]
+        sliding_names = ["model.layers.1.attn"]
+        plan = self._plan(full_names, sliding_names, (4, 2))
+        worker = make_worker(self, num_layers=6, num_hidden_layers=6, kv_cache_config=plan)
+        self.assertEqual(worker.group_num_blocks, (4, 2))
+        # Match the actual shared, 2 MiB-aligned kernel cache allocation.
+        alignment = 2 * 1024 * 1024
+        backing = torch.zeros(alignment, dtype=torch.uint8)
+        cursor = -backing.data_ptr() % alignment
+
+        def cache(num_blocks):
+            nonlocal cursor
+            byte_count = num_blocks * 128  # 16 tokens x 1 head x 4 dims x 2 bytes
+            tensor = backing[cursor : cursor + byte_count].view(torch.bfloat16).reshape(num_blocks, 16, 1, 4)
+            cursor += byte_count
+            return tensor
+
+        caches = {
+            **{name: cache(4) for name in full_names},
+            **{name: cache(2) for name in sliding_names},
+        }
+        worker._transfer_threads_started = True
+        # This used to abort on "2 % 4 != 0" before per-group sizing.
+        worker.register_kv_caches(caches)
+        self.assertEqual(worker.num_blocks, 4)
+        self.assertEqual(
+            worker._layer_group_num_blocks,
+            {full_names[0]: 4, full_names[1]: 4, sliding_names[0]: 2},
+        )
+        self.assertEqual(worker.group_num_layers, {0: 2, 1: 1})
+        self.assertEqual(worker.group_block_len[0], [128, 128])
+        self.assertEqual(worker.group_block_len[1], [128])
+        self.assertEqual(worker.group_block_stride[1], [128])
+        self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
+        self.assertEqual(len(worker.group_kv_caches_base_addr[1]), 1)
+        worker.m_store.register_buffer.assert_called_once()
 
 
 class TestPCPPoolWorker(unittest.TestCase):
