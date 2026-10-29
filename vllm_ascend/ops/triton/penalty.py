@@ -55,46 +55,47 @@ def apply_all_penalties_kernel(
     """Apply repetition, frequency, and presence penalties to logits in place."""
     pid = tl.program_id(axis=0)
     num_programs = tl.num_programs(axis=0)
-    seqs_per_program = (num_seqs + num_programs - 1) // num_programs
+    vocab_blocks = tl.cdiv(vocab_size, BLOCK_SIZE)
+    total_blocks = num_seqs * vocab_blocks
 
-    start_seq = pid * seqs_per_program
-    end_seq = tl.minimum(start_seq + seqs_per_program, num_seqs)
-
-    for seq_idx in range(start_seq, end_seq):
+    # Vocabulary tiles are independent, so even a single sequence can use
+    # multiple vector cores instead of scanning its entire vocabulary serially.
+    for block_idx in tl.range(pid, total_blocks, num_programs):
+        seq_idx = block_idx // vocab_blocks
+        vocab_start = (block_idx - seq_idx * vocab_blocks) * BLOCK_SIZE
         repetition_penalty = tl.load(repetition_penalties_ptr + seq_idx)
         frequency_penalty = tl.load(frequency_penalties_ptr + seq_idx)
         presence_penalty = tl.load(presence_penalties_ptr + seq_idx)
 
-        for vocab_start in range(0, vocab_size, BLOCK_SIZE):
-            vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE)
-            mask = vocab_offsets < vocab_size
+        vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE)
+        mask = vocab_offsets < vocab_size
 
-            logits_offset = seq_idx * stride_logits_seq + vocab_offsets * stride_logits_vocab
-            prompt_mask_offset = seq_idx * stride_prompt_mask_seq + vocab_offsets * stride_prompt_mask_vocab
-            output_mask_offset = seq_idx * stride_output_mask_seq + vocab_offsets * stride_output_mask_vocab
-            counts_offset = seq_idx * stride_bin_counts_seq + vocab_offsets * stride_bin_counts_vocab
+        logits_offset = seq_idx * stride_logits_seq + vocab_offsets * stride_logits_vocab
+        prompt_mask_offset = seq_idx * stride_prompt_mask_seq + vocab_offsets * stride_prompt_mask_vocab
+        output_mask_offset = seq_idx * stride_output_mask_seq + vocab_offsets * stride_output_mask_vocab
+        counts_offset = seq_idx * stride_bin_counts_seq + vocab_offsets * stride_bin_counts_vocab
 
-            logits = tl.load(logits_ptr + logits_offset, mask=mask, other=0.0)
-            prompt_mask_val = tl.load(prompt_mask_ptr + prompt_mask_offset, mask=mask, other=False)
-            output_mask_val = tl.load(output_mask_ptr + output_mask_offset, mask=mask, other=False)
-            output_bin_counts = tl.load(
-                output_bin_counts_ptr + counts_offset,
-                mask=mask,
-                other=0,
-            ).to(tl.float32)
+        logits = tl.load(logits_ptr + logits_offset, mask=mask, other=0.0)
+        prompt_mask_val = tl.load(prompt_mask_ptr + prompt_mask_offset, mask=mask, other=False)
+        output_mask_val = tl.load(output_mask_ptr + output_mask_offset, mask=mask, other=False)
+        output_bin_counts = tl.load(
+            output_bin_counts_ptr + counts_offset,
+            mask=mask,
+            other=0,
+        ).to(tl.float32)
 
-            need_repetition_penalty = (prompt_mask_val | output_mask_val).to(tl.int1)
-            penalty_factor = tl.where(need_repetition_penalty, repetition_penalty, 1.0)
-            scaling = tl.where(
-                (logits > 0.0).to(tl.int1),
-                1.0 / penalty_factor,
-                penalty_factor,
-            )
-            updated = logits * scaling
+        need_repetition_penalty = (prompt_mask_val | output_mask_val).to(tl.int1)
+        penalty_factor = tl.where(need_repetition_penalty, repetition_penalty, 1.0)
+        scaling = tl.where(
+            (logits > 0.0).to(tl.int1),
+            1.0 / penalty_factor,
+            penalty_factor,
+        )
+        updated = logits * scaling
 
-            updated -= frequency_penalty * output_bin_counts
-            updated -= presence_penalty * output_mask_val.to(tl.float32)
-            tl.store(logits_ptr + logits_offset, updated, mask=mask)
+        updated -= frequency_penalty * output_bin_counts
+        updated -= presence_penalty * output_mask_val.to(tl.float32)
+        tl.store(logits_ptr + logits_offset, updated, mask=mask)
 
 
 def apply_penalties_triton(
@@ -138,7 +139,12 @@ def _apply_all_penalties_triton(
 ) -> None:
     """Apply all penalties given precomputed bin counts and masks."""
     num_seqs, vocab_size = logits.shape
-    grid = (min(num_seqs, get_vectorcore_num()), 1, 1)
+    if num_seqs == 0 or vocab_size == 0:
+        return
+
+    BLOCK_SIZE = 2048
+    total_blocks = num_seqs * triton.cdiv(vocab_size, BLOCK_SIZE)
+    grid = (min(total_blocks, get_vectorcore_num()), 1, 1)
 
     apply_all_penalties_kernel[grid](
         logits,
@@ -158,5 +164,5 @@ def _apply_all_penalties_triton(
         stride_output_mask_vocab=output_mask.stride(1),
         stride_bin_counts_seq=output_bin_counts.stride(0),
         stride_bin_counts_vocab=output_bin_counts.stride(1),
-        BLOCK_SIZE=2048,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
