@@ -97,7 +97,7 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: quay.io/ascend/manylinux:${{ matrix.group.image_tag }}
+      image: quay.io/ascend/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
