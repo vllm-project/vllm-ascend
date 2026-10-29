@@ -47,6 +47,9 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
+_mixin_name = "vllm.v1.worker.kv_connector_model_runner_mixin"
+_mixin_was_loaded = _mixin_name in sys.modules
+
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin  # noqa: E402
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
@@ -77,6 +80,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
 # For keys that our real import loaded, overwrite with the saved mock.
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
+
+# The mixin binds vllm.distributed.kv_transfer names at import time. When it was
+# first imported inside this block it captured the rebuilt package, whose
+# KVConnectorBase is a second class object that no longer matches the restored
+# package. Later test files import real connectors through that restored package
+# and would then fail the mixin's isinstance() check, so drop the module we
+# created and let the next import bind to the current one.
+if not _mixin_was_loaded:
+    _created_mixin = sys.modules.pop(_mixin_name, None)
+    _worker_pkg = sys.modules.get("vllm.v1.worker")
+    if _worker_pkg is not None and _worker_pkg.__dict__.get("kv_connector_model_runner_mixin") is _created_mixin:
+        del _worker_pkg.__dict__["kv_connector_model_runner_mixin"]
 
 GET_META_MSG = b"get_meta_msg"
 DONE_SENDING_MSG = b"done_sending_msg"
