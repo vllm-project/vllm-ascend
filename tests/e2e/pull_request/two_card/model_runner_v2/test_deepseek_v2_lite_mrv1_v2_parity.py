@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate DeepSeek V2 Lite Model Runner V1/V2 greedy parity."""
+"""Validate DeepSeek V2 Lite MRV1/V2 greedy parity with synchronous scheduling."""
 
 import os
 
@@ -56,6 +56,7 @@ def _generate(
             MODEL,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
+            async_scheduling=False,
             enforce_eager=True,
             tensor_parallel_size=tensor_parallel_size,
             enable_expert_parallel=enable_expert_parallel,
