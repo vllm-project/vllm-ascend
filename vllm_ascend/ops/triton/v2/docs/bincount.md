@@ -37,6 +37,40 @@ boundary. Its old grid had 65,472 / 65,536 / 65,600 programs for 64 requests
 with 1,047,552 / 1,048,576 / 1,049,600 tokens. The new grid remains bounded
 by the device's Vector count while programs loop over their assigned tiles.
 
+### Request rows, programs and scattered writes
+
+The temporary flags have shape `[R, 32 * num_words]`, where R is the number
+of staged request-mapping entries. They are shared device memory, with one row
+per staged request, rather than one vocabulary per history token or program.
+For R=64 and vocab151936, this allocation is 9,723,904 bytes (about 9.27 MiB).
+
+| Kernel variable | Meaning |
+| --- | --- |
+| `pid` | Program index in the bounded one-dimensional grid |
+| `tile` | Flattened request/block task owned by that program |
+| `token_idx` | Staged request row, obtained by dividing `tile` by blocks per request |
+| `req_state_idx` | Persistent request-state row loaded through the mapping |
+| `prompt_tokens` | Actual token IDs used as vocabulary column indices |
+
+Here `token_idx` is the name inside the two bincount kernels; it does not
+index an individual history token. A program can process tiles from several
+requests, and several programs can process different history tiles of the
+same request. No program owns a private vocabulary. The later logits-penalty
+kernel has a different meaning for its own `token_idx`.
+
+The first stage still scatters: for prompt token ID t it writes
+`flags[staged_request, t] = 1`. For example, prompt `[7, 7, 35]` sets columns
+7 and 35; the repeated 7 writes the same value. Presence needs one bit,
+whereas output frequency needs multiplicity and retains integer atomic adds.
+The second stage reads contiguous vocabulary flags and writes each packed
+word to the mapped persistent request row. Kernel launch order supplies the
+stage boundary before packing begins.
+
+The optimization therefore retains the original PR's scattered prompt writes
+and dense scratch initialization/packing. It bounds launch work and reduces
+the packing intermediate width; it does not reduce the per-request scratch
+size. Dense vocabulary work explains the fixed cost for short histories.
+
 ## Packing four flags per load
 
 The scratch remains int8 and has `ceil(vocab_size / 32) * 32` bytes per row.
