@@ -368,7 +368,8 @@ def test_lilicorr_initializes_shared_runtime_once(monkeypatch):
     sampler.assert_called_once_with(2, 7, 8, device)
     assert speculator.anchor_hidden.shape == (2, 4)
     assert speculator.anchor_valid.shape == (2,)
-    assert speculator._num_rejected.shape == (2,)
+    assert speculator.anchor_hidden.dtype == torch.float32
+    assert speculator.anchor_valid.dtype == torch.bool
     assert speculator._speculator_name == "LiLiCorr"
     assert speculator._lmhead_tp_sample_draft_supported is False
 
