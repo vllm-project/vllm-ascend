@@ -978,7 +978,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --port "$SERVICE_PORT" \
         --data-parallel-size 4 \
         --data-parallel-size-local 2 \
-        --data-parallel-start-rank 0 \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size 4 \

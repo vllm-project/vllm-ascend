@@ -610,7 +610,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --safetensors-load-strategy prefetch \
         --api-server-count 1 \
         --data-parallel-size 8 \
-        --data-parallel-start-rank 0 \
         --data-parallel-size-local 4 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12980 \
@@ -849,10 +848,16 @@ platform-specific group is labeled. Shared parameter meanings are listed in
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
 - `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.
-- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 omits it so that rank 0 is inferred automatically, and node 1 uses `4`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Used on node 1. Node 0 hosts the API server.
+
+In this internal-DP layout, explicitly setting `--data-parallel-start-rank 0` on the
+API node triggers external/hybrid DP load-balancing inference. The remote
+headless engines are then rejected with
+`Remote engine must not use --headless in external or hybrid dp lb mode`.
+Keep the API node's rank implicit so all EngineCores join the same DP group.
 
 **A2 four-node network and data parallel configuration:**
 
