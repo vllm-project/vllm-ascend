@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ops.gbsa import (
     generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
@@ -69,7 +70,10 @@ def qsa_gbsa_attention(
     )
     has_residual_block = row_visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0)
     valid = (sparse_idx >= 0) & (sparse_idx < full_blocks.unsqueeze(1))
-    order = torch.argsort((~valid).to(torch.int32), dim=1, stable=True)
+    # The partition keys are exactly {0, 1}, so float32 represents every key
+    # exactly (well within 2**24). The gathered sparse indices remain int32.
+    partition_dtype = torch.float32 if ascend_envs.VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION else torch.int32
+    order = torch.argsort((~valid).to(partition_dtype), dim=1, stable=True)
     sparse_idx = sparse_idx.gather(1, order)
     full_sparse_count = valid.sum(dim=1).to(torch.int32)
 

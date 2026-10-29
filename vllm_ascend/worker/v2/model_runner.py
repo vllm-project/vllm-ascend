@@ -52,6 +52,7 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -119,6 +120,11 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+from vllm_ascend.worker.v2.mm_decode_queue import (
+    MMDecodeCertificateState,
+    ObjectIdentity,
+    make_mm_decode_request_key,
+)
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -131,6 +137,9 @@ from vllm_ascend.worker.v2.utils import (
     prepare_v41_source_rope,
     torch_cuda_wrapper,
 )
+
+_QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS = 3
+_QWEN_MRV2_EARLY_QUEUE_TP_SIZE = 8
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -253,6 +262,34 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=True,
         )
+        # Experimental host-submission optimization. Keep the existing exact
+        # D2H producer for every step, including steps that cannot use the bound.
+        self._qwen_mrv2_early_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE
+        self._qwen_mrv2_snapshot_generation = 0
+        self._qwen_mrv2_snapshot_source_stream = None
+        self._qwen_mrv2_allowed_backend_builders = None
+        self._qwen_mrv2_qsa_backend = None
+        self._qwen_mrv2_qsa_impl = None
+        self._qwen_mrv2_backend_proof_key = None
+        self._qwen_mrv2_backend_proof = False
+        self._qwen_mrv2_early_queue_stats = {
+            "eligible_steps": 0,
+            "fallback_steps": 0,
+            "exact_snapshots_recorded": 0,
+            "host_length_wait_skipped": 0,
+            "length_device_wait_enqueued": 0,
+        }
+        self._qwen_mrv2_early_queue_last_guard = None
+        self._qwen_mrv2_mm_decode_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE
+        self._qwen_mrv2_mm_decode_proof_enabled = self._qwen_mrv2_mm_decode_queue_enabled
+        self._qwen_mrv2_mm_decode_state = MMDecodeCertificateState()
+        self._qwen_mrv2_mm_decode_epoch = 0
+        self._qwen_mrv2_mm_snapshot_stream = None
+        self._qwen_mrv2_mm_decode_stats = {
+            "exact_certified_batches": 0,
+            "queue_eligible_steps": 0,
+            "invalidations": 0,
+        }
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
@@ -798,6 +835,20 @@ class NPUModelRunner(GPUModelRunner):
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
 
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        if self._qwen_mrv2_mm_decode_proof_enabled and (
+            scheduler_output.scheduled_new_reqs
+            or scheduler_output.scheduled_cached_reqs.resumed_req_ids
+            or scheduler_output.finished_req_ids
+            or scheduler_output.preempted_req_ids
+            or scheduler_output.scheduled_encoder_inputs
+            or scheduler_output.free_encoder_mm_hashes
+        ):
+            self._qwen_mrv2_mm_decode_epoch += 1
+            self._qwen_mrv2_mm_decode_state.invalidate()
+            self._qwen_mrv2_mm_decode_stats["invalidations"] += 1
+        super().finish_requests(scheduler_output)
+
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
@@ -833,7 +884,10 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
+        allow_cpu_upper_bound = self._qwen_mrv2_can_queue_decode(scheduler_output, batch_req_state, batch_desc)
+        self._update_seq_lens_cpu(scheduler_output, req_ids, allow_cpu_upper_bound=allow_cpu_upper_bound)
+        if not allow_cpu_upper_bound:
+            self._qwen_mrv2_certify_mm_decode(scheduler_output, batch_req_state)
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
@@ -1327,22 +1381,374 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
+        if self._qwen_mrv2_early_queue_enabled:
+            self._qwen_mrv2_snapshot_generation += 1
+            self._qwen_mrv2_snapshot_source_stream = default_stream
+            self._qwen_mrv2_early_queue_stats["exact_snapshots_recorded"] += 1
+        if self._qwen_mrv2_mm_decode_proof_enabled:
+            self._qwen_mrv2_mm_snapshot_stream = default_stream
+            request_indices = self.req_states.req_id_to_index
+            keys = self._qwen_mrv2_mm_decode_request_keys(
+                tuple(request_indices),
+                tuple(request_indices.values()),
+                self.req_states.prefill_len.np,
+                prefill_by_slot=True,
+            )
+            self._qwen_mrv2_mm_decode_state.record_snapshot(keys or ())
+
+    def _qwen_mrv2_mm_decode_context(self) -> tuple | None:
+        """Inventory CPU consumers for the audited non-realtime MM path."""
+        if not self._qwen_mrv2_mm_decode_proof_enabled:
+            return None
+        from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
+
+        state = self.model_state
+        runner = getattr(state, "encoder_runner", None)
+        cache = self.encoder_cache
+        if (
+            type(state) is not AscendQwen4ExpModelState
+            or not self.supports_mm_inputs
+            or not state.supports_mm_inputs
+            or runner is None
+            or cache is None
+            or runner.encoder_cache is not cache
+            or state.encoder_cache is not cache
+            or runner.is_realtime is not False
+            or self.model_config.enable_prompt_embeds
+            or self.model_config.is_mm_prefix_lm
+            or self.model_config.is_encoder_decoder
+            or getattr(state, "mm_pruner", None) is not None
+            or getattr(state, "prompt_embeds_state", None) is not None
+            or getattr(self.model, "deepstack_input_embeds_num_tokens", 0) != 0
+        ):
+            return None
+        return (
+            self._qwen_mrv2_mm_decode_epoch,
+            ObjectIdentity(self.req_states),
+            ObjectIdentity(state),
+            ObjectIdentity(self.model),
+            ObjectIdentity(cache),
+            ObjectIdentity(runner),
+            ObjectIdentity(getattr(state, "rope_state", None)),
+            ObjectIdentity(self.model_config),
+            ObjectIdentity(self.model_config.hf_text_config),
+            type(state).prepare_inputs_embeds,
+            type(state).gather_mm_embeddings,
+            type(runner).gather_mm_embeddings,
+        )
+
+    def _qwen_mrv2_mm_decode_request_keys(self, req_ids, slots, prefill_lens, *, prefill_by_slot: bool = False):
+        context = self._qwen_mrv2_mm_decode_context()
+        if context is None or not req_ids or len(req_ids) != len(slots):
+            return None
+        keys = []
+        try:
+            for row, (req_id, slot) in enumerate(zip(req_ids, slots)):
+                slot = int(slot)
+                if self.req_states.req_id_to_index.get(req_id) != slot:
+                    return None
+                prefill_len = int(prefill_lens[slot if prefill_by_slot else row])
+                key = make_mm_decode_request_key(
+                    req_id, slot, prefill_len, context, self.encoder_cache.mm_features[req_id]
+                )
+                if key is None:
+                    return None
+                keys.append(key)
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+            return None
+        return tuple(keys)
+
+    @staticmethod
+    def _qwen_mrv2_mm_batch_is_stable_decode(scheduler_output, batch) -> bool:
+        return (
+            not scheduler_output.scheduled_new_reqs
+            and not scheduler_output.scheduled_cached_reqs.resumed_req_ids
+            and not scheduler_output.preempted_req_ids
+            and not scheduler_output.finished_req_ids
+            and not scheduler_output.scheduled_encoder_inputs
+            and not batch.has_prefill
+            and not bool(np.any(batch.is_prefilling_np))
+            and (batch.prefill_runs_as_decode_np is None or not bool(np.any(batch.prefill_runs_as_decode_np)))
+        )
+
+    def _qwen_mrv2_mm_decode_is_certified(self, scheduler_output, batch) -> bool:
+        if not self._qwen_mrv2_mm_batch_is_stable_decode(scheduler_output, batch):
+            return False
+        keys = self._qwen_mrv2_mm_decode_request_keys(batch.req_ids, batch.idx_mapping_np, batch.prefill_len_np)
+        return keys is not None and self._qwen_mrv2_mm_decode_state.is_certified(keys)
+
+    def _qwen_mrv2_certify_mm_decode(self, scheduler_output, batch) -> None:
+        # This hook follows the original exact fallback, before any embedding
+        # gather. It never certifies from optimistic prefill/decode flags.
+        if (
+            not self._qwen_mrv2_mm_decode_proof_enabled
+            or self.speculator is None
+            or self.sync_spec_pp_cpu_counts
+            or self._can_skip_spec_cpu_length_sync()
+            or self._qwen_mrv2_mm_snapshot_stream != torch.npu.current_stream()
+            or not self._qwen_mrv2_mm_batch_is_stable_decode(scheduler_output, batch)
+        ):
+            return
+        keys = self._qwen_mrv2_mm_decode_request_keys(batch.req_ids, batch.idx_mapping_np, batch.prefill_len_np)
+        if keys is not None:
+            # The event was synchronized in _update_seq_lens_cpu. Read only its
+            # private pinned snapshot, not the scheduler's optimistic counters.
+            exact_counts = self.num_computed_tokens_cpu.numpy()[batch.idx_mapping_np].tolist()
+            if self._qwen_mrv2_mm_decode_state.certify(keys, exact_counts):
+                self._qwen_mrv2_mm_decode_stats["exact_certified_batches"] += 1
+
+    def _qwen_mrv2_can_queue_decode(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> bool:
+        """Allow CPU bounds for audited text or certified MM decode paths.
+
+        This is independent of _can_skip_spec_cpu_length_sync: that helper
+        controls BOTH the producer and consumer. A per-batch optimization must
+        not suppress a snapshot needed by the next batch's exact fallback.
+        """
+        if not self._qwen_mrv2_early_queue_enabled:
+            return False
+
+        # Reject other speculators before accessing their model-specific state.
+        # Lazy imports keep these dependencies out of workers with the flag off.
+        from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
+        from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+
+        if type(self.model_state) is not AscendQwen4ExpModelState or type(self.speculator) is not AscendMTPSpeculator:
+            self._qwen_mrv2_early_queue_last_guard = {
+                "failed": ["exact_qwen_model_state_and_mtp_speculator"],
+                "snapshot_generation": self._qwen_mrv2_snapshot_generation,
+            }
+            self._qwen_mrv2_early_queue_stats["fallback_steps"] += 1
+            return False
+
+        if self._qwen_mrv2_allowed_backend_builders is None:
+            from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
+            from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder, QSAStateBackend
+            from vllm.v1.attention.backends.short_conv_attn import (
+                PleShortConvAttentionBackend,
+                PleShortConvAttentionMetadataBuilder,
+            )
+
+            from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAImpl
+            from vllm_ascend.ops.gdn_attn_builder import (
+                AscendGDNAttentionBackend,
+                AscendGDNAttentionMetadataBuilder,
+                AscendGDNFusedAttentionBackend,
+                AscendGDNHostMetadataBackend,
+                AscendGDNHostMetadataBuilder,
+            )
+
+            self._qwen_mrv2_allowed_backend_builders = {
+                AscendQSABackend: (Qwen4ExpQSAMetadataBuilder,),
+                QSAStateBackend: (QSAMetadataBuilder,),
+                AscendGDNAttentionBackend: (AscendGDNAttentionMetadataBuilder,),
+                AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),
+                AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),
+                PleShortConvAttentionBackend: (PleShortConvAttentionMetadataBuilder,),
+            }
+            self._qwen_mrv2_qsa_backend = AscendQSABackend
+            self._qwen_mrv2_qsa_impl = AscendQSAImpl
+
+        try:
+            target_group_pairs = tuple(
+                (group.backend, type(group.get_metadata_builder(0)))
+                for cache_groups in self.attn_groups
+                for group in cache_groups
+            )
+            # The speculator builds its own groups with the draft config.
+            # Do not infer its CPU consumers from the runner's group inventory.
+            draft_group_pairs = tuple(
+                (group.backend, type(group.get_metadata_builder(0)))
+                for cache_groups in self.speculator.attn_groups
+                for group in cache_groups
+            )
+            backend_proof_key = (
+                target_group_pairs,
+                draft_group_pairs,
+                self.speculator.attn_architecture,
+                self.speculator.attn_backend,
+                self._qwen_mrv2_qsa_backend.get_impl_cls(),
+            )
+            if backend_proof_key != self._qwen_mrv2_backend_proof_key:
+                self._qwen_mrv2_backend_proof = (
+                    bool(target_group_pairs)
+                    and bool(draft_group_pairs)
+                    and all(
+                        builder in self._qwen_mrv2_allowed_backend_builders.get(backend, ())
+                        for backend, builder in (*target_group_pairs, *draft_group_pairs)
+                    )
+                    and any(backend is self._qwen_mrv2_qsa_backend for backend, _ in target_group_pairs)
+                    and any(backend is self._qwen_mrv2_qsa_backend for backend, _ in draft_group_pairs)
+                    and self.speculator.attn_architecture == "QSA"
+                    and self.speculator.attn_backend is self._qwen_mrv2_qsa_backend
+                    and backend_proof_key[4] is self._qwen_mrv2_qsa_impl
+                )
+                self._qwen_mrv2_backend_proof_key = backend_proof_key
+        except (AttributeError, TypeError, IndexError, AssertionError, NotImplementedError):
+            self._qwen_mrv2_backend_proof = False
+            self._qwen_mrv2_backend_proof_key = None
+
+        req_ids = batch_req_state.req_ids
+        scheduled = batch_req_state.num_scheduled_tokens
+        draft_counts = batch_req_state.num_draft_tokens_np
+        indices = batch_req_state.idx_mapping_np
+        # Advanced indexing owns this CPU array; it never aliases the pinned
+        # destination of the in-flight D2H copy.
+        computed_upper_bound = self.req_states.num_computed_tokens_np[indices].astype(np.int64, copy=True)
+        upper_seq_lens = computed_upper_bound + scheduled
+        draft_limit = min(self.max_model_len, self.speculator.draft_model_config.max_model_len)
+        encoder_cache = self.encoder_cache
+        if encoder_cache is None:
+            text_requests = not self.supports_mm_inputs
+        else:
+            text_requests = all(
+                req_id in encoder_cache.mm_features and not encoder_cache.mm_features[req_id] for req_id in req_ids
+            )
+        certified_mm_decode = self._qwen_mrv2_mm_decode_queue_enabled and self._qwen_mrv2_mm_decode_is_certified(
+            scheduler_output, batch_req_state
+        )
+        offload = self.vllm_config.offload_config
+        no_weight_offload = (
+            offload.uva.cpu_offload_gb == 0
+            and not offload.uva.cpu_offload_params
+            and offload.prefetch.offload_group_size == 0
+            and not offload.prefetch.offload_params
+        )
+        parallel = self.parallel_config
+        spec = self.speculative_config
+        checks = {
+            "exact_qwen_model_state": type(self.model_state) is AscendQwen4ExpModelState,
+            "exact_mtp_speculator": type(self.speculator) is AscendMTPSpeculator,
+            "audited_backend_builder_pairs": self._qwen_mrv2_backend_proof,
+            "tp8_dp1_pp1_dcp1_pcp1": (
+                parallel.tensor_parallel_size == _QWEN_MRV2_EARLY_QUEUE_TP_SIZE
+                and parallel.data_parallel_size == 1
+                and parallel.pipeline_parallel_size == 1
+                and parallel.decode_context_parallel_size == 1
+                and parallel.prefill_context_parallel_size == 1
+            ),
+            "async_scheduling": self.scheduler_config.async_scheduling is True,
+            "fixed_k3": (
+                spec is not None
+                and spec.method == "mtp"
+                and self.num_speculative_steps == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS
+                and not spec.uses_dynamic_speculative_decoding()
+            ),
+            "full_uniform_verification": (
+                batch_desc.cg_mode == CUDAGraphMode.FULL
+                and batch_desc.uniform_token_count == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS + 1
+                and bool(req_ids)
+                and bool(np.all(scheduled == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS + 1))
+                and draft_counts is not None
+                and bool(np.all(draft_counts == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS))
+                and all(
+                    len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+                    == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS
+                    for req_id in req_ids
+                )
+            ),
+            "pure_decode": (
+                not batch_req_state.has_prefill
+                and bool(np.all(batch_req_state.prefill_len_np > 0))
+                and bool(np.all(computed_upper_bound >= batch_req_state.prefill_len_np))
+                and not bool(np.any(batch_req_state.is_prefilling_np))
+                and (
+                    batch_req_state.prefill_runs_as_decode_np is None
+                    or not bool(np.any(batch_req_state.prefill_runs_as_decode_np))
+                )
+            ),
+            "no_request_arrival_resume_or_finish": (
+                not scheduler_output.scheduled_new_reqs
+                and not scheduler_output.scheduled_cached_reqs.resumed_req_ids
+                and not scheduler_output.preempted_req_ids
+                and not scheduler_output.finished_req_ids
+            ),
+            "bounds_within_model_and_drafter": (
+                bool(np.all(computed_upper_bound >= 0))
+                and bool(np.all(upper_seq_lens <= self.max_model_len))
+                and bool(np.all(upper_seq_lens + _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS <= draft_limit))
+            ),
+            "prefix_and_mamba_cache_disabled": (
+                self.cache_config.enable_prefix_caching is False
+                and self.cache_config.mamba_cache_mode == "none"
+                and not self.cache_config.kv_sharing_fast_prefill
+                and getattr(self.model_state, "decoder_replay", None) is None
+            ),
+            "text_without_prompt_embeddings": (
+                (text_requests or certified_mm_decode)
+                and not self.model_config.enable_prompt_embeds
+                and not self.model_config.is_mm_prefix_lm
+                and not scheduler_output.scheduled_encoder_inputs
+            ),
+            "no_flashcomm_or_dbo": (
+                not parallel.use_sequence_parallel_moe
+                and not self.ascend_config.enable_sp_by_pass
+                and not parallel.enable_dbo
+            ),
+            "no_lora_or_weight_offload": self.lora_config is None and no_weight_offload,
+            "no_connectors_or_adaptive_verification": (
+                type(self.kv_connector) is KVConnector
+                and not has_kv_transfer_group()
+                and self.aux_output_connector is None
+                and self.adaptive_verification is None
+                and not self.sparse_kv_offload_manager
+                and scheduler_output.kv_connector_metadata is None
+                and scheduler_output.ec_connector_metadata is None
+                and scheduler_output.ec_manager_metadata is None
+                and not scheduler_output.kv_cache_block_copies
+                and not scheduler_output.has_structured_output_requests
+            ),
+            "recorded_same_stream_snapshot": (
+                self._qwen_mrv2_snapshot_generation > 0
+                and self._qwen_mrv2_snapshot_source_stream == torch.npu.current_stream()
+                and not self.sync_spec_pp_cpu_counts
+                and not self._can_skip_spec_cpu_length_sync()
+            ),
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        self._qwen_mrv2_early_queue_last_guard = {
+            "checks": checks,
+            "failed": failed,
+            "snapshot_generation": self._qwen_mrv2_snapshot_generation,
+        }
+        key = "fallback_steps" if failed else "eligible_steps"
+        self._qwen_mrv2_early_queue_stats[key] += 1
+        if not failed and not text_requests and certified_mm_decode:
+            self._qwen_mrv2_mm_decode_stats["queue_eligible_steps"] += 1
+        return not failed
 
     def _update_seq_lens_cpu(
         self,
         scheduler_output: SchedulerOutput,
         req_ids: list[str],
+        *,
+        allow_cpu_upper_bound: bool = False,
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
         if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
-            # Blocks CPU submission until D2H completes; may stall the async pipeline.
-            self.num_computed_tokens_event.synchronize()
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+            if allow_cpu_upper_bound:
+                # The host may submit the next main graph before this copy is
+                # finished. Keep the read-before-next-write dependency on the
+                # DEVICE: later post_update writes the same GPU request state.
+                # Neither the pinned destination nor its NumPy view is read or
+                # modified here. Exact GPU positions, lengths, KV slots and
+                # accepted recurrent state still use the original device path.
+                torch.npu.current_stream().wait_event(self.num_computed_tokens_event)
+                self._qwen_mrv2_early_queue_stats["host_length_wait_skipped"] += 1
+                self._qwen_mrv2_early_queue_stats["length_device_wait_enqueued"] += 1
+            else:
+                # Keep exact CPU lengths for every unaudited or changing batch.
+                self.num_computed_tokens_event.synchronize()
+                for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                    req_index = self.req_states.req_id_to_index[req_id]
+                    self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
