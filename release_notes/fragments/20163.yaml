@@ -1,0 +1,4 @@
+pr: 20163
+entries:
+  - category: bugfix
+    text: Fixed Mooncake sleep failing due to an unsupported peer-disconnection API.
