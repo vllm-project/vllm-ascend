@@ -448,10 +448,10 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
     }
     constInfo.n2Size = sharedParams.n2Size;
     constInfo.s2Size = sharedParams.s2Size;
-    constInfo.dSize = NO_ROPE ? 512 : 576;
+    constInfo.dSize = NO_ROPE ? QSFA_NOPE_DIM : QSFA_NOPE_DIM + QSFA_ROPE_DIM;
     constInfo.dSizeVInput = sharedParams.dSizeVInput;
-    constInfo.dSizeRope = NO_ROPE ? 0 : 64;
-    constInfo.dSizeNope = 512;
+    constInfo.dSizeRope = NO_ROPE ? 0 : QSFA_ROPE_DIM;
+    constInfo.dSizeNope = QSFA_NOPE_DIM;
     constInfo.tileSize = sharedParams.tileSize;
     constInfo.sparseBlockCount = sharedParams.sparseBlockCount;
     constInfo.sparseBlockSize = 1;
