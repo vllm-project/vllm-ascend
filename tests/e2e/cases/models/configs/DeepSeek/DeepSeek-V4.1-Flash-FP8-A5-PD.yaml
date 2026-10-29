@@ -1,7 +1,7 @@
 test_name: "DeepSeek-V4.1-Flash-FP8-A5-PD"
 # TODO: Confirm this path is visible inside both CI containers. The A5 workflow
 # currently mounts host /mnt/weight at /root/.cache; adjust the path or provisioning.
-model: "/mnt/share/weight/DeepSeek-V4.1-Flash"
+model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4.1-Flash-1017"
 num_nodes: 2
 npu_per_node: 8
 dp_load_balancing: external
@@ -114,6 +114,7 @@ templates:
       - --reasoning-parser
       - "deepseek_v41"
       - --enable-prefix-caching
+      - --swa-bounded-replay
       - --trust-remote-code
       - --enforce-eager
       - --speculative-config
