@@ -1,0 +1,10 @@
+pr: 20243
+entries:
+  - category: bugfix
+    text: >-
+      Fixed ECMemcacheConnector reinterpreting every cached encoder output with
+      one config-derived width, so values whose real width differed were either
+      reshaped into the wrong token count or dropped as unaligned. Affects
+      models whose encoder output width differs from the LM embedding width,
+      such as Qwen3-Omni, whose visual DeepStack output is 8192 wide while its
+      audio output is 2048.
