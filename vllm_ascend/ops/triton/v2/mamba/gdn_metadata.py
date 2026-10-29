@@ -6,7 +6,7 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit(do_not_specialize=["NUM_REQS", "NUM_ROWS", "NUM_DECODES", "NUM_DECODE_TOKENS"])
-def _prepare_gdn_metadata_kernel(
+def _prepare_gdn_kernel(
     block_table,
     seq_lens,
     query,
@@ -158,7 +158,7 @@ def prepare_gdn_metadata(
     conv_numel = conv_output.numel() if conv_output is not None else 0
     block = 256
     clear_block = 1024
-    _prepare_gdn_metadata_kernel[(rows + (conv_numel + clear_block - 1) // clear_block,)](
+    _prepare_gdn_kernel[(rows + (conv_numel + clear_block - 1) // clear_block,)](
         block_table,
         seq_lens,
         query,

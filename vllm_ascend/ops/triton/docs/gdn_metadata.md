@@ -4,7 +4,7 @@
 
 - **Location**: [`v2/mamba/gdn_metadata.py`](../v2/mamba/gdn_metadata.py).
   `prepare_gdn_metadata` is the Python entry point for the private
-  `_prepare_gdn_metadata_kernel` Triton kernel.
+  `_prepare_gdn_kernel` Triton kernel.
 - **Function**: Build aligned-cache GDN metadata and clear the shared
   convolution output in one launch. Writes caller-provided buffers and returns `None`.
 - **Formula**: For request `i`, `q_i = query[i + 1] - query[i]` and

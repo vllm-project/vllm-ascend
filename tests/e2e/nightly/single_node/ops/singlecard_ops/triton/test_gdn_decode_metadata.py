@@ -13,7 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
-from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import _prepare_gdn_metadata_kernel
+from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import _prepare_gdn_kernel
 
 
 def _assert_metadata_equal(actual, expected):
@@ -153,7 +153,7 @@ def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
         )
     }
     compiled_kernels = []
-    run = _prepare_gdn_metadata_kernel.run
+    run = _prepare_gdn_kernel.run
 
     def record_kernel(*args, **kwargs):
         compiled = run(*args, **kwargs)
@@ -179,7 +179,7 @@ def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
         accepted = torch.ones(rows, dtype=torch.int32, device=device) if num_spec else None
         with patch.object(builder, "_build_fused_metadata", return_value=None):
             expected = deepcopy(builder.build(0, common, accepted, drafts, num_actual_reqs=count))
-        with patch.object(_prepare_gdn_metadata_kernel, "run", side_effect=record_kernel):
+        with patch.object(_prepare_gdn_kernel, "run", side_effect=record_kernel):
             actual = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
         _assert_metadata_equal(actual, expected)
 
