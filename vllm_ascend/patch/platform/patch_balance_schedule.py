@@ -476,13 +476,6 @@ class BalanceScheduler(Scheduler):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
                     else:
                         (
                             new_computed_blocks,
@@ -645,6 +638,12 @@ class BalanceScheduler(Scheduler):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                # Record at admission so a lookup that does not schedule is
+                # not counted. get_computed_blocks itself does not record, and
+                # the full-attention path was dropping these metrics.
+                if request.num_computed_tokens == 0:
+                    self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
