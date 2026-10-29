@@ -52,7 +52,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalize, PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -683,8 +683,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
-    def _make_eplb_token_mask(self, num_tokens: int, forward_context: ForwardContext) -> torch.Tensor | None:
-        """Build source validity before MoE prepare changes the token layout."""
+    def _make_eplb_token_mask(
+        self, num_tokens: int, forward_context: ForwardContext, prepare_finalize: PrepareAndFinalize
+    ) -> torch.Tensor | None:
+        """Build and gather eligibility after prepare, using the source row count."""
         eplb_state = self.router.eplb_state if self._use_v2_model_runner and self.router is not None else None
         if not use_allgather_eplb(eplb_state is not None):
             return None
@@ -695,7 +697,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         is_padding = eplb_state.allgather_source_is_padding
         if is_padding is None:
             is_padding = getattr(forward_context, "is_padding", None)
-        return make_allgather_mask(
+        token_mask = make_allgather_mask(
             num_tokens,
             num_unpadded_tokens,
             record_enabled,
@@ -703,6 +705,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             tp_size=get_tensor_model_parallel_world_size() if self.moe_config.is_sequence_parallel else 1,
             tp_rank=get_tensor_model_parallel_rank() if self.moe_config.is_sequence_parallel else 0,
         )
+        assert isinstance(prepare_finalize, PrepareAndFinalizeWithAllGather)
+        return prepare_finalize.all_gather_eplb_mask(token_mask)
 
     def _record_eplb_load(
         self,
@@ -801,8 +805,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        token_mask = self._make_eplb_token_mask(hidden_states.shape[0], forward_context)
-
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -810,14 +812,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
         )
+        # hidden_states still has the source row count until reassigned below.
+        token_mask = self._make_eplb_token_mask(
+            hidden_states.shape[0], forward_context, moe_comm_method.prepare_finalize
+        )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
-        if token_mask is not None:
-            assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
-            token_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask(token_mask)
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
         topk_weights, topk_ids = self._select_experts(

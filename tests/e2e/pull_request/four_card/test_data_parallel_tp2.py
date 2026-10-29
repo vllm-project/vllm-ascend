@@ -169,10 +169,9 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             )
 
             def forward():
-                mask = layer._make_eplb_token_mask(EPLB_ROWS, get_forward_context())
-                assert mask is not None
                 prepared = prepare.prepare(hidden, logits)
-                mask = prepare.all_gather_eplb_mask(mask)
+                mask = layer._make_eplb_token_mask(EPLB_ROWS, get_forward_context(), prepare)
+                assert mask is not None
                 physical = _ascend_apply_eplb_mapping(router, logical_ids)
                 dispatched = dispatcher.token_dispatch(
                     MoETokenDispatchInput(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -175,7 +176,9 @@ def test_source_mask_is_unused_outside_v2_a5_allgather(monkeypatch, use_v2, has_
     monkeypatch.setattr(
         "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
     )
-    assert layer._make_eplb_token_mask(2, context) is None
+    prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
+    assert layer._make_eplb_token_mask(2, context, prepare) is None
+    prepare.all_gather_eplb_mask.assert_not_called()
 
 
 @pytest.mark.parametrize("padding_source", ["draft", "context", "unpadded_count"])
@@ -197,6 +200,8 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     monkeypatch.setattr(routed_module, "dbo_current_ubatch_id", lambda: 1)
     monkeypatch.setattr(routed_module, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(routed_module, "get_tensor_model_parallel_rank", lambda: 1)
+    prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
+    prepare.all_gather_eplb_mask.side_effect = lambda mask: mask
     expected = {
         (False, "draft"): [True, True],
         (False, "context"): [True, False],
@@ -205,17 +210,19 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
         (True, "context"): [False, True],
         (True, "unpadded_count"): [True, False],
     }[sequence_parallel, padding_source]
-    mask = layer._make_eplb_token_mask(2, context)
+    mask = layer._make_eplb_token_mask(2, context, prepare)
     assert mask is not None
     assert mask.tolist() == expected
     state.should_record_tensor.fill_(False)
-    mask = layer._make_eplb_token_mask(2, context)
+    mask = layer._make_eplb_token_mask(2, context, prepare)
     assert mask is not None
     assert mask.tolist() == [False, False]
+    assert prepare.all_gather_eplb_mask.call_count == 2
 
 
 @pytest.mark.parametrize("source_padding,expected", [([False, False, False, True], 3), ([True] * 4, 0)])
-def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source_padding, expected):
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source_padding, expected, dp_size):
     events = []
     state = SimpleNamespace(
         num_unpadded_tokens_tensors=[torch.tensor(4)],
@@ -226,13 +233,21 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
         local_expert_count=1,
         local_expert_start=0,
     )
-    config = SimpleNamespace(is_sequence_parallel=False, dp_size=1, pcp_size=1, ep_rank=0, num_local_experts=1)
+    config = SimpleNamespace(
+        is_sequence_parallel=False,
+        dp_size=dp_size,
+        pcp_size=1,
+        ep_rank=0,
+        num_local_experts=1,
+        dp_group=SimpleNamespace(all_gather=lambda rows, dim: torch.cat([rows, torch.zeros_like(rows)])),
+    )
     prepare = PrepareAndFinalizeWithAllGather(config)
     make_mask = routed_module.make_allgather_mask
     gather_mask = prepare.all_gather_eplb_mask
 
     def source_mask(*args, **kwargs):
         events.append("source_mask")
+        assert args[0] == 4
         return make_mask(*args, **kwargs)
 
     def prepare_inputs(**kwargs):
@@ -245,11 +260,14 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
 
     def select_experts(**kwargs):
         events.append("route")
-        return torch.ones(4, 1), torch.zeros(4, 1, dtype=torch.int32)
+        assert kwargs["hidden_states"].shape[0] == 4 * dp_size
+        return torch.ones(4 * dp_size, 1), torch.zeros(4 * dp_size, 1, dtype=torch.int32)
 
     def apply_experts(**kwargs):
         events.append("ffn")
-        return FusedExpertsResult(routed_out=torch.ones(4, 2), expert_tokens=torch.tensor([4]), group_list_type=1)
+        return FusedExpertsResult(
+            routed_out=torch.ones(4 * dp_size, 2), expert_tokens=torch.tensor([4 * dp_size]), group_list_type=1
+        )
 
     def record_load(*args):
         events.append("record_load")
@@ -273,9 +291,11 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
     object.__setattr__(layer, "quant_method", SimpleNamespace(apply=apply_experts))
     layer.dynamic_eplb = False
     layer.return_with_event = False
-    monkeypatch.setattr(
-        routed_module, "get_forward_context", lambda: SimpleNamespace(is_padding=torch.zeros(4, dtype=torch.bool))
+    context = SimpleNamespace(
+        is_padding=torch.zeros(4, dtype=torch.bool), additional_kwargs={"max_tokens_across_dp": 4}
     )
+    monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
     monkeypatch.setattr(
         routed_module, "_EXTRA_CTX", SimpleNamespace(in_profile_run=False, moe_comm_type=afc.MoECommType.ALLGATHER)
     )
@@ -285,6 +305,6 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
     monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))
-    assert events == ["source_mask", "prepare", "gather_mask", "route", "ffn", "record_load", "finalize"]
+    assert events == ["prepare", "source_mask", "gather_mask", "route", "ffn", "record_load", "finalize"]
     assert state.expert_load_view.item() == expected
     assert state.allgather_record_tensor.item() == int(expected > 0)
