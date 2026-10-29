@@ -1,0 +1,4 @@
+pr: 19796
+entries:
+  - category: feature
+    text: Added native BF16 and MXFP8 MiniMax M3.1 Flash DSpark draft loading and constrained A2/A3 FA3 attention support.
