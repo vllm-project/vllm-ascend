@@ -220,7 +220,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_CONNECT_TIMEOUT=1200
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export VLLM_USE_FASTOKENS=1
 
     vllm serve /root/.cache/DeepSeek-V4-Pro-0813 \
@@ -293,7 +292,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_CONNECT_TIMEOUT=1200
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export VLLM_USE_FASTOKENS=1
 
     vllm serve /root/.cache/DeepSeek-V4-Pro-0813 \
@@ -367,7 +365,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
@@ -429,7 +426,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
@@ -633,7 +629,7 @@ Key Parameter Descriptions:
 - `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.
 - `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
 - `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.
-- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), which spreads a long prompt across multiple NPUs during prefill. Besides speeding up prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1`. Since DeepSeek-V4 on 950DT products does not currently support standalone TP, the 950DT DP mixed-deployment uses `DP2/TP1` with PCP `8`, and the o_proj weight sharding also relieves its memory pressure. Do not combine it with `enable_dsa_cp`, which is mutually exclusive with PCP and unsupported by the V2 model runner.
+- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), which spreads a long prompt across multiple NPUs during prefill. Besides speeding up prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1`. The 950DT DP mixed-deployment uses `DP2/TP1` with PCP `8`, and the o_proj weight sharding also relieves its memory pressure. Do not combine it with `enable_dsa_cp`, which is mutually exclusive with PCP and unsupported by the V2 model runner.
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
 - `--headless` (used on non-master nodes) disables the API server on the node, since only the master node serves requests.
 - `--max-model-len` specifies the maximum context length. The example values are intended to allow startup with the documented hardware and configuration. To tune this value, check the startup log `Maximum concurrency for L tokens per request: Cx`: `L × C` provides a rough KV-cache capacity reference for increasing the context length with the same configuration. Use the smallest estimate across all ranks and, for PD-disaggregated deployment, across both Prefill and Decode pools.
@@ -651,7 +647,6 @@ Key Parameter Descriptions:
 - `--async-scheduling` enables asynchronous scheduling to overlap scheduler overhead with model execution.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput. `enable_fused_mc2: 0` disables the Fused MC2 dispatch/combine path.
-- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -727,7 +722,6 @@ Select the tab that matches the deployment hardware.
             export HCCL_CONNECT_TIMEOUT=1200
 
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
             export VLLM_PP_LAYER_PARTITION="32,29"
             export VLLM_USE_FASTOKENS=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -950,7 +944,6 @@ Select the tab that matches the deployment hardware.
             export TP_SOCKET_IFNAME="$nic_name"
             export HCCL_SOCKET_IFNAME="$nic_name"
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
             export HCCL_OP_EXPANSION_MODE="AIV"
             export HCCL_BUFFSIZE=1024
             export HCCL_CONNECT_TIMEOUT=1200
@@ -1154,7 +1147,6 @@ Select the tab that matches the deployment hardware.
             export OMP_NUM_THREADS=10
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export HCCL_BUFFSIZE=1024
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
             export VLLM_USE_V2_MODEL_RUNNER=1
 
 
@@ -1591,7 +1583,6 @@ Select the tab that matches the deployment hardware.
         export HCCL_CONNECT_TIMEOUT=1200
 
         export VLLM_USE_V2_MODEL_RUNNER=1
-        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
         export VLLM_PP_LAYER_PARTITION="32,29"
         export VLLM_USE_FASTOKENS=1
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -1999,7 +1990,6 @@ Select the tab that matches the deployment hardware.
         export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 
         export VLLM_USE_V2_MODEL_RUNNER=1
-        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_BUFFSIZE=1024
         export HCCL_CONNECT_TIMEOUT=1200
@@ -2332,7 +2322,6 @@ Select the tab that matches the deployment hardware.
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export VLLM_USE_V2_MODEL_RUNNER=1
     export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
