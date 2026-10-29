@@ -3425,6 +3425,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
+        preprocess_gate = None
         decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
         prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
         dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
@@ -3463,7 +3464,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
-            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, preprocess_gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
         elif (
@@ -3483,9 +3484,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         else:
-            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, preprocess_gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
+        # The plain QKV-A layout returns no gate. Keep the standalone g_proj
+        # result unless preprocessing produced a fused output gate.
+        if preprocess_gate is not None:
+            gate = preprocess_gate
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
             if attn_metadata.external_flashmla is not None:
