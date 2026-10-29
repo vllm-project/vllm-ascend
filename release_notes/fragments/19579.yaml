@@ -1,4 +1,0 @@
-pr: 19579
-entries:
-  - category: bugfix
-    text: Fixed async KV load allocation zeroing across vLLM release and main zeroing APIs.

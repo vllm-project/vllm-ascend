@@ -24,7 +24,6 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
     RecomputeSchedulerConfig,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -404,25 +403,12 @@ def test_remote_load_excludes_only_async_blocks_from_zeroing(scheduler_cls, asyn
         patch.object(
             scheduler.kv_cache_manager, "allocate_slots", wraps=scheduler.kv_cache_manager.allocate_slots
         ) as allocate,
-        patch.object(
-            scheduler.kv_cache_manager,
-            "get_zeroing_block_ids_in_range",
-            wraps=getattr(scheduler.kv_cache_manager, "get_zeroing_block_ids_in_range", None),
-            create=True,
-        ) as loaded_blocks,
     ):
         output = scheduler.schedule()
 
     assert allocate.call_args is not None
     kwargs = allocate.call_args.kwargs
-    if vllm_version_is("0.31.0"):
-        assert "skip_zeroing_group_ids" not in kwargs
-        if async_load:
-            loaded_blocks.assert_called_once_with(request.request_id, 0, 8)
-        else:
-            loaded_blocks.assert_not_called()
-    else:
-        assert kwargs["skip_zeroing_group_ids"] == ((0,) if async_load else ())
+    assert kwargs["skip_zeroing_group_ids"] == ((0,) if async_load else ())
 
     blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
     assert blocks
@@ -433,7 +419,6 @@ def test_remote_load_excludes_only_async_blocks_from_zeroing(scheduler_cls, asyn
         assert set(output.new_block_ids_to_zero) == set(blocks)
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Group exclusion is specific to the main allocation API")
 def test_async_load_preserves_zeroing_for_unloaded_group():
     config = make_dyntra_test_config(block_size=16)
     config.kv_transfer_config = None
