@@ -16,9 +16,9 @@ on CUDA or ROCm with its PyTorch reference:
 * Attention output gate: the weightless RMSNorm with a sigmoid gate runs
   through the Ascend ``rms_norm_gated`` kernel, as in GLM-5.3-Flash KDA.
 * MoE: Muse Spark normalizes every expert's output before the weighted top-k
-  sum. The Ascend MoE combine has no hook for that norm, so the routed experts
-  run as a dense PyTorch reference. It is meant for reduced bring-up
-  configurations, not for serving the full checkpoint.
+  sum. The Ascend combine fuses the weighting and the sum, so the norm runs at
+  the end of the MLP stage instead, on the rows the combine is about to weigh.
+  That is the same function, because the norm reads one row at a time.
 
 Quantized checkpoints, expert parallelism, sequence-parallel MoE and the
 DSpark draft are not supported yet.
@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
-from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.models.muse_spark.amd.model import (
@@ -50,7 +50,10 @@ from vllm.models.muse_spark.common.omni import (
     register_omni_processor,
 )
 
-from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,
+    AscendUnquantizedFusedMoEMethod,
+)
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 
 ROUTER_DTYPE = torch.float32
@@ -175,23 +178,45 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
     in the last place. The error is rounding noise of that order, not a bias.
     """
 
-    def __init__(self, moe=None, tid2eid=None, post_expert_norm: nn.Module | None = None):
-        super().__init__(moe=moe, tid2eid=tid2eid)
-        if post_expert_norm is None:
-            raise ValueError("Muse Spark routed experts need a post-expert norm.")
-        self.post_expert_norm = post_expert_norm
+    # Attached by the owning MoE once the factory has built the layer, as
+    # upstream attaches its own post_expert_norm_fn to the routed experts.
+    post_expert_norm: nn.Module | None = None
 
     def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
         routed_rows = super().apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+        if self.post_expert_norm is None:
+            raise RuntimeError("Muse Spark routed experts ran without their post-expert norm.")
         return self.post_expert_norm(routed_rows, out_dtype=routed_rows.dtype)
 
 
+class AscendMuseSparkRoutedExperts(AscendRoutedExperts):
+    """Routed experts whose MLP stage ends in the Muse Spark per-route norm.
+
+    ``AscendRoutedExperts`` installs the stock unquantized method itself, so
+    the Muse Spark one replaces it here rather than being passed in. Only the
+    expert container is specialized; the runner still arrives through the
+    usual pluggable dispatch, so the Ascend combine and its reduction hooks
+    are untouched.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._replace_quant_method(
+            AscendMuseSparkFusedMoEMethod(self.moe_config, tid2eid=self.tid2eid),
+        )
+
+
 class MuseSparkReferenceExperts(nn.Module):
-    """Routed experts as a dense PyTorch reference with the per-expert norm.
+    """Routed experts as a dense PyTorch reference with the per-route norm.
+
+    No longer on the model path: the MoE runs through ``FusedMoEFactory``. This
+    stays as the executable statement of what the routed experts compute, which
+    the Ascend path is checked against, and it is small enough to step through
+    when that path disagrees.
 
     Parameter names and shapes follow the consolidated checkpoint tensors,
     ``w13_weight [E, 2I, H]`` (gate rows, then up rows) and
-    ``w2_weight [E, H, I]``, so the default weight loader copies them as is.
+    ``w2_weight [E, H, I]``, the same layout ``FusedMoEFactory`` allocates.
     Every token runs through every expert, so compute grows with the expert
     count; the shapes stay static and no device-to-host sync is needed.
     """
@@ -238,11 +263,14 @@ class MuseSparkReferenceExperts(nn.Module):
 
 
 class AscendMuseSpark1xMoE(MuseSpark1xMoE):
-    """Muse Spark latent MoE whose routed experts run as a PyTorch reference.
+    """Muse Spark latent MoE on the Ascend fused-MoE path.
 
-    The upstream constructor is not called: it builds ``FusedMoEFactory`` with
-    a CUDA/ROCm runner. Router, pooler, unpooler and the two expert norms are
-    built here with the same names, so checkpoints map onto the same keys.
+    The upstream constructor is not called: it pins a CUDA/ROCm runner and a
+    MoE config that defers the top-k finalize, neither of which applies here.
+    The factory is built again with the Ascend routed experts, leaving the
+    runner to the usual pluggable dispatch. Router, pooler, unpooler and the
+    two expert norms keep their upstream names, so checkpoints map onto the
+    same keys.
     """
 
     def __init__(self, vllm_config: VllmConfig, layer_idx: int, prefix: str = "") -> None:
@@ -332,22 +360,34 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
         )
 
         self.intermediate_size = config.moe_intermediate_size
-        self.experts = MuseSparkReferenceExperts(
+        # The experts run at the pooled width; the router still reads the full
+        # hidden size, so its logits are computed here and passed in.
+        self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
             hidden_size=moe_hidden_size,
             intermediate_size=self.intermediate_size,
-            params_dtype=vllm_config.model_config.dtype,
+            renormalize=True,
+            router=self.moe_router,
+            quant_config=None,
+            prefix=f"{prefix}.experts",
+            is_sequence_parallel=self.is_sequence_parallel,
+            router_logits_dtype=self.router_dtype,
+            scoring_func=ROUTER_SCORE_NORMALIZATION,
+            e_score_correction_bias=self.expert_bias,
+            routed_scaling_factor=self.route_scale,
+            routed_experts_cls=AscendMuseSparkRoutedExperts,
         )
+        self.experts.routed_experts.quant_method.post_expert_norm = self.post_expert_norm
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
         pooled, _ = self.pooler(hidden_states)
         return self.pre_expert_norm(pooled)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        router_logits = self._router_logits(hidden_states)  # [T, E] fp32
-        topk_weights, topk_ids = self.moe_router._compute_routing_native(router_logits, indices_type=None)
+        router_logits = self._router_logits(hidden_states)  # [T, E] fp32, full width
         pooled = self._pool(hidden_states)  # [T, moe_hidden]
-        experts_out = self.experts(pooled, topk_weights, topk_ids, self.post_expert_norm)
+        experts_out = self.experts(hidden_states=pooled, router_logits=router_logits)
         output, _ = self.unpooler(experts_out)
         return output
 
