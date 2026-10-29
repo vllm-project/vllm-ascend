@@ -22,6 +22,12 @@ MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE = 512 * 1024 * 1024
 DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE = MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE
 # A single resized tensor above this size is not loaded for optional matching.
 MAX_RESIZED_IMAGE_TRANSFER_SIZE = 1024 * 1024 * 1024
+# Default capacity bounds for the matcher-lifetime similarity metadata. When
+# the cache reaches ``max_capacity * eviction_threshold`` entries, randomly
+# evicted entries shrink it back to ``max_capacity * lower_watermark``.
+DEFAULT_SIMILARITY_CACHE_MAX_CAPACITY = 1_000_000
+DEFAULT_SIMILARITY_EVICTION_THRESHOLD = 0.95
+DEFAULT_SIMILARITY_LOWER_WATERMARK = 0.90
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,9 @@ class SimilarityCacheConfig:
     ssim_threshold: float = 0.99
     ssim_data_range: float = DEFAULT_DATA_RANGE
     resized_image_recv_buffer_size: int = DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE
+    max_capacity: int = DEFAULT_SIMILARITY_CACHE_MAX_CAPACITY
+    eviction_threshold: float = DEFAULT_SIMILARITY_EVICTION_THRESHOLD
+    lower_watermark: float = DEFAULT_SIMILARITY_LOWER_WATERMARK
 
     def __post_init__(self) -> None:
         if isinstance(self.max_hamming, bool) or not isinstance(self.max_hamming, int):
@@ -41,6 +50,28 @@ class SimilarityCacheConfig:
         if not 0 <= self.max_hamming < PHASH_NUM_BANDS:
             raise ValueError(
                 f"similarity_cache.max_hamming must be between 0 and {PHASH_NUM_BANDS - 1}"
+            )
+        if isinstance(self.max_capacity, bool) or not isinstance(self.max_capacity, int):
+            raise ValueError("similarity_cache.max_capacity must be an integer")
+        if self.max_capacity <= 0:
+            raise ValueError("similarity_cache.max_capacity must be a positive integer")
+        if isinstance(self.eviction_threshold, bool) or not isinstance(
+            self.eviction_threshold, (int, float)
+        ):
+            raise ValueError("similarity_cache.eviction_threshold must be a number")
+        if not 0.0 < self.eviction_threshold <= 1.0:
+            raise ValueError(
+                "similarity_cache.eviction_threshold must be greater than 0 "
+                "and at most 1"
+            )
+        if isinstance(self.lower_watermark, bool) or not isinstance(
+            self.lower_watermark, (int, float)
+        ):
+            raise ValueError("similarity_cache.lower_watermark must be a number")
+        if not 0.0 < self.lower_watermark < self.eviction_threshold:
+            raise ValueError(
+                "similarity_cache.lower_watermark must be greater than 0 and "
+                "less than eviction_threshold"
             )
 
     @classmethod
@@ -103,6 +134,35 @@ class SimilarityCacheConfig:
                 f"{resized_image_recv_buffer_size}"
             )
 
+        max_capacity = raw.get("max_capacity", DEFAULT_SIMILARITY_CACHE_MAX_CAPACITY)
+        if isinstance(max_capacity, bool) or not isinstance(max_capacity, int):
+            raise ValueError("similarity_cache.max_capacity must be an integer")
+        if max_capacity <= 0:
+            raise ValueError("similarity_cache.max_capacity must be a positive integer")
+
+        eviction_threshold = raw.get(
+            "eviction_threshold",
+            DEFAULT_SIMILARITY_EVICTION_THRESHOLD,
+        )
+        if isinstance(eviction_threshold, bool) or not isinstance(eviction_threshold, (int, float)):
+            raise ValueError("similarity_cache.eviction_threshold must be a number")
+        eviction_threshold = float(eviction_threshold)
+        if not 0.0 < eviction_threshold <= 1.0:
+            raise ValueError(
+                "similarity_cache.eviction_threshold must be greater than 0 "
+                "and at most 1"
+            )
+
+        lower_watermark = raw.get("lower_watermark", DEFAULT_SIMILARITY_LOWER_WATERMARK)
+        if isinstance(lower_watermark, bool) or not isinstance(lower_watermark, (int, float)):
+            raise ValueError("similarity_cache.lower_watermark must be a number")
+        lower_watermark = float(lower_watermark)
+        if not 0.0 < lower_watermark < eviction_threshold:
+            raise ValueError(
+                "similarity_cache.lower_watermark must be greater than 0 and "
+                "less than eviction_threshold"
+            )
+
         return cls(
             enabled=enabled,
             matcher=matcher,
@@ -110,5 +170,8 @@ class SimilarityCacheConfig:
             ssim_threshold=ssim_threshold,
             ssim_data_range=ssim_data_range,
             resized_image_recv_buffer_size=resized_image_recv_buffer_size,
+            max_capacity=max_capacity,
+            eviction_threshold=eviction_threshold,
+            lower_watermark=lower_watermark,
         )
 

@@ -101,23 +101,41 @@ for candidate_phash in sorted(matched_phashes):
 索引只存在于 matcher 实例内，没有新增跨进程共享、持久化或淘汰机制。
 非零距离模式下，四段索引增加约 4 倍于不同 pHash 数量的集合成员关系。
 
-## 计算 pHash、保存像素与发布索引
+## 计算 pHash、延迟保存像素与发布索引
 
-`perceptual_ssim_cache_matcher.py` 中的
-`_compute_phash_and_save_resized_tensors(mm_hash, feature)`
-处理一张图片的预登记。它通过写入缓存和更新映射产生效果，不返回匹配结果。
+pHash 生命周期分为两个阶段。
 
-### 提取、计算与保存
+`ensure_cache_available()` 阶段做本地索引预登记。对没有 pHash 的 exact miss，
+`_compute_phash_and_cache_metadata(mm_hash, feature)` 计算 pHash，并把它和
+确定性的 resized key 写入 `similarity_cache`、`phash_to_resized_mm_hashes`
+以及 band 反向索引；但不会把 resized pixel tensor 写入 Memcache。此时候选
+key 可能暂时没有 Memcache 值，后续读取路径会通过 key-info 检查跳过缺失值。
+
+`update_state_after_alloc()` 完成最终匹配后，如果结果仍是 save miss，
+connector 会在把该图加入 `mm_hashes_need_saves` 之前调用
+`persist_missed_resized_tensor(mm_hash, feature)`。此时匹配已经结束，
+新持久化并索引的 tensor 只会成为未来请求的候选。
+
+### 提取、计算与缓存 pHash 元数据
 
 1. `extract_resized_tensor(feature)` 提取预处理后的像素张量，
    `extract_image_grid(feature)` 提取 `(T, H, W)` patch 网格信息。任一缺失就跳过。
 2. `compute_phash(resized_tensor, grid, merge_size=...)` 计算完整 64 位 pHash，
    结果是 Python 整数。数据不符合计算要求、返回 `None` 时跳过；此时尚未分 band。
-3. `_tensor_store.put(mm_hash, resized_tensor, grid)` 确认像素已存在或成功写入 Memcache。
-   返回 `False` 时不发布新索引；异常会向上传播。先保存像素再登记索引，
-   避免将未成功保存的数据作为新候选暴露给检索。
-4. `get_resized_key(...)` 生成包含图片标识、grid、shape、dtype 和模型信息的存储 key，
+3. 生成确定性的 resized key，并在同一把状态锁内发布
+   `phash_to_resized_mm_hashes`、band 索引和 `similarity_cache` 元数据；
+   此阶段不执行 `_tensor_store.put()`。
+
+### 最终 miss 后保存像素并发布索引
+
+`persist_missed_resized_tensor()` 优先复用预登记的 pHash；若没有则从当前
+feature 重新计算。随后执行：
+
+1. `_tensor_store.put(mm_hash, resized_tensor, grid)` 确认像素已存在或成功写入 Memcache。
+   返回 `False` 时保留已有的本地索引悬空项；调用方会记录失败，但仍会按原逻辑保存 embedding。
+2. `get_resized_key(...)` 生成包含图片标识、grid、shape、dtype 和模型信息的存储 key，
    后续据此检查布局兼容性并读取像素。
+3. 保存像素后，在同一把状态锁内确认反向索引已登记。
 
 这里的 `mm_hash` 是原始图片标识，`image_phash` 是用于相似度粗筛的感知哈希，
 `resized_key` 是 resized 像素在 Memcache 中的存储 key，三者用途不同。
@@ -149,11 +167,12 @@ if resized_key not in candidate_resized_keys:
 `candidate_resized_keys` 与字典中保存的是同一个列表对象，`append()` 后无需再次赋回字典；
 追加前检查 key，避免重复登记。
 
-最后通过 `similarity_cache.setdefault(...)` 初始化当前图片的记录，
+最后在 `mm_hash` 尚无记录时初始化 `similarity_cache` 记录，
 其中 SSIM 匹配列表初始为空。已有记录会被保留，之前计算的 SSIM 结果不会被清空。
 
-上述三个状态由同一把 `_similarity_state_lock` 保护，使线程池中的任务不会交错发布
-不一致的索引状态。pHash 计算和 Memcache 写入在这把锁之外进行，减少锁内工作量。
+上述三个状态由同一把 `_similarity_state_lock` 保护，使后台 pHash 预登记任务
+不会交错发布不一致的元数据状态。pHash 计算和 Memcache 写入在这把锁之外进行，
+减少锁内工作量。
 这把状态锁与下面保护 PUT 注册生命周期的 `_put_lock` 用途不同。
 
 ## CPU 预处理与传输
@@ -209,9 +228,9 @@ SSIM 内部的设备检查本次没有调整；正常调用中查询和读取的
 获取锁 → 注册缓冲区 → 传输像素 → finally 中注销缓冲区 → 释放锁
 ```
 
-CPU 数据约定不能替代这把锁，因为当前仍存在并发 PUT：
-待处理图片超过 3 张时，matcher 会把计算 pHash 和保存像素的任务提交到线程池，
-各任务最终调用同一个 `_tensor_store.put()`。
+CPU 数据约定不能替代这把锁。批量预登记现在只并行计算 pHash 元数据；
+最终 miss 后的 `_tensor_store.put()` 在调度线程执行。保留锁可以防御
+未来并发 PUT，以及 store 层其他调用路径带来的并发。
 
 保留锁的具体原因有两个：
 
@@ -226,8 +245,7 @@ CPU 数据约定不能替代这把锁，因为当前仍存在并发 PUT：
 但这并不能保证“注册—传输—注销”三个操作作为一个整体不被其他调用插入。
 也不能据此认为上层 Python 的共享注册状态已经得到保护。
 
-这把锁的代价是同一个 store 的 PUT 临界区串行执行，pHash 计算仍可并行。
-若将来明确改为并行计算 pHash、统一由单线程执行 PUT，才可重新评估是否移除它。
+这把锁的代价是同一个 store 的 PUT 临界区串行执行，pHash 元数据计算仍可并行。
 当前实现保留该锁，也保留传输异常时的注销清理。
 
 ## 线程池、Future 与异常等待
