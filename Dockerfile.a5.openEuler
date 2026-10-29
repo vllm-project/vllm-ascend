@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0.B106_20261028030506-950-openeuler24.03-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261028030506-950-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
