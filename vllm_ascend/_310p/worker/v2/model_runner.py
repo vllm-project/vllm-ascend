@@ -1302,8 +1302,12 @@ class NPUModelRunner310V2(NPUModelRunner):
     def _synchronize_multistream_moe_before_logits(self) -> None:
         if not self.ascend_config.multistream_overlap_shared_expert or self.parallel_config.tensor_parallel_size <= 1:
             return
-        graph_manager = self.cudagraph_manager
-        if not graph_manager.cudagraph_mode.has_full_cudagraphs() or len(graph_manager.graphs) <= 1:
+        graph_manager = getattr(self, "cudagraph_manager", None)
+        if (
+            graph_manager is None
+            or not graph_manager.cudagraph_mode.has_full_cudagraphs()
+            or len(graph_manager.graphs) <= 1
+        ):
             return
         if self._multistream_logits_initialized:
             return

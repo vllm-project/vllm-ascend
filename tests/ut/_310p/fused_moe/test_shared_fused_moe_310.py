@@ -128,6 +128,7 @@ def test_runner_310_installs_specialized_comm(with_shared_experts):
 
         assert routed_experts.quant_method is None
         if with_shared_experts:
+            assert runner.ascend_shared_experts is not None
             assert runner.ascend_shared_experts.multistream_overlap is True
             configure.assert_called_once_with(runner.ascend_shared_experts)
         else:

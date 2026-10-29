@@ -38,6 +38,23 @@ def test_logits_sync_skips_unaffected_paths(options):
     assert not runner._multistream_logits_initialized
 
 
+@pytest.mark.parametrize("missing_attribute", [False, True])
+def test_logits_sync_skips_uninitialized_graph_manager(missing_attribute):
+    runner = _runner()
+    if missing_attribute:
+        del runner.cudagraph_manager
+    else:
+        runner.cudagraph_manager = None
+    with (
+        patch("torch.npu.current_stream") as current_stream,
+        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
+    ):
+        runner._synchronize_multistream_moe_before_logits()
+    current_stream.assert_not_called()
+    shared_stream.assert_not_called()
+    assert not runner._multistream_logits_initialized
+
+
 def test_logits_sync_drains_both_streams_only_before_first_real_sample():
     runner = _runner()
     calls = MagicMock()

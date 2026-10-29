@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from types import MethodType
 
 import torch
-import torch.nn.functional as F
 
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -57,7 +56,7 @@ def _enqueue_gate_up_after_router_310(
         expert_gate = getattr(self.layer, "expert_gate", None)
         if expert_gate is not None:
             gate_out, _ = expert_gate(submitted.hidden_states)
-            output_gate = F.sigmoid(gate_out)
+            output_gate = torch.sigmoid(gate_out)
 
     return SubmittedSharedExpertWork310(
         hidden_states=submitted.hidden_states,
