@@ -72,6 +72,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to capture the v2 rejection sampler Triton kernels into a
+    # dedicated ACL graph that is replayed once per decode step. This removes
+    # the per-kernel dispatch overhead (~1ms per step for 4 kernels). Disabled
+    # by default; set to "1" to enable.
+    "VLLM_ASCEND_SAMPLER_ACLGRAPH": lambda: bool(int(os.getenv("VLLM_ASCEND_SAMPLER_ACLGRAPH", "0"))),
 }
 
 # end-env-vars-definition
