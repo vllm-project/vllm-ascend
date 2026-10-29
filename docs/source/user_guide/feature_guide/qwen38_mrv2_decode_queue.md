@@ -24,6 +24,23 @@ is independent of early submission and changes only its boolean keys: `0` and `1
 represented exactly in FP32, the sort remains stable, and the sparse indices retain
 their integer dtype.
 
+## Dependency and cache-layout compatibility
+
+This implementation is based on Qwen support PR #16981 at
+`eb43043aa94e20aa74cf9883d3a3554a12b8b350`, with its pinned vLLM revision
+`544f182d9f0c9bfe8bd7645525951d5e3692a542`. That dependency already includes the
+Model Runner V2, MTP, graph-replay, and padded-metadata adaptations from PR #17249;
+the older MRV2 commits are not applied again.
+
+The dependency uses packed QSA/GDN cache pages and 128-token GBSA kernel pages.
+The metadata integration retains the existing owner's persistent buffers and
+block tables; it does not restore the older contiguous-cache allocation. FP32
+partition keys also retain the newer GBSA residual-block-mode-zero path, including
+explicit incomplete tails and the 512-entry sparse-selection limit. Neither the
+cache allocation nor the native GBSA operator is replaced by this optimization.
+The GBSA dependency now uses the CANN transformer operator API rather than bundled
+operator sources, so the runtime must supply its matching native operators.
+
 ## Original QSA metadata inside the target FULL graph
 
 The original Torch QSA metadata producer is captured at the entry of the existing
@@ -34,14 +51,17 @@ layers execute in the same graph with the existing buffer ABI. There is no separ
 metadata graph, extra graph replay, fused metadata kernel, or staging copy.
 
 This integration is automatic for the supported Qwen model state. Its configuration
-gate checks `FULL_DECODE_ONLY`, TP8, DP1, PP1, DCP1, PCP1, three speculative tokens,
-and a non-eager target. The audited configuration uses fixed MTP K3; the metadata
-gate does not independently check the speculative method or dynamic drafting.
+gate checks `FULL_DECODE_ONLY`, TP8, DP1, PP1, DCP1, PCP1, fixed MTP K3,
+and a non-eager target. Dynamic or adaptive drafting, LoRA capture cases, and DBO
+retain the original immediate producer path.
 The audited target geometry has at most 32 padded tokens and query length four
 (zero-length padding is permitted). The tested requested capture sizes are
 `[1, 2, 4, 8, 12, 16, 20, 24, 28, 32]`; with K3 target query length four, the
-applicable target plans are `4, 8, 12, 16, 20, 24, 28, 32`. Larger or different
-capture lists are not covered by this bounded implementation. Unsupported configurations and non-FULL calls
+applicable target plans are `4, 8, 12, 16, 20, 24, 28, 32`. The effective target
+capture grid must contain every four-token bucket up to its configured maximum,
+which must not exceed 32. Missing, larger, or sparse grids disable this metadata
+migration for the entire configuration, avoiding partial capture or mismatched
+rounded replay plans. Unsupported configurations and non-FULL calls
 retain the original immediate producer path. MTP retains its existing calls; this
 change does not migrate MTP metadata or change MTP graph capture. No embedding or
 TP AllReduce preparation graph is introduced.
@@ -104,3 +124,7 @@ are not a same-environment baseline comparison. Three of seven generation-output
 comparisons differed, so the collection does not establish generation correctness or
 an isolated performance gain. No new hardware collection was performed for the
 source cleanup and default-on update.
+
+After refreshing the dependencies, repeat hardware output/cache correctness and
+performance validation with the new pinned vLLM and packed-cache implementation.
+Historical profiling from the previous cache layout does not validate this revision.

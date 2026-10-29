@@ -18,18 +18,19 @@ HELPER = SOURCE / "models/qwen4_exp/qsa_target_metadata.py"
 class Tensor:
     next_ptr = 1000
 
-    def __init__(self, values=None, shape=None, device="npu:0", dtype="int32", ptr=None):
+    def __init__(self, values=None, shape=None, device="npu:0", dtype="int32", ptr=None, strides=None):
         self.values = values
         self.shape = shape or (len(values),)
         self.device, self.dtype = device, dtype
         self.ptr = ptr or Tensor.next_ptr
+        self.strides = strides
         Tensor.next_ptr += 10000
 
     def data_ptr(self):
         return self.ptr
 
     def stride(self):
-        return (self.shape[1], 1) if len(self.shape) == 2 else (1,)
+        return self.strides or ((self.shape[1], 1) if len(self.shape) == 2 else (1,))
 
     def __len__(self):
         return self.shape[0]
@@ -45,6 +46,7 @@ class Tensor:
             self.device,
             self.dtype,
             self.ptr,
+            self.strides,
         )
 
 
@@ -96,7 +98,10 @@ class TestTargetMetadata(unittest.TestCase):
         sys.modules[spec.name] = self.m
         spec.loader.exec_module(self.m)
         config = types.SimpleNamespace(
-            compilation_config=types.SimpleNamespace(cudagraph_mode="FULL_DECODE_ONLY"),
+            compilation_config=types.SimpleNamespace(
+                cudagraph_mode="FULL_DECODE_ONLY",
+                cudagraph_capture_sizes=[1, 2, 4, 8, 12, 16, 20, 24, 28, 32],
+            ),
             parallel_config=types.SimpleNamespace(
                 tensor_parallel_size=8,
                 data_parallel_size=1,
@@ -104,7 +109,12 @@ class TestTargetMetadata(unittest.TestCase):
                 decode_context_parallel_size=1,
                 prefill_context_parallel_size=1,
             ),
-            speculative_config=types.SimpleNamespace(num_speculative_tokens=3),
+            speculative_config=types.SimpleNamespace(
+                method="mtp",
+                num_speculative_tokens=3,
+                uses_dynamic_speculative_decoding=lambda: False,
+                enable_adaptive_verification=False,
+            ),
             model_config=types.SimpleNamespace(enforce_eager=False),
         )
         self.model_state = types.SimpleNamespace(vllm_config=config)
@@ -262,6 +272,15 @@ class TestTargetMetadata(unittest.TestCase):
                 setattr(self.model_state.vllm_config.parallel_config, field, 1)
         self.assertEqual(len(self.calls), 2)
 
+    def test_sparse_capture_grid_keeps_original_producer_outside_graph(self):
+        self.model_state.vllm_config.compilation_config.cudagraph_capture_sizes = [8, 16, 32]
+        with self.preparation():
+            self.build()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.calls[0]["capturing"])
+        self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+        self.assertEqual(self.m.target_metadata_snapshot()["deferred_calls"], 0)
+
     def test_materialization_locations_are_counted(self):
         self.build()
         self.common._token_to_req_indices_cache = None
@@ -294,6 +313,116 @@ class TestTargetMetadata(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "persistent output ABI"):
             self.capture()
         self.assertEqual(self.m.target_metadata_snapshot()["capture_failures"], 1)
+
+    def test_original_output_count_must_match_all_four_owner_views(self):
+        original = self.m._ORIGINAL_PRODUCER
+        for index, missing in enumerate((True, False)):
+            with self.subTest(missing=missing):
+
+                def changed(common, *buffers, missing=missing, **kwargs):
+                    result = original(common, *buffers, **kwargs)
+                    return result[:-1] if missing else (*result, result[0])
+
+                self.m._ORIGINAL_PRODUCER = changed
+                with self.assertRaisesRegex(RuntimeError, "persistent output ABI"):
+                    self.capture()
+                self.assertEqual(len(self.calls), index + 1)
+                self.assertEqual(self.m.target_metadata_snapshot()["capture_failures"], index + 1)
+                self.assertIsNone(self.common._token_to_req_indices_cache)
+                self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+                self.assertEqual(self.model_state._qsa_target_metadata.capture_depth, 0)
+
+    def test_padded_device_boundaries_keep_trimmed_cpu_tail_and_owner_views(self):
+        self.batch.num_tokens_after_padding = 16
+        self.batch.num_reqs_after_padding = 4
+        self.desc = types.SimpleNamespace(num_tokens=16, num_reqs=4)
+        self.common = Common(
+            Tensor([0, 4, 8, 8, 8]),
+            Tensor([0, 4, 8], device="cpu"),
+            Tensor([10000, 10000, 0, 0]),
+            16,
+            Tensor(shape=(4, 184), strides=(512, 2)),
+            Tensor(shape=(4096,), strides=(2,)),
+        )
+        outputs = self.capture()
+        actual = self.calls[0]["common"]
+        self.assertEqual(actual.query_start_loc.values, [0, 4, 8, 8, 8])
+        self.assertEqual(actual.query_start_loc_cpu.values, [0, 4, 8])
+        self.assertEqual(actual.block_table_tensor.stride(), (512, 2))
+        self.assertEqual(actual.slot_mapping.stride(), (2,))
+        self.assertEqual([value.shape for value in outputs], [(16,)] * 4)
+        self.assertIsNone(self.common._token_to_req_indices_cache)
+        with self.preparation():
+            self.build()
+        self.m.validate_target_metadata_replay(self.model_state, self.desc)
+
+    def test_separate_raw_and_compressed_groups_keep_distinct_owner_buffers(self):
+        # Main attention can share the compressed group's Common object, but
+        # only its side-cache QSAMetadataBuilder calls this producer. The raw
+        # circular group owns a different Common object and different buffers.
+        raw_common = Common(
+            self.common.query_start_loc,
+            self.common.query_start_loc_cpu,
+            self.common.seq_lens,
+            8,
+            Tensor(shape=(2, 1), strides=(8, 1)),
+            Tensor(shape=(4096,)),
+        )
+        raw_buffers = tuple(Tensor(shape=(4096,)) for _ in range(4))
+        with self.m.target_metadata_capture(self.model_state):
+            with self.preparation(capture=True):
+                compressed = self.build()
+                raw = self.m.build_qsa_metadata_original_target_graph(
+                    raw_common,
+                    *raw_buffers,
+                    storage_block_size=8,
+                    compress_ratio=1,
+                    circular_buffer_size=8,
+                )
+            self.capturing = True
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.capturing = False
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.m.target_metadata_snapshot()["captured_plans"][0]["producer_count"], 2)
+        self.assertNotEqual(compressed[0].data_ptr(), raw[0].data_ptr())
+        self.assertEqual(raw[3].data_ptr(), raw_buffers[3].data_ptr())
+        self.assertIsNone(raw_common._token_to_req_indices_cache)
+        self.assertIsNone(self.common._token_to_req_indices_cache)
+
+    def test_side_plan_does_not_rewrite_main_owner_common_views(self):
+        main_views = (
+            self.common.query_start_loc,
+            self.common.seq_lens,
+            self.common.block_table_tensor,
+            self.common.slot_mapping,
+        )
+        self.capture()
+        self.assertEqual(
+            (
+                self.common.query_start_loc,
+                self.common.seq_lens,
+                self.common.block_table_tensor,
+                self.common.slot_mapping,
+            ),
+            main_views,
+        )
+        self.assertIsNone(self.common._token_to_req_indices_cache)
+
+    def test_owner_buffer_stride_and_work_shape_drift_rejected_before_replay(self):
+        self.capture()
+        token_buffer = self.buffers[0]
+        self.buffers = (Tensor(shape=token_buffer.shape, ptr=token_buffer.ptr, strides=(2,)), *self.buffers[1:])
+        with self.preparation():
+            self.build()
+        with self.assertRaisesRegex(RuntimeError, "inputs or static geometry changed"):
+            self.m.validate_target_metadata_replay(self.model_state, self.desc)
+        self.buffers = (token_buffer, *self.buffers[1:])
+        work = self.kwargs["k_work_metadata_buffer"]
+        self.kwargs["k_work_metadata_buffer"] = Tensor(shape=(3, 2), ptr=work.ptr)
+        with self.preparation():
+            self.build()
+        with self.assertRaisesRegex(RuntimeError, "inputs or static geometry changed"):
+            self.m.validate_target_metadata_replay(self.model_state, self.desc)
 
     def test_unsupported_query_layout_is_rejected(self):
         self.common.query_start_loc_cpu.values[:] = [0, 3, 8]

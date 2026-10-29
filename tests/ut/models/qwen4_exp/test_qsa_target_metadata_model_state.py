@@ -76,7 +76,10 @@ class NoFusionIntegrationTests(unittest.TestCase):
         self.addCleanup(sys.modules.pop, PACKAGE + ".model_state", None)
         self.state = self.module.AscendQwen4ExpModelState()
         self.state.vllm_config = SimpleNamespace(
-            compilation_config=SimpleNamespace(cudagraph_mode="FULL_DECODE_ONLY"),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode="FULL_DECODE_ONLY",
+                cudagraph_capture_sizes=[1, 2, 4, 8, 12, 16, 20, 24, 28, 32],
+            ),
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=8,
                 data_parallel_size=1,
@@ -84,7 +87,12 @@ class NoFusionIntegrationTests(unittest.TestCase):
                 decode_context_parallel_size=1,
                 prefill_context_parallel_size=1,
             ),
-            speculative_config=SimpleNamespace(num_speculative_tokens=3),
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                num_speculative_tokens=3,
+                uses_dynamic_speculative_decoding=lambda: False,
+                enable_adaptive_verification=False,
+            ),
             model_config=SimpleNamespace(enforce_eager=False),
         )
         self.batch = SimpleNamespace(num_tokens_after_padding=8, num_reqs_after_padding=2)
@@ -129,6 +137,41 @@ class NoFusionIntegrationTests(unittest.TestCase):
         self.assertFalse(self.calls[-1][-1].defer)
         self.assertIsNone(self.state._qsa_target_metadata.pending)
         self.assertIsNone(self.helper._SCOPE.get())
+
+    def test_incomplete_or_out_of_range_grids_keep_original_preparation(self):
+        config = self.state.vllm_config.compilation_config
+        for sizes in (None, [], [8, 16, 32], [1, 2, 4, 8, 64], [0, 4], [4.0, 8], [True, 4]):
+            with self.subTest(sizes=sizes), patch.object(config, "cudagraph_capture_sizes", sizes):
+                self.assertFalse(self.state._qsa_target_metadata_enabled)
+                self.assertIs(self.state.prepare_attn(self.batch, "FULL"), self.result)
+                self.assertIsNone(self.calls[-1][-1])
+                self.assertFalse(hasattr(self.state, "_qsa_target_metadata"))
+        del config.cudagraph_capture_sizes
+        self.assertFalse(self.state._qsa_target_metadata_enabled)
+
+    def test_complete_rounded_target_grids_enable_the_audited_lane(self):
+        config = self.state.vllm_config.compilation_config
+        for sizes in ([1, 2, 4, 8, 12, 16, 20, 24, 28, 32], [4, 8, 12, 16], [1, 5, 9, 13]):
+            with self.subTest(sizes=sizes), patch.object(config, "cudagraph_capture_sizes", sizes):
+                self.assertTrue(self.state._qsa_target_metadata_enabled)
+                self.state.prepare_attn(self.batch, "FULL")
+                self.assertTrue(self.calls[-1][-1].defer)
+
+    def test_dynamic_mtp_adaptive_lora_and_dbo_keep_original_preparation(self):
+        config = self.state.vllm_config
+        changes = [
+            (config.speculative_config, "method", "eagle"),
+            (config.speculative_config, "uses_dynamic_speculative_decoding", lambda: True),
+            (config.speculative_config, "enable_adaptive_verification", True),
+            (config.parallel_config, "enable_dbo", True),
+            (config, "lora_config", object()),
+        ]
+        for obj, name, value in changes:
+            with self.subTest(name=name), patch.object(obj, name, value, create=True):
+                self.assertFalse(self.state._qsa_target_metadata_enabled)
+                self.assertIs(self.state.prepare_attn(self.batch, "FULL"), self.result)
+                self.assertIsNone(self.calls[-1][-1])
+                self.assertFalse(hasattr(self.state, "_qsa_target_metadata"))
 
     def test_capture_flag_reaches_real_preparation_only_inside_manager_capture(self):
         with self.helper.target_metadata_capture(self.state):

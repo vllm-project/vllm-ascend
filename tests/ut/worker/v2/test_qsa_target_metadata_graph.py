@@ -137,6 +137,15 @@ class TestQsaTargetMetadataGraphOrdering(unittest.TestCase):
         self.assertIs(forward(wrapper, 17, marker=23), self.result)
         self.assertEqual(self.events, ["begin", "model", "finish"])
 
+    def test_mtp_wrapper_retains_draft_context_without_target_metadata(self):
+        wrapper, forward, context = self.wrapper(target=False)
+        wrapper.is_draft_model = True
+        wrapper.is_draft_model_prefill = True
+        self.assertIs(forward(wrapper, 17, marker=23), self.result)
+        self.assertEqual(self.events, ["begin", "model", "finish"])
+        self.assertTrue(context.is_draft_model)
+        self.assertTrue(context.is_draft_model_prefill)
+
     def test_replay_validates_before_either_native_path_and_marks_after_success(self):
         for updatable in (False, True):
             with self.subTest(updatable=updatable):

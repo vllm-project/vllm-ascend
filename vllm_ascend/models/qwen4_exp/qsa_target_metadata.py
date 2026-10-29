@@ -58,7 +58,7 @@ class _Plan:
         location = "target_native_capture" if capturing else "target_capture_warmup"
         state.locations[location] += 1
         actual = _invoke_original(common, self.buffers, self.kwargs, state=state, eligible=True, at_model_entry=True)
-        if not all(_same_view(a, b) for a, b in zip(actual, self.outputs)):
+        if len(actual) != len(self.outputs) or not all(_same_view(a, b) for a, b in zip(actual, self.outputs)):
             raise RuntimeError("Original QSA producer changed its persistent output ABI")
 
 
@@ -94,6 +94,17 @@ def target_metadata_config_supported(model_state):
     config = model_state.vllm_config
     parallel = config.parallel_config
     speculative = config.speculative_config
+    sizes = getattr(config.compilation_config, "cudagraph_capture_sizes", None)
+    if not isinstance(sizes, (list, tuple)) or not sizes:
+        return False
+    if any(type(size) is not int or not 0 < size <= _MAX_TARGET_TOKENS for size in sizes):
+        return False
+    target_sizes = sorted({((size + _TARGET_QUERY_LEN - 1) // _TARGET_QUERY_LEN) * _TARGET_QUERY_LEN for size in sizes})
+    # A sparse grid can pad a real K3 batch into a larger graph: its CPU mapped
+    # total then differs from the capture specialization. Keep the original
+    # producer for that whole configuration, rather than fail during replay.
+    if target_sizes != list(range(_TARGET_QUERY_LEN, target_sizes[-1] + 1, _TARGET_QUERY_LEN)):
+        return False
     return bool(
         config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
         and parallel.tensor_parallel_size == 8
@@ -101,8 +112,13 @@ def target_metadata_config_supported(model_state):
         and parallel.pipeline_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
         and parallel.prefill_context_parallel_size == 1
+        and not getattr(parallel, "enable_dbo", False)
+        and getattr(config, "lora_config", None) is None
         and speculative is not None
+        and speculative.method == "mtp"
         and speculative.num_speculative_tokens == 3
+        and not speculative.uses_dynamic_speculative_decoding()
+        and not speculative.enable_adaptive_verification
         and not config.model_config.enforce_eager
     )
 

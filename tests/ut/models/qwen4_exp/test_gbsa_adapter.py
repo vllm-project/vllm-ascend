@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -27,7 +28,8 @@ def _load_cache_views():
 @pytest.mark.parametrize("storage_page_size", [128, 384, 768])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tail_tokens", range(4))
-def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size, group_ids):
+@pytest.mark.parametrize("fp32_partition", [False, True])
+def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size, group_ids, fp32_partition):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -61,6 +63,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
 
     namespace = {
         "torch": torch,
+        "ascend_envs": SimpleNamespace(VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION=fp32_partition),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
@@ -133,7 +136,8 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
     torch.testing.assert_close(calls[0][2], expected.flatten(1).to(torch.int32))
 
 
-def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
+@pytest.mark.parametrize("fp32_partition", [False, True])
+def test_qsa_gbsa_uses_per_row_mtp_visible_lengths(fp32_partition):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -148,6 +152,7 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
 
     namespace = {
         "torch": torch,
+        "ascend_envs": SimpleNamespace(VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION=fp32_partition),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
@@ -191,7 +196,9 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
     assert indices[0, 3, 2].item() == 26
 
 
-def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
+@pytest.mark.parametrize("fp32_partition", [False, True])
+@pytest.mark.parametrize("tail_tokens", range(4))
+def test_qsa_gbsa_reserves_tail_within_512_entry_limit(fp32_partition, tail_tokens):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -206,6 +213,7 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 
     namespace = {
         "torch": torch,
+        "ascend_envs": SimpleNamespace(VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION=fp32_partition),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
@@ -228,17 +236,58 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
         compact_indices,
         torch.arange(17, dtype=torch.int32).view(1, -1),
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([2048], dtype=torch.int32),
-        torch.tensor([2049], dtype=torch.int32),
+        torch.tensor([2047 + tail_tokens], dtype=torch.int32),
+        torch.tensor([2048 + tail_tokens], dtype=torch.int32),
         torch.empty_like(query),
     )
 
     indices, counts, visible_lengths = calls[0]
     assert indices.shape == (2, 1, 512)
-    assert visible_lengths.tolist() == [2049]
+    assert visible_lengths.tolist() == [2048 + tail_tokens]
     assert counts[:, 0].tolist() == [512, 512]
     assert indices[0, 0, :511].tolist() == list(range(511))
-    assert indices[0, 0, 511].item() == 512
+    assert indices[0, 0, 511].item() == (512 if tail_tokens else 511)
+
+
+@pytest.mark.parametrize("fp32_partition", [False, True])
+@pytest.mark.parametrize("tail_tokens", range(4))
+def test_qsa_gbsa_partition_preserves_selection_order_and_tail(fp32_partition, tail_tokens):
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
+    module = ast.parse(source.read_text())
+    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    calls = []
+
+    def metadata(indices, counts, *args, **kwargs):
+        calls.append((indices.clone(), counts.clone(), kwargs["residual_block_mode"]))
+        return torch.empty(0)
+
+    namespace = {
+        "torch": torch,
+        "ascend_envs": SimpleNamespace(VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION=fp32_partition),
+        "generic_block_sparse_attention_metadata": metadata,
+        "generic_block_sparse_attention": lambda query, *args, **kwargs: (torch.zeros_like(query), torch.empty(0)),
+    }
+    exec(compile(module, str(source), "exec"), namespace)
+    query = torch.ones(1, 4, 128, dtype=torch.bfloat16)
+    keys = torch.zeros(1, 128, 2, 128, dtype=query.dtype)
+    namespace["qsa_gbsa_attention"](
+        query,
+        keys,
+        keys.clone(),
+        torch.tensor([[2, -1, 0, 99, 1, -1, -1, -1]], dtype=torch.int32),
+        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([11 + tail_tokens], dtype=torch.int32),
+        torch.tensor([12 + tail_tokens], dtype=torch.int32),
+        torch.empty_like(query),
+    )
+    indices, counts, residual_mode = calls[0]
+    assert indices.dtype == torch.int32
+    assert indices[0, 0, :3].tolist() == [2, 0, 1]
+    assert counts[:, 0].tolist() == [3 + bool(tail_tokens)] * 2
+    assert residual_mode == 0
+    if tail_tokens:
+        assert indices[:, 0, 3].tolist() == [3, 3]
 
 
 def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
