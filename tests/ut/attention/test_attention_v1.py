@@ -36,6 +36,34 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def test_interleaved_fia_view_geometry(self):
+        raw = torch.zeros(17 + 2 * 4 * 8 * 2 * 4, dtype=torch.float16)
+        page = 8 * 2 * 4
+        key = raw.as_strided((4, 8, 2, 4), (2 * page, 8, 4, 1), 17)
+        value = raw.as_strided(key.shape, key.stride(), 17 + page)
+        self.assertTrue(attn_module._is_block_interleaved_kv_cache(key, value))
+        for k, v in (
+            (key.contiguous(), value.contiguous()),
+            (key, key),
+            (value, key),
+            (key, value.clone()),
+            (key.to(torch.float32), value.to(torch.float32)),
+        ):
+            self.assertFalse(attn_module._is_block_interleaved_kv_cache(k, v))
+
+    def test_interleaved_fia_tables_are_per_step_and_preserve_sentinels(self):
+        table = torch.tensor([[0, 3, -1], [7, 1, 0]], dtype=torch.int32)
+        metadata = AscendMetadata(block_tables=table, seq_lens_list=[17, 8], actual_seq_lengths_q=[1, 2])
+        provider = attn_module.FIAParamProvider("layer", None, is_interleaved_kv=True)
+        resolved = provider.resolve({"layer": metadata})
+        torch.testing.assert_close(resolved["block_table"], torch.tensor([[0, 6, -1], [14, 2, 0]], dtype=torch.int32))
+        self.assertIs(resolved["block_table"], provider.resolve({"layer": metadata})["block_table"])
+        self.assertIs(attn_module.FIAParamProvider("layer", None).resolve({"layer": metadata})["block_table"], table)
+        next_metadata = AscendMetadata(block_tables=table.flip(0), seq_lens_list=[8, 17], actual_seq_lengths_q=[1, 2])
+        next_table = provider.resolve({"layer": next_metadata})["block_table"]
+        torch.testing.assert_close(next_table, resolved["block_table"].flip(0))
+        torch.testing.assert_close(table, torch.tensor([[0, 3, -1], [7, 1, 0]], dtype=torch.int32))
+
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
@@ -392,6 +420,54 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
 
 
 class TestAscendAttentionBackendImpl(TestBase):
+    def test_interleaved_fia_aliases_preserve_writer_and_hybrid_pages(self):
+        # Include a storage offset as in the shared hybrid backing allocator.
+        raw = torch.zeros(19 + 2 * 4 * 8 * 2 * 4, dtype=torch.float16)
+        page = 8 * 2 * 4
+        key = raw.as_strided((4, 8, 2, 4), (2 * page, 8, 4, 1), 19)
+        value = raw.as_strided(key.shape, key.stride(), 19 + page)
+        self.impl.key_cache, self.impl.value_cache = key, value
+        self.impl.use_bnsd_kv_cache = False
+        self.impl.enable_c8_quant = False
+        self.impl.sinks = None
+        self.impl.sliding_window = None
+        for state in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.PrefillCacheHit,
+        ):
+            metadata = AscendMetadata(
+                attn_state=state,
+                block_tables=torch.tensor([[3, 0], [1, 2]], dtype=torch.int32),
+                seq_lens=torch.tensor([9, 8]),
+                seq_lens_list=[9, 8],
+            )
+            k, v, bs, table, lengths = self.impl._get_fia_params(None, None, metadata)
+            self.assertEqual(k.shape, (7, 8, 8))
+            self.assertTrue(k.is_contiguous() and v.is_contiguous())
+            self.assertEqual(k.data_ptr(), key.data_ptr())
+            self.assertEqual(v.data_ptr(), value.data_ptr())
+            self.assertEqual(bs, 8)
+            self.assertEqual(lengths, [9, 8])
+            torch.testing.assert_close(table, metadata.block_tables * 2)
+            key[3, 0].fill_(7)
+            value[0, 1].fill_(11)
+            torch.testing.assert_close(k[6, 0], key[3, 0].flatten())
+            torch.testing.assert_close(v[0, 1], value[0, 1].flatten())
+            # A neighbouring physical page can still hold Mamba state; no
+            # attention write touched it or moved it to a different page.
+            self.assertEqual(torch.count_nonzero(raw[19 + 2 * page : 19 + 4 * page]), 0)
+        for attr, changed in (
+            ("use_bnsd_kv_cache", True),
+            ("enable_c8_quant", True),
+            ("sinks", torch.empty(1)),
+            ("sliding_window", 128),
+        ):
+            previous = getattr(self.impl, attr)
+            setattr(self.impl, attr, changed)
+            self.assertFalse(self.impl._use_interleaved_fia_cache())
+            setattr(self.impl, attr, previous)
+
     def setUp(self):
         self.mock_event = MagicMock()
         self.mock_event.record.return_value = None
