@@ -206,15 +206,15 @@ class EngramGvaPool:
         self.slot_bytes = ((self.used_bytes + _GIB - 1) // _GIB) * _GIB
         self._offload = self._initialize_offload()
         self._pool_base = 0
-        self.owner_weights: dict[int, torch.Tensor] = {}
-        self._backings: list[Any] = []
+        self._backing = None
+        self._owner_storage = None
         self.encoded_ids = None
         self.count = None
         self.staging = None
         try:
             self._allocate_pool()
             self._register_layout()
-            self._create_owner_backings()
+            self._create_owner_storage()
             self._create_lookup_buffers(capacity)
         except Exception:
             self._release_offload()
@@ -311,22 +311,14 @@ class EngramGvaPool:
 
         self._run_collective_stage("layout registration", register)
 
-    def _create_owner_backings(self) -> None:
+    def _create_owner_storage(self) -> None:
         def create():
-            backings = []
-            owner_weights = {}
-            for table in self.tables:
-                num_bytes = table.max_rows_per_owner * self.row_bytes
-                address = self._pool_base + table.block_offset * self.row_bytes
-                backing = (ctypes.c_uint8 * num_bytes).from_address(address)
-                tensor = torch.frombuffer(backing, dtype=torch.uint8).reshape(table.max_rows_per_owner, self.row_bytes)
-                tensor.zero_()
-                backings.append(backing)
-                owner_start, owner_end = table.owner_range(self.rank)
-                owner_weights[table.layer_hash_index] = tensor[: owner_end - owner_start]
-            return backings, owner_weights
+            backing = (ctypes.c_uint8 * self.used_bytes).from_address(self._pool_base)
+            storage = torch.frombuffer(backing, dtype=torch.uint8).reshape(self.rows_per_slot, self.row_bytes)
+            storage.zero_()
+            return backing, storage
 
-        self._backings, self.owner_weights = self._run_collective_stage("owner backing creation", create)
+        self._backing, self._owner_storage = self._run_collective_stage("owner backing creation", create)
 
     def _create_lookup_buffers(self, capacity: int) -> None:
         def create():
@@ -352,8 +344,11 @@ class EngramGvaPool:
         return table
 
     def raw_weight(self, layer_hash_index: int) -> torch.Tensor:
-        self.table(layer_hash_index)
-        return self.owner_weights[layer_hash_index]
+        table = self.table(layer_hash_index)
+        assert self._owner_storage is not None
+        owner_start, owner_end = table.owner_range(self.rank)
+        start = table.block_offset
+        return self._owner_storage[start : start + owner_end - owner_start]
 
     def weight(self, layer_hash_index: int, dtype: torch.dtype) -> torch.Tensor:
         return self.raw_weight(layer_hash_index)[:, : self.weight_bytes].view(dtype)
@@ -425,8 +420,8 @@ class EngramGvaPool:
             torch.npu.synchronize()
         self._release_offload()
         self._pool_base = 0
-        self.owner_weights.clear()
-        self._backings.clear()
+        self._owner_storage = None
+        self._backing = None
         self.owner_map = None
         self.encoded_ids = None
         self.count = None

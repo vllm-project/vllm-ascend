@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 import torch.distributed as dist
 
 from vllm_ascend.models.deepseek_v41.engram.gva import (
@@ -99,6 +100,16 @@ def test_gva_layout_requires_multiple_local_owners(world_size):
 def test_gva_layout_rejects_tables_smaller_than_local_owner_count():
     with pytest.raises(ValueError, match="rows for 4 local row owners"):
         make_engram_gva_tables([3], world_size=4)
+
+
+def test_gva_tables_use_disjoint_ranges_in_one_owner_slot():
+    pool = object.__new__(EngramGvaPool)
+    pool.tables, pool.rows_per_slot = make_engram_gva_tables([11, 4], world_size=3)
+    pool.rank = 1
+    pool._owner_storage = torch.arange(pool.rows_per_slot, dtype=torch.uint8).view(-1, 1)
+
+    assert pool.raw_weight(0).flatten().tolist() == [0, 1, 2, 3]
+    assert pool.raw_weight(1).flatten().tolist() == [4]
 
 
 def test_gva_collective_layout_validation_rejects_rank_mismatch(monkeypatch):
