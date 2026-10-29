@@ -14,9 +14,9 @@
 
 """Ascend wrapper for Qwen3.8-Flash-Next MTP."""
 
-import re
 from typing import Any
 
+import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
