@@ -4,6 +4,7 @@
 """Real-weight LiLiCorr correctness and acceptance checks on two NPUs."""
 
 import os
+from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +18,22 @@ TARGET_MODEL = "Qwen/Qwen3.8-27B"
 DRAFT_MODEL = "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0"
 NUM_SPECULATIVE_TOKENS = 7
 MAX_TOKENS = 64
-RUNNER_KWARGS = {
+
+
+class _RunnerKwargs(TypedDict):
+    tensor_parallel_size: int
+    dtype: str
+    enforce_eager: bool
+    max_model_len: int
+    max_num_seqs: int
+    gpu_memory_utilization: float
+    enable_prefix_caching: bool
+    async_scheduling: bool
+    generation_config: str
+    seed: int
+
+
+RUNNER_KWARGS: _RunnerKwargs = {
     "tensor_parallel_size": 2,
     "dtype": "bfloat16",
     "enforce_eager": True,
