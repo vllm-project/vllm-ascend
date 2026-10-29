@@ -598,9 +598,9 @@ class NPUPlatform(Platform):
             hardware_profile = get_current_hardware_profile()
             if not hardware_profile.supports(HardwareCapability.FP8_ATTENTION):
                 raise ValueError(
-                    f"fp8 KV cache is not supported on the current hardware "
-                    f"(device_type={getattr(hardware_profile, 'device_type', '?')}); "
-                    f"set --kv-cache-dtype to a dtype supported by this device."
+                    f"FP8 KV cache is not supported on "
+                    f"device_type={getattr(hardware_profile, 'device_type', '?')}. "
+                    f"Please specify a supported --kv-cache-dtype."
                 )
 
         # 4.Make sure the config is compatible with Ascend
