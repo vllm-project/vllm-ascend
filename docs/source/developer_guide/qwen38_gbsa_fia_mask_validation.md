@@ -15,14 +15,18 @@ Add a release note fragment with the assigned PR number when preparing a PR.
 
 | Request phase | Attention path |
 | --- | --- |
-| Pure Prefill | FIA with a selected-token mask, independent of sequence length |
+| Pure Prefill | FIA with a selected-token mask when the chunk starts below 24K logical KV, including a chunk that crosses 24K; GBSA when the chunk starts at or above 24K |
 | Pure Decode | Optimized GBSA, including multi-token Decode |
-| Mixed Prefill and Decode | Process Prefill requests first, then contiguous Decode spans through GBSA |
+| Mixed Prefill and Decode | Route each Prefill chunk independently by its cached-prefix logical KV length; coalesce GBSA Prefill chunks and Decode rows |
 
-The scheduler's CPU `is_prefilling` flags determine request phase. Query length
-and KV length do not determine phase. Prefill without history uses current K/V;
-chunked Prefill with history reads paged KV. Request IDs and output row positions
-are preserved when splitting mixed batches. Unknown phase metadata is rejected.
+The scheduler's CPU `is_prefilling` flags determine request phase. Within
+Prefill, the per-request logical visible KV length selects the backend at the
+24K (24576-token) chunk-start boundary. A Prefill chunk whose cached prefix is
+shorter than 24K stays entirely on FIA even when the chunk crosses 24K. This length includes cached history and
+the current Prefill chunk; it is not the padded physical cache capacity.
+Prefill without history uses current K/V; chunked Prefill with history reads
+paged KV. Request IDs and output row positions are preserved when splitting
+mixed batches. Unknown phase metadata is rejected.
 
 Decode uses the GBSA-only graph path. Capture does not freeze CPU KV lengths or
 a Prefill decision into the graph. A Qwen4Exp-only Model Runner V2 guard prevents
@@ -34,7 +38,8 @@ recover the original phase after it has been relabeled.
 
 The dense temporary mask is tiled along Q with a 64 MiB mask budget and at most
 4096 query rows per tile. This budget describes mask dimensions, not total
-temporary allocation. There is no 16K dispatch threshold.
+temporary allocation. Prefill chunks starting at or above the 24K logical-KV threshold do not build
+the FIA mask and instead use GBSA.
 
 ## Changed implementation
 
@@ -52,7 +57,7 @@ custom operator binary, global patch, or other model-specific implementation.
 The FIA helper retains batched-call support, but request dispatch never routes
 Decode to FIA.
 
-CPU regression coverage includes phase boundaries, mixed request ordering,
+CPU regression coverage includes phase and 24K logical-KV boundaries, mixed request ordering,
 one-token Prefill, multi-token Decode, padding, missing metadata, paged cache
 strides, selected masks, residual groups and long-Prefill tiling.
 

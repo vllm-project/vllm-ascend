@@ -160,6 +160,31 @@ def test_route_uses_explicit_phase_not_query_or_kv_length(implementation, query_
     assert plan[0].use_paged_kv is (query_length != kv_length)
 
 
+@pytest.mark.parametrize(
+    "kv_length,prefill,use_fia",
+    [
+        (24575, True, True),
+        (24576, True, True),
+        (24577, True, False),
+        (1, False, False),
+        (24576, False, False),
+    ],
+)
+def test_fia_route_uses_logical_kv_boundary(implementation, kv_length, prefill, use_fia):
+    plan = implementation["build_qsa_request_plan"](
+        torch.tensor([0, 1]), torch.tensor([kv_length]), 1, torch.tensor([prefill])
+    )
+    assert plan[0].use_fia is use_fia
+
+
+def test_prefill_crossing_24k_keeps_the_whole_chunk_on_fia(implementation):
+    plan = implementation["build_qsa_request_plan"](
+        torch.tensor([0, 4]), torch.tensor([24578]), 4, torch.tensor([True])
+    )
+    assert plan[0].fia_query_end == 4
+    assert plan[0].gbsa_query_start == 4
+
+
 def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
     starts = [0]
     for length in query_lengths:
@@ -200,16 +225,26 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
         out,
         plan,
     )
-    expected = torch.repeat_interleave(
-        torch.tensor([3 if phase else 7 for phase in phases]), torch.tensor(query_lengths)
-    )
-    torch.testing.assert_close(out.flatten(), expected.float())
+    expected = []
+    for phase, query_length, kv_length in zip(phases, query_lengths, kv_lengths):
+        fia_rows = 0
+        if phase:
+            kv_before_query = kv_length - query_length
+            fia_rows = query_length if kv_before_query < 24576 else 0
+        expected.extend([3] * fia_rows)
+        expected.extend([7] * (query_length - fia_rows))
+    torch.testing.assert_close(out.flatten(), torch.tensor(expected, dtype=torch.float32))
     return calls
 
 
-def test_pure_prefill_runs_fia_even_above_16k(implementation):
-    calls = run_stub_batch(implementation, [True, True], [2, 3], [4096, 32768])
-    assert [name for name, _ in calls] == ["fia", "fia"]
+def test_pure_prefill_routes_by_logical_kv_length(implementation):
+    calls = run_stub_batch(implementation, [True, True, True], [2, 3, 1], [4096, 24576, 24577])
+    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4]), ("gbsa", [5])]
+
+
+def test_prefill_chunk_crossing_24k_uses_fia_for_every_row(implementation):
+    calls = run_stub_batch(implementation, [True], [4], [24578])
+    assert calls == [("fia", [0, 1, 2, 3])]
 
 
 def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
@@ -219,9 +254,18 @@ def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
 
 def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementation):
     calls = run_stub_batch(
-        implementation, [False, True, False, False, True, False], [1, 2, 1, 4, 1, 1], [4096, 32768, 16384, 12, 1, 8192]
+        implementation,
+        [False, True, True, False, False, True, False],
+        [1, 2, 1, 1, 4, 1, 1],
+        [4096, 24576, 24577, 16384, 12, 1, 8192],
     )
-    assert calls == [("fia", [1, 2]), ("fia", [8]), ("gbsa", [0]), ("gbsa", [3, 4, 5, 6, 7]), ("gbsa", [9])]
+    assert calls == [
+        ("fia", [1, 2]),
+        ("fia", [9]),
+        ("gbsa", [0]),
+        ("gbsa", [3, 4, 5, 6, 7, 8]),
+        ("gbsa", [10]),
+    ]
 
 
 def test_decode_sentinel_bypasses_request_planner(implementation):
@@ -351,7 +395,7 @@ def test_runner_keeps_qwen_prompt_tails_out_of_decode_graph(architecture, has_pr
     assert uniform == (None if changed else 1)
 
 
-def test_long_prefill_tiles_mask_memory_instead_of_selecting_gbsa(implementation):
+def test_fia_helper_tiles_mask_memory_for_eligible_prefill(implementation):
     calls = []
     implementation["QSA_FIA_MASK_BUDGET_BYTES"] = 64
     implementation["torch_npu"] = SimpleNamespace(
