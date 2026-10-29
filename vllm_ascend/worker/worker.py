@@ -214,6 +214,16 @@ class NPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        # Mount the elastic EP scaling executor (mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.__init__). Standby-group
+        # creation is NPU-specific via
+        # NPUPlatform.stateless_init_device_torch_dist_pg.
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            ElasticEPScalingExecutor,
+        )
+
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -525,6 +535,14 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        # Must precede every HCCL comm creation in this process (the local
+        # ws=1 torch world below is the first one): the default adapter
+        # socket port is a single host-wide port and collides across the
+        # Ray-scheduled elastic-EP workers.
+        from vllm_ascend.platform import ensure_hccl_socket_port_range
+
+        ensure_hccl_socket_port_range()
 
         if enable_custom_op():
             register_device_print()
@@ -955,7 +973,7 @@ class NPUWorker(WorkerBase):
         )
         return output
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -975,7 +993,10 @@ class NPUWorker(WorkerBase):
             empty_cache_context = nullcontext()
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+            # Elastic EP standby workers load dummy weights first and receive
+            # the real weights over the standby groups afterwards (mirrors
+            # vllm/v1/worker/gpu_worker.py Worker.load_model).
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1502,6 +1523,14 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
+
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        # Elastic EP state machine entry point: ElasticEPScalingState drives
+        # the worker through model_executor.collective_rpc("elastic_ep_execute",
+        # ...) (see vllm/distributed/elastic_ep/elastic_state.py). Mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.elastic_ep_execute; the
+        # executor itself is mounted in __init__.
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
 def parse_text_output(output) -> None:
