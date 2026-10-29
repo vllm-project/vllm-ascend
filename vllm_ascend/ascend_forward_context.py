@@ -16,6 +16,7 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.distributed.fasteep.policy import is_fasteep
 from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
@@ -405,6 +406,9 @@ def select_moe_comm_method(
     """
     if not is_moe_model(vllm_config):
         return None
+
+    if is_fasteep(vllm_config):
+        return MoECommType.ALLGATHER
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy

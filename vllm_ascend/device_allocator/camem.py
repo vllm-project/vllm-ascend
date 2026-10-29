@@ -275,7 +275,7 @@ class CaMemAllocator(CuMemAllocator):
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
         gc.collect()
-        torch.accelerator.empty_cache()
+        torch.npu.empty_cache()
 
         restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
