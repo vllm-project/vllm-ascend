@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261025172600-910b-ubuntu22.04-py3.12
+FROM quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12
 
 WORKDIR /workspace
 
