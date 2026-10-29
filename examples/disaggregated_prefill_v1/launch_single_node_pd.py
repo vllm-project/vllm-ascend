@@ -44,18 +44,14 @@ Requires Mooncake to be installed (https://github.com/kvcache-ai/Mooncake).
 from __future__ import annotations
 
 import argparse
-import contextlib
-import http.server
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 DEFAULT_PROXY_SCRIPT = str(Path(__file__).parent / "load_balance_proxy_server_example.py")
 
@@ -118,16 +114,27 @@ class EngineConfig:
 
     def build_command(self) -> list[str]:
         cmd = [
-            "vllm", "serve", self.model,
-            "--host", self.host,
-            "--port", str(self.port),
-            "--served-model-name", self.served_model_name,
-            "--tensor-parallel-size", str(self.tp_size),
-            "--max-model-len", str(self.max_model_len),
-            "--max-num-batched-tokens", str(self.max_num_batched_tokens),
-            "--max-num-seqs", str(self.max_num_seqs),
-            "--gpu-memory-utilization", str(self.gpu_memory_utilization),
-            "--distributed_executor_backend", self.distributed_executor_backend,
+            "vllm",
+            "serve",
+            self.model,
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+            "--served-model-name",
+            self.served_model_name,
+            "--tensor-parallel-size",
+            str(self.tp_size),
+            "--max-model-len",
+            str(self.max_model_len),
+            "--max-num-batched-tokens",
+            str(self.max_num_batched_tokens),
+            "--max-num-seqs",
+            str(self.max_num_seqs),
+            "--gpu-memory-utilization",
+            str(self.gpu_memory_utilization),
+            "--distributed_executor_backend",
+            self.distributed_executor_backend,
         ]
 
         if self.trust_remote_code:
@@ -164,9 +171,8 @@ class EngineConfig:
 
 def wait_for_http(url: str, timeout: int = 600, interval: float = 2.0) -> bool:
     """Poll an HTTP endpoint until it responds 200 or timeout."""
-    import urllib.request
     import urllib.error
-
+    import urllib.request
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -190,10 +196,10 @@ def launch_engine(config: EngineConfig, log_file: str) -> subprocess.Popen:
     with open(log_file, "w") as log_handle:
         proc = subprocess.Popen(
             cmd,
-            env = env,
-            stdout = log_handle,
-            stderr = subprocess.STDOUT,
-            preexec_fn = os.setsid if hasattr(os, "setsid") else None,
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
     return proc
 
@@ -211,12 +217,18 @@ def launch_proxy(
     """Launch the load-balance proxy subprocess."""
     cmd = [
         sys.executable, script,
-        "--host", host,
-        "--port", str(port),
-        "--prefiller-hosts", prefill_host,
-        "--prefiller-ports", str(prefill_port),
-        "--decoder-hosts", decode_host,
-        "--decoder-ports", str(decode_port),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--prefiller-hosts",
+        prefill_host,
+        "--prefiller-ports",
+        str(prefill_port),
+        "--decoder-hosts",
+        decode_host,
+        "--decoder-ports",
+        str(decode_port),
     ]
     print(f"[proxy] Launching: {' '.join(cmd)}")
     print(f"[proxy] Log: {log_file}")
@@ -266,10 +278,8 @@ def parse_args() -> argparse.Namespace:
 
     # Parallelism
     p.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size per engine")
-    p.add_argument("--prefill-npus", required=True,
-                   help="Comma-separated NPU chip IDs for prefill (e.g. '0,1')")
-    p.add_argument("--decode-npus", required=True,
-                   help="Comma-separated NPU chip IDs for decode (e.g. '2,3')")
+    p.add_argument("--prefill-npus", required=True,help="Comma-separated NPU chip IDs for prefill (e.g. '0,1')")
+    p.add_argument("--decode-npus", required=True,help="Comma-separated NPU chip IDs for decode (e.g. '2,3')")
 
     # Ports
     p.add_argument("--prefill-port", type=int, default=13700)
@@ -288,25 +298,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
 
     # Extra configs
-    p.add_argument("--additional-config", default=None,
-                   help='JSON string for --additional-config (e.g. \'{"weight_nz_mode": 2}\')')
-    p.add_argument("--compilation-config",
-                   default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
-                   help="JSON string for --compilation-config")
+    p.add_argument(
+        "--additional-config", default=None,help='JSON string for --additional-config (e.g. \'{"weight_nz_mode": 2}\')'
+    )
+    p.add_argument(
+        "--compilation-config",default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',help="JSON string for --compilation-config"
+    )
     p.add_argument("--hf-overrides", default=None, help="JSON string for --hf-overrides")
     p.add_argument("--no-trust-remote-code", action="store_true")
 
     # Proxy
-    p.add_argument("--proxy-script", default=DEFAULT_PROXY_SCRIPT,
-                   help="Path to load_balance_proxy_server_example.py")
-    p.add_argument("--no-proxy", action="store_true",
-                   help="Skip launching the proxy (engines only)")
+    p.add_argument("--proxy-script", default=DEFAULT_PROXY_SCRIPT,help="Path to load_balance_proxy_server_example.py")
+    p.add_argument("--no-proxy", action="store_true",help="Skip launching the proxy (engines only)")
 
     # Startup
-    p.add_argument("--startup-timeout", type=int, default=600,
-                   help="Seconds to wait for each engine to become healthy")
-    p.add_argument("--log-dir", default="/tmp/vllm_pd_logs",
-                   help="Directory for engine and proxy log files")
+    p.add_argument("--startup-timeout", type=int, default=600,help="Seconds to wait for each engine to become healthy")
+    p.add_argument("--log-dir", default="/tmp/vllm_pd_logs",help="Directory for engine and proxy log files")
 
     return p.parse_args()
 
@@ -367,16 +374,12 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
 
     # --- Launch prefill engine ---
-    prefill_proc = launch_engine(
-        prefill_cfg, str(log_dir / "prefill.log")
-    )
+    prefill_proc = launch_engine(prefill_cfg, str(log_dir / "prefill.log"))
     processes.append((prefill_proc, "prefill"))
 
     # --- Launch decode engine ---
     time.sleep(2)
-    decode_proc = launch_engine(
-        decode_cfg, str(log_dir / "decode.log")
-    )
+    decode_proc = launch_engine(decode_cfg, str(log_dir / "decode.log"))
     processes.append((decode_proc, "decode"))
 
     # --- Wait for both engines to be healthy ---
