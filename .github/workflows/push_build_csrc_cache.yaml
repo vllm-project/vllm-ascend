@@ -43,7 +43,7 @@ jobs:
   prepare-targets:
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
       csrc_hash: ${{ steps.hash.outputs.csrc_hash }}

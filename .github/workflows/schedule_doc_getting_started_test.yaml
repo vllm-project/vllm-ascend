@@ -63,7 +63,7 @@ jobs:
     name: Plan doctests
     runs-on: linux-amd64-cpu-4-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       quickstart: ${{ steps.plan.outputs.quickstart }}
       installation: ${{ steps.plan.outputs.installation }}
@@ -76,10 +76,6 @@ jobs:
           # Selection needs both Git histories; image planning uses the checked-out head.
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install doctest tooling
-        run: |
-          pip install PyYAML
 
       - name: Build doctest plan
         env:

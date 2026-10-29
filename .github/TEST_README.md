@@ -59,6 +59,50 @@ Run staging after checkout and use the same `if` condition as the action call.
 For a subdirectory checkout, set staging `working-directory` to that directory
 and pass `.` to the script; adjust the action's `source-root` accordingly.
 
+## Lint Images
+
+Lint images use the same Dockerfile and dependency installation steps, with a
+separate tag for each release branch:
+
+| Source branch | Image |
+|---------------|-------|
+| `main` | `quay.io/atlas-ci/vllm-ascend-ci:lint-main` |
+| `releases/v0.31.0rc` | `quay.io/atlas-ci/vllm-ascend-ci:lint-releases-v0.31.0rc` |
+| `releases/v0.30.0` | `quay.io/atlas-ci/vllm-ascend-ci:lint-releases-v0.30.0` |
+
+Only the PR pre-commit job (including mypy) and the pre-commit cache builder
+select images by branch. For release branches, `_resolve_lint_image.yaml`
+selects the image from the PR's target branch or the cache workflow's branch.
+For main and development branches, the resolver job is skipped before allocating
+a runner, and the consumer uses `:lint-main` by default. Failed release resolution
+blocks the consumer instead of falling back to the main image.
+
+Test selection, csrc cache preparation, doctest planning and recipe preview
+dispatch use the shared
+`quay.io/atlas-ci/vllm-ascend-ci:lite-tools`
+image without a lint resolver dependency. See
+[Lightweight CI images](../docs/source/developer_guide/contribution/testing.md#lightweight-ci-images)
+for its dependencies, build workflow and rollout procedure.
+
+`schedule_lint_image_build.yaml` publishes only from `main` and `releases/v*`,
+including manual runs. It resolves the tag in a step of the existing build job.
+Each build uses the checked-out branch's existing
+Dockerfile, requirements, and verified vLLM commit. Dependency changes trigger
+a rebuild on that branch. The daily schedule continues to build only `main`.
+
+Both image builders use the repository variable `QUAY_ASCEND_CI_USERNAME` and secret
+`QUAY_ASCEND_CI_PASSWORD`. Configure an account with write access to
+`quay.io/atlas-ci/vllm-ascend-ci`. Lint images use AMD64; the shared `lite-tools`
+image supports AMD64 and ARM64.
+
+Publish `:lint-main` before switching consumers from the old `:lint` tag. For an
+existing release branch, backport the image builder and run `Image build lint`
+on that branch before switching its pre-commit jobs to the release image.
+Backport the resolver along with those consumer changes. Builder workflow-file
+changes also trigger a build when pushed. If a CI job starts before its first
+image is published, rerun it after the build finishes. Legacy workflows that
+still publish `:lint` cannot overwrite the new branch-specific tags.
+
 ## Selective Testing System
 
 When a PR changes source files, the precision-testing pipeline

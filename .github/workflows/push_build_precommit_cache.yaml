@@ -38,10 +38,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint-image:
+    # Main and development branches use lint-main without allocating a resolver runner.
+    if: startsWith(github.base_ref || github.ref_name, 'releases/')
+    uses: ./.github/workflows/_resolve_lint_image.yaml
+
   build-cache:
+    needs: lint-image
+    # Allow the expected skip on main/dev; release resolution must succeed.
+    if: >-
+      ${{
+        !cancelled() &&
+        (
+          (!startsWith(github.base_ref || github.ref_name, 'releases/') && needs.lint-image.result == 'skipped') ||
+          (needs.lint-image.result == 'success' && needs.lint-image.outputs.image != '')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: ${{ needs.lint-image.outputs.image || 'quay.io/atlas-ci/vllm-ascend-ci:lint-main' }}
     env:
       RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
       RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com

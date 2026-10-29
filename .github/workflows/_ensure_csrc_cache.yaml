@@ -74,7 +74,7 @@ jobs:
     continue-on-error: true
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
@@ -83,11 +83,6 @@ jobs:
       has_missing: ${{ steps.misses.outputs.has_missing }}
       has_write_credentials: ${{ steps.writer-credentials.outputs.present }}
     steps:
-      - name: Install csrc cache dependencies
-        run: |
-          apt-get update -y
-          apt-get install -y zstd
-
       - name: Checkout source
         uses: actions/checkout@v7
         with:
