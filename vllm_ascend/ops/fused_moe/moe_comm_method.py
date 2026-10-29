@@ -98,6 +98,10 @@ class MoECommMethod(ABC):
     # GMM1 + GMM2 Cube window.
     shared_activation_overlaps_routed_gmm1 = False
 
+    @property
+    def supports_skip_padding(self) -> bool:
+        return True
+
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
 
@@ -116,12 +120,14 @@ class MoECommMethod(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=replace_allreduce,
             quant_type=quant_type,
+            skip_padding=skip_padding,
         )
 
     def finalize(
@@ -250,6 +256,16 @@ class MC2CommImpl(MoECommMethod):
 
     shared_activation_overlaps_routed_gmm1 = True
 
+    @property
+    def supports_skip_padding(self) -> bool:
+        # Route-wise masks can represent V2 padding holes. Unequal-BS MC2
+        # requires all rows valid; hierarchy and A5 need separate contracts.
+        return (
+            self.token_dispatcher.global_bs == 0
+            and self.token_dispatcher.mc2_comm_alg != "hierarchy"
+            and not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        )
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -295,6 +311,12 @@ class FusedMC2CommImpl(MoECommMethod):
     This implementation uses the MC2 communication method, which is optimized for
     Communication and Computation parallelism on Ascend devices.
     """
+
+    @property
+    def supports_skip_padding(self) -> bool:
+        # Fused kernels do not share the dispatcher's 2D route-mask contract.
+        # Keep their existing mask rather than assuming a valid prefix.
+        return False
 
     def __init__(self, moe_config):
         super().__init__(moe_config)

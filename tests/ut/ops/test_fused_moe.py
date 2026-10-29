@@ -953,7 +953,27 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 @pytest.mark.parametrize("return_with_event", [False, True])
 @pytest.mark.parametrize("v2_eplb", [False, True])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
+@pytest.mark.parametrize("mc2", [False, True])
+@pytest.mark.parametrize(
+    "skip_padding,env_enabled,supported,expected_skip_padding",
+    [
+        (False, True, True, False),
+        (True, True, True, True),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
+)
+def test_routed_experts_forward_impl_runs_current_flow(
+    monkeypatch,
+    return_with_event,
+    v2_eplb,
+    is_sequence_parallel,
+    skip_padding,
+    env_enabled,
+    supported,
+    expected_skip_padding,
+    mc2,
+):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -979,6 +999,8 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         )
     )
     routed_experts.enable_npugraph_ex_static_kernel = False
+    routed_experts.skip_padding = skip_padding
+    monkeypatch.setattr(routed_experts_module.vllm_envs, "VLLM_MOE_SKIP_PADDING", env_enabled)
     object.__setattr__(routed_experts, "quant_method", quant_method)
     topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
@@ -1019,11 +1041,13 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     routed_experts._use_v2_model_runner = v2_eplb
     routed_experts.dynamic_eplb = False
     routed_experts.return_with_event = return_with_event
-    moe_comm_method = MagicMock()
+    moe_comm_method = MagicMock(spec=MC2CommImpl) if mc2 else MagicMock()
+    moe_comm_method.supports_skip_padding = supported
+    prepared_mask = torch.tensor([True, False]) if mc2 else None
     moe_comm_method.prepare.return_value = SimpleNamespace(
         hidden_states=prepared_hidden_states,
         router_logits=prepared_router_logits,
-        mc2_mask=None,
+        mc2_mask=prepared_mask,
         padded_hidden_states_shape=torch.Size([2, 4]),
         pertoken_scale=None,
     )
@@ -1046,11 +1070,20 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     record_expert_tokens = MagicMock()
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
+    observed_masks = []
+
+    def capture_mask(**kwargs):
+        mask = routed_experts.ascend_mc2_mask
+        observed_masks.append(mask.clone() if mask is not None else None)
+        return quant_method.apply.return_value
+
+    quant_method.apply.side_effect = capture_mask
     result = routed_experts.forward_impl(
         hidden_states=hidden_states,
         router_logits=router_logits,
         input_ids=input_ids,
     )
+    assert moe_comm_method.prepare.call_args.kwargs["skip_padding"] is expected_skip_padding
 
     if return_with_event:
         assert isinstance(result, tuple)
@@ -1070,8 +1103,15 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         router_logits=router_logits,
         replace_allreduce=is_sequence_parallel,
         quant_type=QuantType.NONE,
+        skip_padding=expected_skip_padding,
     )
     quant_method.apply.assert_called_once()
+    assert routed_experts.ascend_mc2_mask is None
+    if mc2:
+        expected_mask = prepared_mask[:, None].expand_as(topk_ids) if expected_skip_padding else prepared_mask
+        torch.testing.assert_close(observed_masks[0], expected_mask)
+    else:
+        assert observed_masks == [None]
     assert quant_method.apply.call_args.kwargs["layer"] is routed_experts
     assert quant_method.apply.call_args.kwargs["x"] is prepared_hidden_states
     torch.testing.assert_close(

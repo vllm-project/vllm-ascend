@@ -33,6 +33,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.fused_moe.padding import get_valid_token_mask
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
@@ -64,6 +65,7 @@ class PrepareAndFinalize(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         """
         Prepare tensors before MoE computation. May involve:
@@ -132,6 +134,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -146,10 +149,12 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
 
+        token_mask = get_valid_token_mask(hidden_states, replace_allreduce) if skip_padding else None
+
         padded_hidden_states_shape = hidden_states.shape
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
+            pad_size = -self.num_tokens % self.tp_size
             if self.lora_context is not None:
                 prepare_lora_indices(
                     self.lora_context,
@@ -162,6 +167,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = _pad_tokens_with_cat(hidden_states, self.num_tokens + pad_size)
                 router_logits = _pad_tokens_with_cat(router_logits, self.num_tokens + pad_size)
+                if token_mask is not None:
+                    token_mask = nn.functional.pad(token_mask, (0, pad_size), value=False)
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -170,11 +177,13 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
+                if token_mask is not None:
+                    token_mask = torch.tensor_split(token_mask, self.tp_size, dim=0)[self.tp_rank]
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=token_mask,
             padded_hidden_states_shape=padded_hidden_states_shape,
             pertoken_scale=None,
         )
@@ -184,7 +193,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         input_ids,
     ):
         if not self.replace_allreduce:
-            pad_size = self.tp_size - self.num_tokens
+            pad_size = -self.num_tokens % self.tp_size
             if pad_size > 0:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
 
@@ -255,6 +264,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -271,6 +281,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
+        token_mask = get_valid_token_mask(hidden_states, replace_allreduce) if skip_padding else None
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.
@@ -304,6 +315,14 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                 split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
+
+        if token_mask is not None:
+            if not replace_allreduce:
+                token_mask = nn.functional.pad(
+                    token_mask, (0, _EXTRA_CTX.padded_num_tokens - token_mask.shape[0]), value=False
+                )
+                token_mask = torch.tensor_split(token_mask, self.tp_size, dim=0)[self.tp_rank]
+            mc2_mask = nn.functional.pad(token_mask, (0, hidden_states.shape[0] - token_mask.shape[0]), value=False)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
@@ -385,6 +404,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -394,13 +414,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             MoEPrepareOutput with global tensors.
         """
         if self._use_ep_sequence_parallel():
-            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type, skip_padding)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, skip_padding=skip_padding)
 
     def _prepare_with_ep_group(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_type=QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
+        token_mask = get_valid_token_mask(hidden_states, True) if skip_padding else None
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -419,6 +444,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
+        if token_mask is not None:
+            token_mask = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(token_mask.to(torch.int8)).bool()
 
         self.num_tokens = hidden_states.shape[0]
 
@@ -428,7 +455,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=token_mask,
             padded_hidden_states_shape=None,
             pertoken_scale=pertoken_scale,
         )
@@ -439,6 +466,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        skip_padding: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -449,6 +477,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        token_mask = get_valid_token_mask(hidden_states, False) if skip_padding else None
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -457,10 +486,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if token_mask is not None:
+                    token_mask = nn.functional.pad(token_mask, (0, pad_size), value=False)
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+            if token_mask is not None:
+                token_mask = self.moe_config.dp_group.all_gather(token_mask.to(torch.int8), 0).bool()
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -470,6 +503,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if token_mask is not None:
+                    token_mask = nn.functional.pad(token_mask, (0, pad_size), value=False)
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -479,11 +514,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if token_mask is not None:
+                token_mask = get_pcp_group().all_gather(token_mask.to(torch.int8), dim=0).bool()
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=token_mask,
             padded_hidden_states_shape=None,
             pertoken_scale=None,
         )

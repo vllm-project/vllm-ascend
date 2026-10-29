@@ -130,6 +130,7 @@ def _ascend_FusedMoE(
     tid2eid: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 129257,
+    skip_padding: bool = False,
     **kwargs,
 ):
     # RoutedExperts allocates its parameters before AscendMoERunner is
@@ -172,6 +173,7 @@ def _ascend_FusedMoE(
     routed_experts_cls = _adapt_routed_experts_cls(routed_experts_cls)
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["n_shared_experts"] = n_shared_experts
+    routed_experts_args["skip_padding"] = skip_padding
     if hash_indices_table_for_legacy_path is not None:
         routed_experts_args["tid2eid"] = hash_indices_table_for_legacy_path
     runner = _original_FusedMoE(

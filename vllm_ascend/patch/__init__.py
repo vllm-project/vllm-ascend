@@ -187,9 +187,12 @@
 #       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
-#       worker initialization.
+#       worker initialization. Forward the model's `skip_padding` opt-in to
+#       Ascend routed experts so NPU dispatchers can exclude SP padding after
+#       expert mapping, using their own supported operator contracts.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific MoE runner integration.
+#       vllm-ascend-specific MoE runner integration; padding semantics follow
+#       https://github.com/vllm-project/vllm/pull/56079.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.

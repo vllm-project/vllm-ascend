@@ -1,0 +1,11 @@
+pr: 20242
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Ascend MoE routing padded sequence-parallel rows to experts, which
+      skewed expert load and slowed prefill. Kimi K3 routed experts now exclude
+      padding rows when the upstream VLLM_MOE_SKIP_PADDING switch is enabled
+      (the default); set VLLM_MOE_SKIP_PADDING=0 to restore the previous
+      behavior. Unequal-batch MC2, hierarchical MC2, fused MC2 and MegaMoE MXFP
+      keep their existing dispatch behavior and warn when exclusion is
+      requested.

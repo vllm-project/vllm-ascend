@@ -49,6 +49,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     TMoECombineMetadata,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
+from vllm_ascend.ops.fused_moe.padding import mask_padding_routes
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 
@@ -399,6 +400,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
+        # InitRouting excludes IDs outside active_expert_range. Use the first
+        # ID past the global expert range, after expert_map indexing, rather
+        # than propagating DeepEP's -1 into NPU indexing/communication.
+        topk_weights, topk_ids = mask_padding_routes(
+            topk_weights, topk_ids, token_dispatch_input.routing.mc2_mask, global_num_experts
+        )
         sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
@@ -493,6 +500,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
 
+        valid_mask = token_dispatch_input.routing.mc2_mask
+        # Sort padding after every real expert. histc includes its upper bound,
+        # so the sentinel must be strictly larger than num_experts here.
+        topk_weights, topk_ids = mask_padding_routes(topk_weights, topk_ids, valid_mask, self.num_experts + 1)
         (
             permutated_local_input_tokens,
             reversed_local_input_permutation_mapping,
@@ -502,7 +513,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices,
             hidden_shape,
             hidden_shape_before_permute,
-        ) = self._dispatch_preprocess(hidden_states, topk_ids)
+        ) = self._dispatch_preprocess(hidden_states, topk_ids, skip_padding=valid_mask is not None)
 
         dynamic_scale_after_all2all = None
         if with_quant:
@@ -577,7 +588,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         return output
 
-    def _dispatch_preprocess(self, hidden_states, topk_ids):
+    def _dispatch_preprocess(self, hidden_states, topk_ids, skip_padding: bool = False):
         hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         (
@@ -586,14 +597,22 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             output_splits,
             global_input_tokens_local_experts_indices,
             num_out_tokens,
-        ) = self._preprocess(topk_ids)
+        ) = self._preprocess(topk_ids, skip_padding=skip_padding)
         hidden_shape_before_permute = hidden_states.shape
 
-        permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            tokens=hidden_states,
-            indices=topk_ids,
-            num_out_tokens=num_out_tokens,
-        )
+        if num_out_tokens == 0:
+            # CANN treats num_out_tokens=0 as "all rows", not an empty
+            # permutation. This rank must still join the EP collectives.
+            # Dispatch releases this buffer's storage after the collective.
+            # An empty view would still share the original activations' storage.
+            permutated_local_input_tokens = hidden_states.new_empty((0, hidden_states.shape[-1]))
+            reversed_local_input_permutation_mapping = torch.empty(0, dtype=torch.int32, device=hidden_states.device)
+        else:
+            permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
+                tokens=hidden_states,
+                indices=topk_ids,
+                num_out_tokens=num_out_tokens,
+            )
 
         if self.lora_context is not None:
             preprocess_lora_indices(
@@ -601,6 +620,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 topk_ids=topk_ids,
                 reversed_permutation_mapping=reversed_local_input_permutation_mapping,
             )
+            if num_out_tokens < topk_ids.numel():
+                indices = getattr(self.lora_context, "permuted_lora_indices", None)
+                if indices is not None:
+                    self.lora_context.permuted_lora_indices = indices[:num_out_tokens]
 
         return (
             permutated_local_input_tokens,
@@ -613,7 +636,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             hidden_shape_before_permute,
         )
 
-    def _preprocess(self, topk_ids: torch.Tensor):
+    def _preprocess(self, topk_ids: torch.Tensor, skip_padding: bool = False):
         num_local_tokens_per_expert = torch.histc(topk_ids, bins=self.num_experts, min=0, max=self.num_experts)
 
         ep_size = self.ep_size
@@ -622,9 +645,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         input_splits = (
             num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
             .sum(axis=1)
-            .to(torch.device("cpu"), non_blocking=True)
+            # Split sizes already cross to the CPU for alltoallv. When they
+            # also determine the truncated permutation size, wait for this
+            # existing transfer before reading them; do not add a device sum.
+            .to(torch.device("cpu"), non_blocking=not skip_padding)
             .numpy()
         )
+        if skip_padding:
+            num_out_tokens = int(input_splits.sum())
 
         num_global_tokens_per_expert = gather_from_sequence_parallel_region(
             num_local_tokens_per_expert, group=self.ep_group
@@ -667,7 +695,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         dst_type,
     ):
         # Early return if no local experts or no tokens
-        if self.num_local_experts <= 1:
+        if self.num_local_experts <= 1 or global_input_tokens.shape[0] == 0:
             return global_input_tokens, dynamic_scale_after_all2all, None
 
         assert global_input_tokens_local_experts_indices is not None, (
@@ -711,6 +739,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permutated_local_input_tokens: torch.Tensor,
         combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
+        if permutated_local_input_tokens.shape[0] == 0:
+            return permutated_local_input_tokens.new_zeros(combine_metadata.hidden_shape)
         # Unpermutation 1: AlltoAll output to output
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,

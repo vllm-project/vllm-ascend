@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -28,7 +29,8 @@ class _CustomRoutedExperts(RoutedExperts):
         return "custom-loader"
 
 
-def test_factory_adapts_only_the_returned_router():
+@pytest.mark.parametrize("skip_padding", [False, True])
+def test_factory_adapts_only_the_returned_router(skip_padding):
     router = _Router()
     untouched_router = _Router()
     runner = SimpleNamespace(router=router)
@@ -55,9 +57,11 @@ def test_factory_adapts_only_the_returned_router():
             top_k=2,
             router=router,
             enable_eplb=True,
+            skip_padding=skip_padding,
         )
 
     assert result is runner
+    assert original_factory.call_args.kwargs["routed_experts_args"]["skip_padding"] is skip_padding
     assert isinstance(router.eplb_state, AscendEplbLayerState)
     assert getattr(router._apply_eplb_mapping, "__func__", None) is patch_fused_moe._ascend_apply_eplb_mapping
     assert getattr(untouched_router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
@@ -95,6 +99,7 @@ def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
     assert router_factory.call_args.kwargs["eplb_state"] is None
     assert original_factory.call_args.kwargs["enable_eplb"] is True
     assert original_factory.call_args.kwargs["num_redundant_experts"] == 2
+    assert original_factory.call_args.kwargs["routed_experts_args"]["skip_padding"] is False
     assert router.eplb_state is None
     assert getattr(router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
 

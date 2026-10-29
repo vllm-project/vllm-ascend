@@ -33,6 +33,7 @@ class MoeRouterInput:
 
     expert_map: torch.Tensor | None
     global_redundant_expert_num: int
+    # Prepared token validity, shared by MC2 and opt-in AG/A2A dispatchers.
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
     log2phy: torch.Tensor | None = None
