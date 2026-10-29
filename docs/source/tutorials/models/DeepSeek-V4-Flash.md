@@ -132,11 +132,12 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    # deepseek-v4-flash uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
-
-    # deepseek-v4-flash-dspark uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    # The A2 image depends on the model variant: the command below uses the
+    # DeepSeek-V4-Flash (MTP) image. For DeepSeek-V4-Flash-DSpark, set
+    # quay.io/ascend/vllm-ascend:nightly-main instead (see the
+    # "A2 series with dspark" tab in Section 5.1).
+    vllm_ascend_version=v0.30.0rc2
+    export IMAGE=quay.io/ascend/vllm-ascend:${vllm_ascend_version}
 
     docker run --rm \
         --name vllm-ascend \
@@ -370,8 +371,9 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
 
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
+    # Model from Section 3.1; replace the path with the directory recorded
+    # during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
         --served-model-name dsv4 \
@@ -1642,7 +1644,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
     - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
     - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
-    - `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables the fused MoE computation (MC2) optimization, which consolidates shared expert and routed expert computation into fused kernels to reduce launch overhead and improve MoE inference throughput.
+    - `enable_fused_mc2` (inside `--additional-config`, e.g. `'{"enable_cpu_binding":true,"enable_fused_mc2":1}'`): Enables the fused MoE computation (MC2) optimization, which consolidates shared expert and routed expert computation into fused kernels to reduce launch overhead and improve MoE inference throughput. `0` disables the fused path, `1` selects dispatch-FFN-combine. `2` selects CANN MegaMoe; see [Additional Configuration](../../user_guide/configuration/additional_config.md) for the full enum.
     - `cudagraph_capture_sizes` (inside `--compilation-config`): Batch size tiers for ACL graph capture in Decode phase. vLLM pre-compiles graphs for these batch sizes to avoid runtime compilation overhead. In DSpark mode (`num_speculative_tokens=5`), each sequence processes 6 tokens per step (1 real + 5 speculative), so actual concurrency ≈ `batch_size / 6` (e.g., 360 → 60 concurrency). If unset, vLLM auto-captures on demand; set explicitly when concurrency patterns are predictable.
 
     Deployment Verification:
