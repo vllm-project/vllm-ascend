@@ -3,10 +3,9 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 STRUCTURAL_CASES = [
     (1, 2, 1, 128, [24, 20, 20]),
@@ -336,6 +335,7 @@ def test_split_qkv_rmsnorm_mrope(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
 
 # ---------------------------------------------------------------------------
 # Inline cos/sin (positions + inv_freq) tests
