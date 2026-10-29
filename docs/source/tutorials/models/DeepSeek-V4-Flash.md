@@ -227,48 +227,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
     ```
 
-=== "A3 series"
-
-    Run the following script to execute online inference.
-
-    ```shell
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-        --max-model-len 1048576 \
-        --max-num-batched-tokens 10240 \
-        --served-model-name dsv4 \
-        --gpu-memory-utilization 0.9 \
-        --max-num-seqs 64 \
-        --data-parallel-size 4 \
-        --tensor-parallel-size 4 \
-        --enable-expert-parallel \
-        --tokenizer-mode deepseek_v4 \
-        --tool-call-parser deepseek_v4 \
-        --enable-auto-tool-choice \
-        --reasoning-parser deepseek_v4 \
-        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-        --quantization ascend \
-        --port 8000 \
-        --block-size 32 \
-        --attention_config.indexer_kv_dtype int8 \
-        --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '
-        {"ascend_compilation_config":{
-            "enable_npugraph_ex": true,
-            "enable_static_kernel": false
-            },
-        "enable_cpu_binding": true,
-        "multistream_overlap_shared_expert": true}'
-    ```
-
 === "A3 series with DSpark"
 
     Run the following script to execute online inference.
