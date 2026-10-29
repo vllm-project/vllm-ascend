@@ -3,21 +3,24 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
 
 
-def test_mtp_qkv_projection_uses_graph_safe_upstream_path(monkeypatch) -> None:
+@pytest.mark.parametrize("context_fields", [{}, {"is_draft_model": False}, {"is_draft_model": True}])
+def test_mtp_qkv_projection_uses_graph_safe_upstream_path(monkeypatch, context_fields) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
+    layer.is_draft_layer = True
     qkv = torch.empty((2, 24))
     positions = torch.arange(2)
     expected = tuple(torch.empty(1) for _ in range(4))
     monkeypatch.setattr(
         qsa,
         "get_forward_context",
-        lambda: SimpleNamespace(is_draft_model=True),
+        lambda: SimpleNamespace(**context_fields),
     )
 
     with patch.object(
@@ -29,6 +32,23 @@ def test_mtp_qkv_projection_uses_graph_safe_upstream_path(monkeypatch) -> None:
 
     assert actual == expected
     upstream_project.assert_called_once_with(qkv, positions)
+
+
+@pytest.mark.parametrize("draft_marker", [None, False])
+def test_target_projection_does_not_follow_draft_forward_context(monkeypatch, draft_marker) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    if draft_marker is not None:
+        layer.is_draft_layer = draft_marker
+    monkeypatch.setattr(qsa, "get_forward_context", lambda: SimpleNamespace(is_draft_model=True))
+    monkeypatch.setattr(layer, "_main_fused_norm_rope_eligible", lambda *args: False)
+    qkv, positions = torch.empty((2, 24)), torch.arange(2)
+    with (
+        patch.object(qsa.upstream_qsa.Qwen4ExpQSAAttention, "_project_qkv_gate") as upstream_project,
+        pytest.raises(ValueError, match="main-attention fused norm"),
+    ):
+        layer._project_qkv_gate(qkv, positions)
+    upstream_project.assert_not_called()
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
