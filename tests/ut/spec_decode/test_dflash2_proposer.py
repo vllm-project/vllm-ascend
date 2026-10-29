@@ -83,7 +83,12 @@ def test_dflash2_declares_main_factory_classes():
 
 
 def test_lilicorr_convolution_uses_ascend_dflash2_layer():
-    import vllm.model_executor.models.lilicorr as upstream_lilicorr
+    try:
+        import vllm.model_executor.models.lilicorr as upstream_lilicorr
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.model_executor.models.lilicorr":
+            raise
+        pytest.skip("LiLiCorr is not supported by the paired vLLM version")
 
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
 

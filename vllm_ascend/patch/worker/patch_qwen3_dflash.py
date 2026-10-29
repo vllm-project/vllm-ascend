@@ -14,9 +14,11 @@ except ModuleNotFoundError as exc:
     lilicorr_module = None
 
 if lilicorr_module is not None:
-    # LiLiCorr's convolutional variant selects this module-level decoder
-    # factory. Keep its upstream head and checkpoint loader, but use the NPU
-    # implementation for the DFlash2 backbone.
+    # LiLiCorr.__init__ assigns this imported symbol to self.decoder_layer_cls
+    # when convolution is enabled, overriding any subclass-level factory.
+    # Patch the worker-local binding before construction to retain the upstream
+    # head/loader without duplicating its constructor. This has no hot-path cost.
+    # Remove when upstream exposes a platform-selectable convolution factory.
     lilicorr_module.DFlash2Qwen3DecoderLayer = DFlash2Qwen3DecoderLayer
 
 

@@ -17,7 +17,7 @@
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
@@ -85,8 +85,7 @@ def _selector_walk_kernel_ascend(
         else:
             # Verification uses a probability-ratio test, so draft and target
             # draws must use independent noise streams, as in Ascend's sampler.
-            DRAFT_NOISE_SALT: tl.constexpr = 1 << 30
-            position = tl.load(sample_pos_ptr + flat) - 1 + DRAFT_NOISE_SALT
+            position = tl.load(sample_pos_ptr + flat) - 1 + _DRAFT_NOISE_SALT
             # triton-ascend's philox requires int32 seed/offset operands
             # (int64 counters lower to 64-bit multiplies whose runtime
             # helper, __multi3, is unavailable); seeds, token ids and
@@ -137,7 +136,7 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
         else:
             raise NotImplementedError(
-                "dflash2 does not currently support graph mode; "
+                f"{self._speculator_name} does not currently support graph mode; "
                 "please enable enforce_eager. This is because the "
                 "_selector_walk_kernel_ascend operator must be reimplemented "
                 "due to NPU hardware constraints and cannot reuse the upstream "

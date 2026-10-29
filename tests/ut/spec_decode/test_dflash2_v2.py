@@ -26,7 +26,6 @@ import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
@@ -37,9 +36,24 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
     _selector_walk_kernel_ascend,
 )
-from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
-    AscendLiLiCorrSpeculator,
-)
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
+
+    from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
+        AscendLiLiCorrSpeculator,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in (
+        "vllm.v1.worker.gpu.spec_decode.lilicorr",
+        "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator",
+    ):
+        raise
+    HAS_LILICORR = False
+else:
+    HAS_LILICORR = True
+
+REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not supported by the paired vLLM version")
 
 
 @pytest.mark.parametrize("causal", [False, True])
@@ -299,7 +313,7 @@ def test_init_speculator_routes_dflash2_draft_model():
     "architecture,speculator_path",
     [
         ("DFlash2DraftModel", "dflash2.speculator.AscendDFlash2Speculator"),
-        ("LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator"),
+        pytest.param("LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator", marks=REQUIRES_LILICORR),
     ],
 )
 def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture, speculator_path):
@@ -321,6 +335,7 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
+@REQUIRES_LILICORR
 def test_init_speculator_routes_lilicorr_before_dflash2():
     cfg = SimpleNamespace(speculative_config=_spec_config("LiLiCorrDraftModel"))
     with (
@@ -332,11 +347,43 @@ def test_init_speculator_routes_lilicorr_before_dflash2():
         dflash2.assert_not_called()
 
 
+@REQUIRES_LILICORR
+def test_lilicorr_initializes_shared_runtime_once(monkeypatch):
+    calls = []
+    config = SimpleNamespace(hidden_size=4, dflash_config={"lilicorr_candidate_topk": 8})
+
+    def initialize(self, vllm_config, device):
+        calls.append((vllm_config, device))
+        self.draft_model_config = SimpleNamespace(hf_config=config)
+        self.max_num_reqs = 2
+        self.num_speculative_steps = 7
+        self.dtype = torch.float32
+
+    monkeypatch.setattr(AscendDFlashSpeculator, "__init__", initialize)
+    runtime_config, device = object(), torch.device("cpu")
+    with patch("vllm.v1.worker.gpu.spec_decode.dflash2.speculator.CandidateSampler") as sampler:
+        speculator = AscendLiLiCorrSpeculator(runtime_config, device)
+
+    assert calls == [(runtime_config, device)]
+    sampler.assert_called_once_with(2, 7, 8, device)
+    assert speculator.anchor_hidden.shape == (2, 4)
+    assert speculator.anchor_valid.shape == (2,)
+    assert speculator._num_rejected.shape == (2,)
+    assert speculator._speculator_name == "LiLiCorr"
+    assert speculator._lmhead_tp_sample_draft_supported is False
+
+
+@REQUIRES_LILICORR
 def test_lilicorr_uses_ascend_dflash_runtime_hooks():
+    assert issubclass(AscendLiLiCorrSpeculator, AscendDFlash2Speculator)
     assert AscendLiLiCorrSpeculator.build_draft_attn_metadatas is AscendDFlashSpeculator.build_draft_attn_metadatas
     assert AscendLiLiCorrSpeculator.propose is AscendDFlashSpeculator.propose
+    assert AscendLiLiCorrSpeculator.init_cudagraph_manager is AscendDFlash2Speculator.init_cudagraph_manager
+    assert AscendLiLiCorrSpeculator._generate_draft is LiLiCorrSpeculator._generate_draft
+    assert AscendLiLiCorrSpeculator._score_candidates is LiLiCorrSpeculator._score_candidates
 
 
+@REQUIRES_LILICORR
 @pytest.mark.parametrize("embedding_mode", [None, *VocabParallelMode])
 @pytest.mark.parametrize("head_mode", [None, *VocabParallelMode])
 def test_lilicorr_validates_selected_vocabulary_layouts(monkeypatch, embedding_mode, head_mode):
@@ -361,6 +408,7 @@ def test_lilicorr_validates_selected_vocabulary_layouts(monkeypatch, embedding_m
         assert speculator.target_embeddings is embedding
 
 
+@REQUIRES_LILICORR
 def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
     monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", lambda: True)
     speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
@@ -368,6 +416,7 @@ def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
         speculator._lmhead_tp_validate_draft_sampling()
 
 
+@REQUIRES_LILICORR
 def test_lilicorr_requires_enforce_eager(monkeypatch):
     calls: list[CUDAGraphMode] = []
     monkeypatch.setattr(

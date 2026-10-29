@@ -1206,12 +1206,16 @@
 #       but NPU does not have a corresponding implementation.
 #       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
 #       upstream DFlash2 layer rather than the Ascend implementation.
+#       Its constructor overwrites self.decoder_layer_cls with a module-level
+#       import, so a subclass factory alone cannot select the Ascend layer.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
 #       using a key-only call to avoid cloning the entire context buffer.
 #       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
 #       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#       This binding is applied once per worker before model construction;
+#       it adds no tensor operations or synchronization to inference.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
