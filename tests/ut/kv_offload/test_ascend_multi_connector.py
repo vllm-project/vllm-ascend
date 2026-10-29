@@ -334,6 +334,15 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     assert call_order == ["provider", "sibling"]
 
 
+def test_copy_sfa_slot_bindings_are_forwarded_through_multi_connector():
+    pd = SimpleNamespace(get_copy_sfa_slot_bindings=MagicMock(return_value={"req-a": 3}))
+    store = SimpleNamespace()
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [store, pd]
+
+    assert connector.get_copy_sfa_slot_bindings() == {"req-a": 3}
+
+
 def test_mamba_state_copy_runs_after_all_connector_loads():
     call_order = []
     first = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("first-load")))

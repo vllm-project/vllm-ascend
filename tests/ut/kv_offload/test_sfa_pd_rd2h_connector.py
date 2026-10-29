@@ -1512,6 +1512,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     scheduler._reqs_need_recv = set()
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_bindings = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
@@ -1540,8 +1541,16 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     assert req_meta.tail_block_index == 80
     assert req_meta.kv_tokens == 10367
 
-    scheduler.request_finished_all_groups(request, ([1, 2], [3]))
-    assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
+    with patch.object(SFAPDRD2HScheduler, "_d2h_delayed_free", return_value=True):
+        delay_free, _ = scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+        assert delay_free is True
+        assert scheduler._copy_sfa_slot_allocator.get("req-tail") == 0
+        release_meta = scheduler.build_connector_meta(MagicMock())
+        assert release_meta.d2h_releases == {"req-tail": 0}
+
+        scheduler.update_connector_output(SimpleNamespace(finished_sending={"req-tail"}, finished_recving=set()))
+        assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
+        assert scheduler._d2h_pending_releases == {}
 
 
 def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
@@ -1649,6 +1658,48 @@ def test_connector_exposes_copy_sfa_slot_bindings():
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
     connector.connector_worker = SimpleNamespace(copy_sfa_slots_by_req={"req-a": 2})
     assert connector.get_copy_sfa_slot_bindings() == {"req-a": 2}
+
+
+def test_consumer_worker_maps_release_before_initial_request_metadata():
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.request_map = {}
+    worker._dest_blocks_by_req = {}
+    worker._cpu_blocks_by_req = {}
+    worker.copy_sfa_slots_by_req = {}
+    worker._copy_sfa_tail_by_req = {}
+    worker._d2h_released_req_ids = set()
+
+    worker.start_load_kv(SimpleNamespace(requests=[], d2h_releases={"req-cancelled": 3}))
+
+    assert worker.copy_sfa_slots_by_req == {"req-cancelled": 3}
+
+
+def test_consumer_worker_delays_copy_sfa_cleanup_until_slot_is_releasable():
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.request_map = {"req-tail": "req-tail"}
+    worker._dest_blocks_by_req = {"req-tail": ([1], [2])}
+    worker._cpu_blocks_by_req = {"req-tail": 1}
+    worker.copy_sfa_slots_by_req = {"req-tail": 3}
+    worker._copy_sfa_tail_by_req = {}
+    worker._d2h_pending_release_req_ids = set()
+    worker._d2h_released_req_ids = set()
+    worker._pending_done = set()
+    worker._terminal_ext_ids = set()
+    worker._invalid_block_ids = set()
+    worker._mf_read_thread = None
+    worker.offload_manager = MagicMock()
+    worker.offload_manager.d2h_slot_releasable.side_effect = [False, True]
+
+    assert worker.get_finished({"req-tail"}) == (set(), set())
+    assert worker.copy_sfa_slots_by_req == {"req-tail": 3}
+    worker.offload_manager.release_d2h_slots.assert_not_called()
+
+    assert worker.get_finished() == ({"req-tail"}, set())
+    worker.offload_manager.release_d2h_slots.assert_called_once_with([3])
+    assert worker.copy_sfa_slots_by_req == {}
+    assert worker._d2h_pending_release_req_ids == set()
 
 
 def _make_tail_read_thread(*, tp_rank: int = 0, tp_size: int = 1) -> MembPullReadThread:
