@@ -1,0 +1,6 @@
+pr: 20169
+entries:
+  - category: bugfix
+    text: Normalize MiniMax-M3 sparse KV block selections before CANN GBSA attention so unused KV-tail values cannot affect attention in the tested selection-order cases.
+  - category: dependency
+    text: MiniMax-M3 sparse attention uses CANN Ops Transformer GBSA and metadata bindings instead of the repository-bundled SparseAttentionScore implementation; compatible CANN bindings and runtime kernels are required.
