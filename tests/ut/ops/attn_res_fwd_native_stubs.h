@@ -11,6 +11,9 @@ constexpr int ACLNN_SUCCESS = 0;
 constexpr int ACLNN_ERR_PARAM_INVALID = 1;
 constexpr int ACLNN_ERR_INNER_CREATE_EXECUTOR = 2;
 #define ACLNN_API
+namespace op {
+enum class DataType { DT_BF16, DT_FLOAT };
+}
 struct TestShape {
   std::vector<int64_t> dims;
   TestShape(std::initializer_list<int64_t> values) : dims(values) {}
@@ -20,6 +23,7 @@ struct TestShape {
 struct aclTensor {
   TestShape shape;
   std::vector<int64_t> strides;
+  op::DataType dtype = op::DataType::DT_BF16;
   aclTensor(std::initializer_list<int64_t> values) : shape(values), strides(values.size()) {
     int64_t stride = 1;
     for (size_t dim = values.size(); dim > 0; --dim) {
@@ -29,6 +33,7 @@ struct aclTensor {
   }
   const TestShape& GetViewShape() const { return shape; }
   const std::vector<int64_t>& GetViewStrides() const { return strides; }
+  op::DataType GetDataType() const { return dtype; }
   void SetOriginalShape(const TestShape&) const {}
   bool IsEmpty() const {
     for (auto dim : shape.dims)

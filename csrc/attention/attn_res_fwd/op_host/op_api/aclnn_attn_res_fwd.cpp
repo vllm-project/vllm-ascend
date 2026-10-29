@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "aclnn_attn_res_fwd.h"
 #include <limits>
-#include "../attn_res_fwd_parallel_plan.h"
 #include "../../attn_res_fwd_validation.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
@@ -68,6 +67,13 @@ extern "C" aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
         !AttnResFwd::IsValidNormEpsilon(eps) || !AttnResFwd::IsValidNormEpsilon(outputNormEps, true)) {
         return ACLNN_ERR_PARAM_INVALID;
     }
+    const aclTensor *tensors[] = {prefix, blocks, proj, norm, addend, outputNorm,
+                                   output, prefixOut, materialized};
+    for (const auto *tensor : tensors) {
+        if (tensor->GetDataType() != DataType::DT_BF16) {
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+    }
     const auto &prefixShape = prefix->GetViewShape();
     const auto &bankShape = blocks->GetViewShape();
     const auto &projShape = proj->GetViewShape();
@@ -101,10 +107,7 @@ extern "C" aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
     }
     // Match the existing AttnRes ACLNN entry: external tensors carry their
     // logical dimensions in the view shape. This is host metadata only.
-    for (const aclTensor *tensor : {prefix, blocks, proj, norm, addend, outputNorm,
-                                   static_cast<const aclTensor *>(output),
-                                   static_cast<const aclTensor *>(prefixOut),
-                                   static_cast<const aclTensor *>(materialized)}) {
+    for (const auto *tensor : tensors) {
         tensor->SetOriginalShape(tensor->GetViewShape());
     }
     auto exec = CREATE_EXECUTOR();

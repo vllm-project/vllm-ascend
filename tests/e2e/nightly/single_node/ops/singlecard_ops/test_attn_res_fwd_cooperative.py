@@ -213,3 +213,32 @@ def test_attn_res_fwd_softmax_extreme_negative_scores(tokens):
     output, _, _ = torch.ops._C_ascend.attn_res_fwd(prefix, None, bank, projection, gamma, 1e-5, valid)
     torch_npu.npu.synchronize()
     torch.testing.assert_close(output, prefix, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_attn_res_fwd_rejects_oversized_empty_bank():
+    # A zero-token view needs no backing allocation, but capacity * H would
+    # overflow int64 before the native validator in the previous adapter.
+    hidden = 7168
+    capacity = torch.iinfo(torch.int64).max // hidden + 1
+    prefix = torch.empty(0, hidden, device="npu", dtype=torch.bfloat16)
+    bank = torch.empty_strided((0, capacity, hidden), (0, hidden, 1), device="npu", dtype=torch.bfloat16)
+    projection = torch.ones(1, hidden, device="npu", dtype=torch.bfloat16)
+    gamma = torch.ones(hidden, device="npu", dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="invalid bank extent/write slot"):
+        torch.ops._C_ascend.attn_res_fwd(prefix, None, bank, projection, gamma, 1e-5, 0)
+
+
+@pytest.mark.parametrize("with_add", [False, True])
+@torch.inference_mode()
+def test_attn_res_fwd_accepts_empty_batch(with_add):
+    hidden, valid = 512, 2
+    prefix = torch.empty(0, hidden, device="npu", dtype=torch.bfloat16)
+    bank = torch.empty(0, valid, hidden, device="npu", dtype=torch.bfloat16)
+    projection = torch.ones(1, hidden, device="npu", dtype=torch.bfloat16)
+    gamma = torch.ones(hidden, device="npu", dtype=torch.bfloat16)
+    outputs = torch.ops._C_ascend.attn_res_fwd(
+        prefix, torch.empty_like(prefix) if with_add else None, bank, projection, gamma, 1e-5, valid, gamma, 1e-4
+    )
+    for output in outputs:
+        assert output.shape == prefix.shape and output.numel() == 0

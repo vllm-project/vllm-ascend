@@ -108,6 +108,8 @@ A2/A3 的原 RESIDENT/RELOAD 路径保留按 token 分核，并修正了标量 B
 Host 还会在整数收窄前检查 shape、候选行数、stride 和写槽范围，拒绝会导致
 `N+1`、对齐或 buffer 字节长度溢出的元数据；平台信息缺失和属性指针缺失时返回失败。
 投影必须严格为 `[1,H]`，epsilon 必须为 FP32 可表示的有限值。
+Torch、ACLNN 和 Tiling 共用 bank 尺寸/stride 范围校验；零 token 大 view
+也必须在尺寸乘法前通过检查，空输出快速返回前同样检查所有 tensor 的 BF16 dtype。
 原生 ACLNN 入口在空输出快速返回前同样校验 bank 属性，拒绝非法有效行数和写槽。
 
 单卡精度用例位于

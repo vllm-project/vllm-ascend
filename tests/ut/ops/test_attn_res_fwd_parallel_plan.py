@@ -122,6 +122,9 @@ int main() {
     assert(!AreShapeFieldsRepresentable(u32max + 1, 9, 7168));
     assert(!AreShapeFieldsRepresentable(1, u32max + 1, 7168));
     assert(!AreShapeFieldsRepresentable(1, 1, u32max));
+    const int64_t overflowingCapacity = std::numeric_limits<int64_t>::max() / 7168 + 1;
+    assert(!IsValidBankExtent(0, overflowingCapacity, 7168, 0, 0, -1));
+    assert(IsValidBankExtent(0, 2, 512, 2, 1024, -1));
     assert(AreCandidateRowsRepresentable(0));
     assert(!AreCandidateRowsRepresentable(u32max));
     assert(IsValidBankExtent(1, 9, 7168, 8, 9 * 7168, 8));

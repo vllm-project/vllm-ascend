@@ -4,8 +4,8 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 
+#include "../attn_res_fwd_validation.h"
 #include "../op_kernel/attn_res_fwd_ub_layout.h"
 
 namespace AttnResFwd {
@@ -15,40 +15,10 @@ constexpr uint32_t COOPERATIVE_MIN_HIDDEN = 512;
 constexpr uint32_t COOPERATIVE_MAX_OUTPUT_SPLITS = 8;
 constexpr uint32_t COOPERATIVE_MAX_SCORE_SPLITS = 32;
 constexpr uint32_t COOPERATIVE_MAX_ROWS = 128;
-constexpr uint32_t COOPERATIVE_HIDDEN_ALIGN = 64;
+constexpr uint32_t COOPERATIVE_HIDDEN_ALIGN = TILING_HIDDEN_ALIGNMENT;
 constexpr uint32_t COOPERATIVE_SLOT_BYTES = 32;
 constexpr uint32_t COOPERATIVE_FLOAT_BLOCK = COOPERATIVE_SLOT_BYTES / sizeof(float);
 constexpr uint32_t COOPERATIVE_UB_ALLOWANCE = 32 * 1024;
-
-// Buffer lengths are uint32_t bytes; reserve alignment headroom before casts.
-constexpr uint32_t MAX_TILING_HIDDEN =
-    std::numeric_limits<uint32_t>::max() / sizeof(float) / COOPERATIVE_HIDDEN_ALIGN * COOPERATIVE_HIDDEN_ALIGN;
-constexpr uint32_t MAX_TILING_ROWS = std::numeric_limits<uint32_t>::max() / (COOPERATIVE_FLOAT_BLOCK * sizeof(float)) /
-                                     COOPERATIVE_FLOAT_BLOCK * COOPERATIVE_FLOAT_BLOCK;
-
-inline bool AreShapeFieldsRepresentable(int64_t tokens, int64_t capacity, int64_t hidden) {
-  const uint64_t maxField = std::numeric_limits<uint32_t>::max();
-  return tokens >= 0 && static_cast<uint64_t>(tokens) <= maxField && capacity >= 0 &&
-         static_cast<uint64_t>(capacity) <= maxField && hidden >= 0 &&
-         static_cast<uint64_t>(hidden) <= MAX_TILING_HIDDEN;
-}
-
-inline bool AreCandidateRowsRepresentable(int64_t valid) {
-  return valid >= 0 && static_cast<uint64_t>(valid) < MAX_TILING_ROWS;
-}
-
-inline bool IsValidBankExtent(int64_t tokens, int64_t capacity, int64_t hidden, int64_t valid, int64_t stride,
-                              int64_t writeIndex) {
-  if (!AreShapeFieldsRepresentable(tokens, capacity, hidden) || !AreCandidateRowsRepresentable(valid) ||
-      valid > capacity || stride < 0 || writeIndex < -1 || writeIndex >= capacity ||
-      writeIndex > std::numeric_limits<int32_t>::max() || (writeIndex >= 0 && writeIndex < valid)) {
-    return false;
-  }
-  const uint64_t minimumStride = static_cast<uint64_t>(capacity) * static_cast<uint64_t>(hidden);
-  const uint64_t maxElements = std::numeric_limits<uint64_t>::max() / sizeof(uint16_t);
-  return static_cast<uint64_t>(stride) >= minimumStride &&
-         (tokens == 0 || static_cast<uint64_t>(stride) <= maxElements / static_cast<uint64_t>(tokens));
-}
 
 struct ParallelPlan {
   uint32_t usedCores{0};

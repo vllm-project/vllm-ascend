@@ -23,8 +23,10 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_impl(
                 op_name, ": invalid prefix/bank shape");
     TORCH_CHECK(proj.dim() == 2 && proj.size(0) == 1 && proj.size(1) == prefix.size(1) &&
                 norm.dim() == 1 && norm.size(0) == prefix.size(1), op_name, ": invalid weights");
-    TORCH_CHECK(valid >= 0 && valid <= blocks.size(1) && write_idx >= -1 &&
-                write_idx < blocks.size(1) && (write_idx < 0 || write_idx >= valid),
+    // Validate extents before any signed capacity * H arithmetic, including
+    // zero-token views whose dimensions can exceed the backing allocation.
+    TORCH_CHECK(AttnResFwd::IsValidBankExtent(prefix.size(0), blocks.size(1), prefix.size(1),
+                                            valid, blocks.stride(0), write_idx),
                 op_name, ": invalid bank extent/write slot");
     const at::Tensor* inputs[] = {&prefix, &blocks, &proj, &norm};
     for (const at::Tensor* tensor : inputs) {
@@ -34,8 +36,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_impl(
                     op_name, ": writable bank must not alias read-only inputs");
     }
     TORCH_CHECK(prefix.is_contiguous() && proj.is_contiguous() && norm.is_contiguous() &&
-                blocks.stride(2) == 1 && blocks.stride(1) == prefix.size(1) &&
-                blocks.stride(0) >= blocks.size(1) * prefix.size(1),
+                blocks.stride(2) == 1 && blocks.stride(1) == prefix.size(1),
                 op_name, ": prefix/weights/individual bank rows must be contiguous");
     if (addend.has_value()) {
         TORCH_CHECK(addend->sizes() == prefix.sizes() && addend->dtype() == prefix.dtype() &&

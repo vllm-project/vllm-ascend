@@ -55,6 +55,23 @@ int main() {
          ACLNN_ERR_PARAM_INVALID);
   assert(Invoke(&projection, &emptyAddend, &gamma, &emptyOutput, 1e-5, 1e-4, false, false, 12, 2, 2, 0) ==
          ACLNN_SUCCESS);
+  // Empty output must not bypass the BF16 contract on any tensor argument.
+  for (int64_t tokens : {0, 1}) {
+    aclTensor prefix{tokens, 4}, bank{tokens, 3, 4}, proj{1, 4}, norm{4}, add{tokens, 4}, outputNorm{4}, out{tokens, 4},
+        prefixOut{tokens, 4}, materialized{tokens, 4};
+    aclTensor* tensors[] = {&prefix, &bank, &proj, &norm, &add, &outputNorm, &out, &prefixOut, &materialized};
+    for (auto* tensor : tensors) {
+      tensor->dtype = op::DataType::DT_FLOAT;
+      uint64_t workspaceSize = 0;
+      aclOpExecutor* executor = nullptr;
+      const auto status = aclnnAttnResFwdGetWorkspaceSize(&prefix, &bank, &proj, &norm, &add, &outputNorm, 1e-5, 2, 12,
+                                                          2, 1e-4, true, true, true, false, &out, &prefixOut,
+                                                          &materialized, &workspaceSize, &executor);
+      delete executor;
+      assert(status == ACLNN_ERR_PARAM_INVALID);
+      tensor->dtype = op::DataType::DT_BF16;
+    }
+  }
   projection.strides[1] = 2;
   assert(Invoke(&projection, &addend, &gamma, &output) == ACLNN_ERR_PARAM_INVALID);
   // No rejected call may reach the fake backend launcher.

@@ -35,3 +35,8 @@ entries:
       Extended AttnResFwd cooperative dispatch to batches using at most half
       the available AIV cores, enabling row-parallel scoring for B=16 while
       retaining full-row output ownership and existing UB checks.
+  - category: bugfix
+    hardware: [A2, A3, A5]
+    text: >-
+      Reject oversized zero-token bank views before stride arithmetic and
+      validate BF16 dtypes before the empty-output fast return in AttnResFwd.
