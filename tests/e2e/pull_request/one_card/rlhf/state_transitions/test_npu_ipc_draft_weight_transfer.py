@@ -94,7 +94,7 @@ def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed):
         max_num_batched_tokens=64,
         gpu_memory_utilization=0.2,
         speculative_config={"method": "standalone_ar", "model": str(model_path), "num_speculative_tokens": 2},
-        weight_transfer_config={"backend": "ipc"},
+        weight_transfer_config={"backend": "npu_ipc"},
         additional_config={"rl_config": {"enabled": True}},
     )
     trainer = None

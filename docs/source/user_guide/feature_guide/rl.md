@@ -51,7 +51,7 @@ for field definitions, prerequisites, and migration from legacy settings.
 
 | Deployment mode | Memory management | Weight transfer backend |
 | --- | --- | --- |
-| Trainer and rollout engine share NPUs | Enable sleep mode so the rollout engine can release NPU memory | `ipc` |
+| Trainer and rollout engine share NPUs | Enable sleep mode so the rollout engine can release NPU memory | `npu_ipc` |
 | Trainer and rollout engine use different NPUs | Pause generation during the update; sleep mode is normally unnecessary | `hccl` |
 
 The exact lifecycle is framework-dependent. In particular, level 2 sleep
@@ -121,7 +121,7 @@ vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
 
 | Backend | Use case | Transport |
 | --- | --- | --- |
-| `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
+| `npu_ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
 
 Start an HCCL-enabled server with:
@@ -138,7 +138,7 @@ user-facing backend name to `NPUIPCWeightTransferEngine`:
 ```bash
 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
 vllm serve Qwen/Qwen3-0.6B \
-    --weight-transfer-config '{"backend": "ipc"}' \
+    --weight-transfer-config '{"backend": "npu_ipc"}' \
     --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
@@ -424,7 +424,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `rl_config.enable_training_consistency=true` | Training-inference consistency | Select FA3; requires the `flash_attn_npu_v3` package |
 | `rl_config.enable_batch_invariant=true` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
-| `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
+| `--weight-transfer-config '{"backend": "npu_ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
 | `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |
