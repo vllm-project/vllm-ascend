@@ -91,6 +91,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.fasteep.policy import is_fasteep, validate_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -462,6 +463,8 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        if runtime := getattr(self, "_fasteep_runtime", None):
+            runtime.close()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -897,6 +900,11 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            if scheduler_output.total_num_scheduled_tokens:
+                raise RuntimeError("Inactive FastEEP rank received scheduled tokens.")
+            return EMPTY_MODEL_RUNNER_OUTPUT
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
@@ -965,6 +973,9 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            return EMPTY_MODEL_RUNNER_OUTPUT
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
             self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
@@ -974,6 +985,8 @@ class NPUWorker(WorkerBase):
         return output
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        if is_fasteep(self.vllm_config):
+            validate_config(self.vllm_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -1455,6 +1468,9 @@ class NPUWorker(WorkerBase):
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            return
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         # Idle DP worker RPCs also need the current config for replay metadata.

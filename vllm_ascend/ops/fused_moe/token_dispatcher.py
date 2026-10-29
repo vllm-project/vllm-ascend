@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.fasteep.policy import is_fasteep, local_physical_mask
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -336,6 +337,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.fasteep_physical_routing = is_fasteep(get_current_vllm_config())
         self.max_num_tokens = kwargs.get("max_num_tokens")
         num_experts_local = kwargs.get("num_local_experts", 0)
         self.num_experts_local = (
@@ -391,10 +393,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
+            if getattr(self, "fasteep_physical_routing", False):
+                mask = local_physical_mask(topk_ids, get_ep_group().rank_in_group, self.num_experts_local)
+            else:
+                mask = expert_map[topk_ids] != -1
+            topk_weights = topk_weights * mask
         else:
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local

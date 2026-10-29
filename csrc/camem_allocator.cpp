@@ -322,7 +322,11 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+PyObject* python_hccl_subcomm(PyObject*, PyObject*);
+
 static PyMethodDef module_methods[] = {
+    {"python_hccl_subcomm", python_hccl_subcomm, METH_VARARGS,
+     "Create an HCCL child communicator from a retained parent."},
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
     {"python_create_and_map", (PyCFunction)python_create_and_map, METH_VARARGS,
