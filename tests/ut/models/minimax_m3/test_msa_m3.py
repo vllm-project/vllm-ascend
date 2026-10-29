@@ -75,6 +75,33 @@ def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock
     return gbsa_metadata_op, gbsa_attention_op
 
 
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("strided", [False, True])
+def test_gbsa_prefix_normalization_preserves_valid_selection(dtype: torch.dtype, strided: bool) -> None:
+    # count 外的正数属于残留数据，不能因排序进入有效选块集合。
+    source = torch.tensor([[[8, 3, 99, 2], [4, -1, 9, -1], [6, 2, 1, 0], [5, 4, 3, 2]]], dtype=dtype)
+    counts = torch.tensor([[2, 1, 4, 0]], dtype=torch.int32)
+    if strided:
+        storage = torch.zeros((*source.shape[:-1], source.shape[-1] * 2), dtype=dtype)
+        storage[..., ::2].copy_(source)
+        source = storage[..., ::2]
+        count_storage = torch.zeros((1, counts.shape[-1] * 2), dtype=counts.dtype)
+        count_storage[..., ::2].copy_(counts)
+        counts = count_storage[..., ::2]
+        assert not source.is_contiguous()
+        assert not counts.is_contiguous()
+    original, original_counts = source.clone(), counts.clone()
+
+    normalized = msa_m3_npu_module._sort_valid_gbsa_prefix(source, counts)
+
+    expected = torch.tensor([[[3, 8, -1, -1], [4, -1, -1, -1], [0, 1, 2, 6], [-1, -1, -1, -1]]], dtype=torch.int32)
+    torch.testing.assert_close(normalized, expected, rtol=0, atol=0)
+    assert normalized.dtype == torch.int32
+    assert normalized.is_contiguous()
+    assert torch.equal(source, original)
+    assert torch.equal(counts, original_counts)
+
+
 @dataclass
 class BatchSpec:
     seq_lens: list[int]
@@ -1451,6 +1478,14 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     kv_cache = torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
         [
+            [[1, 0], [0, -1], [3, 2], [-1, -1]],
+            [[1, 0], [1, -1], [3, 2], [3, -1]],
+        ],
+        dtype=torch.int32,
+    )
+    original_topk = topk_idx.clone()
+    expected_topk = torch.tensor(
+        [
             [[0, 1], [0, -1], [2, 3], [-1, -1]],
             [[0, 1], [1, -1], [2, 3], [3, -1]],
         ],
@@ -1491,7 +1526,8 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
         assert gbsa_metadata_op.call_args.kwargs["cu_seqlens_q"] is prefix
     metadata_args = gbsa_metadata_op.call_args.args
     metadata_kwargs = gbsa_metadata_op.call_args.kwargs
-    assert torch.equal(metadata_args[0], topk_idx)
+    assert torch.equal(metadata_args[0], expected_topk)
+    assert torch.equal(topk_idx, original_topk)
     assert torch.equal(
         metadata_args[1],
         torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
@@ -1514,7 +1550,7 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     args = gbsa_attention_op.call_args.args
     kwargs = gbsa_attention_op.call_args.kwargs
     assert args[0] is q
-    assert torch.equal(args[3], topk_idx)
+    assert torch.equal(args[3], expected_topk)
     assert torch.equal(args[4], metadata_args[1])
     assert args[5] == [1, 128]
     assert kwargs["metadata"] is metadata
@@ -2088,7 +2124,7 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     assert args[0].dtype == dtype
     assert args[1].dtype == dtype
     assert args[2].dtype == dtype
-    assert args[3] is topk_idx
+    assert torch.equal(args[3], topk_idx)
     torch.testing.assert_close(args[4], torch.ones(5, 1, dtype=torch.int32))
     assert kwargs["metadata"] is metadata
     assert kwargs["softmax_precision"] == 0

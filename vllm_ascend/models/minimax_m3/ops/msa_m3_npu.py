@@ -242,6 +242,20 @@ def prepare_decode_gbsa_metadata(
     )
 
 
+def _sort_valid_gbsa_prefix(
+    topk_idx: torch.Tensor,
+    select_num_idx: torch.Tensor,
+) -> torch.Tensor:
+    """按逻辑升序规范有效稀疏块，保持 counts 和尾部 -1。"""
+    indices = topk_idx.to(dtype=torch.int32)
+    positions = torch.arange(indices.shape[-1], device=indices.device, dtype=torch.int32)
+    valid = (positions < select_num_idx.unsqueeze(-1)) & (indices >= 0)
+    sentinel = torch.iinfo(torch.int32).max
+    keys = torch.where(valid, indices, sentinel)
+    ordered = torch.sort(keys, dim=-1).values
+    return torch.where(ordered == sentinel, -1, ordered).contiguous()
+
+
 @torch.no_grad()
 def _run_generic_block_sparse_attention(
     q: torch.Tensor,
@@ -264,6 +278,8 @@ def _run_generic_block_sparse_attention(
     del dequant_scale
     topk_idx = topk_idx.to(dtype=torch.int32).contiguous()
     select_num_idx = select_num_idx.to(dtype=torch.int32).contiguous()
+    # 当前 GBSA 栈的部分尾块屏蔽对 selected 排列敏感，以逻辑升序固定边界。
+    topk_idx = _sort_valid_gbsa_prefix(topk_idx, select_num_idx)
     block_table = block_table.to(dtype=torch.int32).contiguous()
     cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int64).contiguous()
     seq_lens = seq_lens.to(dtype=torch.int32).contiguous()
