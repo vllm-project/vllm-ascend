@@ -173,8 +173,8 @@ benchmarks:
     max_out_len: 1024
     batch_size: 128
     request_rate: 0
-    baseline: 2900
-    threshold: 0.97
+    baseline: 4248.503
+    threshold: 0.95
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
