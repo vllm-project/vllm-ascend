@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from tests.e2e.pull_request.one_card.ascendstore_v1_layerwise_timing import LayerwiseLoadTiming
 from tests.ut.distributed.ascend_store.v1.helpers import FakeLoadStartGate, make_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     KVTransferStep,
     LoadCommand,
     LookupRequest,

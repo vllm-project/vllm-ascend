@@ -24,7 +24,7 @@ from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
     StateCheckpointSource,
     StoreSourceReleaseMetadata,

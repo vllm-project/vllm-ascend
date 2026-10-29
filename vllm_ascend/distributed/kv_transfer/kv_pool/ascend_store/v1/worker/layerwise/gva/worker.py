@@ -20,7 +20,7 @@ from ....infrastructure.mapping import (
     local_addresses,
     local_lengths,
 )
-from ....infrastructure.resources import KVPoolResources
+from ....infrastructure.resources import Resources
 from ....infrastructure.topology import KVPoolTopology
 from ...transfer.batch import KVGroupBatch, KVTransferBatch
 from ...transfer.completion import LoadCompletion
@@ -41,7 +41,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
     def __init__(
         self,
         topology: KVPoolTopology,
-        resources: KVPoolResources,
+        resources: Resources,
         *,
         coordinator: Coordinator,
         kv_cache_layout: str = "NHD",

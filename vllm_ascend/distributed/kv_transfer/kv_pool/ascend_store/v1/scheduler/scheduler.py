@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.utils.math_utils import cdiv
 
 from ..infrastructure.configuration import KVPoolConfig
-from ..infrastructure.protocol.messages import (
+from ..protocol.lookup import LookupClient
+from ..protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
@@ -18,7 +19,6 @@ from ..infrastructure.protocol.messages import (
     StoreCommandBatch,
     StoreSourceReleaseMetadata,
 )
-from ..infrastructure.protocol.rpc import LookupClient
 from .lookup import resolve_load_candidate
 from .source_leases import StoreSourceLeases
 from .state import LoadCandidate, RequestAllocation, RequestProgress

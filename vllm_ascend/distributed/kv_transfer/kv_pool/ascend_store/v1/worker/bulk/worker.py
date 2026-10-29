@@ -18,9 +18,9 @@ from ...infrastructure.mapping import (
     map_keys,
     select_layers,
 )
-from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
-from ...infrastructure.resources import KVPoolResources
+from ...infrastructure.resources import Resources
 from ...infrastructure.topology import KVPoolTopology
+from ...protocol.messages import CheckpointStoreCommand, StoreCommand
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeysByPartition,
@@ -63,7 +63,7 @@ class BulkWorker(KVPoolWorker):
     def __init__(
         self,
         topology: KVPoolTopology,
-        resources: KVPoolResources,
+        resources: Resources,
         *,
         coordinator: Coordinator,
         kv_cache_layout: str = "NHD",

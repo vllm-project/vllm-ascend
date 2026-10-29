@@ -18,9 +18,9 @@ from ..layerwise.layerwise_cache_layout import (
 from .backend import LayerwiseAccessKind, resolve_backend_spec
 from .infrastructure.configuration import KVPoolConfig, resolve_kv_pool_config
 from .infrastructure.coordinator import Coordinator
-from .infrastructure.protocol.rpc import LookupClient
-from .infrastructure.resources import KVPoolResources
+from .infrastructure.resources import Resources
 from .infrastructure.topology import resolve_worker_topology
+from .protocol.lookup import LookupClient
 from .scheduler import (
     AsynchronousBulkScheduler,
     KVPoolScheduler,
@@ -79,9 +79,9 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
         vllm_config.parallel_config,
         extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
     )
-    resources: KVPoolResources | None = None
+    resources: Resources | None = None
     try:
-        resources = KVPoolResources(
+        resources = Resources(
             backend,
             backend_spec,
             topology.transfer_groups,

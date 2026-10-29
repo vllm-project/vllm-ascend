@@ -1,11 +1,11 @@
-"""Tests for infrastructure.protocol.lookup."""
+"""Tests for protocol.lookup."""
 
 from __future__ import annotations
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.lookup import LookupCodec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupCodec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LookupRequest,
     LookupResult,
     TailKeyBoundary,

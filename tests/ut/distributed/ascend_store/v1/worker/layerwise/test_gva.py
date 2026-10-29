@@ -23,12 +23,12 @@ from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
     make_gva_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import GVARegion
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    Resources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LookupRequest,
     RangeStoreCommand,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
@@ -51,7 +51,7 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
 
     topology = make_topology(physical_layers=(4, 5))
     registration_backend = FakeBackend()
-    resources = KVPoolResources(registration_backend, make_gva_spec(), topology.groups)
+    resources = Resources(registration_backend, make_gva_spec(), topology.groups)
     caches = {
         layer_name: torch.empty((8, 4), dtype=torch.float32)
         for layer_name in tuple(name for layer in topology.groups[0].layers for name in layer.layer_names)
@@ -206,7 +206,7 @@ def test_gva_worker_close_unregisters_exact_region_before_backend_close() -> Non
     backend = FakeGVABackend()
     topology = make_topology(physical_layers=(0,))
     backend_spec = make_gva_spec()
-    resources = KVPoolResources(backend, backend_spec, topology.groups)
+    resources = Resources(backend, backend_spec, topology.groups)
     worker = GVALayerwiseWorker(
         topology,
         resources,

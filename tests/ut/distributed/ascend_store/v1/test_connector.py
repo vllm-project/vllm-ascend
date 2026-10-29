@@ -18,7 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connecto
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import (
     AscendStoreV1Connector,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     KVTransferStep,
     LoadCommand,
     StoreSourceReleaseMetadata,
@@ -252,6 +252,6 @@ def test_connector_closes_created_worker_if_lookup_server_cannot_start(monkeypat
         parallel_config=SimpleNamespace(rank=0),
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
     )
-    with pytest.raises(RuntimeError, match="Failed to start Lookup server"):
+    with pytest.raises(RuntimeError, match="Failed to start RPC server"):
         AscendStoreV1Connector(config, None, None)
     assert calls == ["worker"]

@@ -15,7 +15,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import attention_fence
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LoadCommand,
     RangeStoreCommand,
 )

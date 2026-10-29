@@ -42,19 +42,19 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import configuration
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import topology as topology_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution import Executor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    Resources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    resolve_group_layers,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
     LoadCommand,
     LookupRequest,
     RangeStoreCommand,
     StateCheckpointSource,
     TailKeyBoundary,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
-    resolve_group_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
     AsynchronousBulkScheduler,
@@ -86,7 +86,7 @@ def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_
     group = replace(base.groups[0], layers=resolve_group_layers(list(names), base_layer_count=2))
     topology = replace(base, groups=(group,))
     backend = TensorBytesBackend()
-    resources = KVPoolResources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
+    resources = Resources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
@@ -726,7 +726,7 @@ def _make_tensor_tp_worker(backend, layout, tp_size, tp_rank, *, total_heads, po
             expected_entries.append(values)
         caches[name] = tuple(entries)
         expected[name] = tuple(expected_entries)
-    resources = KVPoolResources(backend, make_backend_spec(layerwise_access=None), topology.transfer_groups)
+    resources = Resources(backend, make_backend_spec(layerwise_access=None), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
@@ -819,7 +819,7 @@ def test_bulk_lookup_recovers_sparse_retention_objects_and_loads_tail(
 ) -> None:
     topology = make_sparse_group_topology(block_size=16, sliding_window=33)
     backend = TensorBytesBackend()
-    resources = KVPoolResources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
+    resources = Resources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups)
     worker = BulkWorker(
         topology,
         resources,
@@ -884,7 +884,7 @@ def test_hybrid_checkpoint_round_trip_receives_full_objects_with_lookup_tail_key
     attention = replace(attention, kv_cache_spec=replace(attention.kv_cache_spec, head_size=2, head_size_v=3))
     topology = replace(topology, groups=(attention, state))
     backend = TensorBytesBackend()
-    resources = KVPoolResources(
+    resources = Resources(
         backend, make_backend_spec(layerwise_access=None, requires_exists_before_put=True), topology.groups
     )
     worker = BulkWorker(

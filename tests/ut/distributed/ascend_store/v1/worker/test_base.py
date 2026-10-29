@@ -32,7 +32,14 @@ from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
     make_gva_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    Resources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
@@ -40,13 +47,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     RangeStoreCommand,
     StateCheckpointSource,
     StoreCommandBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import base as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
@@ -109,7 +109,7 @@ def test_bulk_binding_uses_retained_tensors_without_consuming_registration_table
 def test_invalid_tp_tensor_geometry_fails_before_native_registration() -> None:
     topology = make_topology(physical_layers=(0,), tp_mismatch=True)
     backend = RecordingBackend()
-    resources = KVPoolResources(backend, make_backend_spec(), topology.transfer_groups)
+    resources = Resources(backend, make_backend_spec(), topology.transfer_groups)
     worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology))
     with pytest.raises(RuntimeError, match="unflatten.*sizes.*multiply"):
         worker.bind_kv_caches(make_caches(topology))
@@ -121,7 +121,7 @@ def test_invalid_tp_tensor_geometry_fails_before_native_registration() -> None:
 def test_layerwise_capability_binding_failure_precedes_registration_and_closes_backend(phase, monkeypatch):
     backend = RecordingBackend()
     topology = make_topology(physical_layers=(0,))
-    resources = KVPoolResources(backend, make_backend_spec(), topology.groups)
+    resources = Resources(backend, make_backend_spec(), topology.groups)
     fail = Mock(side_effect=RuntimeError("capability binding failed"))
     worker = KeyRangeLayerwiseWorker(
         topology,
@@ -144,7 +144,7 @@ def test_unknown_store_source_keeps_real_registration_and_backend_open() -> None
     backend = RecordingBackend()
     backend.put_result = RuntimeError("put failed after address handoff")
     backend_spec = make_backend_spec(layerwise_access=None)
-    resources = KVPoolResources(backend, backend_spec, topology.groups)
+    resources = Resources(backend, backend_spec, topology.groups)
     cleanup = Mock()
     resources.bind_execution_cleanup(cleanup)
     worker = BulkWorker(

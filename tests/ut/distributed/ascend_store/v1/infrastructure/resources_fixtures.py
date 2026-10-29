@@ -15,7 +15,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     rollback_buffer_registration,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
+    Resources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
@@ -72,13 +72,13 @@ def make_caches(topology, *, shared_storage: bool = False):
 
 def make_resources(backend: RecordingBackend, *, physical_layers=(0, 1)):
     topology = make_topology(physical_layers=physical_layers)
-    resources = KVPoolResources(backend, make_backend_spec(layerwise_access=None), topology.groups)
+    resources = Resources(backend, make_backend_spec(layerwise_access=None), topology.groups)
     return topology, resources
 
 
 def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
-    resources = KVPoolResources(backend, backend_spec, topology.groups)
+    resources = Resources(backend, backend_spec, topology.groups)
     worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology, 64), store_enabled=False)
     worker.bind_kv_caches(make_caches(topology))
     worker.close()

@@ -14,7 +14,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import FakeBlockPool, make_config
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
     RangeStoreCommand,
     StateCheckpointSource,

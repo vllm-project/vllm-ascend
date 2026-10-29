@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 _GVA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 
 
-class KVPoolResources:
+class Resources:
     """Manage resources that need to be started, stopped, or explicitly released.
 
     Own Executors, Backend object sessions, buffer registrations, and the Backend

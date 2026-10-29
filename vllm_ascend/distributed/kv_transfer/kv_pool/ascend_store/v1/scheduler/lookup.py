@@ -5,7 +5,7 @@ from __future__ import annotations
 from vllm.utils.math_utils import cdiv
 
 from ..infrastructure.configuration import KVPoolConfig
-from ..infrastructure.protocol.messages import LookupResult
+from ..protocol.messages import LookupResult
 from .state import LoadCandidate
 
 

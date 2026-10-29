@@ -5,7 +5,7 @@ import pytest
 
 from tests.ut.distributed.ascend_store.v1.helpers import make_worker
 from tests.ut.distributed.ascend_store.v1.worker.transfer.fixtures import make_group
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import LoadCommand
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import LoadCommand
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import key_range
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer import rows
 

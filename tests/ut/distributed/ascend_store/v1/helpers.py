@@ -26,12 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
-    KVTransferStep,
-    StoreCommand,
-    StoreCommandBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import KVPoolResources
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import Resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
     ContextRank,
     CPPartitionSpec,
@@ -41,6 +36,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     PPPartitionSpec,
     TPPartitionSpec,
     context_replica_groups,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
+    KVTransferStep,
+    StoreCommand,
+    StoreCommandBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
@@ -327,7 +327,7 @@ class FakeEvent:
         self.synchronized = True
 
 
-class FakeResources(KVPoolResources):
+class FakeResources(Resources):
     def register_kv_buffers(self):
         pass
 

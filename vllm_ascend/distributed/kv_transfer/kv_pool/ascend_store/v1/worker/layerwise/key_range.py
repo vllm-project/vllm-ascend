@@ -23,7 +23,7 @@ from ...infrastructure.mapping import (
     local_addresses,
     local_lengths,
 )
-from ...infrastructure.resources import KVPoolResources
+from ...infrastructure.resources import Resources
 from ...infrastructure.topology import KVPoolTopology
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion
@@ -43,7 +43,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
     def __init__(
         self,
         topology: KVPoolTopology,
-        resources: KVPoolResources,
+        resources: Resources,
         *,
         coordinator: Coordinator,
         kv_cache_layout: str = "NHD",

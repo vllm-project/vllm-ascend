@@ -1,19 +1,74 @@
-"""Wire encoding for Scheduler-to-Worker Lookup."""
+"""Adapt Lookup messages, validation, and cache-miss fallback to byte-frame RPC."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TypeAlias
+from collections.abc import Callable, Sequence
 
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from ..infrastructure.rpc import MAX_TIMEOUT_MS, RPC_CLOSE_TIMEOUT_S, RpcClient, RpcServer, WireFrame, deadline_after
 from .messages import LookupRequest, LookupResult, TailKeyBoundary
 
-WireFrame: TypeAlias = bytes | bytearray | memoryview
 _TOKEN_COUNT_BYTES = 4
 _REQUEST_FRAME_COUNT = 4
 _TAIL_KEY_BOUNDARY_BYTES = 8
+
+
+class LookupClient:
+    """Interpret unsuccessful remote queries as misses, reconnecting on the next Lookup."""
+
+    def __init__(self, address: str, *, timeout_ms: int = -1) -> None:
+        if type(timeout_ms) is not int or not -1 <= timeout_ms <= MAX_TIMEOUT_MS:
+            raise ValueError(f"lookup_rpc_timeout_ms must be an integer between -1 and {MAX_TIMEOUT_MS}")
+        self._address = address
+        self._timeout_ms = timeout_ms
+        self._codec = LookupCodec()
+        self._rpc = RpcClient(address)
+        self._closed = False
+
+    def lookup(self, request: LookupRequest) -> LookupResult:
+        if self._closed:
+            raise RuntimeError("Lookup client is closed")
+        deadline = deadline_after(self._timeout_ms)
+        frames = self._codec.encode_request(request)
+        try:
+            result = self._codec.decode_result(self._rpc.request(frames, deadline=deadline))
+            if result.available_end_token > request.end_token:
+                raise ValueError("Lookup response exceeds the requested token range")
+            return result
+        except Exception:
+            logger.exception("Lookup RPC failed at %s; treating this query as an external cache miss", self._address)
+            # Invalid replies also invalidate the connection, even after a completed exchange.
+            self._rpc.reset_connection()
+            return LookupResult(0)
+
+    def close(self) -> None:
+        self._closed = True
+        self._rpc.close()
+
+
+class LookupServer:
+    """Translate Lookup failures into miss replies while retaining the Worker callback until close."""
+
+    def __init__(self, lookup: Callable[[LookupRequest], LookupResult], address: str) -> None:
+        self._codec = LookupCodec()
+        self._address = address
+        self._lookup = lookup
+        self._rpc = RpcServer(self._handle_request, address)
+
+    def close(self, *, timeout: float = RPC_CLOSE_TIMEOUT_S) -> None:
+        """The owning Connector may release Worker resources only after this succeeds."""
+        self._rpc.close(timeout=timeout)
+
+    def _handle_request(self, frames: Sequence[WireFrame]) -> bytes:
+        try:
+            request = self._codec.decode_request(frames)
+            return self._codec.encode_result(self._lookup(request))
+        except Exception:
+            logger.exception("Lookup request failed at %s; returning an external cache miss", self._address)
+            return self._codec.encode_result(LookupResult(0))
 
 
 class LookupCodec:

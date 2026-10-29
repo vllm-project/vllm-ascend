@@ -35,19 +35,19 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     GVAObjectSessions,
     ObjectSessions,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
+    Resources,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
+    resolve_group_layers,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
     LookupRequest,
     RangeStoreCommand,
     StoreCommandBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
-    resolve_group_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
     GVALayerwiseWorker,
@@ -374,7 +374,7 @@ def test_layerwise_lookup_recovers_sparse_objects_after_publication(
     topology = make_sparse_group_topology(block_size=16, sliding_window=33)
     backend: FakeGVABackend | PublishedKeyRangeBackend = FakeGVABackend() if use_gva else PublishedKeyRangeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec(requires_exists_before_put=True)
-    resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
+    resources = Resources(backend, backend_spec, topology.transfer_groups)
     coordinator = make_coordinator(topology, 256, retention_interval=retention_interval)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, coordinator=coordinator, source_ready_event_factory=FakeEvent)
@@ -424,7 +424,7 @@ def test_layerwise_store_copies_all_cache_entries_at_each_physical_layer(use_gva
     )
     backend = FakeGVABackend() if use_gva else FakeBackend()
     backend_spec = make_gva_spec() if use_gva else make_backend_spec()
-    resources = KVPoolResources(backend, backend_spec, topology.transfer_groups)
+    resources = Resources(backend, backend_spec, topology.transfer_groups)
     coordinator = make_coordinator(topology)
     worker_type = GVALayerwiseWorker if use_gva else KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, coordinator=coordinator, source_ready_event_factory=FakeEvent)

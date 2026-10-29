@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.mooncak
     backend as mooncake_adapter,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results import BackendResultError
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LoadCommand,
     RangeStoreCommand,
 )

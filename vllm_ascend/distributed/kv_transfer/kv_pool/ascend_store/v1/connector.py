@@ -15,8 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 
 from .factory import create_kv_pool_scheduler, create_kv_pool_worker
-from .infrastructure.protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
-from .infrastructure.protocol.rpc import LookupServer
+from .protocol.lookup import LookupServer
+from .protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
 from .scheduler import KVPoolScheduler
 from .worker.base import KVPoolWorker
 from .worker.layerwise import LayerwiseWorker

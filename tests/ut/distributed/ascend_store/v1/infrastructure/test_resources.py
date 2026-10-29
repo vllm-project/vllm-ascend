@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution import Executor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
-    KVPoolResources,
+    Resources,
 )
 
 
@@ -58,7 +58,7 @@ def test_gva_registration_alignment_does_not_change_mapping_payload() -> None:
     alignment = 2 * 1024 * 1024
     topology = make_topology(physical_layers=(0,))
     backend = RecordingBackend()
-    resources = KVPoolResources(backend, make_gva_spec(), topology.transfer_groups, align_shared_storage=True)
+    resources = Resources(backend, make_gva_spec(), topology.transfer_groups, align_shared_storage=True)
     storage = torch.empty(2 * alignment, dtype=torch.uint8)
     aligned_offset = -storage.data_ptr() % alignment
     view_offset = aligned_offset + 64
@@ -94,7 +94,7 @@ def test_registration_covers_strided_aliases_without_registering_unrelated_stora
 def test_resources_skip_empty_rope_views_in_registration(empty_first, use_gva) -> None:
     backend = RecordingBackend()
     topology = make_topology(physical_layers=(0,))
-    resources = KVPoolResources(
+    resources = Resources(
         backend,
         make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA if use_gva else None),
         topology.transfer_groups,

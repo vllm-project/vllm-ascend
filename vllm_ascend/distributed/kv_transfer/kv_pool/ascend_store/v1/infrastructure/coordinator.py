@@ -34,7 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from .protocol.messages import TailKeyBoundary
+from ..protocol.messages import TailKeyBoundary
 from .topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]

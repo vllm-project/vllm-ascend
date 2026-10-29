@@ -46,7 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure 
     topology as topology_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LoadCommand,
     LookupRequest,
     RangeStoreCommand,
@@ -402,7 +402,7 @@ def test_worker_factory_closes_backend_when_resource_creation_fails(monkeypatch)
     def fail_resources(*_args, **_kwargs):
         raise RuntimeError("resource creation failed")
 
-    monkeypatch.setattr(factory_module, "KVPoolResources", fail_resources)
+    monkeypatch.setattr(factory_module, "Resources", fail_resources)
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
@@ -701,7 +701,7 @@ def test_factories_reject_configuration_before_ranks_and_resource_creation(confi
     acquire = Mock(side_effect=AssertionError("Configuration must precede runtime dependencies"))
     for module, names in (
         (topology_module, ("get_tp_group", "get_pp_group")),
-        (factory_module, ("LookupClient", "resolve_backend_spec", "KVPoolResources")),
+        (factory_module, ("LookupClient", "resolve_backend_spec", "Resources")),
     ):
         for name in names:
             monkeypatch.setattr(module, name, acquire)

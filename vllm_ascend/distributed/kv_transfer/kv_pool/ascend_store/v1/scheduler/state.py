@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..infrastructure.protocol.messages import TailKeyBoundary
+from ..protocol.messages import TailKeyBoundary
 
 
 @dataclass(frozen=True, slots=True)

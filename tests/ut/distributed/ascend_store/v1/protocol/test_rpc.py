@@ -10,16 +10,16 @@ import pytest
 from zmq.constants import RCVTIMEO, SNDTIMEO, SocketType
 from zmq.sugar.context import Context
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol import rpc
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.lookup import LookupCodec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import rpc
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
+    LookupClient,
+    LookupCodec,
+    LookupServer,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LookupRequest,
     LookupResult,
     TailKeyBoundary,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.rpc import (
-    LookupClient,
-    LookupServer,
 )
 
 
@@ -193,7 +193,7 @@ def test_lookup_rpc_close_keeps_active_query_owned_until_it_can_stop(lookup_addr
                 socket.connect(lookup_address)
                 socket.send_multipart(LookupCodec().encode_request(LookupRequest(0, 4, (0,), (b"a",))))
                 assert query_started.wait(timeout=2)
-                with pytest.raises(RuntimeError, match="Worker resources must remain open"):
+                with pytest.raises(RuntimeError, match="handler resources must remain open"):
                     server.close(timeout=0)
                 finish_query.set()
                 server.close(timeout=2)
@@ -207,5 +207,18 @@ def test_lookup_rpc_close_keeps_active_query_owned_until_it_can_stop(lookup_addr
 
 
 def test_lookup_rpc_reports_startup_failure_without_waiting_for_a_query() -> None:
-    with pytest.raises(RuntimeError, match="Failed to start Lookup server"):
+    with pytest.raises(RuntimeError, match="Failed to start RPC server"):
         LookupServer(lambda _request: LookupResult(0), "unsupported://lookup")
+
+
+def test_lookup_encoding_failure_is_not_a_cache_miss(monkeypatch) -> None:
+    def unexpected_connection(*_args, **_kwargs):
+        pytest.fail("Local encoding failure must not open a connection")
+
+    monkeypatch.setattr(rpc, "make_zmq_socket", unexpected_connection)
+    client = LookupClient("unused")
+    try:
+        with pytest.raises(OverflowError):
+            client.lookup(LookupRequest(0, -1, (0,), (b"a",)))
+    finally:
+        client.close()

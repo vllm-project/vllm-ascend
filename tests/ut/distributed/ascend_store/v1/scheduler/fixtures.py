@@ -9,7 +9,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MambaSpec
 
 from tests.ut.distributed.ascend_store.v1.helpers import make_pool_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import KVPoolConfig
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LookupResult,
     TailKeyBoundary,
 )

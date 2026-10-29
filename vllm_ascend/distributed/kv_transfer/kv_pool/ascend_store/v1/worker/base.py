@@ -16,9 +16,9 @@ from vllm.logger import logger
 from ..infrastructure.coordinator import Coordinator
 from ..infrastructure.execution import Executor
 from ..infrastructure.mapping import KeyTable, map_keys
-from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
-from ..infrastructure.resources import KVPoolResources
+from ..infrastructure.resources import Resources
 from ..infrastructure.topology import KVPoolTopology
+from ..protocol.messages import KVTransferStep, LoadCommand, LookupRequest, LookupResult, StoreCommand
 from .transfer.batch import (
     KeysByPartition,
     KVGroupBatch,
@@ -73,7 +73,7 @@ class KVPoolWorker(ABC):
     def __init__(
         self,
         topology: KVPoolTopology,
-        resources: KVPoolResources,
+        resources: Resources,
         executors: Sequence[Executor],
         *,
         store_enabled: bool,

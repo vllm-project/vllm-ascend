@@ -149,7 +149,7 @@ Store 钩子在调用线程记录来源就绪事件，再把工作交给队列�
 
 ### 4.6 Resources
 
-`KVPoolResources` 持有执行器、Backend 对象会话、内存注册句柄和客户端，并保留 KV Tensor 引用。Worker 持有 Mapping 与每步 Session。
+`Resources` 持有执行器、Backend 对象会话、内存注册句柄和客户端，并保留 KV Tensor 引用。Worker 持有 Mapping 与每步 Session。
 
 绑定时先提取真实 Tensor/view 的基址、块载荷、块 stride 和层边界。Worker 据此建立 Mapping，随后注册 buffer，最后启动执行器。有效载荷决定需要复制的字节；注册范围覆盖原生传输可能访问的分配跨度。共享 storage 的多个 view 要按实际地址跨度处理，块间 padding 影响跨度但不进入对象载荷。group block 与 kernel block 的比例也在绑定时落实，空 Entry 被跳过。
 

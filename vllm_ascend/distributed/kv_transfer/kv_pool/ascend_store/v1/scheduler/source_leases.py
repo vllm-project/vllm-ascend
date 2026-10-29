@@ -12,7 +12,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from ..infrastructure.configuration import KVPoolConfig
 from ..infrastructure.coordinator import checkpoint_companion_indices, store_block_range, store_group_mask
-from ..infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
+from ..protocol.messages import CheckpointStoreCommand, StoreCommand
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool

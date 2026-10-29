@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...infrastructure.protocol.messages import StoreCommand
+from ...protocol.messages import StoreCommand
 from .batch import KVTransferBatch, TransferSource
 
 
