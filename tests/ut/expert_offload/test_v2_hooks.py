@@ -17,12 +17,13 @@ import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
-from vllm_ascend.expert_offload.lifecycle import (
-    close_expert_offload_on_shutdown,
+from vllm_ascend.expert_offload.quantization import expert_adapter_type, maybe_offload_quant_method
+from vllm_ascend.expert_offload.utils import (
+    expert_offload_loading,
     finalize_expert_offload_loading,
-    guard_expert_offload_loading,
+    is_offload_target_loading,
 )
-from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter, maybe_offload_quant_method
+from vllm_ascend.quantization.quant_type import QuantType
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -44,13 +45,8 @@ def load_hook_class(path, class_name, methods, parent, namespace):
                 )
     assert len(selected) == len(methods)
     for method in selected:
-        # Exercise offload lifecycle decorators while excluding unrelated runtime wrappers.
-        method.decorator_list = [
-            decorator
-            for decorator in method.decorator_list
-            if isinstance(decorator, ast.Name)
-            and decorator.id in ("guard_expert_offload_loading", "close_expert_offload_on_shutdown")
-        ]
+        # Exercise actual method bodies without unrelated runtime wrappers.
+        method.decorator_list = []
     class_body: list[ast.stmt] = [
         field for field in node.body if isinstance(field, ast.AnnAssign) and isinstance(field.value, ast.Constant)
     ] + list(selected)
@@ -74,7 +70,7 @@ def load_hook_class(path, class_name, methods, parent, namespace):
 def loading_memory(monkeypatch):
     memory_allocated = Mock(side_effect=[100, 164])
     monkeypatch.setattr(
-        "vllm_ascend.expert_offload.lifecycle.torch",
+        "vllm_ascend.expert_offload.utils.torch",
         SimpleNamespace(npu=SimpleNamespace(memory_allocated=memory_allocated)),
     )
     return memory_allocated
@@ -85,7 +81,6 @@ def warmups(monkeypatch):
     modules = {}
     for name, functions in {
         "nz_warmup": ("start_nz_warm_thread", "join_nz_warm_thread"),
-        "early_kernel_warmup": ("start_early_kernel_warmup", "join_early_kernel_warmup"),
     }.items():
         qualified = f"vllm_ascend.model_executor.warmup.{name}"
         module = ModuleType(qualified)
@@ -175,9 +170,9 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
         Parent,
         {
             "torch": torch,
-            "guard_expert_offload_loading": guard_expert_offload_loading,
             "finalize_expert_offload_loading": finalize_expert_offload_loading,
-            "close_expert_offload_on_shutdown": close_expert_offload_on_shutdown,
+            "expert_offload_loading": expert_offload_loading,
+            "logger": Mock(),
             "CUDAGraphMode": SimpleNamespace(NONE=0),
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
             "IntermediateTensors": type("IntermediateTensors", (), {}),
@@ -194,7 +189,7 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
     runner = runner_class()
     runner.expert_offload_manager = manager
     runner._uses_flashmla = False
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=None, model_config=object())
     runner.device = "cpu"
     runner.compilation_config = SimpleNamespace(cudagraph_mode=0)
     runner._start_dump_data = Mock()
@@ -253,7 +248,7 @@ def test_dummy_load_rejected_before_parent_and_loading_failure_closes_manager():
 
 @pytest.mark.parametrize(
     "enabled,failure",
-    [(enabled, failure) for enabled in (False, True) for failure in ("start_nz", "start", "load", "join", "join_early")]
+    [(enabled, failure) for enabled in (False, True) for failure in ("start_nz", "load", "join")]
     + [(True, "finalize")],
 )
 def test_loading_failure_preserves_native_warmup_behavior_and_closes_offload(warmups, enabled, failure):
@@ -261,25 +256,17 @@ def test_loading_failure_preserves_native_warmup_behavior_and_closes_offload(war
     runner, _ = make_runner(manager=manager, fail_load=failure == "load")
     if failure == "start_nz":
         warmups.nz_warmup.start_nz_warm_thread.side_effect = RuntimeError("start_nz failed")
-    elif failure == "start":
-        warmups.early_kernel_warmup.start_early_kernel_warmup.side_effect = RuntimeError("start failed")
     elif failure == "join":
         warmups.nz_warmup.join_nz_warm_thread.side_effect = RuntimeError("join failed")
-    elif failure == "join_early":
-        warmups.early_kernel_warmup.join_early_kernel_warmup.side_effect = RuntimeError("join_early failed")
     elif failure == "finalize":
         assert manager is not None
         manager.finalize_loading.side_effect = RuntimeError("finalize failed")
     with pytest.raises(RuntimeError, match=f"{failure} failed"):
         runner.load_model()
-    if failure in ("start_nz", "start"):
+    if failure == "start_nz":
         warmups.nz_warmup.join_nz_warm_thread.assert_not_called()
     else:
         warmups.nz_warmup.join_nz_warm_thread.assert_called_once_with()
-    if failure in ("start_nz", "start", "join"):
-        warmups.early_kernel_warmup.join_early_kernel_warmup.assert_not_called()
-    else:
-        warmups.early_kernel_warmup.join_early_kernel_warmup.assert_called_once_with("load_model")
     if manager is not None:
         manager.close.assert_called_once_with()
         if failure != "finalize":
@@ -291,7 +278,7 @@ def test_loading_cleanup_failure_preserves_the_original_error():
     manager.close.side_effect = RuntimeError("cleanup failed")
     runner, _ = make_runner(manager=manager, fail_load=True)
     with (
-        patch("vllm_ascend.expert_offload.lifecycle.logger.exception") as log,
+        patch.object(runner.load_model.__globals__["logger"], "exception") as log,
         pytest.raises(RuntimeError, match="load failed"),
     ):
         runner.load_model()
@@ -299,18 +286,17 @@ def test_loading_cleanup_failure_preserves_the_original_error():
     log.assert_called_once_with("Failed to clean up expert offload after model loading failure")
 
 
-def test_pool_accounting_starts_after_both_warmups(warmups, loading_memory):
+def test_pool_accounting_starts_after_native_warmup(warmups, loading_memory):
     manager = Mock()
     runner, _ = make_runner(manager=manager)
     runner.compilation_config.cudagraph_mode = 1
     order = Mock()
     order.attach_mock(warmups.nz_warmup.join_nz_warm_thread, "join_nz")
-    order.attach_mock(warmups.early_kernel_warmup.join_early_kernel_warmup, "join_early")
     order.attach_mock(manager.finalize_loading, "finalize")
     order.attach_mock(loading_memory, "memory")
     order.attach_mock(runner._start_dump_data, "dump")
     runner.load_model()
-    assert [entry[0] for entry in order.mock_calls] == ["join_nz", "join_early", "memory", "finalize", "memory", "dump"]
+    assert [entry[0] for entry in order.mock_calls] == ["join_nz", "memory", "finalize", "memory", "dump"]
     assert runner.model_memory_usage == 1064
     assert runner.model_state.prompt_logprobs_worker is runner.prompt_logprobs_worker
 
@@ -424,7 +410,7 @@ def quant_methods(monkeypatch):
             setattr(param, key, value)
 
     scheme = SimpleNamespace(
-        quant_type="mxfp4",
+        quant_type=QuantType.W4A8MXFP,
         group_size=32,
         get_weight=lambda *args: {"w13_weight": torch.empty(6, 4, 3), "w2_weight": torch.empty(6, 4, 3)},
         get_dynamic_quant_param=lambda *args: {
@@ -456,11 +442,13 @@ def quant_methods(monkeypatch):
             "AscendFusedMoEMethod": native_cls,
             "torch": torch,
             "LayerOffloadBinding": binding_factory,
-            "MXFP4ExpertAdapter": MXFP4ExpertAdapter,
-            "QuantType": SimpleNamespace(W4A8MXFP="mxfp4"),
+            "expert_adapter_type": expert_adapter_type,
         },
     )
-    state = SimpleNamespace(config=None)
+    target = object()
+    state = SimpleNamespace(config=None, model_config=target)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")
+    runner = SimpleNamespace(vllm_config=SimpleNamespace(model_config=target), expert_offload_manager=object())
     config_module = ModuleType("vllm_ascend.ascend_config")
     monkeypatch.setattr(
         config_module, "get_ascend_config", lambda: SimpleNamespace(expert_offload_config=state.config), raising=False
@@ -485,21 +473,29 @@ def quant_methods(monkeypatch):
     layer.tid2eid = None
     layer.moe_config = object()
     return SimpleNamespace(
-        native_cls=native_cls, offload_cls=offload_cls, layer=layer, state=state, scheme=scheme, binding=binding_factory
+        native_cls=native_cls,
+        offload_cls=offload_cls,
+        layer=layer,
+        state=state,
+        scheme=scheme,
+        binding=binding_factory,
+        runner=runner,
     )
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("is_draft", [False, True])
-def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_methods, enabled, is_draft):
+@pytest.mark.parametrize("model_tag", ["backbone", "dspark_head", "draft_model", "eagle_head"])
+def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_methods, monkeypatch, enabled, model_tag):
+    is_draft = model_tag != "backbone"
     q = quant_methods
     config = ExpertOffloadConfig(enabled=enabled, num_device_experts=2 if enabled else None)
     q.state.config = config
     layer = q.layer
-    layer._expert_offload_enabled = not is_draft
     native = q.native_cls(q.scheme, layer.moe_config)
     quant_config = SimpleNamespace(get_quant_method=Mock(return_value=native))
-    method = layer._get_quant_method("experts", quant_config, layer.moe_config)
+    with expert_offload_loading(q.runner):
+        monkeypatch.setattr("vllm.compilation.backends.model_tag", model_tag)
+        method = layer._get_quant_method("experts", quant_config, layer.moe_config)
     quant_config.get_quant_method.assert_called_once_with(layer, "experts", tid2eid=None)
     offloaded = enabled and not is_draft
     assert isinstance(method, q.offload_cls) is offloaded
@@ -525,22 +521,44 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_met
 
 def test_missing_offload_config_preserves_native_method(quant_methods):
     layer = quant_methods.layer
-    layer._expert_offload_enabled = True
     native = object()
     quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
     assert layer._get_quant_method("experts", quant_config, None) is native
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_loading_scope_restores_nested_disabled_load_and_failure(quant_methods, fail):
+    from vllm.compilation.backends import set_model_tag
+
+    assert not is_offload_target_loading()
+    try:
+        with expert_offload_loading(quant_methods.runner):
+            assert is_offload_target_loading()
+            # A multimodal inner model may clone ModelConfig; the loading tag
+            # still identifies the target without a model-specific exception.
+            with patch("vllm.config.get_current_vllm_config", return_value=object()):
+                assert is_offload_target_loading()
+            with expert_offload_loading(SimpleNamespace(expert_offload_manager=None)):
+                assert not is_offload_target_loading()
+            assert is_offload_target_loading()
+            with set_model_tag("dspark_head"):
+                assert not is_offload_target_loading()
+            assert is_offload_target_loading()
+            if fail:
+                raise RuntimeError("loading failed")
+    except RuntimeError as error:
+        assert fail and str(error) == "loading failed"
+    assert not is_offload_target_loading()
+
+
 def test_routed_owner_rejects_unquantized_or_unsupported_adapter(quant_methods):
     quant_methods.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
     layer = quant_methods.layer
-    layer._expert_offload_enabled = True
-    with pytest.raises(ValueError, match="quantized"):
+    with expert_offload_loading(quant_methods.runner), pytest.raises(ValueError, match="quantized"):
         layer._get_quant_method("experts", None, object())
     quant_config = SimpleNamespace(get_quant_method=lambda *_args, **_kwargs: object())
-    with pytest.raises(ValueError, match="does not support"):
+    with expert_offload_loading(quant_methods.runner), pytest.raises(ValueError, match="does not support"):
         layer._get_quant_method("experts", quant_config, object())
-    layer._expert_offload_enabled = False
     assert layer._get_quant_method("experts", quant_config, object()) is not None
 
 

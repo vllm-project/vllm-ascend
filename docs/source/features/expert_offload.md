@@ -31,16 +31,26 @@ Expert offload is disabled by default. Enable target expert offload using the ex
 The slot count must satisfy `top_k <= num_device_experts < num_experts` for every target routed expert layer. Unknown keys, string booleans, non-integral slot counts, and invalid capacities fail early.
 
 Model compatibility is checked per routed-expert layer, not by a target model-name
-allowlist. The current adapter requires W4A8 MXFP with group size 32, packed gate/up
-and down weights, complete E8M0 scales, an expert/shard checkpoint loader, native
-post-processing and gated SiLU or SITU activation. All target routed layers must be
+allowlist. Ascend 950 (A5) hardware is required. The adapters accept W4A8 MXFP
+(group size 32, gated SiLU/SITU), W8A8 MXFP8 (group size 32, gated SiLU),
+W8A8 INT8 (channel scales/offsets, gated SiLU), and native block FP8 checkpoints
+that the existing scheme executes as MXFP8 on A5. Each layer must expose complete
+gate/up/down tensors, an expert/shard checkpoint loader and native post-processing.
+All target routed layers must be
 offloaded, and their layouts must be compatible with the single shared pool.
 Raw tensor shapes and dtypes are checked before allocating owned host storage;
 native physical NZ storage is checked during preparation and transfer. Shared and
 dense model weights follow their existing paths.
 
 Full-model acceptance recorded below covers the locally stored
-DeepSeek-V4-Flash-0731 checkpoint. Passing the capability checks for another model
+DeepSeek-V4-Flash-0731 checkpoint. GLM-5.3-Flash (`Glm5Next`) and
+Qwen3.8-Flash-Next (`Qwen4Exp`) now have expert-format adapters for their native
+MoE paths. GLM's checkpoint-native MTP composition is described below. This
+feature requires Model Runner V2. Full-model accuracy and memory acceptance are
+checkpoint-specific; passing format and configuration checks does not establish
+them. Start validation without `speculative_config`, then validate the combined
+configuration against the same checkpoint with speculative decoding disabled.
+Passing the capability checks for another model
 does not establish full-model hardware or accuracy acceptance for that model.
 
 Required settings are MRV2 and single-worker execution with TP/DP/PP/PCP/DCP sizes equal to one. Use `enforce_eager=True` for eager, or compilation mode `NONE` with `FULL_DECODE_ONLY` for ACL graph. Compiled/piecewise or mixed graphs, expert parallelism, EPLB, dual batch overlap, LoRA, sleep mode, online weight reload, generic CPU weight offload, and PD disaggregation are unsupported. Biased experts and sequence-parallel expert execution are also rejected. Use normal `auto`, `safetensors`, or `pt` checkpoint loading; dummy and preprocessed weight-cache loaders are unsupported.
@@ -53,7 +63,7 @@ implementation constraint; a missing hardware result is a validation boundary.
 
 | Area | Current requirement and reason | Extension work |
 | --- | --- | --- |
-| Expert format | W4A8 MXFP, group size 32, complete packed tensors and supported gated activation | Add an adapter and loader/physical-copy/GEMM tests for each new format |
+| Expert format | W4A8 MXFP, W8A8 MXFP8, W8A8 INT8 or block FP8 converted through native MXFP8; complete tensors and supported gated activation | Validate each checkpoint and native physical-copy/GEMM path on A5 |
 | Worker ownership | TP/DP/PP/PCP/DCP equal one; slots and maps are worker-local | Define distributed ownership, communication and failure recovery |
 | EP/EPLB and mixed placement | Other expert placement/remapping must not invalidate the residency map | Coordinate placement changes with resident slots and host bytes |
 | DBO, shared-expert overlap and alternate fused dispatch | One pool and one execution scope are reused; alternate dispatch integration is absent | Add independently owned execution buffers and overlap/dispatch acceptance |
@@ -62,13 +72,21 @@ implementation constraint; a missing hardware result is a validation boundary.
 | LoRA, expert bias and sequence parallel | Their slot/weight-view integration is not implemented | Add composition, numerical and lifecycle coverage before enabling |
 | Checkpoint loader | `auto`, `safetensors` or `pt` must report every expert/shard | Adapt completeness tracking for other loaders |
 | Shared full-expert pool | All adopted target layers require homogeneous specifications | Introduce bounded pools for distinct layout families |
-| DSpark | Same checkpoint, DeepSeek V4 draft architecture, eager draft, fixed verification, one request | Validate other draft architectures and concurrent drafting separately |
+| Optional speculative decoding | Checkpoint-native DeepSeek V4 DSpark or GLM-5.3-Flash MTP; eager draft and fixed verification | Validate other draft architectures and draft graphs separately |
 | Other target model names | Accepted only when every layer satisfies the adapter contract | Run matching checkpoint, eager/graph and offload-disabled acceptance |
+
+DSpark is optional: expert offload can run without `speculative_config`, including
+with multiple requests. In that case, target-model compatibility is determined by
+the routed-expert capability checks above. The draft architecture restrictions only
+apply when speculative decoding is configured; they are not a target-model allowlist.
 
 DSpark KV-cache input preparation follows the main implementation unchanged.
 Expert offload only manages target expert bindings and runner-owned cleanup.
-Draft experts remain fully resident on the NPU and use the existing DSpark
+Draft experts remain fully resident on the NPU and use the existing native
 loading and execution paths, without offload bindings or offload-owned pinned storage.
+The runner scopes offload to the target loading tag. Native draft loading tags
+exclude drafts even when DSpark retains the target ModelConfig; multimodal
+language submodels remain eligible when they clone ModelConfig under the target tag.
 
 ### Manager lifecycle
 
@@ -85,13 +103,13 @@ The configuration accepts both synchronous and asynchronous scheduling. Offload 
 
 Historical validation of `fe34a97da` on the local 0731 checkpoint includes target-only execution with the original prepared pinned storage. Target-plus-DSpark validation used 128 slots in each model, FP8 KV, a 3 GiB KV budget, a six-token target graph and eager fixed drafting. That run required a separate bounded pinned-staging workaround after full host pinned allocation failed. It passed five greedy requests, including 65536 input and 1024 output tokens, with matching synchronous/asynchronous output hashes.
 
-An October 23 follow-up on Ascend 950PR used the same PR baseline with separate bounded pinned staging and allocator prewarm. Nine shared requests matched between synchronous and asynchronous DSpark execution, including actual prefix-cache hits and partial/full draft rejection. Nine shared requests also matched with DSA attention overlap enabled. With DSpark disabled, four concurrent requests matched their serial references; mixed batches, graph-capacity eager fallback, cancellation recovery and a pure-eager reference were covered. DSpark remains restricted to one request at a time.
+An October 23 follow-up on Ascend 950PR used the same PR baseline with separate bounded pinned staging and allocator prewarm. Nine shared requests matched between synchronous and asynchronous DSpark execution, including actual prefix-cache hits and partial/full draft rejection. Nine shared requests also matched with DSA attention overlap enabled. With DSpark disabled, four concurrent requests matched their serial references; mixed batches, graph-capacity eager fallback, cancellation recovery and a pure-eager reference were covered. These DSpark runs used one request at a time; this is a validation boundary, not a `max_num_seqs` restriction.
 
 These resource workarounds are not included in this guard-removal change. The original direct-pinned DSpark asynchronous path and acceptance after migration to current main remain pending. The diagnostic runs do not establish an asynchronous throughput improvement.
 
 ### Checkpoint-native DSpark
 
-The supported speculative configuration is the DeepSeek V4 checkpoint's own DSpark draft, with `max_num_seqs=1`, eager drafting and fixed verification. Other speculative methods, external drafts, draft graphs and adaptive verification remain rejected. For the locally tested 0731 checkpoint, the draft block size is five:
+DeepSeek V4 uses the checkpoint's own DSpark draft, with eager drafting and fixed verification. Expert offload does not impose a single-request limit. Decode graph eligibility is checked against the padded token count and resident expert capacity; batches beyond that bound use the existing eager fallback. GLM MTP is described below. External drafts, other speculative architectures, draft graphs and adaptive verification remain rejected. For the locally tested 0731 checkpoint, the draft block size is five:
 
 ```bash
 --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
@@ -110,6 +128,37 @@ The current policy still requires full-checkpoint acceptance under the selected
 NPU memory budget; historical results below used the previous policy.
 
 Uniform verification descriptors can contain several tokens per request. Capture and dispatch include every verification and padding row in the existing capacity bound. Five draft tokens plus the new target token require at least 36 slots at top-k six for a six-token target graph. Adding the draft also increases model and KV memory; a slot count that fits ordinary decode is not guaranteed to fit DSpark. This integration does not enable LRC, expert prefetch or hot-expert preload.
+
+### Checkpoint-native GLM-5.3-Flash MTP
+
+GLM-5.3-Flash can combine target expert offload with its checkpoint's own
+`Glm5NextMTPModel` head. The draft stays fully resident on the NPU. Both
+synchronous and asynchronous scheduling are accepted, including multiple requests.
+Use eager drafting and fixed verification:
+
+```bash
+--speculative-config '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}'
+--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16]}'
+--additional-config '{"expert_offload_config":{"enabled":true,"num_device_experts":68}}'
+```
+
+The GLM deployment guide's `deepseek_mtp` method is a legacy alias that vLLM
+normalizes to `mtp`; it still loads GLM's own head. The target must use the
+`glm5_next_text` configuration and the draft must come from the same checkpoint.
+`enforce_eager` inside `speculative_config` applies to the draft, while the target
+can use decode graphs.
+
+For three draft tokens, verification contains four tokens per request. At top-k
+eight, 68 resident experts admit four-token and eight-token target graphs. A
+four-request verification batch has 16 tokens and a worst-case 128 expert routes,
+so it uses the existing eager capacity fallback. Graph filtering does not reduce
+`max_num_seqs`. Allow additional NPU memory for the full-resident draft and its KV
+cache; the target resident count alone does not bound total model memory.
+
+Full-checkpoint MRV2 runs have exercised expert transfers, target graph replay,
+concurrent eager fallback and native MTP acceptance. Exact greedy equivalence
+with MTP-disabled decoding has not passed for every mixed batch; numerical
+acceptance remains pending.
 
 ## Serving example
 

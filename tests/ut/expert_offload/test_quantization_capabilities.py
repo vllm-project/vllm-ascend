@@ -8,6 +8,7 @@ import torch
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import LayerOffloadBinding
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def layer_and_scheme():
@@ -23,7 +24,7 @@ def layer_and_scheme():
         w13_weight_scale=torch.zeros(6, 128, 2, dtype=torch.uint8),
         w2_weight_scale=torch.zeros(6, 64, 2, dtype=torch.uint8),
     )
-    return layer, SimpleNamespace(group_size=32, process_weights_after_loading=Mock())
+    return layer, SimpleNamespace(quant_type=QuantType.W4A8MXFP, group_size=32, process_weights_after_loading=Mock())
 
 
 @pytest.mark.parametrize("activation", ["silu", "situ", SimpleNamespace(value="silu")])

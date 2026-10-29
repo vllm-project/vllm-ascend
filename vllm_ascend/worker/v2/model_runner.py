@@ -94,11 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.lifecycle import (
-    close_expert_offload_on_shutdown,
-    finalize_expert_offload_loading,
-    guard_expert_offload_loading,
-)
+from vllm_ascend.expert_offload.utils import expert_offload_loading, finalize_expert_offload_loading
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -300,34 +296,47 @@ class NPUModelRunner(GPUModelRunner):
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
 
-    @guard_expert_offload_loading
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        from vllm_ascend.model_executor.warmup.nz_warmup import (
-            join_nz_warm_thread,
-            start_nz_warm_thread,
-        )
-
-        # Overlap the one-off NZ cast with weight I/O. Every model goes
-        # through here.
-        start_nz_warm_thread("thread")
+        offload = self.expert_offload_manager
+        if offload is not None and load_dummy_weights:
+            raise ValueError(
+                "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
+            )
         try:
-            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            super().load_model(load_dummy_weights, *args, **kwargs)
-            self.pd_dspark_aux_layer_ids = aux_layers
-        finally:
-            # Join even when weight loading fails: these threads touch the NPU
-            # device and must not outlive this call. Joining here is also before
-            # memory profiling.
-            join_nz_warm_thread()
+            from vllm_ascend.model_executor.warmup.nz_warmup import (
+                join_nz_warm_thread,
+                start_nz_warm_thread,
+            )
 
-        finalize_expert_offload_loading(self)
+            # Overlap the one-off NZ cast with weight I/O. Every model goes
+            # through here.
+            start_nz_warm_thread("thread")
+            try:
+                aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+                with expert_offload_loading(self):
+                    super().load_model(load_dummy_weights, *args, **kwargs)
+                self.pd_dspark_aux_layer_ids = aux_layers
+            finally:
+                # Join even when weight loading fails: these threads touch the NPU
+                # device and must not outlive this call. Joining here is also before
+                # memory profiling.
+                join_nz_warm_thread()
 
-        # In cudagraph modes the dumper must be started before graph capture so
-        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
-        # the dumper at the end of load_model).
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            self._start_dump_data()
-        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+            finalize_expert_offload_loading(self)
+
+            # In cudagraph modes the dumper must be started before graph capture so
+            # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
+            # the dumper at the end of load_model).
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                self._start_dump_data()
+            self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+        except Exception:
+            if offload is not None:
+                try:
+                    offload.close()
+                except Exception:
+                    logger.exception("Failed to clean up expert offload after model loading failure")
+            raise
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -590,18 +599,21 @@ class NPUModelRunner(GPUModelRunner):
                 self._c8_mxfp_v_scale_caches.append((layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page))
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
-    @close_expert_offload_on_shutdown
     def shutdown(self) -> None:
-        # Drop C8 packet views before the parent collects tensors and
-        # empties the allocator cache.
-        entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
-        if entries is not None:
-            entries.clear()
-        zeroer = getattr(self, "kv_block_zeroer", None)
-        if isinstance(zeroer, C8KVBlockZeroer):
-            zeroer.entries.clear()
-            self.kv_block_zeroer = zeroer.delegate
-        super().shutdown()
+        try:
+            if self.expert_offload_manager is not None:
+                self.expert_offload_manager.close()
+        finally:
+            # Drop C8 packet views before the parent collects tensors and
+            # empties the allocator cache, even when offload cleanup fails.
+            entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
+            if entries is not None:
+                entries.clear()
+            zeroer = getattr(self, "kv_block_zeroer", None)
+            if isinstance(zeroer, C8KVBlockZeroer):
+                zeroer.entries.clear()
+                self.kv_block_zeroer = zeroer.delegate
+            super().shutdown()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

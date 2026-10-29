@@ -14,12 +14,14 @@ from vllm_ascend.expert_offload.expert_offload_manager import (
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class LayoutScheme:
     """CPU contract double, not a substitute for an MXFP NPU kernel test."""
 
     group_size = 32
+    quant_type = QuantType.W4A8MXFP
 
     def process_weights_after_loading(self, layer):
         for name in MXFP4ExpertAdapter.tensor_names:
@@ -130,6 +132,7 @@ def test_decode_eviction_prefill_and_overflow_preserve_parameters():
     manager = ready_model(layer)
     binding = layer._expert_offload_binding
     addresses = {name: getattr(layer, name).data_ptr() for name in binding.resident}
+    map_addresses = (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
     manager.begin_execution()
     manager.has_prefill = False
     with patch.object(manager, "get_comm", return_value=object()):
@@ -154,8 +157,11 @@ def test_decode_eviction_prefill_and_overflow_preserve_parameters():
         view, physical, _ = binding.prepare(layer, ids)
         assert_selected_bundles(binding, view, physical, ids)
     assert addresses == {name: getattr(layer, name).data_ptr() for name in binding.resident}
+    assert map_addresses == (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
     manager.finish_execution(failed=False)
     assert manager.state is OffloadState.READY
+    manager.close()
+    assert binding.mapping is None
 
 
 def test_pool_is_reused_between_layers_and_restores_correct_contents():
@@ -233,12 +239,22 @@ def test_native_loading_prepares_host_storage_before_publishing_residency(monkey
     events = []
     binding = object.__new__(LayerOffloadBinding)
     binding.resident = {}
+    binding.num_experts = 6
     binding.num_slots = 2
     binding.device = SimpleNamespace(type="npu")
     binding.graph_staging = {}
     binding.residency = ExpertResidency(6, 2)
-    tensors = {name: object() for name in MXFP4ExpertAdapter.tensor_names}
-    binding.adapter = SimpleNamespace(materialize=lambda *args: tensors)
+    tensors = {name: torch.arange(4, dtype=torch.float32) for name in MXFP4ExpertAdapter.tensor_names}
+    binding.adapter = SimpleNamespace(materialize=lambda *args: tensors, tensor_names=MXFP4ExpertAdapter.tensor_names)
+    mapping = object()
+
+    def allocate_mapping(num_experts, device):
+        assert num_experts == 6 and device is binding.device
+        assert binding.residency.logical_to_physical() == (-1,) * 6
+        events.append("mapping")
+        return mapping
+
+    monkeypatch.setattr("vllm_ascend.expert_offload.expert_offload_manager.ExpertMapBuffer", allocate_mapping)
 
     def prepare(*args):
         assert binding.residency.logical_to_physical() == (-1,) * 6
@@ -257,7 +273,7 @@ def test_native_loading_prepares_host_storage_before_publishing_residency(monkey
         SimpleNamespace(current_stream=lambda device: SimpleNamespace(synchronize=lambda: events.append("sync"))),
         raising=False,
     )
-    layer = SimpleNamespace(**{name: SimpleNamespace(data=None) for name in tensors})
+    layer = SimpleNamespace(**{name: torch.nn.Parameter(torch.empty(0), requires_grad=False) for name in tensors})
     if fail_preparation:
         with pytest.raises(RuntimeError, match="native preparation failed"):
             binding.process_weights_after_loading(layer)
@@ -267,5 +283,6 @@ def test_native_loading_prepares_host_storage_before_publishing_residency(monkey
     else:
         binding.process_weights_after_loading(layer)
         assert binding.residency.logical_to_physical() == (0, 1, -1, -1, -1, -1)
-        assert events == ["finalize", "sync", "prepare"]
-        assert all(getattr(layer, name).data is value for name, value in tensors.items())
+        assert events == ["finalize", "sync", "prepare", "mapping"]
+        assert binding.mapping is mapping
+        assert all(getattr(layer, name).data_ptr() == value.data_ptr() for name, value in tensors.items())

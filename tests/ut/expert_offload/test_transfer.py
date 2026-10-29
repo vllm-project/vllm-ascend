@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
-from vllm_ascend.expert_offload.types import PreparedExpertTensor
+from vllm_ascend.expert_offload.utils import PreparedExpertTensor
 
 
 def _tensor(count, pointer, *, physical_elements=None, storage_bytes=None):

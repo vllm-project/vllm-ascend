@@ -425,12 +425,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *args,
         tid2eid=None,
         n_shared_experts: int = 0,
-        expert_offload_enabled: bool = True,
         **kwargs,
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
-        # Quant-method selection happens inside the upstream constructor.
-        object.__setattr__(self, "_expert_offload_enabled", expert_offload_enabled)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
