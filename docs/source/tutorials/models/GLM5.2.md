@@ -57,6 +57,10 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
+Replace `{tag}` with a published tag compatible with the selected hardware
+and scenario before running these commands. Use the same image on every
+node in the deployment.
+
 **Step 1:** Download the Docker image
 
 ```bash
@@ -319,6 +323,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       --api-server-count 1 \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
+      --enable-expert-parallel \
       --seed 1024 \
       --served-model-name glm \
       --tool-call-parser glm47 \
@@ -347,6 +352,8 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       and indexer KV caches use `int8` in this hardware tab.
     - `FULL_DECODE_ONLY` captures only Decode execution; `deepseek_mtp` uses
       three speculative tokens with an eager draft model.
+    - `--enable-expert-parallel` is required for the requested DSA context
+      parallelism and FlashComm1 with this TP16/DP1 layout.
     - `HCCL_BUFFSIZE=200` follows the common HCCL buffer definition above.
 
 #### 5.1.2 Multi-node Deployment {: #512-multi-node-deployment }
@@ -610,7 +617,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --safetensors-load-strategy prefetch \
         --api-server-count 1 \
         --data-parallel-size 8 \
-        --data-parallel-start-rank 0 \
         --data-parallel-size-local 4 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12980 \
@@ -849,7 +855,7 @@ platform-specific group is labeled. Shared parameter meanings are listed in
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
 - `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.
-- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
+- `--data-parallel-start-rank`: Omit this option on API node 0 so rank `0` is inferred and internal DP load balancing is retained. Only headless node 1 explicitly sets `4`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Used on node 1. Node 0 hosts the API server.
@@ -899,6 +905,11 @@ The A2 four-node commands in this section do not enable fused MC2.
 Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
 Topology, role-specific limits and connector settings are explained in each
 hardware tab; apply only the settings for the selected platform.
+
+The proxy commands below use the source tree bundled in the official
+vLLM-Ascend image at `/vllm-workspace/vllm-ascend`. On a separate proxy
+host, run them inside a vLLM-Ascend container. For a source installation,
+replace that prefix with the actual checkout directory.
 
 Select the hardware tab below for the prefill and decode topology. Prefill and decode run on separate node groups and exchange KV cache through Mooncake.
 
@@ -1355,7 +1366,7 @@ layerwise setting and topology.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" "$P2_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -1933,7 +1944,7 @@ layerwise setting and topology.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -2310,7 +2321,7 @@ layerwise setting and topology.
 
     unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
       --host 0.0.0.0 --port 8000 --workers 8 \
       --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
       --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -2321,7 +2332,7 @@ layerwise setting and topology.
         10010 10011 10012 10013 10010 10011 10012 10013
     ```
 
-    Check the proxy and send requests with model name `glm5`, explicitly
+    Check the proxy and send requests with model name `glm`, explicitly
     bypassing any client-side HTTP proxy:
 
     ```shell
@@ -2844,7 +2855,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     D2_IP="<D2_IP>"
     D3_IP="<D3_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -3861,7 +3872,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
-        python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
           --host 0.0.0.0 --port 1999 --workers 8 \
           --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
           --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -4138,7 +4149,7 @@ Select the tab that matches your deployment hardware.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" "$P1_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D1_IP" \
@@ -4638,7 +4649,7 @@ Select the tab that matches your deployment hardware.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -4739,8 +4750,8 @@ settings when comparing results. Scores are specific to the model shown.
 
 ### 7.3 W4A4C8 950DT products Validation Records
 
-Both records below use one 950DT products (96GB × 8), the 2026-10-08 950DT products
-image, TP8/DP1/EP, eager mode, a configured maximum
+Both records below use one 950DT products (96GB × 8), a historical local
+950DT products image, TP8/DP1/EP, eager mode, a configured maximum
 context of 135000, 16384 batched tokens, 20 sequences and FP8 KV/indexer
 caches. On 2026-10-10, `/health`, `/v1/chat/completions` and
 `/v1/completions` returned HTTP 200 for both local checkpoints.
@@ -4748,6 +4759,13 @@ This verifies startup and short requests, not actual 135k inputs,
 tool use or performance. The historical command used `--reasoning-parser glm45`;
 the shared commands now use `glm47` to align with GLM-5.3. That parser
 update has not been revalidated on NPU hardware in this documentation update.
+
+The recorded local Docker image ID is
+`sha256:cc0062c206978be60a1c4b729a9b4975eecdec498e5569f2406a09d6ab98841e`,
+with vLLM `0.30.0+empty` and vLLM-Ascend commit `a50eb57f1`. This is
+a local image ID, not a registry digest or a pullable image reference.
+The image selected in Section 4 must not be assumed to reproduce these
+historical records.
 
 | Model / local checkpoint | Startup and short requests | Dataset result |
 | --- | --- | --- |
@@ -4790,6 +4808,11 @@ group. The single DP16/TP1 Decode group spans D0/D1. Pooling and 1M rows
 refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 
 ### 9.1 Recommended Configurations {: #91-detailed-node-configuration }
+
+The Colocated rows summarize the multi-node examples in
+[Section 5.1.2](#512-multi-node-deployment). The single-node examples in
+[Section 5.1.1](#511-single-node-deployment) use different parallelism and
+scheduler limits; do not apply the multi-node rows to those examples.
 
 | Scenario | Hardware | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

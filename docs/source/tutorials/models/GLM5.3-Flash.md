@@ -672,13 +672,16 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     ##### Start the Proxy
 
-    Run on a separate host after the Prefill and Decode endpoints are healthy.
+    Run inside a vLLM-Ascend container on a separate host after the Prefill
+    and Decode endpoints are healthy. The official image includes the proxy
+    at the absolute path below; for a source installation, replace the
+    checkout prefix with the actual source directory.
 
     ```shell
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
