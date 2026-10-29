@@ -862,7 +862,8 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping_np = batch_req_state.idx_mapping_np
         num_reqs = len(req_ids)
 
-        merge_metadata_upload = self.adaptive_verification is None
+        # PP retains idx_mapping across steps; each batch needs its own storage.
+        merge_metadata_upload = self.adaptive_verification is None and not self.use_pp
         idx_mapping = None
         if not merge_metadata_upload:
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)

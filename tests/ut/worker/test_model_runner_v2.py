@@ -1663,6 +1663,32 @@ def test_prepare_inputs_common_path():
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
 
 
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+def test_pp_prepare_inputs_preserves_mapping_for_deferred_consumers(draft, is_last_pp_rank):
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(draft=draft, use_pp=True)
+    runner.is_last_pp_rank = is_last_pp_rank
+    mappings = []
+
+    def combine_tokens(*args):
+        mappings.append(args[1])
+        return torch.tensor([0, 1], dtype=torch.int32)
+
+    with patch.object(runner, "_upload_batch_metadata", side_effect=AssertionError("PP must use independent uploads")):
+        _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, combine_tokens=combine_tokens)
+        # Mimic a PP queue retaining the first batch's device mapping while a
+        # later batch is prepared in a different request order.
+        first_mapping = mappings[0]
+        batch_req_state.idx_mapping_np = np.array([1, 0], dtype=np.int32)
+        batch_req_state.req_ids = ["r1", "r0"]
+        _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, combine_tokens=combine_tokens)
+
+    torch.testing.assert_close(first_mapping, torch.tensor([0, 1], dtype=torch.int32))
+    torch.testing.assert_close(mappings[1], torch.tensor([1, 0], dtype=torch.int32))
+    assert first_mapping.data_ptr() != mappings[1].data_ptr()
+    assert first_mapping.data_ptr() != runner.input_buffers.idx_mapping_buffer.data_ptr()
+
+
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
 @pytest.mark.parametrize("full_cg", [False, True])
 def test_pd_tail_input_survives_upstream_decode_graph_classification(num_spec_tokens, full_cg):
