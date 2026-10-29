@@ -796,7 +796,8 @@ class SparseKVOffloadManager:
             }
             if len(source_token_capacities) != 1:
                 raise RuntimeError(
-                    f"delayed D2H resident K/V buffers have inconsistent token capacities: {sorted(source_token_capacities)}"
+                    f"delayed D2H resident K/V buffers have inconsistent "
+                    f"token capacities: {sorted(source_token_capacities)}"
                 )
             self.d2h_source_token_capacity = next(iter(source_token_capacities))
             if self.tp_rank == 0:
