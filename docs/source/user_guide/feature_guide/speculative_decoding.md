@@ -966,8 +966,11 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding, PP/PCP/DCP=1, disabled prefix caching,
-Mamba cache mode `none`, and disabled stochastic rounding.
+RecoverSSM requires speculative decoding and does not support pipeline
+parallelism (PP), prefill context parallelism (PCP), or decode context
+parallelism (DCP). Prefix caching and stochastic rounding must be disabled,
+and Mamba cache mode must be `none`.
+
 For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,
 and RecoverSSM settings on both sides.
