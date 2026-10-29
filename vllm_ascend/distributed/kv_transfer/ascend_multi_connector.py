@@ -56,13 +56,6 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
 
-    def on_request_received(self, request: "Request") -> None:
-        """Forward optional, thread-safe input notification to child connectors."""
-        for connector in self._connectors:
-            callback = getattr(connector, "on_request_received", None)
-            if callback is not None:
-                callback(request)
-
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
         providers = []

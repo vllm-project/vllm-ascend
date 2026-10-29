@@ -64,10 +64,10 @@ class MooncakeHeartbeatThread(threading.Thread):
 
     def run(self) -> None:
         peers: dict[tuple[str, int], _Peer] = {}
-        poller = zmq.Poller()
+        poller = zmq.Poller()  # type: ignore[attr-defined]
         encoder = msgspec.msgpack.Encoder()
         next_send = 0.0
-        with zmq.Context() as context:
+        with zmq.Context() as context:  # type: ignore[attr-defined]
             try:
                 while not self.stop_event.is_set():
                     now = time.monotonic()
@@ -82,9 +82,9 @@ class MooncakeHeartbeatThread(threading.Thread):
                         for endpoint, ids in groups.items():
                             if endpoint not in peers:
                                 path = make_zmq_path("tcp", *endpoint)
-                                sock = make_zmq_socket(context, path, zmq.REQ, bind=False)
-                                sock.setsockopt(zmq.LINGER, 0)
-                                poller.register(sock, zmq.POLLIN)
+                                sock = make_zmq_socket(context, path, zmq.REQ, bind=False)  # type: ignore[attr-defined]
+                                sock.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
+                                poller.register(sock, zmq.POLLIN)  # type: ignore[attr-defined]
                                 peers[endpoint] = _Peer(sock)
                             ids_list = tuple(ids)
                             peers[endpoint].pending = deque(
@@ -96,8 +96,8 @@ class MooncakeHeartbeatThread(threading.Thread):
                         try:
                             if peer.ack_deadline:
                                 try:
-                                    response = peer.socket.recv(flags=zmq.NOBLOCK)
-                                except zmq.Again:
+                                    response = peer.socket.recv(flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+                                except zmq.Again:  # type: ignore[attr-defined]
                                     if now < peer.ack_deadline:
                                         continue
                                     raise TimeoutError("heartbeat ACK timed out") from None
@@ -105,12 +105,12 @@ class MooncakeHeartbeatThread(threading.Thread):
                                     raise ValueError(f"Unexpected heartbeat ACK: {response!r}")
                                 peer.ack_deadline = 0.0
                             if peer.pending:
-                                peer.socket.send(peer.pending[0], flags=zmq.NOBLOCK)
+                                peer.socket.send(peer.pending[0], flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
                                 peer.pending.popleft()
                                 peer.ack_deadline = now + HEARTBEAT_ACK_TIMEOUT
-                        except zmq.Again:
+                        except zmq.Again:  # type: ignore[attr-defined]
                             continue
-                        except (zmq.ZMQError, TimeoutError, ValueError):
+                        except (zmq.ZMQError, TimeoutError, ValueError):  # type: ignore[attr-defined]
                             logger.warning("Mooncake heartbeat failed for %s:%d; retrying next interval", *endpoint)
                             self._close_peer(peers.pop(endpoint), poller)
                     if peers:

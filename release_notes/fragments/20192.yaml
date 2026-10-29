@@ -3,8 +3,8 @@ entries:
   - category: feature
     text: >-
       MooncakeConnectorV2 now renews producer KV-cache leases while decode-side
-      requests wait in the engine input queue, wait for scheduling, or complete
-      KV transfers, preventing premature release during long waits.
+      requests wait for scheduling or complete KV transfers after scheduler
+      admission, preventing premature release during long waits.
   - category: config
     text: >-
       MooncakeConnectorV2 now uses kv_connector_extra_config.kv_lease_duration

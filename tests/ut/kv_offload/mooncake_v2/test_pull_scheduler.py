@@ -13,7 +13,6 @@ import zmq
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -913,27 +912,17 @@ def test_local_prefix_hit_stops_heartbeat() -> None:
     scheduler._recving_thread.add_request.assert_called_once()
 
 
-def test_input_receipt_registers_before_scheduler_admission_and_is_idempotent() -> None:
+def test_heartbeat_registration_starts_at_scheduler_admission_and_is_idempotent() -> None:
     scheduler = make_pull_scheduler()
     scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
-    connector = object.__new__(MooncakePullConnector)
-    connector.connector_scheduler = scheduler
     request = heartbeat_request()
-    connector.on_request_received(request)
-    assert len(scheduler._heartbeat_thread.requests) == 1
+    assert not scheduler._heartbeat_thread.requests
+    scheduler.on_new_request(request)
+    assert scheduler._heartbeat_thread.requests == {"request-d": ("127.0.0.1", 6000, "request-p")}
     assert not scheduler._reqs_recv_info and not scheduler._reqs_need_recv
     snapshot = dict(scheduler._heartbeat_thread.requests)
     scheduler.on_new_request(request)
     assert scheduler._heartbeat_thread.requests == snapshot
-
-
-def test_multi_connector_forwards_input_receipt_only_to_supporting_children() -> None:
-    callback = MagicMock()
-    connector = object.__new__(AscendMultiConnector)
-    connector._connectors = (SimpleNamespace(), SimpleNamespace(on_request_received=callback))
-    request = heartbeat_request()
-    connector.on_request_received(request)
-    callback.assert_called_once_with(request)
 
 
 @pytest.mark.parametrize("in_flight", [False, True])
@@ -1029,10 +1018,10 @@ def test_heartbeat_thread_renews_without_scheduler_steps_and_isolates_dead_peer(
     stop = threading.Event()
     received = threading.Event()
     second = threading.Event()
-    with zmq.Context() as context:
-        router = context.socket(zmq.ROUTER)
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
         port = router.bind_to_random_port("tcp://127.0.0.1")
-        router.setsockopt(zmq.RCVTIMEO, 100)
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
         seen = []
 
         def serve():
@@ -1040,7 +1029,7 @@ def test_heartbeat_thread_renews_without_scheduler_steps_and_isolates_dead_peer(
                 while not stop.is_set():
                     try:
                         frames = router.recv_multipart()
-                    except zmq.Again:
+                    except zmq.Again:  # type: ignore[attr-defined]
                         continue
                     message = msgspec.msgpack.decode(frames[-1])
                     seen.append(message)
@@ -1103,10 +1092,10 @@ def test_heartbeat_batches_large_groups_and_reconnects_after_bad_ack(monkeypatch
     monkeypatch.setattr(heartbeat_module, "HEARTBEAT_ACK_TIMEOUT", 0.05)
     stop = threading.Event()
     received_all = threading.Event()
-    with zmq.Context() as context:
-        router = context.socket(zmq.ROUTER)
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
         port = router.bind_to_random_port("tcp://127.0.0.1")
-        router.setsockopt(zmq.RCVTIMEO, 100)
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
         seen = set()
         batch_sizes = []
         identities = set()
@@ -1117,7 +1106,7 @@ def test_heartbeat_batches_large_groups_and_reconnects_after_bad_ack(monkeypatch
                 while not stop.is_set():
                     try:
                         frames = router.recv_multipart()
-                    except zmq.Again:
+                    except zmq.Again:  # type: ignore[attr-defined]
                         continue
                     identities.add(frames[0])
                     _, ids = msgspec.msgpack.decode(frames[-1])

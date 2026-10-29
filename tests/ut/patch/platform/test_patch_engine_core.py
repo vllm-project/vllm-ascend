@@ -32,7 +32,6 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCore
@@ -209,41 +208,3 @@ def test_run_engine_core_patch_applies_profiling_when_enabled(monkeypatch):
     _engine_core_patch._run_engine_core_patch_func(vllm_config=object())
 
     profiling.assert_called_once_with()
-
-
-@pytest.mark.parametrize("has_connector,has_callback", [(False, False), (True, False), (True, True)])
-def test_receipt_hook_runs_after_successful_preprocessing(monkeypatch, has_connector, has_callback):
-    req = object()
-    result = (req, 7)
-    events = []
-
-    def original(self, incoming):
-        events.append("preprocessed")
-        return result
-
-    connector = SimpleNamespace() if has_connector else None
-    if has_callback:
-        connector.on_request_received = lambda received: events.append(received)
-    engine = SimpleNamespace(scheduler=SimpleNamespace(get_kv_connector=lambda: connector))
-    monkeypatch.setattr(EngineCore, "preprocess_add_request", original)
-    _engine_core_patch._patch_request_received()
-    wrapper = EngineCore.preprocess_add_request
-    _engine_core_patch._patch_request_received()
-    assert EngineCore.preprocess_add_request is wrapper
-    assert wrapper(engine, object()) is result
-    assert events == (["preprocessed", req] if has_callback else ["preprocessed"])
-
-
-def test_invalid_input_is_not_registered_for_renewal(monkeypatch):
-    connector = SimpleNamespace(on_request_received=MagicMock())
-    engine = SimpleNamespace(scheduler=SimpleNamespace(get_kv_connector=lambda: connector))
-
-    def original(self, incoming):
-        raise ValueError("invalid input")
-
-    monkeypatch.setattr(EngineCore, "preprocess_add_request", original)
-    _engine_core_patch._patch_request_received()
-    assert EngineCore.preprocess_add_request is not original
-    with pytest.raises(ValueError, match="invalid input"):
-        EngineCore.preprocess_add_request(engine, object())
-    connector.on_request_received.assert_not_called()

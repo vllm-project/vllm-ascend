@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -323,7 +323,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             if request_id not in self.delayed_free_requests and request_id not in self.renewed_requests:
                 self.delayed_free_requests[request_id] = time.monotonic() + self.kv_lease_duration
 
-    def _handle_heartbeat(self, request_ids: tuple[str, ...]) -> None:
+    def _handle_heartbeat(self, request_ids: Sequence[str]) -> None:
         with self.state_lock:
             now = time.monotonic()
             for request_id in request_ids:
@@ -578,11 +578,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 self._heartbeat_thread.start()
 
     def on_new_request(self, request: "Request") -> None:
+        """Track remote KV leases from scheduler admission until receive completion."""
         super().on_new_request(request)
-        self.on_request_received(request)
-
-    def on_request_received(self, request: "Request") -> None:
-        """Register leases from the input thread without touching scheduler state."""
         params = request.kv_transfer_params
         if (
             self._heartbeat_thread is not None

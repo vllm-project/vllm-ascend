@@ -239,10 +239,6 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class MooncakePullConnector(MooncakeBaseConnector):
     """Pull-based Mooncake KV transfer connector."""
 
-    def on_request_received(self, request: "Request") -> None:
-        assert isinstance(self.connector_scheduler, MooncakePullConnectorScheduler)
-        self.connector_scheduler.on_request_received(request)
-
     def __init__(
         self,
         vllm_config: VllmConfig,

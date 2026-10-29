@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import wraps
-
 import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.engine.core import EngineCoreProc
 
@@ -29,26 +27,6 @@ from vllm_ascend.patch.platform.patch_profiling_chunk import _apply_profiling_pa
 _PATCHED = False
 
 _OriginalRunEngineCore = EngineCoreProc.run_engine_core
-
-
-def _patch_request_received() -> None:
-    original = _engine_core_mod.EngineCore.preprocess_add_request
-    if getattr(original, "_ascend_request_received", False):
-        return
-
-    @wraps(original)
-    def preprocess_add_request(self, request):
-        result = original(self, request)
-        # Runs in the input thread, before admission to EngineCore.input_queue.
-        # The optional callback must only update connector-owned locked state.
-        connector = self.scheduler.get_kv_connector()
-        callback = getattr(connector, "on_request_received", None)
-        if callback is not None:
-            callback(result[0])
-        return result
-
-    preprocess_add_request._ascend_request_received = True
-    _engine_core_mod.EngineCore.preprocess_add_request = preprocess_add_request
 
 
 def _patch_dp_engine_core_proc(vllm_config, dp_rank: int):
@@ -86,7 +64,6 @@ def _apply_patch() -> None:
 
     # Patch EngineCore.post_step
     pp_mtp_patch_post_step()
-    _patch_request_received()
     # Patch EngineCoreProc.run_engine_core
     # And in _run_engine_core_patch_func:
     # 1. Patch EngineCore.__init__ by _apply_profiling_patches

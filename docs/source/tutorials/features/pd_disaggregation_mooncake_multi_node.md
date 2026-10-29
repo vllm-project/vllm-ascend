@@ -382,16 +382,14 @@ heartbeat extends the deadline to the later of the existing deadline and
 model forward completion. P releases the blocks after aggregated transfer
 completion, or when the lease expires without renewal.
 
-Registration starts in the EngineCore input thread after successful request
-preprocessing, so requests waiting in the engine input queue are also covered.
-An optional receipt hook in the existing Ascend EngineCore patch only updates
-the connector's locked registry; it does not access scheduler queues or KV
-blocks. Scheduler admission repeats registration idempotently for other engine
-entry paths. AscendMultiConnector forwards this hook to supporting children.
+Registration starts when the scheduler calls `on_new_request()`, before KV
+allocation. Once registered, requests keep renewing while waiting for scheduling
+or model execution. Requests still waiting in EngineCore's input queue before
+scheduler admission are not tracked and remain subject to the initial P lease.
 
 Set `kv_lease_duration` to the same integer value on P and D (at least 6 seconds).
 The heartbeat interval is `duration // 6` and the renewal window is
-`duration * 2 // 3`, matching NixlConnector. For example, add this configuration
+`duration * 2 // 3`. For example, add this configuration
 to each side's existing `--kv-transfer-config`:
 
 ```json
@@ -473,7 +471,7 @@ settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 
-On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
+On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node 脳 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
 
 | NPUs per Node | Reserved Port Range | Recommended kv_port |
 |---------------|---------------------|---------------------|
