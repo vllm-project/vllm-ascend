@@ -6,10 +6,47 @@ import torch
 
 torch_npu = pytest.importorskip("torch_npu")
 
+from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import _pack_token_peer_tiled  # noqa: E402
 from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge  # noqa: E402
 from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query  # noqa: E402
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale  # noqa: E402
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton  # noqa: E402
+
+
+@pytest.mark.parametrize("tokens,local_heads,head_dim", [(513, 32, 512), (257, 64, 512), (1, 64, 1024)])
+@pytest.mark.parametrize("head_major_lse", [False, True])
+def test_tiled_pack_preserves_raw_bits(tokens, local_heads, head_dim, head_major_lse):
+    ranks, heads = 2, 2 * local_heads
+    bits = torch.tensor([0, -32768, 1, 16256, 32640, -128, 32705, -63], dtype=torch.int16)
+    owner_cpu = bits[torch.arange(heads * tokens * head_dim) % bits.numel()].view(heads, tokens, head_dim)
+    output = owner_cpu.npu().view(torch.bfloat16).transpose(0, 1)
+    lse_bits = torch.tensor([0, -2147483648, 1065353216, 2139095040, -8388608, 2143289345], dtype=torch.int32)
+    stats_cpu = lse_bits[torch.arange(tokens * heads) % lse_bits.numel()].view(tokens, heads, 1)
+    lse = stats_cpu.npu().view(torch.float32)
+    if head_major_lse:
+        lse = lse.transpose(0, 1).contiguous().transpose(0, 1)
+    words = output.view(torch.int32)
+    output_size = tokens * local_heads * (head_dim // 2)
+    send = torch.empty((ranks, output_size + tokens * local_heads), dtype=torch.int32, device="npu")
+    _pack_token_peer_tiled[(ranks,)](
+        words,
+        lse,
+        send,
+        words.stride(0),
+        words.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        tokens,
+        local_heads,
+        head_dim // 2,
+        4096,
+    )
+    actual = send.cpu()
+    expected_words = owner_cpu.transpose(0, 1).view(torch.int32)
+    expected_words = expected_words.reshape(tokens, ranks, local_heads, head_dim // 2).permute(1, 0, 2, 3)
+    expected_stats = stats_cpu.reshape(tokens, ranks, local_heads).permute(1, 0, 2)
+    assert torch.equal(actual[:, :output_size], expected_words.reshape(ranks, -1))
+    assert torch.equal(actual[:, output_size:], expected_stats.reshape(ranks, -1))
 
 
 @pytest.mark.parametrize("widths", [(512, 64), (256, 128), (64, 512)])

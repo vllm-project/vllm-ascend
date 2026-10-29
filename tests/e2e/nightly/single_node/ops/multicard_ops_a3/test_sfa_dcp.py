@@ -472,20 +472,21 @@ def test_exchange_t1_singleton_stride_graph(context, layout):
 
 
 @pytest.mark.parametrize(
-    "tokens,local_heads,head_dim", [(513, 32, 512), (1025, 16, 512), (257, 64, 512), (1, 64, 1024)]
+    "tokens,local_heads,head_dim",
+    [(512, 32, 512), (513, 32, 512), (1025, 16, 512), (256, 64, 512), (257, 64, 512), (1, 64, 1024), (2, 64, 1024)],
 )
-def test_exchange_vector_resource_fallback_graph(context, tokens, local_heads, head_dim, monkeypatch):
+def test_exchange_tiled_resource_graph(context, tokens, local_heads, head_dim, monkeypatch):
     rank, group, retained = context
     heads = RANKS * local_heads
     owner = torch.empty((heads, tokens, head_dim), dtype=torch.bfloat16, device="npu")
     output = owner.transpose(0, 1)
     lse = torch.zeros((tokens, heads, 1), device="npu")
-    assert not can_exchange(output, lse, RANKS)
+    assert can_exchange(output, lse, RANKS)
 
-    def unexpected_exchange(*args):
-        raise AssertionError("oversized vectors must use upstream tiled packing")
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("large vectors must stay on the native exchange path")
 
-    monkeypatch.setattr(dcp_a2a, "exchange", unexpected_exchange)
+    monkeypatch.setattr(dcp_a2a, "pack_dcp_output_lse", unexpected_fallback)
 
     def invoke():
         return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)

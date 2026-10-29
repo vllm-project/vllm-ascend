@@ -21,8 +21,8 @@
 - Group size must divide `H`. The local merge's reduction vector requires a power-of-two rank dimension.
 - Feature width and local head count are derived from the input and group, without D512 or32-head routing limits. BF16 features must form complete INT32 words, and both `D / 2` and the local head count must be powers of two for the full-vector copies. Other layouts retain upstream packing.
 - `LOCAL_HEADS` is static vector configuration because it determines `tl.arange` widths, including the T1 pack. Token counts and ordinary strides remain runtime values, not exact-value constexpr keys.
-- Empty inputs are excluded. Token eligibility is bounded by vector sizes below, not a fixed batch limit or scheduler configuration.
-- Both full-vector lengths are bounded to16384 32-bit elements: `T * (H / R)` for LSE and `(H / R) * (D / 2)` for output words. A3 compiler checks passed at this boundary; larger LSE vectors produced UB allocation failures. Larger inputs retain upstream tiled packing. This bounds vector resources rather than imposing a fixed token limit, and depends only on group-uniform shape information.
+- Empty inputs are excluded. There is no fixed token cap or dependency on scheduler configuration.
+- The existing full-vector pack is retained when both `T * (H / R)` and `(H / R) * (D / 2)` fit within16384 32-bit elements. Larger payloads use native head/feature tiles of at most4096 elements and bounded LSE chunks, with tokens distributed across Vector Cores. The payload layout and single All2All are unchanged; this threshold selects tiling rather than rejecting larger shapes.
 - Output feature storage must permit INT32 reinterpretation. The exchange normalizes non-unit features, odd outer strides or odd BF16 storage offsets inside the one-collective path; it does not change collective counts based on rank-local storage.
 - T1 flattens contiguous output before dtype reinterpretation. This removes odd singleton strides without copying data; `contiguous()` alone can preserve such strides.
 - PCP composition, token scatter, returned-LSE and deferred-combine requests retain their existing implementations and semantics.
