@@ -1,5 +1,0 @@
-pr: 19691
-entries:
-  - category: performance
-    text: Improved grouped BF16 DequantSituQuant row scheduling for small expert groups on Ascend A3.
-    hardware: [A3]
