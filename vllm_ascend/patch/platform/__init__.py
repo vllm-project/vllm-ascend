@@ -49,6 +49,7 @@ import vllm_ascend.patch.platform.patch_replayssm_config  # noqa
 
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
+import vllm_ascend.patch.platform.patch_stateless_coordinator  # noqa
 
 # The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.31.0+).
 import vllm_ascend.patch.platform.patch_engram_config  # noqa

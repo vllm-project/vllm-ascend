@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     init_model_parallel_group,
 )
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 from vllm_ascend.ascend_config import get_ascend_config
 
@@ -66,8 +67,17 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
+    world_group = get_world_group()
+    if isinstance(world_group, StatelessGroupCoordinator):
+        # Elastic EP: the DP dimension lives in stateless groups outside the
+        # local c10d world, so the Ascend-only auxiliary groups (MC2,
+        # fine-grained TP, dynamic EPLB) cannot be laid out from here. The
+        # elastic topology requires TP=1 with EPLB disabled, which leaves them
+        # unused; core initialize_model_parallel has already built the
+        # stateless TP/PP/DP/EP groups.
+        return
     world_size = torch.distributed.get_world_size()
-    backend = torch.distributed.get_backend(get_world_group().device_group)
+    backend = torch.distributed.get_backend(world_group.device_group)
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size

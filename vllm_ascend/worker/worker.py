@@ -91,6 +91,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.fasteep.policy import is_fasteep, validate_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -213,6 +214,16 @@ class NPUWorker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        # Mount the elastic EP scaling executor (mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.__init__). Standby-group
+        # creation is NPU-specific via
+        # NPUPlatform.stateless_init_device_torch_dist_pg.
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            ElasticEPScalingExecutor,
+        )
+
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -452,6 +463,8 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        if runtime := getattr(self, "_fasteep_runtime", None):
+            runtime.close()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -525,6 +538,14 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        # Must precede every HCCL comm creation in this process (the local
+        # ws=1 torch world below is the first one): the default adapter
+        # socket port is a single host-wide port and collides across the
+        # Ray-scheduled elastic-EP workers.
+        from vllm_ascend.platform import ensure_hccl_socket_port_range
+
+        ensure_hccl_socket_port_range()
 
         if enable_custom_op():
             register_device_print()
@@ -879,6 +900,11 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            if scheduler_output.total_num_scheduled_tokens:
+                raise RuntimeError("Inactive FastEEP rank received scheduled tokens.")
+            return EMPTY_MODEL_RUNNER_OUTPUT
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
@@ -947,6 +973,9 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            return EMPTY_MODEL_RUNNER_OUTPUT
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
             self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
@@ -955,7 +984,9 @@ class NPUWorker(WorkerBase):
         )
         return output
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        if is_fasteep(self.vllm_config):
+            validate_config(self.vllm_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -975,7 +1006,10 @@ class NPUWorker(WorkerBase):
             empty_cache_context = nullcontext()
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+            # Elastic EP standby workers load dummy weights first and receive
+            # the real weights over the standby groups afterwards (mirrors
+            # vllm/v1/worker/gpu_worker.py Worker.load_model).
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1434,6 +1468,9 @@ class NPUWorker(WorkerBase):
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
+        runtime = getattr(self, "_fasteep_runtime", None)
+        if runtime is not None and runtime.inactive:
+            return
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         # Idle DP worker RPCs also need the current config for replay metadata.
@@ -1502,6 +1539,14 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
+
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        # Elastic EP state machine entry point: ElasticEPScalingState drives
+        # the worker through model_executor.collective_rpc("elastic_ep_execute",
+        # ...) (see vllm/distributed/elastic_ep/elastic_state.py). Mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.elastic_ep_execute; the
+        # executor itself is mounted in __init__.
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
 def parse_text_output(output) -> None:
