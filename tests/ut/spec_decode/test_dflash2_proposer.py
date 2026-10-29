@@ -96,7 +96,7 @@ def test_lilicorr_convolution_uses_ascend_dflash2_layer():
 
 
 def test_lilicorr_cannot_silently_use_plain_dflash_on_v1():
-    from vllm_ascend.spec_decode import get_spec_decode_method
+    from vllm_ascend.worker.v1.spec_decode import get_spec_decode_method
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -105,7 +105,7 @@ def test_lilicorr_cannot_silently_use_plain_dflash_on_v1():
         )
     )
     with (
-        patch("vllm_ascend.spec_decode.AscendDflashProposer") as plain_dflash,
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflashProposer") as plain_dflash,
         pytest.raises(NotImplementedError, match="VLLM_USE_V2_MODEL_RUNNER=1"),
     ):
         get_spec_decode_method("dflash", config, "cpu", None)

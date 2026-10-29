@@ -409,6 +409,21 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
 ```
 
 Both the plain and convolutional LiLiCorr checkpoint variants are supported.
+The real-weight CI test pairs `Qwen/Qwen3.8-27B` with the ModelScope draft
+`niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0`, using TP=2 and seven
+speculative tokens. Both models are listed in the A2/A3 download catalog.
+After the CI model-download job has populated the cache, run:
+
+```shell
+VLLM_USE_MODELSCOPE=True VLLM_USE_V2_MODEL_RUNNER=1 pytest -v \
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py
+```
+
+The test compares greedy output token IDs with target-only decoding for both
+draft sampling modes, exercises nonzero-temperature probabilistic drafting,
+and checks draft/acceptance metric consistency. Acceptance length is recorded
+for calibration; no unmeasured throughput or acceptance-rate threshold is set.
+
 Standard tensor parallelism is supported. Fine-grained embedding/LM head TP
 and PCP vocabulary weight sharding are currently unsupported; the candidate
 path requires the standard TP vocabulary layout.
