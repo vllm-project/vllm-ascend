@@ -1,4 +1,0 @@
-pr: 19573
-entries:
-  - category: bugfix
-    text: Fixed multimodal recompute scheduling across the release and main vLLM encoder-input APIs and preserved duplicate encoder cache references.
