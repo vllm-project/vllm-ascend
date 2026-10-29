@@ -120,7 +120,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens":5,"method":"dspark"}'
       - --kv-transfer-config
-      - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"36010","engine_id":"1","kv_connector_extra_config":{"prefill":{"dp_size":8,"tp_size":1},"decode":{"dp_size":8,"tp_size":1}}}'
+      - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"36010","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":8,"tp_size":1},"decode":{"dp_size":8,"tp_size":1}}}'
       - --additional-config
       - '{"multistream_engram_overlap":false,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true}'
 
@@ -192,7 +192,7 @@ benchmarks:
     threshold: 5
     temperature: 1
     thinking: true
-    reasoning_effort: low
+    reasoning_effort: high
   perf_TPOT50_16k_1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
