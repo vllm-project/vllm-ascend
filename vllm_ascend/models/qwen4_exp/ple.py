@@ -26,6 +26,8 @@ import torch_npu
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.ops.torch_ple import ple_conv_torch
+
 
 def _get_allow_internal_format() -> bool:
     raw_value = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
@@ -240,6 +242,7 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
+    from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
@@ -249,6 +252,10 @@ def patch_upstream_ple_short_conv() -> None:
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
+
+    # The AMD PLE class binds this function at module import time.  Replace
+    # only that model-local binding; other platforms keep the upstream kernel.
+    upstream_ple_layer.ple_conv = ple_conv_torch
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
