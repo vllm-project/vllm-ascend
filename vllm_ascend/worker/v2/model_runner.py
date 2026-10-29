@@ -298,7 +298,11 @@ class NPUModelRunner(GPUModelRunner):
         sequence parallelism. Without updating the synchronized counts,
         ``DPMetadata.make`` can observe 55 scheduled rows and a 56-row batch.
         """
-        if self.dp_size <= 1 or not enable_sp(self.vllm_config):
+        if (
+            self.dp_size <= 1
+            or self.parallel_config.pipeline_parallel_size <= 1
+            or not enable_sp(self.vllm_config)
+        ):
             return
 
         dispatch_and_sync = vllm_model_runner.dispatch_cg_and_sync_dp
@@ -883,7 +887,10 @@ class NPUModelRunner(GPUModelRunner):
         # Without this, each stage independently pads inside the model; for a
         # non-TP-aligned prefill the PP boundary drops that row and the next
         # stage rebuilds it, desynchronizing hybrid/GDN state metadata.
-        if enable_sp(self.vllm_config):
+        if (
+            enable_sp(self.vllm_config)
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
             num_tokens_after_padding = round_up(
                 num_tokens_after_padding,
                 self.parallel_config.tensor_parallel_size,
