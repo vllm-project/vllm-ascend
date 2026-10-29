@@ -85,6 +85,7 @@ class TestNPUWorker(TestBase):
             delattr(self.hf_config_mock, "index_topk")
 
         self.model_config_mock.hf_config = self.hf_config_mock
+        self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
