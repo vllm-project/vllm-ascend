@@ -17,8 +17,14 @@ def load_function(path, name, namespace):
     source = ROOT / path
     tree = ast.parse(source.read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    constants = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_MAX_PACK_VECTOR_ELEMENTS" for t in n.targets)
+    ]
     future = ast.parse("from __future__ import annotations").body
-    exec(compile(ast.Module(body=future + [method], type_ignores=[]), str(source), "exec"), namespace)
+    exec(compile(ast.Module(body=future + constants + [method], type_ignores=[]), str(source), "exec"), namespace)
     return namespace[name]
 
 
@@ -108,9 +114,32 @@ def test_exchange_gate_derives_head_shards_from_group(ranks, local_heads, head_d
     heads = ranks * local_heads
     output = SimpleNamespace(device=device, dtype=torch.bfloat16, ndim=3, shape=(13, heads, head_dim))
     lse = SimpleNamespace(device=device, dtype=torch.float32, shape=(13, heads, 1))
-    assert run(output, lse, ranks) is (vector_compatible and local_heads & (local_heads - 1) == 0)
+    assert run(output, lse, ranks) is (
+        vector_compatible and local_heads & (local_heads - 1) == 0 and local_heads * (head_dim // 2) <= 16384
+    )
     output.shape = (13, heads + 1, head_dim)
     assert not run(output, lse, ranks)
+
+
+@pytest.mark.parametrize(
+    "tokens,heads,head_dim,ranks,expected",
+    [
+        (192, 64, 512, 8, True),
+        (512, 64, 512, 2, True),
+        (513, 64, 512, 2, False),
+        (1024, 64, 512, 4, True),
+        (1025, 64, 512, 4, False),
+        (256, 128, 512, 2, True),
+        (257, 128, 512, 2, False),
+        (1, 128, 512, 2, True),
+        (1, 128, 1024, 2, False),
+    ],
+)
+def test_exchange_vector_resource_boundary(tokens, heads, head_dim, ranks, expected):
+    run = load_function("vllm_ascend/ops/triton/dcp/sfa_dcp_exchange.py", "can_exchange", {"torch": torch})
+    output = torch.empty((tokens, heads, head_dim), dtype=torch.bfloat16, device="meta")
+    lse = torch.empty((tokens, heads, 1), device="meta")
+    assert run(output, lse, ranks) is expected
 
 
 def test_custom_op_fake_retains_shape_dtype_and_does_not_collect():

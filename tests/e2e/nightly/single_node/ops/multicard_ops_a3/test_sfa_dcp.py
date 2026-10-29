@@ -435,3 +435,71 @@ def test_registered_exchange_group_sizes_against_fp64(context, local_heads, toke
     if optimized:
         checks.append((fp32, reference, budget))
     retained.append((graph, checks, (owner, lse_owner)))
+
+
+@pytest.mark.parametrize("layout", ["ordinary", "odd_singleton", "odd_offset"])
+def test_exchange_t1_singleton_stride_graph(context, layout):
+    rank, group, retained = context
+    heads = RANKS * 8
+    if layout == "odd_singleton":
+        owner = torch.empty((heads, 512, 1), dtype=torch.bfloat16, device="npu")
+        output = owner.permute(2, 0, 1)
+        assert output.is_contiguous() and output.stride(0) == 1
+    elif layout == "odd_offset":
+        owner = torch.empty(heads * 512 + 1, dtype=torch.bfloat16, device="npu")
+        output = owner[1:].view(1, heads, 512)
+    else:
+        owner = output = torch.empty((1, heads, 512), dtype=torch.bfloat16, device="npu")
+    lse = torch.zeros((1, heads, 1), device="npu")
+    base = (torch.arange(heads * 512).reshape(1, heads, 512) % 31 - 15).float() / 32
+    output.copy_(base + rank / 16)
+
+    def invoke():
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+
+    for _ in range(3):
+        invoke()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = invoke()
+    for step in range(3):
+        output.copy_(base + rank / 16 + step / 64)
+        lse.fill_(step / 4)
+        graph.replay()
+        expected = (base[:, rank * 8 : (rank + 1) * 8] + (RANKS - 1) / 32 + step / 64).bfloat16()
+        assert torch.equal(result.cpu().view(torch.int16), expected.view(torch.int16))
+    retained.append((graph, [(result, expected, 0)], (owner, lse)))
+
+
+@pytest.mark.parametrize(
+    "tokens,local_heads,head_dim", [(513, 32, 512), (1025, 16, 512), (257, 64, 512), (1, 64, 1024)]
+)
+def test_exchange_vector_resource_fallback_graph(context, tokens, local_heads, head_dim, monkeypatch):
+    rank, group, retained = context
+    heads = RANKS * local_heads
+    owner = torch.empty((heads, tokens, head_dim), dtype=torch.bfloat16, device="npu")
+    output = owner.transpose(0, 1)
+    lse = torch.zeros((tokens, heads, 1), device="npu")
+    assert not can_exchange(output, lse, RANKS)
+
+    def unexpected_exchange(*args):
+        raise AssertionError("oversized vectors must use upstream tiled packing")
+
+    monkeypatch.setattr(dcp_a2a, "exchange", unexpected_exchange)
+
+    def invoke():
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+
+    output.fill_(rank / 16)
+    for _ in range(3):
+        invoke()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = invoke()
+    for step in range(3):
+        output.fill_(rank / 16 + step / 64)
+        lse.fill_(step / 4)
+        graph.replay()
+        expected = torch.full((tokens, local_heads, head_dim), (RANKS - 1) / 32 + step / 64, dtype=torch.bfloat16)
+        assert torch.equal(result.cpu().view(torch.int16), expected.view(torch.int16))
+    retained.append((graph, [(result, expected, 0)], (owner, lse)))

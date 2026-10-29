@@ -7,6 +7,9 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge
 
+# Larger full vectors overflow UB on the tested compiler; use upstream tiling.
+_MAX_PACK_VECTOR_ELEMENTS = 16384
+
 
 @triton.jit
 def _pack_t1_peer(output_words_ptr, lse_ptr, send_ptr, LOCAL_HEADS: tl.constexpr, HEAD_WORDS: tl.constexpr):
@@ -83,7 +86,7 @@ def can_exchange(output: torch.Tensor, lse: torch.Tensor, ranks: int) -> bool:
     head_words = head_dim // 2
     return (
         ranks & (ranks - 1) == 0  # Merge's tl.arange(0, RANKS) requires a power-of-two length.
-        and tokens > 0  # Tests configured at most 192 tokens; this is not a kernel limit.
+        and tokens > 0
         and head_dim > 0
         and head_dim % 2 == 0  # Each INT32 word holds two BF16 values.
         and head_words & (head_words - 1) == 0  # Full-word tl.arange vector length.
@@ -92,6 +95,10 @@ def can_exchange(output: torch.Tensor, lse: torch.Tensor, ranks: int) -> bool:
         # Full vectors preserve the unmasked copy lowering. Other head counts
         # retain upstream packing rather than scalarizing a masked token loop.
         and local_heads & (local_heads - 1) == 0
+        # Bound both INT32 output words and the rounded FP32 LSE vector.
+        # The limit is a power of two, so bounding T*heads also bounds its next_power_of_2.
+        and local_heads * head_words <= _MAX_PACK_VECTOR_ELEMENTS
+        and tokens * local_heads <= _MAX_PACK_VECTOR_ELEMENTS
         and lse.dtype == torch.float32
         and tuple(lse.shape) == (tokens, heads, 1)
     )
@@ -153,7 +160,9 @@ def exchange(output: torch.Tensor, lse: torch.Tensor, group) -> torch.Tensor:
     if output.storage_offset() % 2:
         output = output.clone()
     lse = lse.contiguous()
-    words = output.view(torch.int32)
+    # A contiguous T1 view can retain an odd singleton stride. Flattening is
+    # metadata-only and removes that stride before widening BF16 to INT32.
+    words = output.view(-1).view(torch.int32)
     send = torch.empty((ranks, peer_words), dtype=torch.int32, device=output.device)
     # T1 normalizes LSE to contiguous [1, heads, 1], so the head stride is one.
     _pack_t1_peer[(ranks,)](words, lse, send, local_heads, head_words)
