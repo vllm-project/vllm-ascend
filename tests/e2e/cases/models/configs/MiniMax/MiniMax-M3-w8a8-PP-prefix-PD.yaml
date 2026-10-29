@@ -50,6 +50,7 @@ env_common: &env_common
   VLLM_USE_V2_MODEL_RUNNER: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_MODELSCOPE: true
+
 env_prefill: &env_prefill
   <<: *env_common
   VLLM_PP_LAYER_PARTITION: "16,15,15,14"
@@ -115,6 +116,9 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+      - "--profiler-config"
+      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
+
 
   - node_index: 1
     envs:
@@ -174,6 +178,9 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+      - "--profiler-config"
+      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
+
 
   - node_index: 2
     envs:
@@ -233,6 +240,8 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+      - "--profiler-config"
+      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
 
 
 benchmarks:
