@@ -821,6 +821,29 @@ def test_balance_schedule_waiting_and_running_paths():
     scheduler.schedule(throttle_prefills=True)
 
 
+def test_balance_schedule_records_local_prefix_cache_stats():
+    """A newly admitted request must land in the local prefix-cache stats.
+
+    Regression guard: this fork of ``schedule()`` used to record only on the
+    mamba + connector fast path, so plain full-attention models (Qwen3,
+    DeepSeek) left ``vllm:prefix_cache_queries_total`` /
+    ``vllm:prefix_cache_hits_total`` at zero even with APC enabled.
+    """
+    scheduler = _make_balance_scheduler()
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None, "fixture builds the scheduler with log_stats=True"
+
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens > 0
+    assert request in scheduler.running
+
+    # The lookup ran on an empty cache: every prompt token is a query, none hit.
+    assert stats.queries == request.num_tokens
+    assert stats.hits == 0
+
+
 @pytest.mark.parametrize("holds_kv_blocks", [False, True])
 def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
     scheduler = _make_balance_scheduler()
