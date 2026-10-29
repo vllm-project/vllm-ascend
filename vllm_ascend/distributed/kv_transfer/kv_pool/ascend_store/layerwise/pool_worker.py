@@ -56,7 +56,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
-    validate_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -344,18 +343,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 if self.num_prefetch_layers <= 0:
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
         self.sync_save_events: list[torch.npu.Event] | None = None
-        if (
-            self._layerwise_reuse_layout is not None
-            and self.layerwise_offload
-            and (self._recurrent_layers or len(self.cacheable_group_ids) != self.num_kv_cache_groups)
-        ):
-            validate_layerwise_reuse_config(self.vllm_config, self._layerwise_reuse_layout)
-        if (
-            self.layerwise_offload
-            and (self._recurrent_layers or len(self.cacheable_group_ids) != self.num_kv_cache_groups)
-            and _LW_DEFER_LAST_SAVE
-        ):
-            raise ValueError("Stateful layerwise reuse requires VLLM_ASCEND_LW_DEFER_LAST_SAVE=0")
 
         logger.info(
             "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
@@ -1206,6 +1193,16 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             end = request.target_token_len // block_size
             if partial_block_index is not None:
                 end = min(end, partial_block_index)
+        elif self.use_layerwise_transfer and self.layerwise_offload:
+            # A group can complete pages before the transfer LCM boundary.
+            # Persist those pages before another layer overwrites the slot.
+            end = max(
+                end,
+                min(
+                    request.target_token_len // block_size,
+                    len(request.block_hashes) * self.hash_block_size // block_size,
+                ),
+            )
         return end
 
     def _pool_keys_missing(self, keys: list[str]) -> set[str]:
@@ -1555,12 +1552,14 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             block_ids = request.block_ids_by_group[group_id]
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
+            if self.layerwise_offload:
+                num_blocks = self._layerwise_save_full_end(request, group_id, self.grouped_block_size[group_id], None)
             if self.layerwise_offload and self._group_reuses_buffer(group_id):
                 # Only the running endpoint belongs to this layer after reuse.
                 # Older non-null slots may already hold another layer's state.
                 result[group_id] = [
                     index == num_blocks - 1
-                    and request.target_token_len == request.save_end_token
+                    and request.target_token_len == num_blocks * self.grouped_block_size[group_id]
                     and index < len(block_ids)
                     and block_ids[index] != 0
                     for index in range(num_blocks)
@@ -1571,8 +1570,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             # checkpoint before the next chunk moves/reuses its state slots.
             chunk_checkpoint = (
                 request.num_prompt_tokens is not None
-                and request.target_token_len == request.save_end_token
-                and request.save_end_token % self.cache_transfer_granularity == 0
+                and request.target_token_len == num_blocks * self.grouped_block_size[group_id]
+                and (self.layerwise_offload or request.save_end_token % self.cache_transfer_granularity == 0)
                 and 0 < request.target_token_len < request.num_prompt_tokens
             )
             result[group_id] = [
@@ -2177,13 +2176,15 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         ]
         if reused_state_groups:
             for request in requests:
-                # No speculative tokens: every complete prompt page must have
-                # a hash. Do not publish a later state as an earlier endpoint.
-                if len(request.block_hashes) * self.hash_block_size < (
-                    request.target_token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
-                ):
-                    raise ValueError("Recurrent cache reuse requires hashes for all computed full pages")
                 for group_id in reused_state_groups:
+                    # Keep the full/partial key identity stable across steps.
+                    # Recurrent state cannot replay an earlier unhashed page.
+                    block_size = self.grouped_block_size[group_id]
+                    if (
+                        request.target_token_len // block_size
+                        > len(request.block_hashes) * self.hash_block_size // block_size
+                    ):
+                        raise ValueError("Recurrent cache reuse requires hashes for all computed full pages")
                     endpoints = [request.target_token_len] if request.can_save else []
                     if request.load_spec is not None and request.load_spec.can_load:
                         endpoints.append(request.load_spec.kvpool_cached_tokens)
@@ -2438,7 +2439,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE:
+            # Recurrent state may be cleared or copied before the next load
+            # hook. Finish reading shared state before returning from forward.
+            if _LW_DEFER_LAST_SAVE and not (
+                self._recurrent_layers & (self.prefetch_layer_map.keys() | set(self.prefetch_layer_map.values()))
+            ):
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
                 # start of the NEXT step's start_load_kv, absorbing the send

@@ -5,7 +5,7 @@ from uuid import uuid4
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -17,7 +17,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
-    validate_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     RequestTracker,
@@ -100,13 +99,6 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
                         max(reuse_layout.layer_cache_specs) + 1,
                     )
                 self.layerwise_offload = reuse_layout.has_layer_reuse
-                validate_layerwise_reuse_config(vllm_config, reuse_layout)
-                if (
-                    self.layerwise_offload
-                    and any(isinstance(item.main.spec, MambaSpec) for item in reuse_layout.layer_cache_specs.values())
-                    and self.cache_coordinator is None
-                ):
-                    raise ValueError("Recurrent layerwise reuse requires a hybrid cache reachability coordinator")
             else:
                 self.layerwise_offload = build_layerwise_cache_layout(
                     self.num_layers,

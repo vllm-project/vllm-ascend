@@ -114,42 +114,21 @@ class LayerwiseReuseLayout:
 
 
 def validate_layerwise_reuse_config(vllm_config: VllmConfig, layout: LayerwiseReuseLayout) -> None:
-    """Validate the supported execution modes for recurrent or private state."""
-    state_specs = [
-        item.main.spec for item in layout.layer_cache_specs.values() if isinstance(item.main.spec, MambaSpec)
-    ]
-    has_private_state = any(
-        not is_prefix_cacheable(spec.spec)
-        for item in layout.layer_cache_specs.values()
-        for spec in (item.main, item.indexer, *item.extra_main_specs)
-        if spec is not None
-    )
-    if not layout.has_layer_reuse or not (state_specs or has_private_state):
-        return
-    parallel = vllm_config.parallel_config
-    if not vllm_config.model_config.enforce_eager or vllm_config.speculative_config is not None:
-        raise ValueError("Stateful layerwise reuse requires enforce_eager=True and speculative decoding disabled")
-    if any(
-        getattr(parallel, name, 1) != 1
-        for name in (
-            "pipeline_parallel_size",
-            "data_parallel_size",
-            "prefill_context_parallel_size",
-            "decode_context_parallel_size",
-        )
+    """Shared recurrent slots must be final when their layer saves them."""
+    if not any(
+        len(slot) > 1 and isinstance(layout.layer_cache_specs[slot[0]].main.spec, MambaSpec)
+        for slot in layout.buffer_slots
     ):
-        raise ValueError("Stateful layerwise reuse currently requires PP=DP=PCP=DCP=1")
-    transfer = vllm_config.kv_transfer_config
-    if transfer.kv_connector != "AscendStoreConnector" or transfer.kv_role not in ("kv_producer", "kv_both"):
-        raise ValueError(
-            "Stateful layerwise reuse requires a saving AscendStoreConnector; P2P MultiConnector is unsupported"
-        )
-    if len(layout.layer_cache_specs) != vllm_config.model_config.get_num_layers(parallel):
-        raise ValueError("Stateful layerwise reuse does not support draft cache layers")
-    prefix_unit = vllm_config.cache_config.prefix_match_unit
-    state_block_sizes = {spec.block_size for spec in state_specs}
-    if state_specs and isinstance(prefix_unit, int) and state_block_sizes != {prefix_unit}:
-        raise ValueError("Recurrent cache reuse requires prefix_match_unit equal to the state block size (or unset)")
+        return
+    # Replay-based speculation may commit state after forward even with zero
+    # speculative blocks. That commit cannot address an overwritten slot.
+    if vllm_config.speculative_config is not None:
+        raise ValueError("Recurrent layerwise reuse does not support speculative state commits")
+    parallel = vllm_config.parallel_config
+    # Pool transfer scales group block sizes for CP; recurrent state pages do
+    # not scale with CP, so those endpoint indices are not interchangeable.
+    if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+        raise ValueError("Recurrent layerwise reuse requires unscaled state block sizes (PCP=DCP=1)")
 
 
 def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
@@ -352,8 +331,10 @@ def build_layerwise_reuse_layout(
             raise NotImplementedError("Layerwise reuse does not support additional cacheable main components")
         unsupported_specs = [
             named_spec
-            for named_specs in named_specs_by_layer.values()
-            for named_spec in named_specs
+            for slot in buffer_slots
+            if len(slot) > 1
+            for layer in slot
+            for named_spec in named_specs_by_layer[layer]
             if not isinstance(named_spec.spec, AttentionSpec)
             and is_prefix_cacheable(named_spec.spec)
             and not (
