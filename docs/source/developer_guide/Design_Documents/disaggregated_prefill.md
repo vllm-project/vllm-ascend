@@ -69,6 +69,11 @@ instance's post-prefill request latency dropped while the per-transfer time and
 the decode-side queue time stayed flat; the connector itself is pull-only, so
 the mechanism is not attributed here.
 
+MemFabric has not been validated on A3 or on 950PR&950DT Products.
+`device_urma`, the UB data path for 950PR&950DT, is accepted and passed through
+to the engine but has not been exercised here, and none of the numbers above
+carry over to A3 or 950 because their interconnect ceilings differ.
+
 `transfer_backend` is honoured by `MooncakeConnectorV1` only. The layerwise,
 hybrid and D2RH connectors and `MooncakeConnectorV2` raise if it selects
 anything other than `mooncake`.
