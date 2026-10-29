@@ -94,6 +94,32 @@ class _FakeCompressedManager:
         return computed, len(computed[0]) * logical_block_size
 
 
+class _FakePrefixManager:
+    """FA manager: contiguous prefix walk over externally cached blocks."""
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        **kwargs,
+    ):
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        max_blocks = max_length // kv_cache_spec.block_size
+        for block_hash in list(block_hashes)[:max_blocks]:
+            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+        return computed, len(computed[0]) * kv_cache_spec.block_size
+
+
 class TestAscendStoreCoordinator(unittest.TestCase):
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
@@ -255,6 +281,81 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                 coord.load_mask(_hashes(16), 2048),
                 (cached_mask,),
             )
+
+
+class TestFindReachableHitTokens(unittest.TestCase):
+    """The shared driver behind the scheduler/worker coordinator lookups."""
+
+    def test_passes_mask_allowed_hashes_to_query_callback(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=256,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+        )
+        calls: list[tuple[int, list, list | None]] = []
+
+        def query_group_hits(group_id, group_block_hashes, lookup_mask):
+            calls.append((group_id, list(group_block_hashes), list(lookup_mask) if lookup_mask is not None else None))
+            return []
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, True],
+        ):
+            hit = coord.find_reachable_hit_tokens(_hashes(2), 256, query_group_hits)
+
+        self.assertEqual(hit, 0)
+        self.assertEqual(calls, [(0, _hashes(2), [False, True])])
+
+    def test_hit_length_derived_from_callback_hits(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            return_value=_FakePrefixManager,
+        ):
+            coord = AscendStoreCoordinator(
+                [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
+                scheduler_block_size=256,
+                hash_block_size=128,
+                group_block_sizes=[128],
+                group_cache_families=["c4"],
+            )
+        block_hashes = _hashes(4)
+        received: list[list] = []
+
+        def query_group_hits(group_id, group_block_hashes, lookup_mask):
+            received.append(list(group_block_hashes))
+            self.assertIsNone(lookup_mask)
+            return list(group_block_hashes[:3])
+
+        with patch.object(coord, "find_longest_cache_hit", wraps=coord.find_longest_cache_hit) as derive:
+            hit = coord.find_reachable_hit_tokens(block_hashes, 384, query_group_hits)
+
+        # Only whole hash blocks within token_len are queried (384 // 128 = 3).
+        self.assertEqual(received, [_hashes(3)])
+        self.assertEqual(hit, 384)
+        derive.assert_called_once()
+        self.assertFalse(derive.call_args.kwargs["apply_eagle"])
+
+    def test_no_hits_returns_zero_without_deriving(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            return_value=_FakePrefixManager,
+        ):
+            coord = AscendStoreCoordinator(
+                [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
+                scheduler_block_size=256,
+                hash_block_size=128,
+                group_block_sizes=[128],
+                group_cache_families=["c4"],
+            )
+
+        with patch.object(coord, "find_longest_cache_hit") as derive:
+            hit = coord.find_reachable_hit_tokens(_hashes(2), 256, lambda *args: [])
+
+        self.assertEqual(hit, 0)
+        derive.assert_not_called()
 
 
 if __name__ == "__main__":

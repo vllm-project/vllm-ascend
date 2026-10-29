@@ -19,6 +19,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -180,6 +181,9 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
+                # vLLM #51718 renamed shared_by to layers; expose both fields
+                # so this focused 310P fixture stays valid on main and 0.28.0.
+                shared_by=[layer_name],
                 layers=[layer_name],
             )
         ],
@@ -202,6 +206,10 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].untyped_storage().nbytes() == 160
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="vLLM #51718 only changed main descriptors",
+)
 def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     class FakeMambaSpec:
         block_size = 1
@@ -227,6 +235,7 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=4096,
+                shared_by=layer_names,
                 layers=layer_names,
             )
         ],
@@ -416,6 +425,9 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
+                # vLLM #51718 renamed shared_by to layers; expose both fields
+                # so this focused 310P fixture stays valid on main and 0.28.0.
+                shared_by=["model.layers.0.self_attn"],
                 layers=["model.layers.0.self_attn"],
             )
         ],
@@ -445,6 +457,10 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="vLLM #51718 only changed main descriptors",
+)
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128
@@ -489,6 +505,7 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=spec.page_size_bytes * 100,
+                shared_by=layer_names,
                 layers=layer_names,
             )
         ],

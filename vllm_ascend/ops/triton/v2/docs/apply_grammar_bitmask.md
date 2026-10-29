@@ -117,8 +117,10 @@
   ```text
   logits.shape         = [64, 151936]
   logits.dtype         = BFLOAT16
-  logits_indices.shape = [64]
+  logits_indices.shape = [64]          # packed (req_idx, position) mapping
   logits_indices.dtype = INT32
+  cu_num_logits.shape  = [num_reqs + 1]
+  cu_num_logits.dtype  = INT32
   bitmask.shape        = [64, 4748]
   bitmask.dtype        = INT32
   BLOCK_SIZE           = 8192
@@ -139,8 +141,11 @@ from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import (
 device = torch.device("npu:0")
 
 rows = 64
+num_reqs = 16
+logits_per_req = 4
 vocab_size = 151936
 block_size = 8192
+mask_stride = 8  # must exceed the largest packed position
 bitmask_words = (vocab_size + 31) // 32
 
 logits = torch.randn(
@@ -150,11 +155,19 @@ logits = torch.randn(
     device=device,
 )
 
-logits_indices = torch.arange(
-    rows,
+# Cumulative logit rows per request.
+cu_num_logits = torch.arange(
+    0,
+    (num_reqs + 1) * logits_per_req,
+    logits_per_req,
     dtype=torch.int32,
     device=device,
 )
+
+# Each entry packs (req_idx, position) as req_idx * mask_stride + position.
+req_idx = torch.arange(rows) // logits_per_req
+position = torch.arange(rows) % logits_per_req
+logits_indices = (req_idx * mask_stride + position).to(torch.int32).to(device)
 
 # bit=1 means allowed. -1 means all 32 bits are 1.
 bitmask = torch.full(
@@ -173,9 +186,11 @@ _apply_grammar_bitmask_kernel[grid](
     logits,
     logits.stride(0),
     logits_indices,
+    cu_num_logits,
     bitmask,
     bitmask.stride(0),
     vocab_size,
+    MASK_STRIDE=mask_stride,
     BLOCK_SIZE=block_size,
 )
 ```

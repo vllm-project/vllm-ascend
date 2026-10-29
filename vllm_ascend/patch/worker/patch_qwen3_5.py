@@ -46,6 +46,9 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
+            # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
+            if positions.ndim == 1:
+                positions = positions.unsqueeze(0).expand(3, -1)
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)

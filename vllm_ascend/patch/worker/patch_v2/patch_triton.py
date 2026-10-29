@@ -5,6 +5,7 @@ from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
+from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
 from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
@@ -33,6 +34,7 @@ states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 speculator.gumbel_sample = gumbel_sample
 base_speculator.gumbel_sample = gumbel_sample
+dspark_speculator.gumbel_sample = gumbel_sample
 bad_words.apply_bad_words = apply_bad_words
 gumbel.gumbel_sample = gumbel_sample
 gumbel.apply_temperature = apply_temperature

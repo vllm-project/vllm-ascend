@@ -26,9 +26,9 @@ on:
         required: false
         default: ''
       model:
-        description: 'opencode model name (default: deepseek/deepseek-v4-flash)'
+        description: 'opencode model name (default: deepseek/deepseek-flash)'
         required: false
-        default: 'deepseek/deepseek-v4-flash'
+        default: 'deepseek/deepseek-flash'
 
 permissions:
   contents: write
@@ -42,7 +42,10 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-v4-flash' }}
+  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-flash' }}
+  # Accumulated adaptation state ref on HEAD_FORK, shared by resolve-source
+  # (incremental mode base) and the push step (PR-success update).
+  MAIN2MAIN_BASELINE_REF: main2main_baseline
   
 
 jobs:
@@ -81,15 +84,39 @@ jobs:
 
           git config user.name "main2main-bot"
           git config user.email "main2main-bot@users.noreply.github.com"
-          git fetch origin main
-          UPSTREAM_SHA=$(git rev-parse origin/main)
+          # This fetch gates the whole run; retry transient failures.
+          attempt=0
+          until git fetch "https://github.com/${UPSTREAM_REPO}.git" main; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::upstream fetch from ${UPSTREAM_REPO} failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "upstream fetch failed (attempt ${attempt}), retrying in 15s"
+            sleep 15
+          done
+          UPSTREAM_SHA=$(git rev-parse FETCH_HEAD)
           USE_BASELINE=false
 
-          # Attempt incremental mode: carry forward previous adaptation commits
-          # by rebasing main2main_baseline onto this run's fixed upstream SHA.
-          if git fetch "https://github.com/${HEAD_FORK}.git" \
-            "refs/heads/main2main_baseline:refs/remotes/main2main/main2main_baseline" 2>/dev/null; then
-            BASELINE_SHA=$(git rev-parse refs/remotes/main2main/main2main_baseline)
+          # A missing baseline ref is the normal first-run state (fresh mode);
+          # only transport failures are retried.
+          attempt=0
+          BASELINE_PRESENT=false
+          BASELINE_FETCH_ERR=""
+          while [ "$attempt" -lt 3 ]; do
+            BASELINE_FETCH_ERR=$(git fetch "https://github.com/${HEAD_FORK}.git" \
+              "refs/heads/${MAIN2MAIN_BASELINE_REF}:refs/remotes/main2main/${MAIN2MAIN_BASELINE_REF}" 2>&1) \
+              && { BASELINE_PRESENT=true; break; }
+            case "${BASELINE_FETCH_ERR}" in
+              *"couldn't find remote ref"*|*"does not exist"*|*"not found in"*|"")
+                break ;;
+            esac
+            attempt=$((attempt + 1))
+            echo "baseline ref fetch failed (attempt ${attempt}), retrying in 15s"
+            sleep 15
+          done
+          if [ "${BASELINE_PRESENT}" = "true" ]; then
+            BASELINE_SHA=$(git rev-parse "refs/remotes/main2main/${MAIN2MAIN_BASELINE_REF}")
             BASELINE_VLLM=$(git show "${BASELINE_SHA}:.github/vllm-main-verified.commit" 2>/dev/null || true)
             TARGET_BEHIND=false
             if [ -n "$TARGET_COMMIT" ] && [ -n "$BASELINE_VLLM" ] && \
@@ -105,11 +132,15 @@ jobs:
                 git rebase --abort
               fi
             fi
+          else
+            case "${BASELINE_FETCH_ERR}" in
+              *"couldn't find remote ref"*|*"does not exist"*|*"not found in"*|"")
+                echo "No baseline ref ${MAIN2MAIN_BASELINE_REF} on ${HEAD_FORK} — starting in fresh mode" ;;
+              *)
+                echo "::warning::baseline ref fetch failed (${BASELINE_FETCH_ERR}) — falling back to fresh mode; the incremental adaptation state is NOT carried forward" ;;
+            esac
           fi
 
-          # Fresh mode starts directly from the fixed upstream SHA when no
-          # baseline exists, the target vLLM commit predates the baseline's
-          # verified vLLM commit, or the rebase conflicts.
           if [ "$USE_BASELINE" = true ]; then
             {
               echo "source_repository=$HEAD_FORK"
@@ -130,7 +161,8 @@ jobs:
     needs: resolve-source
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
-      target_ids: '["a2-arm64-ubuntu"]'
+      # No CPU csrc cache: csrc is compiled on the a3 NPU runner below.
+      target_ids: '[]'
       repository: ${{ needs.resolve-source.outputs.source_repository }}
       source_ref: ${{ needs.resolve-source.outputs.source_ref }}
       base_repository: vllm-project/vllm-ascend
@@ -139,13 +171,13 @@ jobs:
 
   main2main:
     needs: [resolve-source, ensure-csrc-cache]
-    runs-on: linux-aarch64-a2b1-8
+    runs-on: linux-aarch64-a3-16-sh-001
     timeout-minutes: 2880
     concurrency:
       group: main2main
       cancel-in-progress: false
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -168,7 +200,7 @@ jobs:
         shell: bash -el {0}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-      MAIN2MAIN_IMAGE_TAG: 9.1.0-910b-ubuntu22.04-py3.12
+      MAIN2MAIN_IMAGE_TAG: 9.1.0-a3-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
@@ -176,6 +208,9 @@ jobs:
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
+      # a3 dual-die chips require die-pair-aligned allocation.
+      MAIN2MAIN_PAIR_ALIGNED_DEVICES: '1'
+      MAIN2MAIN_TEST_TIMEOUT: '3600'
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
@@ -200,8 +235,48 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Exclude vllm dir from ascend git
-        run: echo "vllm-upstream/" >> .git/info/exclude
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
+          path: vllm-upstream
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
+            xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
+          fi
+          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev zstd clang-15 jq gh shellcheck ripgrep
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/vllm-upstream"
+          pip install uv pytest
+
+      - name: Prepare ascend workspace
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -eu
+          # Hide the nested vllm checkout from the ascend repo's git status.
+          echo "vllm-upstream/" >> .git/info/exclude
+
+          TARGET="${TARGET_COMMIT}"
+          if [ -n "${TARGET}" ]; then
+            if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::Invalid target_commit format: ${TARGET}"
+              exit 1
+            fi
+          fi
+
+          git config user.name "main2main-bot"
+          git config user.email "main2main-bot@users.noreply.github.com"
+          gh --version
 
       - name: Load main2main test cases
         run: |
@@ -219,51 +294,10 @@ jobs:
           printf '%s\n' "${CASES}"
           echo "MAIN2MAIN_TEST_CASES=${CASES}" >> "$GITHUB_ENV"
 
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v7
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
-          path: vllm-upstream
-          fetch-depth: 0
-
-      - name: Validate target commit
-        run: |
-          TARGET="${TARGET_COMMIT}"
-          if [ -n "${TARGET}" ]; then
-            if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
-              echo "::error::Invalid target_commit format: ${TARGET}"
-              exit 1
-            fi
-          fi
-
-      - name: Install dependencies
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
-            xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
-          fi
-          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev zstd clang-15 jq gh shellcheck
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/vllm-upstream"
-          pip install uv pytest
-
-      - name: Configure git identity
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -eu
-          git config user.name "main2main-bot"
-          git config user.email "main2main-bot@users.noreply.github.com"
-          gh --version
-
       - name: Check npu and CANN info
         if: ${{ !cancelled() }}
         run: |
+          set -u
           npu-smi info || true
           if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
             cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
@@ -297,12 +331,26 @@ jobs:
             --registry https://repo.huaweicloud.com/repository/npm/ \
             opencode-ai
           # configure opencode auth
+          # DeepSeek official platform; MAIN2MAIN_API_KEY must hold a DeepSeek key.
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
           {
             "deepseek": {
               "type": "api",
               "key": "${{ secrets.MAIN2MAIN_API_KEY }}"
+            }
+          }
+          EOF
+          # extend opencode's model catalog: models.dev does not list deepseek-flash yet
+          mkdir -p ~/.config/opencode
+          cat > ~/.config/opencode/opencode.json <<EOF
+          {
+            "provider": {
+              "deepseek": {
+                "models": {
+                  "deepseek-flash": {}
+                }
+              }
             }
           }
           EOF
@@ -330,6 +378,9 @@ jobs:
           M2M_FLOW_DIR="/tmp/main2main_flow"
           if [ ! -d "${M2M_FLOW_DIR}/.git" ]; then
             git clone https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+          else
+            git -C "${M2M_FLOW_DIR}" fetch origin main
+            git -C "${M2M_FLOW_DIR}" reset --hard origin/main
           fi
           pip install -e "${M2M_FLOW_DIR}"
 
@@ -337,8 +388,6 @@ jobs:
         id: branch
         working-directory: ${{ github.workspace }}
         env:
-          # The ref identifies what to fetch; the SHA fixes the exact commit
-          # used as the incremental-mode rebase base.
           UPSTREAM_FETCH_REF: ${{ needs.resolve-source.outputs.base_ref }}
           UPSTREAM_REBASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
           CHECKOUT_SOURCE_SHA: ${{ needs.resolve-source.outputs.source_ref }}
@@ -354,8 +403,6 @@ jobs:
             git rebase "$UPSTREAM_REBASE_SHA"
           fi
           git cat-file -e "${UPSTREAM_BASE_SHA}^{commit}"
-          # main2main_flow uses upstream/main as its squash baseline. Keep the
-          # ref on the resolved snapshot instead of fetching a moving main.
           git update-ref refs/remotes/upstream/main "$UPSTREAM_BASE_SHA"
           BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
@@ -364,12 +411,10 @@ jobs:
       - name: Get csrc hash
         id: get_csrc_hash
         run: |
-          # Fail closed so a git error cannot silently produce sha256(empty).
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
 
-          # Match the standalone cache producer's tracked csrc build inputs.
           CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
@@ -399,9 +444,7 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          # During the rollout, tolerate misses so main2main can use the existing
-          # NPU build while CPU cache production proves stable.
-          # Restore fail-on-cache-miss to true after the transition period.
+          # Transition: tolerate misses until the CPU cache rollout completes.
           fail-on-cache-miss: false
 
       - name: Install Mooncake wheel
@@ -424,16 +467,17 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
-      - name: Install vllm-ascend
+      - name: Install vllm-project/vllm-ascend
         working-directory: ${{ github.workspace }}
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          # a3 SoC values for the on-runner compile; do not derive from the runner name.
+          SOC_VERSION: ascend910_9391
+          MAX_JOBS: '184'
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          # Preserve main2main availability during the transition by compiling
-          # on the NPU only when the CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
             echo "csrc cache hit: skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -441,6 +485,18 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+
+      - name: Save vllm-ascend csrc cache
+        # Persist the on-runner build for the next dispatch.
+        if: steps.cache-csrc.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Run main2main flow
         id: run-main2main
@@ -531,8 +587,7 @@ jobs:
           STATUS_JSON="${MAIN2MAIN_WORKSPACE}/final_status.json"
           BASE_SHA="${{ steps.branch.outputs.base_sha }}"
 
-          # kickoff may exit 0 without writing final_status.json (e.g. flow short-circuits
-          # on no new commits). Degrade gracefully instead of crashing on FileNotFoundError.
+          # kickoff may exit 0 without final_status.json (no-new-commits short-circuit).
           if [ ! -f "${STATUS_JSON}" ]; then
             echo "::warning::final_status.json not found at ${STATUS_JSON}; kickoff produced no structured status"
             FINAL_STATUS="missing"
@@ -576,42 +631,3 @@ jobs:
           echo "::notice::final_status=${FINAL_STATUS}, reached_commit=${REACHED_COMMIT}, steps=${STEPS_COMPLETED}/${STEPS_TOTAL}, commit_count=${COMMIT_COUNT}"
           print_group_if_nonempty "main2main created commits" /tmp/main2main/created-commits.md
 
-      - name: Create manual review issue
-        if: steps.final-status.outputs.manual_review_required == 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          eval "${MAIN2MAIN_LOG_HELPERS}"
-
-          PR_URL=$(cat /tmp/main2main/pr_url.txt 2>/dev/null || echo "")
-          OLD="${{ steps.final-status.outputs.old_commit }}"
-          NEW="${{ steps.final-status.outputs.new_commit }}"
-          SHORT_NEW=$(printf '%.8s' "${NEW}")
-
-          cat > /tmp/main2main-manual-review.md <<EOF
-          ## Summary
-
-          main2main automation stopped before completing all planned steps.
-
-          ## Context
-
-          - Draft PR: ${PR_URL}
-          - Commit range: \`${OLD}\`...\`${NEW}\`
-          - Status: \`${{ steps.final-status.outputs.status }}\`
-
-          ## Final Summary
-
-          $(cat /tmp/main2main/final-summary.md 2>/dev/null || echo "(final summary unavailable)")
-          EOF
-
-          print_group "Manual review issue" /tmp/main2main-manual-review.md
-          gh issue create \
-            --repo "${UPSTREAM_REPO}" \
-            --title "[main2main] main2main manual review required (${SHORT_NEW})" \
-            --body-file /tmp/main2main-manual-review.md
-
-      - name: Chain next run
-        if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
-        run: |
-          echo "::notice::Chaining next main2main run..."
-          gh workflow run Main2Main \
-            --repo "${UPSTREAM_REPO}"

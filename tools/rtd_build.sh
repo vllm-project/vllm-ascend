@@ -53,7 +53,7 @@ if [ "$DOCS_LANG" = "zh" ]; then
     # mkdocs so the generated sources exist when mkdocs scans
     # DOCS_DIR.
     echo "[rtd-build] Generating Chinese sources from .po files..."
-    python tools/generate_zh_docs.py
+    python -m tools.generate_zh_docs
 
     # Mirror shared static assets into the Chinese DOCS_DIR. mkdocs resolves
     # `extra_css` and other static paths relative to DOCS_DIR, so anything

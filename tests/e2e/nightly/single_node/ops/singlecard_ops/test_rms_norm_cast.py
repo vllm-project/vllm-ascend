@@ -4,7 +4,6 @@
 import pytest
 import torch
 import torch_npu
-import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 
 def _tolerances(dtype: torch.dtype) -> tuple[float, float]:

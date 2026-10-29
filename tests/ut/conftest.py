@@ -228,6 +228,7 @@ if not _npu_available:
     sys.modules["torch_npu"].npu_fast_gelu = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_transpose_batchmatmul = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_weight_quant_batchmatmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_scatter_nd_update_ = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_grouped_matmul = MagicMock(return_value=[MagicMock()])  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_clipped_swiglu = MagicMock()  # type: ignore[attr-defined]

@@ -8,7 +8,8 @@ This guide uses Qwen3-0.6B as an example to help you run your first offline infe
 - Python: {{ release_python_version }}
 - Docker
 - Supported hardware:
-{% include "getting_started/installation/supported_hardware.inc.md" %}
+
+{% filter indent(4, true) %}{% include "getting_started/installation/supported_hardware.inc.md" %}{% endfilter %}
 
 ??? note "Software stack included in the vLLM Ascend image"
 
@@ -50,6 +51,7 @@ The following sections provide offline inference and online serving examples. Ch
 
     If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to ModelScope:
 
+    <!-- doctest: quickstart-modelscope -->
     ```bash
     export VLLM_USE_MODELSCOPE=True
     pip install "modelscope>=1.18.1,<1.38"

@@ -12,6 +12,12 @@ a2:
   single_node:
     test_config:
       # YAML-driven tests
+      - name: qwen3-30b-a3b-bf16-a2-performance
+        os: linux-aarch64-a2b3-4
+        config_file_path: Qwen3-30B-A3B-BF16-A2.yaml
+      - name: qwen3-30b-a3b-w8a8-a2-performance
+        os: linux-aarch64-a2b3-4
+        config_file_path: Qwen3-30B-A3B-W8A8-A2.yaml
       - name: qwen3-vl-32b-instruct-w8a8
         os: linux-aarch64-a2b3-4
         config_file_path: Qwen3-VL-32B-Instruct-W8A8.yaml
@@ -208,6 +214,12 @@ a3:
       - name: glm-5.1-w8a8-prefill-mc2
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
+      - name: glm-5.2-w4a8-dspark
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
+      - name: glm-5.2-w4a8-mtp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
@@ -287,15 +299,6 @@ a3:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
-      # Qwen3-32B V1/V2 exit-scenario accuracy guards (AIME W8A8 + GPQA bf16):
-      # nightly-only, reusing the same pytest files (V1 vs V2 direct compare).
-      - name: qwen3-32b-w8a8-aime2024-acc
-        os: linux-aarch64-nightly-a3-4
-        tests: tests/e2e/nightly/test_qwen3_32b_w8a8_aime2024_accuracy.py
-      - name: qwen3-32b-bf16-gpqa-acc
-        os: linux-aarch64-nightly-a3-4
-        tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
-        testcase_timeout: 240
 
 a3-560t:
   single_node:
@@ -324,6 +327,12 @@ a3-560t:
       - name: glm-5.1-w8a8-prefill-mc2
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
+      - name: glm-5.2-w4a8-dspark
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
+      - name: glm-5.2-w4a8-mtp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
@@ -370,15 +379,6 @@ a3-560t:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
-      # Qwen3-32B V1/V2 exit-scenario accuracy guards (AIME W8A8 + GPQA bf16):
-      # nightly-only, reusing the same pytest files (V1 vs V2 direct compare).
-      - name: qwen3-32b-w8a8-aime2024-acc
-        os: linux-aarch64-a3-4-cn12-001
-        tests: tests/e2e/nightly/test_qwen3_32b_w8a8_aime2024_accuracy.py
-      - name: qwen3-32b-bf16-gpqa-acc
-        os: linux-aarch64-a3-4-cn12-001
-        tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
-        testcase_timeout: 240
 
 310p:
   single_node:
@@ -403,13 +403,42 @@ a3-560t:
         config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
 
 a5:
-  multi_node:
-    test_config:
-      - name: Qwen3-235B-W8A8-EPLB
-        size: 2
-        config_file_path: Qwen3-235B-W8A8-EPLB-mxfp0.yaml
+#   multi_node:
+#     test_config:
+#       - name: Qwen3-235B-W8A8-EPLB
+#         size: 2
+#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
 #   single_node:
 #     test_config:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp
 #         os: linux-aarch64-a5-8
 #         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
+  single_node:
+    test_config:
+      - name: Qwen3_235b_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_235b_w8a8_A5.yaml
+      - name: DeepSeek_V31_W4A4C8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V31_W4A4C8_A5.yaml
+      - name: Qwen3_32b_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_32b_w8a8_A5.yaml
+      - name: GLM5_1_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: GLM5_1_W4A4_A5.yaml
+      - name: Qwen3_6_27b_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_6_27b_A5.yaml
+      - name: Qwen3_6_27B_W8A8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_6_27B_W8A8_A5.yaml
+      - name: Qwen3_5_35B_A3B_FP8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_5_35B_A3B_FP8_A5.yaml
+      - name: DeepSeek_V4_Flash_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V4_Flash_A5.yaml
+      - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml

@@ -3,9 +3,34 @@ from typing import Any
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from vllm_ascend import envs
+
 _NUM_AICORE = -1
 _NUM_VECTORCORE = -1
+_UB_SIZE_BYTES = -1
 _extension_module = None
+
+# Safe default for Ascend 910B (A2) and 910C (A3), both have 192 KB UB.
+# Used when device properties do not expose UB size and no env override is set.
+DEFAULT_UB_SIZE_BYTES = 192 * 1024
+
+# Minimum plausible UB size in bytes. Some Ascend driver versions return
+# invalid values (e.g., 1) for UB-related device properties when the real
+# information is unavailable. Any detected value below this threshold is
+# treated as invalid and falls back to DEFAULT_UB_SIZE_BYTES. The smallest
+# real UB on any shipping Ascend NPU is 128 KB (older 310P), so 4 KB is a
+# conservative floor that rejects sentinel/error values while accepting any
+# genuine UB report.
+_MIN_UB_SIZE_BYTES = 4 * 1024
+
+# Candidate keys that Triton Ascend driver may use to report UB size.
+_UB_SIZE_PROPERTY_KEYS = (
+    "ub_size",
+    "max_ub_size",
+    "unified_buffer_size",
+    "max_shared_memory",
+    "max_shared_mem",
+)
 
 if HAS_TRITON:
     try:
@@ -44,7 +69,7 @@ else:
 
 
 def init_device_properties_triton():
-    global _NUM_AICORE, _NUM_VECTORCORE
+    global _NUM_AICORE, _NUM_VECTORCORE, _UB_SIZE_BYTES
     if _NUM_AICORE == -1 and HAS_TRITON:
         device_properties: dict[str, Any] = triton.runtime.driver.active.utils.get_device_properties(
             torch.npu.current_device()
@@ -52,6 +77,24 @@ def init_device_properties_triton():
         _NUM_AICORE = device_properties.get("num_aicore", -1)
         _NUM_VECTORCORE = device_properties.get("num_vectorcore", -1)
         assert _NUM_AICORE > 0 and _NUM_VECTORCORE > 0, "Failed to detect device properties."
+
+        # Detect UB size: try each candidate key from device properties.
+        # Reject values below _MIN_UB_SIZE_BYTES: some driver versions return
+        # sentinels (e.g., 1) when UB info is unavailable, which would produce
+        # absurdly small tiles and kernel compilation failures.
+        for key in _UB_SIZE_PROPERTY_KEYS:
+            value = device_properties.get(key)
+            if isinstance(value, (int, float)) and value >= _MIN_UB_SIZE_BYTES:
+                _UB_SIZE_BYTES = int(value)
+                break
+        # Fall back to safe default if not found or invalid.
+        if _UB_SIZE_BYTES <= 0:
+            _UB_SIZE_BYTES = DEFAULT_UB_SIZE_BYTES
+
+        # Allow env var override for debugging or unsupported hardware.
+        env_override = envs.VLLM_ASCEND_ROPE_UB_SIZE_KB
+        if env_override > 0:
+            _UB_SIZE_BYTES = env_override * 1024
 
 
 def get_aicore_num():
@@ -64,3 +107,16 @@ def get_vectorcore_num():
     global _NUM_VECTORCORE
     assert _NUM_VECTORCORE > 0, "Device properties not initialized. Please call init_device_properties_triton() first."
     return _NUM_VECTORCORE
+
+
+def get_ub_size_bytes():
+    """Return the Unified Buffer (UB) size in bytes for the current NPU.
+
+    Used by Triton kernels to dynamically size tiles so they fit within UB.
+    The value is auto-detected from device properties during
+    ``init_device_properties_triton()``, with a safe fallback of 192 KB
+    (covering Ascend 910B/A3). Override via ``VLLM_ASCEND_ROPE_UB_SIZE_KB``.
+    """
+    global _UB_SIZE_BYTES
+    assert _UB_SIZE_BYTES > 0, "Device properties not initialized. Please call init_device_properties_triton() first."
+    return _UB_SIZE_BYTES

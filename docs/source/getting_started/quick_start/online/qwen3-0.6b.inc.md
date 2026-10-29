@@ -1,5 +1,6 @@
 The following Qwen3-0.6B example has been validated using the default model loading configuration.
 
+<!-- doctest: quickstart-standard-online-serve -->
 ```bash
 vllm serve Qwen/Qwen3-0.6B &
 ```
@@ -17,22 +18,27 @@ Congratulations! You have successfully started the vLLM server.
 
 You can query the model list:
 
+<!-- doctest: quickstart-standard-online-model-list -->
 ```bash
-curl http://localhost:8000/v1/models | python3 -m json.tool
+curl --fail http://localhost:8000/v1/models
 ```
 
 You can also send a prompt to the model:
 
+<!-- doctest: quickstart-standard-online-completion -->
 ```bash
-curl http://localhost:8000/v1/completions \
+curl --fail http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "Qwen/Qwen3-0.6B",
         "prompt": "Beijing is a",
-        "max_completion_tokens": 5,
+        "max_tokens": 5,
         "temperature": 0
-    }' | python3 -m json.tool
+    }'
 ```
+
+Confirm that the response contains nonempty generated text in `choices[0].text`.
+An error response or an empty completion does not confirm successful inference.
 
 vLLM is running as a background process. You can use `kill -2 $VLLM_PID` to stop it gracefully, which is similar to pressing `Ctrl+C` for a foreground vLLM process:
 
@@ -42,6 +48,7 @@ vLLM is running as a background process. You can use `kill -2 $VLLM_PID` to stop
 
     Before running `kill`, confirm that `VLLM_PID` is the service started by this example to avoid stopping another running vLLM process by mistake.
 
+<!-- doctest: quickstart-standard-online-stop -->
 ```bash
 VLLM_PID=$(pgrep -f "vllm serve")
 kill -2 "$VLLM_PID"

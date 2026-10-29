@@ -248,10 +248,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_model_forward
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.maybe_all_gather_and_unpad
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: draft_hidden_states_all_gather
 - symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
   min_version: "0.9.1"
   domain: SpecDecode

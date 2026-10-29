@@ -1,4 +1,7 @@
 add_op_to_compiled_list()
+set(quant_lightning_indexer_v2_depends
+    "attention/lightning_indexer_v2"
+    CACHE STRING "Kernel source dependencies for quant_lightning_indexer_v2" FORCE)
 
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE

@@ -46,6 +46,7 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    vllm_version_is,
 )
 
 
@@ -287,9 +288,15 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         quantization-aware per-layer projections, so use vLLM's public loader
         interface without creating that extra packed parameter.
         """
-        # Current vLLM drops the training-only and shared checkpoint
-        # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
-        loader = AutoWeightsLoader(self)
+        if vllm_version_is("0.28.0"):
+            loader = AutoWeightsLoader(
+                self,
+                skip_substrs=list(self.checkpoint_skip_substrs),
+            )
+        else:
+            # Current vLLM drops the training-only and shared checkpoint
+            # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
+            loader = AutoWeightsLoader(self)
         rotation_weight = None
         if self.rotation_path is not None:
             rotation_weight = get_rotation_matrix(self.rotation_path)
