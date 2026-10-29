@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import inspect
 from types import SimpleNamespace
 
 import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
+from vllm.config.kv_transfer import KVTransferConfig
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
@@ -31,9 +33,16 @@ def _scheduler(
     is_kv_producer: bool | None = None,
     uses_sparse_index_kpool: bool = False,
 ):
-    kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
-    if kv_transfer_config is not None and is_kv_producer is not None:
-        kv_transfer_config.is_kv_producer = is_kv_producer
+    role = (
+        None
+        if is_kv_consumer is None
+        else "kv_both"
+        if is_kv_consumer and is_kv_producer
+        else "kv_consumer"
+        if is_kv_consumer
+        else "kv_producer"
+    )
+    kv_transfer_config = None if role is None else KVTransferConfig(kv_connector="MooncakeConnectorV2", kv_role=role)
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
     # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split.
     scheduler_kwargs: dict = {}
@@ -131,12 +140,12 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
-def test_producer_splits_window_after_external_cache_hit():
+def test_producer_splits_window_after_local_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
         _request(num_computed_tokens=0),
         num_new_tokens=8,
-        num_external_computed_tokens=379,
+        num_new_local_computed_tokens=379,
     )
 
     assert result == 5
@@ -181,16 +190,15 @@ def test_sparse_index_kpool_stops_at_last_cacheable_boundary():
 
 
 def test_sparse_index_kpool_does_not_round_small_chunk_to_zero():
+    scheduler = _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True)
+    # Upstream advances within a block when the configured prefill limit is
+    # smaller than that block, rather than waiting for a larger next budget.
+    scheduler.max_num_scheduled_tokens = 64
     result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
-        _request(
-            num_computed_tokens=128,
-            num_prompt_tokens=500,
-            num_tokens=500,
-        ),
+        scheduler,
+        _request(num_computed_tokens=128, num_prompt_tokens=500, num_tokens=500),
         num_new_tokens=64,
     )
-
     assert result == 64
 
 
@@ -298,3 +306,47 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("role", ["kv_producer", None])
+@pytest.mark.parametrize("sparse", [False, True])
+def test_continuing_prefill_stops_at_next_state_boundary(role, sparse):
+    scheduler = _scheduler(
+        is_kv_consumer=None if role is None else role in ("kv_consumer", "kv_both"),
+        is_kv_producer=role in ("kv_producer", "kv_both"),
+        uses_sparse_index_kpool=sparse,
+    )
+    scheduler.block_size = 4352
+    scheduler.cache_config.block_size = 128 if sparse else 4352
+    scheduler.max_num_scheduled_tokens = 512
+    request = _request(num_computed_tokens=4000, num_prompt_tokens=20000, num_tokens=20000)
+    reference = copy.copy(scheduler)
+    reference.cache_config = copy.copy(scheduler.cache_config)
+    reference.cache_config.block_size = 4352
+    if role in (None, "kv_producer"):
+        reference.use_eagle = reference.use_eagle_block_drop = False
+    expected = _original_mamba_block_aligned_split(reference, request, 512)
+    assert expected == 352
+    assert _mamba_block_aligned_split(scheduler, request, 512) == expected
+    assert scheduler.cache_config.block_size == (128 if sparse else 4352)
+    assert scheduler.use_eagle and scheduler.use_eagle_block_drop
+    # A budget smaller than the distance to the next boundary still advances.
+    assert _mamba_block_aligned_split(scheduler, request, 128) == 128
+
+
+def test_sparse_layout_is_restored_when_upstream_raises(monkeypatch):
+    scheduler = _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True)
+
+    original_config = scheduler.cache_config
+
+    def fail(self, *args):
+        assert original_config.block_size == 384
+        assert self.cache_config.block_size == self.block_size
+        raise RuntimeError("upstream failure")
+
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", fail)
+    with pytest.raises(RuntimeError, match="upstream failure"):
+        _mamba_block_aligned_split(scheduler, _request(num_computed_tokens=100), 128)
+    assert scheduler.cache_config is original_config
+    assert scheduler.cache_config.block_size == 384
+    assert scheduler.use_eagle and scheduler.use_eagle_block_drop
