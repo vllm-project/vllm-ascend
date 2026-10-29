@@ -103,9 +103,9 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
+        UV_FIND_LINKS: "http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi/triton-ascend"
         UV_INDEX_URL: >-
           ${{ matrix.group.npu_type == '310p' &&
-          'https://mirrors.huaweicloud.com/ascend/repos/pypi/' ||
           'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
         UV_EXTRA_INDEX_URL: >-
           ${{ matrix.group.npu_type == '310p' &&
