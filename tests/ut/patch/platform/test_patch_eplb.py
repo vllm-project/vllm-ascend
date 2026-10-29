@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.platforms import current_platform
 from vllm.v1.executor.multiproc_executor import WorkerProc
 
@@ -537,6 +538,96 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     assert published[0].layer_idx == changed_layer
     assert published[0].is_last_result
     assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
+
+
+@pytest.mark.parametrize("fail_transfer", [False, True])
+def test_hixl_worker_consumption_events_are_scoped_to_model_cycle_and_layer(monkeypatch, fail_transfer):
+    session, communicators, _engine = _shared_models(monkeypatch)
+    session.initialize(communicators)
+    old_mapping = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    new_mapping = old_mapping.flip(1)
+    model_states = {
+        name: SimpleNamespace(
+            communicator=communicator,
+            physical_to_logical_map=old_mapping,
+            logical_to_physical_map=torch.empty((2, 4, 1), dtype=torch.int32),
+            model=SimpleNamespace(expert_weights=[[object()], [object()]]),
+            expert_buffer=[object()],
+            rebalanced=True,
+            pending_result=None,
+        )
+        for name, communicator in communicators.items()
+    }
+    cycles = iter(range(2))
+    previous_events = {}
+    transfers = []
+    active_model = ""
+    failure = RuntimeError("layer transfer failed")
+    monkeypatch.setattr(torch, "Event", MagicMock(side_effect=lambda: MagicMock()))
+
+    class ConsumedEvent(CpuGpuEvent):
+        def wait(self, stream=None):
+            # Emulate the foreground acknowledgement after publication, including
+            # the real CpuGpuEvent.record() replacement of the device event.
+            model_state = model_states[active_model]
+            assert model_state.pending_result.consumed_event is self
+            self.record()
+            super().wait(stream=stream)
+            previous_events[active_model] = self._event
+            model_state.pending_result = None
+
+    def wait_for_rearrangement(_stream):
+        if next(cycles, None) is None:
+            return False
+        previous_events.clear()
+        return True
+
+    def transfer_layer(**kwargs):
+        nonlocal active_model
+        communicator = kwargs["communicator"]
+        active_model = next(name for name, candidate in communicators.items() if candidate is communicator)
+        layer = kwargs["layer_idx"]
+        dependency = communicator._consumed_event
+        assert dependency is (previous_events[active_model] if layer else None)
+        transfers.append((active_model, layer))
+        if fail_transfer and layer == 1:
+            raise failure
+        communicator.set_transfer_context(kwargs["old_layer_indices"].numpy(), layer)
+        communicator.execute()
+        if dependency is not None:
+            dependency.synchronize.assert_called_once_with()
+        return object()
+
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", ConsumedEvent)
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", lambda *_args: new_mapping)
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", transfer_layer)
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=MagicMock(), cpu_group=MagicMock(size=lambda: 1)),
+    )
+    monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = model_states
+    state._hixl_session = session
+    state.wait_for_rearrangement = wait_for_rearrangement
+
+    def original_worker(state, stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
+    if fail_transfer:
+        with pytest.raises(RuntimeError, match="layer transfer failed") as error:
+            worker(state, MagicMock())
+        assert session._error is error.value is failure
+        assert not session._usable
+        assert transfers == [("draft", 0), ("draft", 1)]
+    else:
+        worker(state, MagicMock())
+        assert transfers == [(name, layer) for _ in range(2) for name in communicators for layer in range(2)]
+        session.close()
+    assert all(communicator._consumed_event is None for communicator in communicators.values())
+    assert all(model_state.pending_result is None for model_state in model_states.values())
 
 
 @pytest.mark.parametrize("failure_stage", ["context", "synchronize"])

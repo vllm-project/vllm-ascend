@@ -301,6 +301,20 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder._get_pool_bytes_per_block`
+#    Why:
+#       The builder-based vLLM planner probes one block and requires every
+#       device tensor to share one backing size. Ascend's DSV4.1, DSV4, GLM5,
+#       and TurboQuant layouts can use several differently sized allocations.
+#    How:
+#       Return the aggregate per-block pool size from existing Ascend layout
+#       accounting for those cache types; leave other layouts on the upstream
+#       placement probe.
+#    Related PR (if no, explain why):
+#       No upstream PR currently handles Ascend's multi-allocation layouts.
+#    Future Plan:
+#       Move this override into an Ascend KVCacheConfigBuilder, or remove it
+#       once upstream provides a platform hook for multi-allocation accounting.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -199,10 +199,10 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
     # Run a certain test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py::test_qwen3_dense_graph_mode
     ```
 
 === "Multi-card"
@@ -257,7 +257,7 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py)
 
 ### Csrc incremental build cache checks
 
@@ -298,7 +298,7 @@ You can preview locally which runners a set of tests would be routed to:
 
 ```bash
 python3 .github/workflows/scripts/select_tests.py \
-  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
 # Full suite routing (mirrors the ready-all mode)
 python3 .github/workflows/scripts/select_tests.py --all-tests
