@@ -17,7 +17,7 @@
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, _log1p_neg_stable, tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
@@ -43,9 +43,8 @@ def _selector_walk_kernel_ascend(
 ):
     """Ascend variant of upstream ``_selector_walk_kernel``.
 
-    The Gumbel noise uses ``log(u)`` rather than ``log1p(-u)`` because
-    triton-ascend cannot lower libdevice log1p. Both have the same distribution;
-    using the open uniform directly also avoids rounding ``1 - u`` to one.
+    The upstream stable ``log1p(-u)`` helper avoids libdevice log1p and
+    preserves the positive Gumbel tail for small uniform draws.
     The signature mirrors upstream so the shared ``CandidateSampler`` can
     call it unmodified:
     ``SAMPLE_PROBABILISTIC`` gates greedy vs. probabilistic, and ``USE_FP64``
@@ -92,7 +91,7 @@ def _selector_walk_kernel_ascend(
             # positions all fit int32.
             gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
             uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
-            noise = -tl.log(-tl.log(uniform))
+            noise = -tl.log(-_log1p_neg_stable(uniform))
             sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
             best = tl.max(sampled_scores, axis=0)
             index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)

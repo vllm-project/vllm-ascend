@@ -6,11 +6,36 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
+
+
+@triton.jit
+def _stable_gumbel_kernel(uniform_ptr, output_ptr, size: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    uniform = tl.load(uniform_ptr + offsets, offsets < size, other=0.5)
+    noise = -tl.log(-_log1p_neg_stable(uniform))
+    tl.store(output_ptr + offsets, noise, offsets < size)
+
+
+def test_stable_gumbel_matches_fp64_reference():
+    """Compile the shared transform on NPU and check both tails and its branch."""
+    uniform = torch.tensor(
+        [2.0**-31, 2.0**-24, 1e-4, 0.24999999, 0.25, 0.25000003, 0.5, 1.0 - 2.0**-24],
+        dtype=torch.float32,
+    )
+    reference = -torch.log(-torch.log1p(-uniform.double()))
+    device_uniform = uniform.to("npu")
+    output = torch.empty_like(device_uniform)
+    _stable_gumbel_kernel[(1,)](device_uniform, output, uniform.numel(), BLOCK=16)
+    actual = output.cpu().double()
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, reference, atol=4e-6, rtol=2e-6)
 
 
 @pytest.mark.parametrize("use_triton", [False, True])
