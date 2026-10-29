@@ -230,16 +230,18 @@ Layerwise 在已确定的对象内逐层选择 segment，保留其在完整对�
 
 绑定生成 Key、Local，并按需生成 Layer 关系；Remote 由所选访问方式单独建立。Bulk 使用 Key 和 Local 传输整对象；KeyRange 为各段计算紧凑对象偏移；GVA 根据 Configuration 与 Topology 的约束，在紧凑段序上加入全局层预留、上下文槽位及对齐。Remote 的对象大小因此可以大于本地有效载荷之和。
 
-运行时，Worker 提供已选内容 hash 和本地 Block ID。对段 j，令 βⱼ 为 block 0 基址，σⱼ 为块步长，ℓⱼ 为长度，oⱼ 为对象偏移；bᵢ 为第 i 条记录的本地 Block ID，Gᵢ 为本次对象会话提供的远端基址。地址、步长、长度和偏移均以字节计。
+运行时，Worker 提供已选内容 hash 和本地 Block ID。对段 $j$，令 $\beta_j$ 为 block 0 基址，$\sigma_j$ 为块步长，$\ell_j$ 为长度，$o_j$ 为对象偏移；$b_i$ 为第 $i$ 条记录的本地 Block ID，$G_i$ 为本次对象会话提供的远端基址。地址、步长、长度和偏移均以字节计，$\Vert$ 表示字符串拼接。
 
-```text
-Key       = prefix + 内容 hash + suffix
-本地地址  = βⱼ + bᵢ × σⱼ
-复制长度  = ℓⱼ
-GVA 地址  = Gᵢ + oⱼ
-```
+$$
+\begin{aligned}
+\mathrm{Key}_i &= \mathrm{prefix} \Vert \text{内容 hash}_i \Vert \mathrm{suffix} \\
+\text{本地地址}_{ij} &= \beta_j + b_i \sigma_j \\
+\text{复制长度}_j &= \ell_j \\
+\text{GVA 地址}_{ij} &= G_i + o_j
+\end{aligned}
+$$
 
-KeyRange 直接使用 oⱼ；GVA 的 Gᵢ 由有效 Backend 对象会话提供，不属于永久绑定数据。Layerwise 用同一段区间选择 Local 与 Remote；Bulk 使用完整段序列。Lookup 的命名范围单独建立，可以覆盖本 rank 没有本地来源的分区。
+KeyRange 直接使用 $o_j$；GVA 的 $G_i$ 由有效 Backend 对象会话提供，不属于永久绑定数据。Layerwise 用同一段区间选择 Local 与 Remote；Bulk 使用完整段序列。Lookup 的命名范围单独建立，可以覆盖本 rank 没有本地来源的分区。
 
 Mapping 只求值位置与身份。对象选择、逐层批次复用、Backend 参数组织和结果归属由 Worker 完成；Backend 负责实际复制及对象会话。
 
