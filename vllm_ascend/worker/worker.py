@@ -449,7 +449,12 @@ class NPUWorker(WorkerBase):
         if drafter is None or not callable(getattr(drafter, "_maybe_share_lm_head", None)):
             return
 
-        children = [(module, name, child) for module in draft_model.modules() for name, child in module.named_children()]
+        children = [
+            (module, name, child)
+            for module in draft_model.modules()
+            for name, child in module.named_children()
+        ]
+
         try:
             # Reuse Ascend's model-specific sharing rules without rebuilding the
             # ACL graph wrapper or clearing its update stream.
