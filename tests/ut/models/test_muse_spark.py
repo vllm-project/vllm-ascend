@@ -17,6 +17,7 @@ from torch import nn
 pytest.importorskip("vllm.models.muse_spark.amd.model", reason="vLLM without Muse Spark")
 
 import vllm.models.muse_spark.common.layers as upstream_layers  # noqa: E402
+from vllm.distributed import parallel_state  # noqa: E402
 from vllm.models.muse_spark.amd.model import MuseSpark1xAttention  # noqa: E402
 from vllm.models.muse_spark.common.layers import (  # noqa: E402
     MuseSpark1xRMSNorm,
@@ -274,65 +275,88 @@ def test_quantized_checkpoints_are_rejected_before_construction():
         muse_spark.AscendMuseSpark1xForCausalLM.__init__(model, vllm_config=vllm_config)
 
 
-def test_reference_moe_rejects_expert_parallelism():
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
-    ep_group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
-
-    with (
-        patch.object(muse_spark, "get_ep_group", return_value=ep_group),
-        pytest.raises(NotImplementedError, match="expert parallelism"),
-    ):
-        muse_spark.AscendMuseSpark1xMoE(vllm_config, layer_idx=1)
-
-
-MOE_HIDDEN_SIZE = 16
-MOE_INTERMEDIATE_SIZE = 12
-NUM_LOCAL_EXPERTS = 4
-
-
-def _build_moe(monkeypatch):
-    """Build the MoE with the factory stubbed, and return it with the call."""
-    config = SimpleNamespace(
-        hidden_size=32,
-        moe_hidden_size=MOE_HIDDEN_SIZE,
-        moe_intermediate_size=MOE_INTERMEDIATE_SIZE,
-        num_local_experts=NUM_LOCAL_EXPERTS,
+def _moe_vllm_config(*, enable_expert_parallel: bool) -> SimpleNamespace:
+    text_config = SimpleNamespace(
+        hidden_size=16,
+        num_local_experts=4,
         num_experts_per_tok=2,
         num_shared_experts=0,
-        routed_scaling_factor=1.5,
+        routed_scaling_factor=1.0,
         output_multiplier=1.0,
+        moe_hidden_size=8,
+        moe_intermediate_size=8,
         rms_norm_eps=EPS,
         post_norm_eps=EPS,
     )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=config, dtype=torch.float32),
-        parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=text_config, dtype=torch.float32),
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=enable_expert_parallel,
+            use_sequence_parallel_moe=False,
+        ),
     )
 
-    class _FakeRoutedExperts(nn.Module):
-        pass
 
-    class _FakeRunner(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.routed_experts = _FakeRoutedExperts()
-            self.routed_experts.quant_method = _bare_moe_method()
+class _StubLinear(nn.Module):
+    """Stands in for the vLLM linear layers, which need an initialized TP group."""
 
+    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(output_size, input_size), requires_grad=False)
+
+
+def test_reference_moe_rejects_expert_parallelism():
+    with pytest.raises(NotImplementedError, match="expert parallelism"):
+        muse_spark.AscendMuseSpark1xMoE(_moe_vllm_config(enable_expert_parallel=True), layer_idx=1)
+
+
+class _FakeRoutedExperts(nn.Module):
+    pass
+
+
+class _FakeRunner(nn.Module):
+    """Stands in for the runner the factory returns."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.routed_experts = _FakeRoutedExperts()
+        self.routed_experts.quant_method = _bare_moe_method()
+
+
+def _build_moe():
+    """Build the MoE with the factory and the vLLM linears stubbed.
+
+    Returns the layer and the keyword arguments the factory was called with.
+    """
     factory = patch.object(muse_spark, "FusedMoEFactory", side_effect=lambda **kwargs: _FakeRunner())
-    monkeypatch.setattr(muse_spark, "GateLinear", lambda *args, **kwargs: nn.Linear(1, 1))
-    monkeypatch.setattr(muse_spark, "ReplicatedLinear", lambda *args, **kwargs: nn.Linear(1, 1))
-    monkeypatch.setattr(
-        muse_spark, "get_ep_group", lambda: SimpleNamespace(device_group=SimpleNamespace(size=lambda: 1))
-    )
-
-    with factory as fused_moe:
-        moe = muse_spark.AscendMuseSpark1xMoE(vllm_config, layer_idx=0, prefix="model.layers.0.mlp")
+    with (
+        factory as fused_moe,
+        patch.object(muse_spark, "GateLinear", _StubLinear),
+        patch.object(muse_spark, "ReplicatedLinear", _StubLinear),
+    ):
+        moe = muse_spark.AscendMuseSpark1xMoE(
+            _moe_vllm_config(enable_expert_parallel=False),
+            layer_idx=1,
+            prefix="model.layers.1.mlp",
+        )
     return moe, fused_moe.call_args.kwargs
 
 
-def test_moe_builds_the_experts_on_the_ascend_fused_path(monkeypatch):
+def test_moe_builds_under_tensor_parallelism_without_ep():
+    # vLLM builds the EP group over the TP ranks of every MoE model, so TP=2
+    # yields a two-rank EP group even with expert parallelism disabled.
+    two_rank_ep_group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
+
+    with patch.object(parallel_state, "_EP", two_rank_ep_group):
+        moe, _ = _build_moe()
+
+    assert moe.ep_size == 1
+    assert moe.n_local_physical_experts == moe.n_physical_experts == 4
+
+
+def test_moe_builds_the_experts_on_the_ascend_fused_path():
     """The runner is left to the pluggable dispatch; only the container differs."""
-    moe, kwargs = _build_moe(monkeypatch)
+    moe, kwargs = _build_moe()
 
     assert kwargs["routed_experts_cls"] is muse_spark.AscendMuseSparkRoutedExperts
     # Passing runner_cls would bypass the Ascend runner and its combine.
@@ -341,20 +365,22 @@ def test_moe_builds_the_experts_on_the_ascend_fused_path(monkeypatch):
     assert kwargs["router"] is moe.moe_router
 
 
-def test_moe_sizes_the_experts_to_the_pooled_width(monkeypatch):
+def test_moe_sizes_the_experts_to_the_pooled_width():
     """The experts live after the pooler, so they take the latent width."""
-    _, kwargs = _build_moe(monkeypatch)
+    config = _moe_vllm_config(enable_expert_parallel=False).model_config.hf_text_config
+    _, kwargs = _build_moe()
 
-    assert kwargs["hidden_size"] == MOE_HIDDEN_SIZE
-    assert kwargs["intermediate_size"] == MOE_INTERMEDIATE_SIZE
-    assert kwargs["num_experts"] == NUM_LOCAL_EXPERTS
+    assert kwargs["hidden_size"] == config.moe_hidden_size
+    assert kwargs["hidden_size"] != config.hidden_size
+    assert kwargs["intermediate_size"] == config.moe_intermediate_size
+    assert kwargs["num_experts"] == config.num_local_experts
 
 
-def test_moe_hands_its_post_expert_norm_to_the_quant_method(monkeypatch):
+def test_moe_hands_its_post_expert_norm_to_the_quant_method():
     """Without this the MLP stage raises rather than skipping the norm."""
-    moe, _ = _build_moe(monkeypatch)
+    moe, _ = _build_moe()
 
     attached = moe.experts.routed_experts.quant_method.post_expert_norm_fn
-    # A bound method, not the module: holding the module would register its
-    # weight again under the quant method.
+    # A bound method, not the module: holding the module would register the
+    # norm's weight a second time under the quant method.
     assert attached.__self__ is moe.post_expert_norm

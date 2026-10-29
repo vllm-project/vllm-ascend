@@ -30,7 +30,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -282,10 +281,14 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
         nn.Module.__init__(self)
 
         config = vllm_config.model_config.hf_text_config
-        self.ep_size = get_ep_group().device_group.size()
-        if self.ep_size > 1:
+        parallel_config = vllm_config.parallel_config
+        # vLLM builds the EP group over all TP x PCP x DP ranks of every MoE
+        # model; only enable_expert_parallel shards the experts across it.
+        if parallel_config.enable_expert_parallel:
             raise NotImplementedError("Muse Spark on Ascend does not support expert parallelism yet.")
-        self.is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        # The reference experts are replicated on every rank.
+        self.ep_size = 1
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         if self.is_sequence_parallel:
             raise NotImplementedError("Muse Spark on Ascend does not support sequence-parallel MoE yet.")
 
