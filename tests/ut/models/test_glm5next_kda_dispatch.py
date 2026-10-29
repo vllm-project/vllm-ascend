@@ -299,7 +299,16 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         assert correction is layer.kv_cache[2] and kg is layer.kv_cache[3]
         assert capacity == 2 and a_log.shape == (1,)
         torch.testing.assert_close(indices, metadata.spec_state_indices_tensor[:, 0])
-        return recurrent(q, k, v, gate, beta, state, starts, indices)
+        assert state is layer.kv_cache[1]
+        assert q.shape[1] == 2
+        torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        events.append("recover_verify")
+        calls.append("recover_verify")
+        # RecoverSSM verification records compact updates without mutating the
+        # persistent checkpoint. The accepted updates are committed later.
+        return q * 2
 
     monkeypatch.setattr(model_kda, "kda_recoverssm_verify", verify)
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
@@ -316,18 +325,24 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     # Rows outside the scheduled token groups are left untouched.
     assert torch.isnan(out[:, tokens:]).all()
     expected_state = torch.zeros_like(layer.kv_cache[1])
-    recurrent_slots = (
-        metadata.spec_state_indices_tensor.reshape(-1)
-        if speculative
-        else metadata.non_spec_state_indices_tensor[: metadata.num_decodes]
-    )
-    expected_state.index_fill_(0, recurrent_slots, 2.0)
+    if not recover:
+        recurrent_slots = (
+            metadata.spec_state_indices_tensor.reshape(-1)
+            if speculative
+            else metadata.non_spec_state_indices_tensor[: metadata.num_decodes]
+        )
+        expected_state.index_fill_(0, recurrent_slots, 2.0)
     if not spec_only:
         expected_state.index_fill_(0, metadata.prefill_state_indices, 3.0)
     torch.testing.assert_close(layer.kv_cache[1], expected_state, rtol=0, atol=0)
-    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    spec_call = "recover_verify" if recover else "recurrent"
+    assert calls == ([spec_call] if spec_only else [spec_call, "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
-    assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
+    spec_event = "recover_verify" if recover else "state_write"
+    expected_execution_events = [spec_event]
+    if not spec_only:
+        expected_execution_events.append("state_write")
+    assert events == [("load", "layer"), "compute", *expected_execution_events, "save"]
 
 
 @pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])
