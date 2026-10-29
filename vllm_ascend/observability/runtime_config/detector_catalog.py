@@ -29,6 +29,7 @@ from vllm_ascend.observability.runtime_config.schema import (
     validate_detector_section,
 )
 from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
+from vllm_ascend.observability.runtime_guard.detector.rare_chars import RareCharsDetector
 from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
 
@@ -37,6 +38,7 @@ REGISTERED_DETECTOR_TYPES: tuple[type, ...] = (
     SpecAcceptanceDetector,
     TokenRepeatDetector,
     LogitsFiniteDetector,
+    RareCharsDetector,
 )
 
 
