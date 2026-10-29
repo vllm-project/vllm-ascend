@@ -108,6 +108,12 @@
 #      wrapper)
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
+#   4. `vllm.v1.engine.core.EngineCore.preprocess_add_request`: after successful
+#      preprocessing, invoke an optional thread-safe connector receipt hook.
+#      Mooncake V2 needs to renew leases for requests still in the input queue
+#      while the engine waits for model execution. Scheduler hooks run too late.
+#      No upstream receipt hook exists in the pinned vLLM version; remove this
+#      wrapper when upstream provides an equivalent connector input callback.
 #    Why:
 #       Previously patch_balance_schedule, patch_dyntra_lb_core and
 #       patch_profiling_chunk each wrapped `EngineCoreProc.run_engine_core`
