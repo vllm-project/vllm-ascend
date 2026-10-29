@@ -370,7 +370,10 @@ def _select_capacity_and_world_size_moe_comm_method(
         "num_experts_per_tok",
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
-    world_size = vllm_config.parallel_config.world_size_across_dp
+    # The EP group spans DP x PCP x TP ranks and never includes PP (each PP
+    # stage owns different layers), so divide out pipeline_parallel_size to get
+    # the real EP group size.
+    world_size = vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
