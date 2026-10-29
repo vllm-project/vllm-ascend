@@ -135,9 +135,10 @@ class AttnResFwdCooperativeRegBase {
         WriteRow(materialized_, outputOffset_, outputCount_);
       }
       if (tiling_->outputNormEps > 0.0f) {
-        CastToFloat(row_, rowBf16_, outputCount_);
-        SquareSum(outputCount_);
-        InverseRms(tiling_->outputNormEps);
+        // Preserve the BF16-rounded mixture while fusing its RMS statistics.
+        RegBase::CastAndInvRms(row_, scalar_, rowBf16_, hidden_, tiling_->invHiddenSize,
+                              tiling_->outputNormEps);
+        PipeBarrier<PIPE_V>();
         ApplyOutputNorm();
       }
       WriteRow(output_, outputOffset_, outputCount_);

@@ -23,3 +23,9 @@ entries:
     text: >-
       Fixed AttnResFwd softmax handling for large candidate banks, broadcast
       repeat overflow, and extreme-negative score padding in legacy paths.
+  - category: performance
+    hardware: [A5]
+    text: >-
+      Fused output RMSNorm conversion and statistics in RegBase for the
+      complete-row AttnResFwd path, reducing small-batch kernel latency
+      while retaining the BF16 mixture boundary and one readiness barrier.
