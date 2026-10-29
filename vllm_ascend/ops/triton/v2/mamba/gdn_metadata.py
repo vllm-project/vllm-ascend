@@ -5,7 +5,7 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def prepare_gdn_metadata(
+def _prepare_gdn_metadata_kernel(
     block_table,
     seq_lens,
     query,
