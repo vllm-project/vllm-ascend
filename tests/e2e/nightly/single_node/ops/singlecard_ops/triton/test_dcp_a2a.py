@@ -537,3 +537,103 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
     torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "ranks,head_dim,num_tokens,local_heads,local_stride,local_dtype",
+    [(r, d, 16, 4, 1, torch.bfloat16) for r in (4, 8, 16) for d in (96, 256, 512, 1024)]
+    + [(16, 512, t, 4, 1, torch.bfloat16) for t in (1, 4, 64)]
+    + [pytest.param(16, 512, t, 6, 1, torch.bfloat16, id=f"kimi-heads6-t{t}") for t in (16, 64)]
+    + [(12, 160, 16, 4, 1, torch.bfloat16), (16, 130, 16, 4, 1, torch.bfloat16)]
+    + [(r, 512, 16, 4, 2, torch.bfloat16) for r in (4, 8, 16)]
+    + [(r, d, 16, 4, 1, dtype) for r, d in ((4, 96), (16, 512), (8, 256)) for dtype in (torch.float16, torch.float32)],
+)
+@torch.inference_mode()
+def test_rank_tiled_combine_fp64_reference(
+    monkeypatch, ranks, head_dim, num_tokens, local_heads, local_stride, local_dtype
+):
+    """Check the dispatched kernel against original inputs, not a scalar reduction.
+
+    Parallel FP32 summation may cross BF16 rounding boundaries. Independently
+    bound its mathematical error, then check the output's BF16 rounding exactly.
+    """
+    if dcp_a2a.get_ascend_device_type() != dcp_a2a.AscendDeviceType.A3:
+        pytest.skip("The rank-tiled combine path is qualified on A3 only")
+    torch.manual_seed(7201 + num_tokens + local_heads)
+    num_heads = local_heads * ranks
+    history = torch.randn(ranks, num_tokens, local_heads, head_dim, device="npu", dtype=torch.bfloat16)
+    history_lse = torch.randn(ranks, num_tokens, local_heads, 1, device="npu") * 30
+    local = torch.randn(num_tokens, local_heads, head_dim * local_stride, device="npu", dtype=local_dtype)[
+        ..., ::local_stride
+    ]
+    local_lse = (torch.randn(num_tokens, local_heads, 2, device="npu") * 30)[..., :1]
+    history_lse[:, 0, 0] = -torch.inf
+    history[:, 0, 0] = torch.nan
+    local_lse[0, 0] = torch.nan
+    local[0, 0] = torch.nan
+    if num_tokens > 1:
+        local_lse[1, 0] = torch.inf
+        local[1, 0] = torch.nan
+    # Treat head partitions as received rank contributions. The oracle below
+    # reads the original values and LSE, independently of the packed wire.
+    packed = pack_dcp_output_lse(
+        history.transpose(0, 1).reshape(num_tokens, num_heads, head_dim),
+        history_lse.transpose(0, 1).reshape(num_tokens, num_heads, 1),
+        ranks,
+        1,
+    )
+    rank_tiled_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
+    launches = []
+
+    class LaunchSpy:
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append((self.kernel, grid, args, kwargs))
+                return self.kernel[grid](*args, **kwargs)
+
+            return launch
+
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_rank_tiled_kernel", LaunchSpy(rank_tiled_kernel))
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_kernel", LaunchSpy(scalar_kernel))
+    actual = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    assert len(launches) == 1
+    kernel, grid, args, kwargs = launches[0]
+    feature_tile = min(128, dcp_a2a.triton.next_power_of_2(head_dim), 2048 // dcp_a2a.triton.next_power_of_2(ranks))
+    jobs = num_tokens * local_heads * dcp_a2a.triton.cdiv(head_dim, feature_tile)
+    expected_tiled = (
+        local_stride == 1
+        and jobs >= dcp_a2a.get_vectorcore_num()
+        and ranks >= 2 * dcp_a2a.triton.cdiv(head_dim, feature_tile)
+        and num_tokens * local_heads * ranks >= 4 * dcp_a2a.get_vectorcore_num()
+    )
+    assert kernel is (rank_tiled_kernel if expected_tiled else scalar_kernel)
+    # Check the same dispatched reduction with an FP32 output allocation.
+    # Output strides are measured in elements, so they are unchanged here.
+    fp32 = torch.empty(actual.shape, device="npu", dtype=torch.float32)
+    fp32_args = list(args)
+    fp32_args[1] = fp32
+    kernel[grid](*fp32_args, **kwargs)
+    values = torch.cat((history.cpu().double(), local.cpu().double()[None]))
+    logs = torch.cat((history_lse.cpu().double(), local_lse.cpu().double()[None]))
+    valid = torch.isfinite(logs)
+    maximum = torch.where(valid, logs, -torch.inf).amax(0)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    weights = torch.where(valid, torch.exp(logs - maximum), 0.0)
+    denominator = weights.sum(0)
+    expected = (torch.where(valid, values, 0.0) * weights).sum(0) / torch.where(denominator > 0, denominator, 1.0)
+    torch.testing.assert_close(fp32.cpu().double(), expected, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(actual, fp32.to(torch.bfloat16), rtol=0, atol=0)
+    assert torch.isfinite(actual).all().item()
+    assert actual[0, 0].count_nonzero().item() == 0
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        replayed = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    for _ in range(3):
+        local_lse.add_(0.1)
+        graph.replay()
+        eager = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+        torch.testing.assert_close(replayed, eager, rtol=0, atol=0)
