@@ -160,11 +160,11 @@ def test_attention_hands_the_kv_cache_write_back_to_the_backend():
     assert attention.attn.kv_cache_update_bypass is False
 
 
-def test_rope_rotates_in_fp32_and_returns_the_activation_dtype():
-    seen_dtypes: list[torch.dtype] = []
+def test_qk_norm_and_rope_run_in_fp32_and_round_once():
+    rope_inputs: list[torch.Tensor] = []
 
     def forward_native(positions, query, key):
-        seen_dtypes.extend((query.dtype, key.dtype))
+        rope_inputs.extend((query, key))
         return query + 1, key + 1
 
     attention = _attention(rotary_emb=SimpleNamespace(forward_native=forward_native))
@@ -172,7 +172,18 @@ def test_rope_rotates_in_fp32_and_returns_the_activation_dtype():
 
     q, k, v, og = attention._qk_norm_rope_kv_insert(qkv, torch.arange(NUM_TOKENS))
 
-    assert seen_dtypes == [torch.float32, torch.float32]
+    # The upstream kernel rounds once at the store, so RoPE must see the fp32
+    # norm output itself, not a bf16 copy of it.
+    q_in, k_in, _, _ = qkv.split(NUM_HEADS * HEAD_DIM, dim=-1)
+    q_norm, k_norm = (
+        attention.qk_norm.forward_native(x.reshape(-1, HEAD_DIM), out_dtype=torch.float32).reshape(NUM_TOKENS, -1)
+        for x in (q_in, k_in)
+    )
+    assert len(rope_inputs) == 2
+    assert torch.equal(rope_inputs[0], q_norm)
+    assert torch.equal(rope_inputs[1], k_norm)
+    assert torch.equal(q, (q_norm + 1).to(torch.bfloat16))
+    assert torch.equal(k, (k_norm + 1).to(torch.bfloat16))
     assert q.dtype == k.dtype == v.dtype == torch.bfloat16
     assert og is not None and og.shape == (NUM_TOKENS, NUM_HEADS * HEAD_DIM)
 

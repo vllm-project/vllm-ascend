@@ -10,8 +10,9 @@ on CUDA or ROCm with its PyTorch reference:
 * RMSNorm: the upstream module calls a CUDA-tuned Triton kernel for every
   contiguous input, so every Muse Spark norm is switched to ``forward_native``.
 * QK-norm and RoPE: upstream rotates through ``RotaryEmbedding.forward_cuda``
-  and can insert K/V from a ROCm kernel. Here RoPE runs in fp32 through
-  ``forward_native`` and the Ascend attention backend writes the KV cache.
+  and can insert K/V from a ROCm kernel. Here QK-norm and RoPE run in fp32
+  through ``forward_native`` and round once, as the upstream kernel does, and
+  the Ascend attention backend writes the KV cache.
 * Attention output gate: the weightless RMSNorm with a sigmoid gate runs
   through the Ascend ``rms_norm_gated`` kernel, as in GLM-5.3-Flash KDA.
 * MoE: Muse Spark normalizes every expert's output before the weighted top-k
@@ -93,22 +94,19 @@ class AscendMuseSpark1xAttention(MuseSpark1xAttention):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             og = None
 
+        # Like the upstream kernel, norm and rotate in fp32 and round once at
+        # the end; rounding the norm output before RoPE would round twice.
         if self.qk_norm is not None:
             q = self.qk_norm(q.reshape(-1, self.head_dim), out_dtype=torch.float32).reshape(-1, self.q_size)
             k = self.qk_norm(k.reshape(-1, self.head_dim), out_dtype=torch.float32).reshape(-1, self.kv_size)
-            q = q.to(v.dtype)
-            k = k.to(v.dtype)
 
         if self.use_attn_temperature_tuning:
-            q = (q * self._get_attn_temperature_scale(positions)).to(q.dtype)
+            q = q * self._get_attn_temperature_scale(positions)
 
         if self.rotary_emb is not None:
-            # fp32 inputs keep the shared fp32 cos/sin cache in fp32, matching
-            # the upstream kernel, which rotates against an fp32 cache.
-            q_rotated, k_rotated = self.rotary_emb.forward_native(positions, q.float(), k.float())
-            q = q_rotated.to(v.dtype)
-            k = k_rotated.to(v.dtype)
-        return q, k, v, og
+            # fp32 inputs also keep the shared fp32 cos/sin cache in fp32.
+            q, k = self.rotary_emb.forward_native(positions, q.float(), k.float())
+        return q.to(v.dtype), k.to(v.dtype), v, og
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         if not self.fuse_o_norm_gate:
