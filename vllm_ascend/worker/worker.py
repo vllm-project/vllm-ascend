@@ -95,8 +95,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -1224,7 +1224,7 @@ class NPUWorker(WorkerBase):
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
         target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
+        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0

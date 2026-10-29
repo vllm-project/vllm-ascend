@@ -5,8 +5,11 @@
 import numpy as np
 import torch
 
-# Keep warmup and the live prepare-inputs kernel on the same launch block size.
-PREPARE_INPUTS_BLOCK_SIZE = 4
+# Single source of truth lives next to the kernel + its JIT warmup wrapper;
+# re-exported here for existing callers.
+from vllm_ascend.ops.triton.spec_decode.utils import (  # noqa: F401
+    PREPARE_INPUTS_BLOCK_SIZE,
+)
 
 
 def update_num_computed_tokens_for_batch_change(

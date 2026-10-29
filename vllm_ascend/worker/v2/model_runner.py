@@ -291,19 +291,14 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
-            join_early_kernel_warmup,
-            start_early_kernel_warmup,
-        )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
         )
 
-        # Overlap the one-off NZ cast and Triton compile with weight I/O.
-        # Every model goes through here.
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here.
         start_nz_warm_thread("thread")
-        start_early_kernel_warmup()
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
             super().load_model(load_dummy_weights, *args, **kwargs)
@@ -313,7 +308,6 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
-            join_early_kernel_warmup("load_model")
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -441,6 +435,26 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
 
+    def _initialize_kv_cache_upstream(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None,
+    ) -> None:
+        # Upstream initialize_kv_cache builds the attention metadata builders
+        # via init_attn_backend; the DSA builder registers its fused Q-RMS
+        # JIT kernel during construction, so hold a registry window open
+        # around the super() call (v1 parity; the v1 runner wraps its
+        # initialize_metadata_builders instead). Runners built without the
+        # upstream __init__ (tests, partial mocks) have no registry; the
+        # window is optional for them.
+        registry = getattr(self, "jit_warmup_registry", None)
+        window = registry.activate() if registry is not None else nullcontext()
+        with window:
+            super().initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -475,10 +489,7 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-            )
+            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
