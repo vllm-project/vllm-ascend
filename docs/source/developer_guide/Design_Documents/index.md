@@ -4,3 +4,5 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 
 - [KVPP: KV Cache Layer Parallelism](kvpp.md) — Physical cache placement, full-layer broadcast, and test design.
 - [Persistent Incremental Csrc Build Cache](persistent_csrc_build_cache.md) — Fine-grained native build reuse, correctness identity, concurrency, and CI integration.
+
+- [Model Runner V2 Penalty Bincount](bincount.md) — Prompt flags, bitmap packing, work mapping and validation.

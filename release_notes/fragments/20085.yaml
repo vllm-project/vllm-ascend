@@ -2,11 +2,11 @@ pr: 20085
 entries:
   - category: performance
     text: >-
-      Improved Model Runner V2 penalty-statistics initialization with a
-      Vector-core-sized grid, byte prompt flags, fused initialization and
-      bitmap packing. Performance remains dependent on workload shape.
+      Updated Model Runner V2 penalty statistics to build prompt-presence
+      bitmaps using zero-initialized byte flags and two Triton passes,
+      based on PR #15270. Output counts retain atomic accumulation.
   - category: bugfix
     text: >-
-      Fixed bincount launch failures for large request histories, including
-      the 64-request, 1M-token boundary, by distributing token tiles within
-      the device's Vector-core count.
+      Bounded the bincount statistics grid by the device Vector-core count
+      to support large request histories, including the 64-request,
+      1M-token launch boundary.

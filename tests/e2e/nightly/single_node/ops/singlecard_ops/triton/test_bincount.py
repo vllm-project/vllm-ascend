@@ -8,7 +8,7 @@ from vllm.triton_utils import triton
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
-from vllm_ascend.worker.v2.sample.penalties import bincount
+from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
 
 
 def torch_bincount(mapping, tokens, prompt_len, prefill_len, prompt_bin_mask, output_bin_counts):
@@ -145,3 +145,64 @@ def test_bincount_vector_work_partition(rounds, tail):
     torch.testing.assert_close(mask_gpu.cpu(), expected_masks, atol=0, rtol=0)
     torch.testing.assert_close(count_gpu.cpu(), expected_counts, atol=0, rtol=0)
     torch.testing.assert_close(token_gpu.cpu(), tokens, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("vocab_size", [5121, 151936])
+def test_bincount_then_apply_penalties(vocab_size):
+    # Chained entry-point coverage follows PR #15270; include all three policies.
+    rows, prompt_tokens, output_tokens = 6, 512, 24
+    mapping = torch.tensor([4, 0, 2, 3], dtype=torch.int32)
+    generator = torch.Generator().manual_seed(7)
+    tokens = torch.randint(vocab_size, (rows, prompt_tokens + output_tokens), generator=generator, dtype=torch.int32)
+    prompt = torch.full((rows,), prompt_tokens, dtype=torch.int32)
+    prefill = prompt + output_tokens
+    words = triton.cdiv(vocab_size, 32)
+    mask_storage = torch.full((rows, words + 21), -12345, dtype=torch.int32)
+    count_storage = torch.full((rows, vocab_size + 21), -12345, dtype=torch.int32)
+    expected_mask, expected_counts = mask_storage.clone(), count_storage.clone()
+    torch_bincount(
+        mapping, tokens, prompt, prefill, expected_mask[:, 2 : words + 2], expected_counts[:, 2 : vocab_size + 2]
+    )
+    device_mapping = mapping.npu()
+    device_masks, device_counts = mask_storage.npu(), count_storage.npu()
+    masks, counts = device_masks[:, 2 : words + 2], device_counts[:, 2 : vocab_size + 2]
+    bincount(device_mapping, tokens.npu(), prompt.npu(), prefill.npu(), masks, counts, int(prefill.max()))
+
+    # Mapped rows exercise frequency-only, presence-only, repetition-only and
+    # combined penalties. Unmapped state rows retain their sentinels.
+    repetition = torch.tensor([1.0, 1.0, 1.0, 1.5, 1.3, 1.0])
+    frequency = torch.tensor([0.4, 0.0, 0.0, 0.3, 0.0, 0.0])
+    presence = torch.tensor([0.0, 0.0, 0.2, 0.1, 0.0, 0.0])
+    logits = torch.randn(len(mapping), vocab_size, generator=torch.Generator().manual_seed(11))
+    expected_logits = logits.clone()
+    vocab_ids = torch.arange(vocab_size)
+    for token_idx, req in enumerate(mapping.tolist()):
+        output_counts = expected_counts[req, 2 : vocab_size + 2].float()
+        output_present = output_counts != 0
+        packed = expected_mask[req, 2 : words + 2]
+        prompt_present = ((packed[vocab_ids // 32] >> (vocab_ids % 32)) & 1) != 0
+        scale = torch.where(prompt_present | output_present, repetition[req], 1.0)
+        row = expected_logits[token_idx]
+        row *= torch.where(row > 0, 1.0 / scale, scale)
+        row -= frequency[req] * output_counts
+        row -= presence[req] * output_present
+
+    device_logits = logits.npu()
+    no_draft_positions = torch.zeros(len(mapping), dtype=torch.int32, device="npu")
+    apply_penalties(
+        device_logits,
+        device_mapping,
+        no_draft_positions,
+        no_draft_positions,
+        repetition.npu(),
+        frequency.npu(),
+        presence.npu(),
+        masks,
+        counts,
+    )
+    torch.testing.assert_close(device_logits.cpu(), expected_logits, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(device_masks.cpu(), expected_mask, rtol=0, atol=0)
+    torch.testing.assert_close(device_counts.cpu(), expected_counts, rtol=0, atol=0)

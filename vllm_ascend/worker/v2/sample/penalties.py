@@ -26,6 +26,11 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 # Maximum program count accepted by the Ascend kernel launch API.
 MAX_GRID_PROGRAMS = 65535
 
+# Token-presence bits stored in each int32 prompt bitmap word.
+BITS_PER_WORD = 32
+
+# Prompt-presence flags and packing follow PR #15270:
+# https://github.com/vllm-project/vllm-ascend/pull/15270
 # Vocabulary words packed per program in _pack_prompt_bin_mask_kernel.
 WORDS_PER_BLOCK = 128
 
@@ -158,24 +163,6 @@ def apply_penalties(
 
 
 @triton.jit
-def _bincount_zero_kernel(
-    mapping_ptr,
-    flag_ptr,
-    flag_stride,
-    counts_ptr,
-    counts_stride,
-    vocab_size,
-    BLOCK: tl.constexpr,
-):
-    request_idx = tl.program_id(0)
-    req = tl.load(mapping_ptr + request_idx)
-    for tile in range(tl.program_id(1), tl.cdiv(flag_stride, BLOCK), tl.num_programs(1)):
-        vocab = tile * BLOCK + tl.arange(0, BLOCK)
-        tl.store(flag_ptr + request_idx * flag_stride + vocab, 0, vocab < flag_stride)
-        tl.store(counts_ptr + req * counts_stride + vocab, 0, vocab < vocab_size)
-
-
-@triton.jit
 def _bincount_kernel(
     expanded_idx_mapping_ptr,
     all_token_ids_ptr,
@@ -233,6 +220,7 @@ def _pack_prompt_bin_mask_kernel(
     num_words,
     vocab_size,
     WORDS_PER_BLOCK: tl.constexpr,
+    BITS_PER_WORD: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     word_block_idx = tl.program_id(1)
@@ -240,13 +228,13 @@ def _pack_prompt_bin_mask_kernel(
 
     words = word_block_idx * WORDS_PER_BLOCK + tl.arange(0, WORDS_PER_BLOCK)
     word_mask = words < num_words
-    bits = tl.arange(0, 32)
-    flat = words[:, None] * 32 + bits[None, :]
+    bits = tl.arange(0, BITS_PER_WORD)
+    flat = words[:, None] * BITS_PER_WORD + bits[None, :]
     # The final word runs past vocab_size, so mask per element, not per word.
     elem_mask = word_mask[:, None] & (flat < vocab_size)
     flags = tl.load(prompt_flag_ptr + token_idx * prompt_flag_stride + flat, mask=elem_mask, other=0).to(tl.int32)
     # Each bit is contributed by exactly one lane, so the sum equals an OR.
-    bit_masks = tl.full((32,), 1, tl.uint32) << bits
+    bit_masks = tl.full((BITS_PER_WORD,), 1, tl.uint32) << bits
     packed = tl.sum(tl.where(flags != 0, bit_masks[None, :], 0), axis=1).to(tl.int32)
     tl.store(prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + words, packed, mask=word_mask)
 
@@ -269,24 +257,16 @@ def bincount(
     num_blocks = max(1, triton.cdiv(max_prefill_len, BLOCK_SIZE))
     init_device_properties_triton()
     statistics_grid = min(get_vectorcore_num(), num_tokens * num_blocks)
-    # Scratch flags for the prompt bitmask, one byte per vocabulary entry per
-    # request being counted. Freed on return; num_tokens is the number of newly
-    # added penalty requests, so this stays small.
-    prompt_flag = torch.empty(
+    # Scratch prompt-presence flags (0: absent, 1: present), one byte per
+    # vocabulary entry per staged request. Packed into prompt_bin_mask below
+    # and freed on return. num_tokens counts newly added penalty requests.
+    prompt_flag = torch.zeros(
         num_tokens,
-        num_words * 32,
+        num_words * BITS_PER_WORD,
         dtype=torch.int8,
         device=prompt_bin_mask.device,
     )
-    _bincount_zero_kernel[(num_tokens, min(triton.cdiv(num_words * 32, 4096), MAX_GRID_PROGRAMS // num_tokens))](
-        expanded_idx_mapping,
-        prompt_flag,
-        prompt_flag.stride(0),
-        output_bin_counts,
-        output_bin_counts.stride(0),
-        vocab_size,
-        BLOCK=4096,
-    )
+    output_bin_counts[expanded_idx_mapping] = 0
     _bincount_kernel[(statistics_grid,)](
         expanded_idx_mapping,
         all_token_ids,
@@ -311,4 +291,5 @@ def bincount(
         num_words,
         vocab_size,
         WORDS_PER_BLOCK=WORDS_PER_BLOCK,
+        BITS_PER_WORD=BITS_PER_WORD,
     )
