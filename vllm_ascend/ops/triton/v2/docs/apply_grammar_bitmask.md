@@ -22,8 +22,6 @@ Inactive speculative positions skip all vocabulary accesses. An empty mask grid 
 
 The Ascend structured-output manager starts parallel bitmask filling above 64 non-speculative requests. Speculative decoding, diffusion, and smaller batches retain the upstream serial or request-specific paths.
 
-The Model Runner V2 worker preallocates pinned host buffers for the packed bitmask and request mapping. Consecutive non-speculative decode steps with an unchanged request set and order reuse the device mapping; every step still copies the new bitmask. A copy-stream event protects host buffers from being overwritten while an earlier asynchronous transfer is pending. Speculative positions and changed request mappings are rebuilt on every step.
-
 ## Semantics
 
 For mask row `r` and vocabulary token `v`:

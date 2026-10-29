@@ -1,7 +1,6 @@
 import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu import model_runner as gpu_model_runner
 from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.sample import (
     bad_words,
@@ -39,7 +38,6 @@ from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
-from vllm_ascend.worker.v2.structured_outputs import AscendStructuredOutputsWorker
 
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
@@ -63,8 +61,6 @@ dspark_speculator.gumbel_sample = categorical_sample
 sampler.gumbel_sample = categorical_sample
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
-structured_outputs.StructuredOutputsWorker = AscendStructuredOutputsWorker
-gpu_model_runner.StructuredOutputsWorker = AscendStructuredOutputsWorker
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.

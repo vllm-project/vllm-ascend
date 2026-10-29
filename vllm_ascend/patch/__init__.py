@@ -1405,21 +1405,17 @@
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #       apply_penalties also fails on large input shape because of the triton kernel limitation.
-#       The generic structured-output worker also allocates pinned staging buffers
-#       and rebuilds the request mapping on every grammar decode step.
 #    How：
 #       override triton ops in vLLM with ascend implementation
 #       re-write apply_penalties kernel with minimum change to support large input shape.
-#       Use AscendStructuredOutputsWorker to reuse pinned bitmask/mapping buffers
-#       and retain the device mapping across unchanged non-speculative decode steps.
 #    Test:
 #       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
-#       Grammar worker coverage: tests/ut/worker/v2/test_structured_outputs.py
+#       Grammar kernel coverage:
+#       tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_grammar_bitmask_triton.py
 #    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch and reusable structured-output staging.
+#       Let vLLM support triton ops dispatch.
 #    Future Plan:
-#       Remove this patch when vLLM supports the dispatch function and provides
-#       reusable pinned staging/mapping buffers for structured-output workers.
+#       Remove this patch when vLLM supports the dispatch function.
 #
 #   2. `vllm.v1.worker.gpu.metrics.logits.libdevice`
 #    Why:
