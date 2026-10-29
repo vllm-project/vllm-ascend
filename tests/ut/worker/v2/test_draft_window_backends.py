@@ -167,6 +167,23 @@ def test_smaller_extra_window_selects_native_intersection(types, topology):
     require_compatible_direct_prefix_routes(selected)
 
 
+@pytest.mark.parametrize("window", [1024, 32768])
+def test_native_only_dflash2_keeps_a_typed_builder_without_a_full_group(types, topology, window):
+    routes, _, context = native_swa_bundle(types, topology)
+    selected = select_native_swa_subset_routes(
+        routes[:1],
+        window_size=window,
+        max_query_tokens=8,
+        future_offset_bound=7,
+        context=context,
+        dense_impl_type=DenseBuilder,
+    )
+    assert len(selected) == 1
+    assert selected[0].status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+    assert selected[0].native_window == 4096
+    require_compatible_direct_prefix_routes(selected)
+
+
 @pytest.mark.parametrize("change", [{"sliding_window": 1024}, {"sinks": object()}, {"use_bnsd_kv_cache": True}])
 def test_native_swa_actual_consumer_must_match_certificate(types, topology, change):
     routes, impl, context = native_swa_bundle(types, topology)

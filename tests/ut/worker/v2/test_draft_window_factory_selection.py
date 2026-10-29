@@ -155,7 +155,7 @@ def test_selector_and_factory_window_contract(selector, factory, monkeypatch, ov
         # Runner dispatch does not call the V2 factory on the V1 branch.
         constructor.assert_not_called()
         return
-    rejected = case in {"plain-eagle-on", "dflash2-eager-on", "dflash2-graph-on", "draft-graph-on", "dynamic-k-on"}
+    rejected = case in {"plain-eagle-on", "dflash2-graph-on", "draft-graph-on", "dynamic-k-on"}
     if rejected:
         with pytest.raises(NotImplementedError):
             module.init_speculator(config, "cpu")
@@ -163,6 +163,6 @@ def test_selector_and_factory_window_contract(selector, factory, monkeypatch, ov
     else:
         result = module.init_speculator(config, "cpu")
         assert result is constructor.return_value
-        assert hasattr(result, "draft_window_policy") is (case == "eligible-on")
+        assert hasattr(result, "draft_window_policy") is (case in {"eligible-on", "dflash2-eager-on"})
         assert not hasattr(result, "_draft_window_runtime")
     assert config.compilation_config.mode == "target-graph"

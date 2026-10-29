@@ -71,8 +71,8 @@ def resolve_draft_window_policy(
 
     if method not in {"eagle3", "dflash", "dspark"}:
         raise NotImplementedError(f"draft_window_size is not supported for speculative method {method!r}")
-    if is_dflash2:
-        raise NotImplementedError("draft_window_size requires a DFlash2 read provider")
+    if is_dflash2 and method != "dflash":
+        raise NotImplementedError("DFlash2 draft_window_size requires speculative method 'dflash'")
     if dynamic_k:
         raise NotImplementedError("draft_window_size requires static speculative decoding")
     if method == "dspark" and model_type.startswith("deepseek_v4") and builtin_v4_dspark is not False:

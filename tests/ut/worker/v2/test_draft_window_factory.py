@@ -198,18 +198,53 @@ def test_v4_identity_requires_actual_model_category(factory, monkeypatch, differ
 
 @pytest.mark.parametrize(
     "method,arch,dynamic",
-    [("eagle", "EagleDraftModel", False), ("dflash", "DFlash2DraftModel", False), ("eagle3", "EagleDraftModel", True)],
+    [
+        ("eagle", "EagleDraftModel", False),
+        ("dflash", "UnknownDFlashDraftModel", False),
+        ("eagle3", "EagleDraftModel", True),
+    ],
 )
 def test_unsupported_window_rejected_before_constructor(factory, monkeypatch, method, arch, dynamic):
     module, effective, _ = factory
     effective.draft_window_size = 1024
     config = _config(method=method, draft_arch=arch)
     config.speculative_config.uses_dynamic_speculative_decoding.return_value = dynamic
-    route, cls = ("dflash2", "AscendDFlash2Speculator") if method == "dflash" else ("eagle", "AscendEagleSpeculator")
+    route, cls = ("dflash", "AscendDFlashSpeculator") if method == "dflash" else ("eagle", "AscendEagleSpeculator")
     ctor = _constructor(monkeypatch, route, cls)
     with pytest.raises(NotImplementedError):
         module.init_speculator(config, "cpu")
     ctor.assert_not_called()
+
+
+def test_dflash2_eager_window_keeps_its_own_constructor_and_target_graph(factory, monkeypatch):
+    module, effective, modes = factory
+    effective.draft_window_size = 1024
+    config = _config(method="dflash", draft_arch="DFlash2DraftModel")
+    ctor = _constructor(monkeypatch, "dflash2", "AscendDFlash2Speculator")
+    result = module.init_speculator(config, "cpu")
+    assert result is ctor.return_value
+    assert result.draft_window_policy.enabled
+    assert result.draft_window_policy.normalized_method == "dflash"
+    assert ctor.call_args.args[0].compilation_config.mode is modes.NONE
+    assert config.compilation_config.mode == "target-graph"
+
+
+@pytest.mark.parametrize("architectures", [[], ["UnknownDFlashDraftModel"], ["DFlashDraftModel", "DFlash2DraftModel"]])
+def test_unknown_or_ambiguous_dflash_window_architecture_is_rejected_early(factory, monkeypatch, architectures):
+    module, effective, _ = factory
+    effective.draft_window_size = 1024
+    config = _config(method="dflash")
+    config.speculative_config.draft_model_config.architectures = architectures
+    ctor = _constructor(monkeypatch, "dflash", "AscendDFlashSpeculator")
+    dflash2 = _constructor(monkeypatch, "dflash2", "AscendDFlash2Speculator")
+    with pytest.raises(NotImplementedError, match="architecture"):
+        module.init_speculator(config, "cpu")
+    ctor.assert_not_called()
+    # OFF still delegates to the selected baseline's own capability checks.
+    effective.draft_window_size = None
+    expected = dflash2 if "DFlash2DraftModel" in architectures else ctor
+    assert module.init_speculator(config, "cpu") is expected.return_value
+    assert not hasattr(expected.return_value, "draft_window_policy")
 
 
 def test_ascend_final_v41_architecture_forces_only_window_off(factory, monkeypatch):

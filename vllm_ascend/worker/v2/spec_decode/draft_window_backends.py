@@ -464,7 +464,11 @@ def require_compatible_direct_prefix_routes(routes: Sequence[DraftWindowGroupRou
         route for route in routes if route.status is not DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
     )
     if not prefix_routes:
-        raise NotImplementedError("Native SWA intersection requires a projected Full group")
+        # Native-band builders validate and rebase their own coordinates;
+        # unlike a direct-prefix reader, they need no companion Full group.
+        if routes:
+            return
+        raise NotImplementedError("Draft Window requires at least one certified read group")
     anchor_span = prefix_routes[0].table_column_span
     for route in prefix_routes:
         if anchor_span % route.table_column_span:
@@ -494,6 +498,9 @@ def select_native_swa_subset_routes(
     """
     if max_query_tokens < 1 or future_offset_bound < 0:
         raise ValueError("Native SWA coverage requires a positive query bound")
+    native_only = bool(routes) and all(
+        route.status is DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE for route in routes
+    )
     projected = []
     for route in routes:
         if route.status is not DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE:
@@ -511,7 +518,7 @@ def select_native_swa_subset_routes(
                 or impl.use_bnsd_kv_cache
             ):
                 raise NotImplementedError(f"Draft Window native SWA consumer {name} has no coverage certificate")
-        if window_size < native_window + max_query_tokens + future_offset_bound:
+        if native_only or window_size < native_window + max_query_tokens + future_offset_bound:
             projected.append(
                 replace(
                     route,
@@ -519,8 +526,8 @@ def select_native_swa_subset_routes(
                     reason="Typed causal native band intersected using its builder's current exact pair",
                 )
             )
-    if not any(route.status is not DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION for route in projected):
-        raise NotImplementedError("Draft Window requires a projected Full group alongside covered native SWA")
+    if not projected:
+        raise NotImplementedError("Draft Window requires at least one certified read group")
     return tuple(projected)
 
 

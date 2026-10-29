@@ -77,7 +77,7 @@ class NativeSWABuilder:
 
         continuing = continuing_prefill_rows(batch, n)
         if continuing.all():
-            return metadata
+            return self._finish_build(metadata)
         source = NativeSWASource.from_block_tables(
             runtime.speculator.block_tables,
             self.gid,
@@ -117,4 +117,15 @@ class NativeSWABuilder:
             seq_lens_list=view.seq_lens_cpu.tolist(),
         )
         retain(view, owned)
-        return owned
+        return self._finish_build(owned)
+
+    def _finish_build(self, metadata: Any):
+        # A native-only drafter has no Full-group callback to certify its
+        # preparation. Count it only after every native group built fresh
+        # metadata; mixed Full/SWA routes keep their existing Full authority.
+        runtime = self.runtime
+        if not runtime.gids:
+            runtime._native_swa_built.add(self.gid)
+            if runtime._native_swa_built == runtime.native_swa_intersections.keys():
+                runtime._build_count = 1
+        return metadata

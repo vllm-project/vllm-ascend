@@ -81,13 +81,23 @@ def _resolve_window_policy(vllm_config: VllmConfig) -> DraftWindowPolicyDecision
             target_model_type=target_model_type,
             builtin_v4_dspark=True,
         )
+    architectures = speculative_config.draft_model_config.architectures
+    if method == "dflash" and (
+        not architectures
+        or len(set(architectures)) != 1
+        or architectures[0] not in {"DFlashDraftModel", "DFlash2DraftModel"}
+    ):
+        raise NotImplementedError(
+            "draft_window_size with method 'dflash' requires a supported "
+            "DFlashDraftModel or DFlash2DraftModel architecture"
+        )
     return resolve_draft_window_policy(
         requested_window_size=requested,
         method=method,
         target_model_type=target_model_type,
         builtin_v4_dspark=builtin_v4,
         dynamic_k=speculative_config.uses_dynamic_speculative_decoding(),
-        is_dflash2="DFlash2DraftModel" in speculative_config.draft_model_config.architectures,
+        is_dflash2="DFlash2DraftModel" in architectures,
     )
 
 

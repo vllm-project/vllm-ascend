@@ -530,9 +530,14 @@ options.
 - MRV2 also force-disables the window for the dedicated built-in DeepSeek V4
   DSpark model category. DSpark itself remains enabled. Other recognized draft
   categories follow their own window setting and consumer capability checks.
-- MRV2 supports static Eagle3, DFlash, and eligible DSpark methods. Plain
-  Eagle, dynamic speculative length, and DFlash2 window providers are not
-  implemented. Continuing prefill chunks retain full reads. Eagle3 also keeps
+- MRV2 supports static Eagle3, DFlash (including `DFlash2DraftModel` with
+  `method="dflash"`), and eligible DSpark methods. DFlash2 uses the existing
+  candidate selector and proposal distribution; only its Draft attention
+  read view changes. Native SWA layers intersect their native readable band
+  with the extra window, including drafts with only native SWA layers.
+  Plain Eagle and dynamic speculative length remain unsupported with a
+  window. DFlash2 requires an eager Draft; this does not disable Target Graph.
+  Continuing prefill chunks retain full reads. Eagle3 also keeps
   full reads for its first prefill pass. An unfinished prompt keeps full reads
   at every autoregressive step; after prompt completion, eligible steps use
   the frozen proposal window.

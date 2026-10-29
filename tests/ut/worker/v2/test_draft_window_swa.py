@@ -70,6 +70,7 @@ def prepared(span=128, continuing=(False, False), window=1024):
     runtime = SimpleNamespace(
         _owner=owner,
         _input_batch=batch,
+        gids=(1,),
         window_size=window,
         pool=SimpleNamespace(retain=lambda actual_owner, *values: retained.extend(values)),
         speculator=SimpleNamespace(
@@ -233,3 +234,77 @@ def test_misnamed_cpu_field_is_not_a_new_exact_consumer():
     result = NativeSWABuilder(builder, runtime, owner, 0, 4096).build(0, common)
     assert result.seq_lens_list == [1151, 1024]
     assert result.seq_lens_cpu.device.type == "cpu"
+
+
+@pytest.mark.parametrize("continuing", [False, True])
+def test_native_only_runtime_accounts_for_the_actual_builder_and_retains_readers(monkeypatch, continuing):
+    from vllm_ascend.worker.v2.spec_decode import draft_window_runtime as runtime_module
+    from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
+
+    prepared_runtime, _, common, original, table, _, builder = prepared(continuing=(continuing, continuing))
+    speculator = prepared_runtime.speculator
+    speculator.draft_model_config = SimpleNamespace(enforce_eager=True)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
+    speculator.vllm_config = SimpleNamespace(max_concurrent_batches=2)
+    speculator.num_speculative_steps = 7
+
+    def native_only(runtime, spec):
+        runtime.native_swa_intersections = {0: 4096}
+        return ()
+
+    class Completion:
+        def is_complete(self):
+            return False
+
+        def wait(self):
+            raise AssertionError("No reader wait is needed with a free lane")
+
+    monkeypatch.setattr(runtime_module.DraftWindowRuntime, "_validate_route", native_only)
+    monkeypatch.setattr(runtime_module, "_NPUCompletion", Completion)
+    runtime = runtime_module.DraftWindowRuntime(
+        speculator, resolve_draft_window_policy(requested_window_size=1024, method="dflash")
+    )
+    before = table.clone()
+    with runtime.proposal_context(speculator, prepared_runtime._input_batch):
+        owner = runtime._owner
+        wrapped = runtime.metadata_builder_callback(0)(0, builder, ["draft.0"])
+        result = wrapped.build(0, common)
+        assert runtime._build_count == 1
+        assert result.slot_mapping is original.slot_mapping
+        assert result.positions is original.positions
+        if continuing:
+            assert result is original
+        else:
+            assert any(value is result for value in owner.retained)
+        torch.testing.assert_close(table, before, rtol=0, atol=0)
+    assert owner.completion is not None
+    assert not owner.completion.is_complete()
+    assert runtime.pool.reclaim_completed() == 0
+
+
+def test_native_only_proposal_cannot_be_certified_by_one_of_two_groups(monkeypatch):
+    from vllm_ascend.worker.v2.spec_decode import draft_window_runtime as runtime_module
+    from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
+
+    prepared_runtime, _, common, _, _, _, builder = prepared()
+    speculator = prepared_runtime.speculator
+    speculator.draft_model_config = SimpleNamespace(enforce_eager=True)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
+    speculator.vllm_config = SimpleNamespace(max_concurrent_batches=2)
+    speculator.num_speculative_steps = 7
+
+    def native_only(runtime, spec):
+        runtime.native_swa_intersections = {0: 4096, 1: 4096}
+        return ()
+
+    monkeypatch.setattr(runtime_module.DraftWindowRuntime, "_validate_route", native_only)
+    runtime = runtime_module.DraftWindowRuntime(
+        speculator, resolve_draft_window_policy(requested_window_size=1024, method="dflash")
+    )
+    with (
+        pytest.raises(RuntimeError, match="did not consume a read projection"),
+        runtime.proposal_context(speculator, prepared_runtime._input_batch),
+    ):
+        runtime.metadata_builder_callback(0)(0, builder, ["draft.0"]).build(0, common)
+        assert runtime._build_count == 0
+    assert runtime.pool._poisoned

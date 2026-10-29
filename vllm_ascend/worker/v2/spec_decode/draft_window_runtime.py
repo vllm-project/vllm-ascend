@@ -86,7 +86,11 @@ class DraftWindowRuntime:
             from vllm_ascend.worker.v2.spec_decode.draft_window_dsa import DSABuilderOwners
 
             self._dsa_builders = DSABuilderOwners()
-        self.anchor_block_span = int(speculator.block_tables.kernel_block_sizes[self.gids[0]])
+        read_groups = self.gids or tuple(self.native_swa_intersections)
+        if not read_groups:
+            raise NotImplementedError("Draft Window requires at least one certified read group")
+        self.anchor_block_span = int(speculator.block_tables.kernel_block_sizes[read_groups[0]])
+        self._native_swa_built: set[int] = set()
         self.pool = DraftWindowOwnerPool(int(speculator.vllm_config.max_concurrent_batches))
         self._owner = None
         self._input_batch = None
@@ -141,8 +145,10 @@ class DraftWindowRuntime:
             if self.window_size < speculator.num_query_per_req:
                 raise ValueError("DFlash draft_window_size must cover its query width")
             routes = tuple(route for route in routes if route.gid not in self.native_swa_intersections)
-        if self.method in ("eagle3", "dflash", "dspark") and all(
-            route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes
+        if (
+            routes
+            and self.method in ("eagle3", "dflash", "dspark")
+            and all(route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes)
         ):
             from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
@@ -208,6 +214,8 @@ class DraftWindowRuntime:
             try:
                 # Preparation and builders enqueue copies/kernels before model
                 # forward. Even a later host error must retain this proposal.
+                if self.native_swa_intersections:
+                    self._native_swa_built.clear()
                 self.pool.begin_native(owner)
                 yield
                 if not self._build_count:

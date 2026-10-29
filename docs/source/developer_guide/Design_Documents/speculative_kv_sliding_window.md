@@ -493,7 +493,10 @@ It does not convert a native SWA group to dense Full attention.
 
 When the requested Window covers the complete native band for every supported
 query, that native reader remains unchanged and only the Full group receives
-a Window projection. Otherwise a proposal-local adapter calls the original
+a Window projection. For a native-SWA-only draft, including DFlash2, each
+native group retains the typed adapter even when the extra window covers
+its band: there is no companion Full callback to certify preparation.
+Otherwise a proposal-local adapter calls the original
 concrete metadata builder first. The adapter reuses the native length list
 that this invocation has already obtained from current device exact lengths.
 The field named `seq_lens_cpu` alone does not certify a CPU snapshot: on the
@@ -514,9 +517,20 @@ completion releases the proposal.
 
 This provider is limited to the concrete ordinary causal ND GQA consumer,
 with no sinks, compression, offload or CP-sharded Draft layout. It requires
-a Full group alongside the native groups and an unpadded current request
-extent. Unsupported consumers and padding are rejected explicitly. This
-Draft-eager extension does not select the Target Graph builders.
+an unpadded current request extent. Native-only proposals are certified only
+after every participating native group has built its fresh metadata. Mixed
+Full/SWA proposals keep the existing Full-group authority. Unsupported
+consumers and padding are rejected explicitly. This Draft-eager extension
+does not select the Target Graph builders.
+
+DFlash2 is identified by `DFlash2DraftModel` with `method="dflash"`. Its
+inherited Ascend proposal wrapper encloses the original DFlash2 candidate
+Top-K, selector, path walk and realized-probability cache. The final owner
+event follows these consumers; their algorithm and probability semantics
+are not replaced by ordinary DFlash. Window OFF returns before creating a
+Window policy runtime, and keeps the baseline DFlash2 dispatch and checks.
+An enabled Window rejects unknown DFlash architectures and a non-eager
+Draft during initialization. Target Graph selection remains independent.
 
 The native-SWA adapter pins its completed CPU int64 start vector before H2D.
 The exact pinned DMA source remains held by the proposal owner; converting it

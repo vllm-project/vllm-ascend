@@ -58,12 +58,20 @@ def test_static_supported_methods(method):
     assert result.effective_window_size == 1024
 
 
+def test_dflash2_uses_the_dflash_policy_without_a_new_method():
+    result = resolve_draft_window_policy(requested_window_size=1024, method="dflash", is_dflash2=True)
+    assert result.enabled
+    assert result.normalized_method == "dflash"
+    with pytest.raises(NotImplementedError, match="static"):
+        resolve_draft_window_policy(requested_window_size=1024, method="dflash", is_dflash2=True, dynamic_k=True)
+
+
 @pytest.mark.parametrize(
     "kwargs,error",
     [
         ({"method": "eagle"}, NotImplementedError),
         ({"method": "ngram"}, NotImplementedError),
-        ({"method": "dflash", "is_dflash2": True}, NotImplementedError),
+        ({"method": "eagle3", "is_dflash2": True}, NotImplementedError),
         ({"method": "eagle3", "dynamic_k": True}, NotImplementedError),
         ({"method": "dspark", "dynamic_k": True}, NotImplementedError),
     ],
