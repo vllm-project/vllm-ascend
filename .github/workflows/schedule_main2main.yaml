@@ -496,7 +496,7 @@ jobs:
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.6.0
+          uv pip install --force-reinstall --no-deps triton-ascend==3.6.0.post2
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
             echo "csrc cache hit: skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .

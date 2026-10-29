@@ -17,7 +17,7 @@ torch==2.10.0
 torch-npu==2.10.0.post7
 torchvision==0.25.0
 torchaudio==2.10.0
-triton-ascend==3.6.0
+triton-ascend==3.6.0.post2
 wheel
 xgrammar>=0.1.30
 pandas-stubs
