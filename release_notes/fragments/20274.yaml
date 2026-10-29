@@ -1,0 +1,4 @@
+pr: 20274
+entries:
+  - category: bugfix
+    text: MoE graph batches above the MC2 token capacity now use graph-compatible AllGather communication on Ascend.

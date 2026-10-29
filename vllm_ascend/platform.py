@@ -730,6 +730,7 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
