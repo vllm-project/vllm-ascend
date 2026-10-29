@@ -575,9 +575,9 @@ Here are two accuracy evaluation methods.
 
 ### 7.1 Using AISBench
 
-1. For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
+1. For detailed instructions, refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for accuracy evaluation.
 
-2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
+2. After execution, you can get the result. For reference only, here is the result of `Qwen3.5-27B-w8a8` obtained with `vllm-ascend:v0.17.0rc1` on an Atlas 800I A3 node. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
 
 > For `Qwen3.6-27B-w8a8`, change `model` to `qwen3.6` and `path` to the corresponding model weight path.
 
