@@ -2,6 +2,7 @@ import gc
 
 import pytest
 import torch
+from vllm.triton_utils import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -9,11 +10,17 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     copy_and_expand_dflash_and_dspark_inputs_kernel,
     prepare_inputs_padded_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v1.spec_decode.dflash_proposer import (
-    _COPY_EXPAND_TILE_SIZE,
-    _compute_num_programs,
-)
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+_COPY_EXPAND_TILE_SIZE = 256
+
+
+def _compute_num_programs(num_context_total: int, num_query_total: int) -> int:
+    """Programs needed by the copy/expand kernel, capped at the vector-core count."""
+    init_device_properties_triton()
+    num_blocks_needed = triton.cdiv(max(num_context_total, num_query_total), _COPY_EXPAND_TILE_SIZE)
+    return min(num_blocks_needed, get_vectorcore_num())
+
 
 PARALLEL_DRAFTING_TOKEN_ID = 151643
 KV_BLOCK_SIZE = 128

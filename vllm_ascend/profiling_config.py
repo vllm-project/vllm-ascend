@@ -87,19 +87,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
   name: modelExec
 
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
-  name: modelRunnerExec
-  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model_runner
-  domain: Execute
-
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._update_states
-  name: _update_states
-  domain: Execute
-
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._prepare_inputs
-  name: _prepare_inputs
-  domain: Execute
-
 - symbol: "vllm.model_executor.models.*:*.embed_multimodal"
   name: multimodalEmbedding
   domain: Multimodal
@@ -112,15 +99,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
 - symbol: vllm.v1.utils:record_function_or_nullcontext
   min_version: "0.15.0rc1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:record_function_or_nullcontext
-
-# ===== MTP / NPUModelRunner =====
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.propose_draft_token_ids
-  min_version: "0.9.1"
-  handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:propose_draft_token_ids_npu
-
-- symbol: vllm_ascend.sample.rejection_sampler:rejection_sample
-  min_version: "0.9.1"
-  handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:capture_rejection_output
 
 # ===== Request Lifecycle =====
 - symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
@@ -141,10 +119,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
 - symbol: vllm.v1.engine.core:DPEngineCoreProc.add_request
   min_version: "0.9.1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel
-
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
-  min_version: "0.9.1"
-  handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel_worker
 
 # ===== Extended OpenAI-to-ops trace points =====
 
@@ -208,105 +182,18 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
   domain: Execute
   name: modelExec
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._calc_spec_decode_metadata
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: NPUModelRunner._calc_spec_decode_metadata
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._build_attn_state
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: NPUModelRunner._build_attn_state
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._determine_batch_execution_and_padding
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._determine_batch_execution_and_padding
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._pad_for_sequence_parallelism
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._pad_for_sequence_parallelism
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sync_metadata_across_dp
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._sync_metadata_across_dp
 - symbol: vllm.v1.cudagraph_dispatcher:CudagraphDispatcher.dispatch
   min_version: "0.9.1"
   domain: Execute
   name: CudagraphDispatcher.dispatch
-- symbol: vllm_ascend.worker.v1.model_runner:_post_process_cudagraph_mode
-  min_version: "0.9.1"
-  domain: Execute
-  name: _post_process_cudagraph_mode
 - symbol: vllm_ascend.utils:should_skip_allreduce_across_dp_group
   min_version: "0.9.1"
   domain: Execute
   name: should_skip_allreduce_across_dp_group
-- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._propose
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: draft_propose
-- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._run_merged_draft
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: draft_model_forward
-- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: draft_compute_token_ids
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._build_attention_metadata
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._build_attention_metadata
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sanitize_placeholder_input_ids_for_forward
-  min_version: "0.9.1"
-  domain: SpecDecode
-  name: NPUModelRunner._sanitize_placeholder_input_ids_for_forward
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._preprocess
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._preprocess
 - symbol: vllm_ascend.ops.rotary_embedding:update_cos_sin
   min_version: "0.9.1"
   domain: Execute
   name: rotary.update_cos_sin
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._model_forward
-  min_version: "0.9.1"
-  domain: ModelForward
-  name: NPUModelRunner._model_forward
-  attributes:
-  - name: req_ids
-    expr: this | attr input_batch | attr req_ids | str
-  - name: dp_rank
-    expr: this | attr dp_rank | str
-  - name: npu_id
-    expr: this | attr device | attr index | str
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._update_full_graph_params_if_needed
-  min_version: "0.9.1"
-  domain: ModelForward
-  name: NPUModelRunner._update_full_graph_params_if_needed
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._all_gather_hidden_states_and_aux
-  min_version: "0.9.1"
-  domain: ModelForward
-  name: NPUModelRunner._all_gather_hidden_states_and_aux
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._dummy_run
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._dummy_run
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.sample_tokens
-  min_version: "0.9.1"
-  domain: Sample
-  name: NPUModelRunner.sample_tokens
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sample
-  min_version: "0.9.1"
-  domain: Sample
-  name: NPUModelRunner._sample
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._bookkeeping_sync
-  min_version: "0.9.1"
-  domain: Execute
-  name: NPUModelRunner._bookkeeping_sync
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._poll_late_kv_connector_output
-  min_version: "0.9.1"
-  domain: KVTransfer
-  name: NPUModelRunner._poll_late_kv_connector_output
 - symbol: vllm.v1.worker.gpu_model_runner:GPUModelRunner._compute_cascade_attn_prefix_lens
   min_version: "0.9.1"
   domain: Execute

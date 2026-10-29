@@ -422,7 +422,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_USE_FASTOKENS=1
 
     export VLLM_DISABLE_COMPILE_CACHE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -509,7 +508,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_USE_FASTOKENS=1
 
     export VLLM_DISABLE_COMPILE_CACHE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -731,7 +729,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export CPU_AFFINITY_CONF=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
@@ -799,7 +796,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export CPU_AFFINITY_CONF=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
-    export VLLM_USE_V2_MODEL_RUNNER=0
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
@@ -884,7 +880,6 @@ is deprecated); `fuse_muls_add` belongs under `ascend_compilation_config`.
 - `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
-- `VLLM_USE_V2_MODEL_RUNNER=0`: Selects the V1 model runner for the A2 examples.
 
 **KV cache configuration:**
 
@@ -1032,7 +1027,6 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1139,7 +1133,6 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1240,7 +1233,6 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1557,7 +1549,6 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -1647,7 +1638,6 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -1737,7 +1727,6 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
             export LOCAL_WORLD_SIZE=16
@@ -1823,7 +1812,6 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
             export LOCAL_WORLD_SIZE=16
@@ -2104,7 +2092,6 @@ layerwise setting and topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export CPU_AFFINITY_CONF=1
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
@@ -2199,7 +2186,6 @@ layerwise setting and topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export CPU_AFFINITY_CONF=1
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
@@ -2481,7 +2467,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
 
@@ -2603,7 +2588,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
 
@@ -2722,7 +2706,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export ASCEND_RT_VISIBLE_DEVICES=$1
             export VLLM_USE_FASTOKENS=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -2954,7 +2937,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -3068,7 +3050,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -3182,7 +3163,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -3294,7 +3274,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -3597,7 +3576,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_USE_FASTOKENS=1
     export VLLM_PP_LAYER_PARTITION="42,36"
     export PYTHONHASHSEED=0
@@ -3723,7 +3701,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
@@ -3952,7 +3929,6 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -4050,7 +4026,6 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -4240,7 +4215,6 @@ Select the tab that matches your deployment hardware.
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4338,7 +4312,6 @@ Select the tab that matches your deployment hardware.
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4436,7 +4409,6 @@ Select the tab that matches your deployment hardware.
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4531,7 +4503,6 @@ Select the tab that matches your deployment hardware.
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-            export VLLM_USE_V2_MODEL_RUNNER=0
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4829,8 +4800,7 @@ request; reserve output tokens within the 1,048,576-token context limit.
 ### 9.3 TurboQuant KV Cache for GLM-5.2 and GLM-5.3
 
 Use a build of the selected 0.30 maintenance branch containing the packed
-SFA TurboQuant support. This SFA path supports model runner V1; it does
-not require switching the V1 reference deployments to runner V2.
+SFA TurboQuant support.
 Use `--dtype bfloat16` on A2/A3 and disable xLite graph mode.
 
 `--kv-cache-dtype turboquant_4bit_nc` replaces the int8 attention KV cache

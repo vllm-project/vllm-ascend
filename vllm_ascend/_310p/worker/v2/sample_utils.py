@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """310P sampling primitives backed by the shared CPU generator cache.
 
-Lives under the MRv2 worker so that the MRv1-only ``vllm_ascend._310p.sample``
-package can be deleted without affecting the 310P MRv2 sampling path.
+Lives under the MRv2 worker; the MRv1-only ``vllm_ascend._310p.sample`` package
+it was extracted from has been removed.
 """
 
 import torch

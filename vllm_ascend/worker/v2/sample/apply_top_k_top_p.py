@@ -3,10 +3,8 @@ import torch
 from vllm_ascend.utils import vllm_version_is
 
 
-# Canonical sort-based top-k/top-p masking implementation.
-# It lives under the MRv2 worker because vllm_ascend.sample is MRv1-only and is
-# scheduled for deletion: MRv1 imports it from here, so the dependency only ever
-# points from the dying code to the surviving code.
+# Canonical sort-based top-k/top-p masking implementation. It lives under the
+# MRv2 worker; the MRv1 sampler that used to import it has been removed.
 def _apply_top_k_top_p_pytorch(
     logits: torch.Tensor,  # [B, V_local]
     k: torch.Tensor,  # [B] or None

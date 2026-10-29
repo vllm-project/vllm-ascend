@@ -157,35 +157,25 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-The accepted fields depend on the model runner:
+Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
+default and moves expert weights asynchronously over HIXL when it is available
+on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
+`default` or `stair` only through the upstream `--eplb-config.policy` option.
+See the
+[EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
+for the advanced STAIR fields and their defaults.
 
-- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
-  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy by default and moves expert weights asynchronously
-  over HIXL when it is available on every EPLB rank, falling back to Gloo
-  CPU staging otherwise. Select `default` or `stair` only through the
-  upstream `--eplb-config.policy` option. See the
-  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
-  for the advanced STAIR fields and their defaults.
-- **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase` and `stair_config`.
-  MRv1 does not accept upstream `--enable-eplb` on Ascend.
-
-Mixing the two schemas fails during startup instead of silently ignoring
-configuration.
+The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
+`algorithm_execution_interval`, `expert_map_record_path`,
+`num_redundant_experts`, `eplb_policy_type`, and `eplb_heat_collection_stage`
+fields configured the Model Runner V1 EPLB implementation, which has been
+removed. They no longer take effect.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `dynamic_eplb`                   | bool| `False`| MRv1 only. Whether to enable legacy dynamic EPLB. |
-| `expert_map_path`                | str | `None` | MRv1 only. Load a recorded static expert map. |
-| `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
-| `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
-| `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
-| `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
-| `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
-| `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
-| `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 

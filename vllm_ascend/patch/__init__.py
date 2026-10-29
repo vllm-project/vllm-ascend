@@ -798,30 +798,25 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, draft_window_size, suffix
-#       speculative decoding, ngram speculative decoding, draft_model
-#       speculative decoding, dflash2 graph, and p-eagle)
-#       default to v1.
-#       Upstream GPU-specific architecture, feature, and Triton gates must not
-#       silently switch an
-#       Ascend request back to v1. VLLM_USE_V2_MODEL_RUNNER=0 remains the
-#       explicit v1 escape hatch.
+#       Model Runner V1 has been removed, so Model Runner V2 is the only Ascend
+#       implementation. Upstream still derives its own default from the
+#       environment, Triton availability, and GPU-specific feature gates; those
+#       must not route an Ascend request to the removed runner. Features without
+#       a V2 implementation (draft_window_size, enable_dsa_cp, suffix
+#       speculative decoding, dflash2 graph, and p-eagle) are rejected during
+#       validation instead of falling back.
 #    How:
-#       Call apply_v2_model_runner_config_patch() to install the Ascend
-#       default-v2 use_v2_model_runner property (with the V2 feature
-#       blacklist) and neutralize upstream V2 validation. Spec+PP is
-#       native upstream, so this patch no longer rewrites that unsupported
-#       list. Keep the Ascend-supported V1 feature allowlist
-#       (dspark / dflash2).
+#       Call apply_v2_model_runner_config_patch() to install a
+#       use_v2_model_runner property that always selects V2, and to replace
+#       upstream V2 validation with the Ascend unsupported-feature check.
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
 #       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
-#       Remove this patch once upstream exposes a platform-specific default
-#       runner-selection hook.
+#       Remove this patch once upstream removes the V1 runner and keeps V2 as
+#       the only implementation.
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
@@ -832,18 +827,6 @@
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
 #       Re-add only if a supported pin rejects PCP+DP.
-#
-#   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
-#    Why:
-#       Both supported vLLM lanes reject V1 PP with async scheduling for a GPU runner
-#       limitation. Ascend has separate PP communication and scheduler patches.
-#    How:
-#       Add this feature to the existing Ascend V1 allowlist, preserving
-#       unrelated upstream restrictions.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/45014 describes the GPU issue.
-#    Future Plan:
-#       Remove with the V1 runner compatibility patch when Ascend uses V2 only.
 #
 # * Worker Patch:
 # ========#
@@ -991,14 +974,7 @@
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
 #
-#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
-#    Why:
-#       310P needs to protect the tail slot during MTP input_ids shift to avoid
-#       GatherV2 corruption from persistent drafter input buffers.
-#    How:
-#       Reuse the 310P proposer implementation for the first-pass input shift.
-#
-#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
+#   2. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
 #    Why:
 #       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
 #       and attention backend/builder wiring.
@@ -1007,7 +983,7 @@
 #       GDN attention backend. RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
 #
-#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`
+#   3. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`
 #      (RC only)
 #    Why:
 #       310P images do not install Triton, so upstream ``HAS_TRITON=False``
@@ -1020,8 +996,8 @@
 #       No, 310P custom operator and backend behavior are vllm-ascend specific.
 #    Future Plan:
 #       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, backend selection, and
-#       vision rot_pos_emb that does not race on 310P RC.
+#       chunk metadata, backend selection, and vision rot_pos_emb that does
+#       not race on 310P RC.
 #
 # ** 8. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1491,16 +1467,15 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (default-v2 selection plus
-#       remaining V2/V1 feature patches).
+#       in `platform/patch_use_v2_model_runner.py` (V2-only runner selection).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
 #    Related PR (if no, explain why):
 #       See platform/patch_use_v2_model_runner.py.
 #    Future Plan:
-#       Remove this module together with the platform patch once vllm-ascend
-#       fully supports the v2 model runner.
+#       Remove this module together with the platform patch once upstream
+#       removes the V1 runner.
 #
 # ** 30. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

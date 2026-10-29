@@ -47,10 +47,6 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
-    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
-        "en": "Model Runner V1 EPLB Architecture",
-        "zh": "Model Runner V1 EPLB 架构",
-    },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
         "zh": "Model Runner V2 EPLB 架构",

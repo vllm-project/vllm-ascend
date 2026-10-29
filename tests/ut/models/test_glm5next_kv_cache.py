@@ -36,7 +36,6 @@ from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
     get_kpool_tail_ring_capacity,
 )
-from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import AscendMultiKVCacheGroupMTPProposer
 
 pytestmark = pytest.mark.usefixtures("keypool_kernels")
 
@@ -820,32 +819,3 @@ def test_incomplete_inputs_fail_before_kernel_launch(field, keypool_kernels):
     with pytest.raises(ValueError, match="must cover every actual token"):
         _builder(_config()).build(0, common)
     keypool_kernels.build_keypool_metadata.assert_not_called()
-
-
-@pytest.mark.parametrize("logical,primary", [(128, True), (256, False), (1152, False)])
-def test_mtp_preserves_expanded_kernel_pages(logical, primary):
-    config, common = _config(), _common()
-    config.cache_config.block_size = logical
-    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1)
-    config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    builder = _builder(config)
-    split, width = logical // 128, (8192 + logical - 1) // logical
-    physical = torch.arange(1, 2 * width + 1, dtype=torch.int32).view(2, width)
-    table = (physical[:, :, None] * split + torch.arange(split)).reshape(2, -1)
-    common.block_table_tensor = table
-    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
-    proposer._uses_multi_group_kv_cache, proposer.kv_cache_gid, proposer.max_model_len = True, 0, 8192
-    proposer.vllm_config = config
-    gid = 0 if primary else 1
-    proposer._multi_group_slot_mapping_buffers = {(gid, 0): common.slot_mapping.clone()}
-    proposer._multi_group_block_table_buffers = {gid: torch.zeros_like(table)}
-    cache = SimpleNamespace(
-        is_circular_group=False,
-        compute_slot_mapping=lambda *_: None,
-        get_device_tensor=lambda: table,
-        slot_mapping=SimpleNamespace(gpu=common.slot_mapping),
-    )
-    proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[cache, cache]))
-    group = SimpleNamespace(kv_cache_group_id=gid, get_metadata_builder=lambda: builder)
-    draft = proposer._common_attn_metadata_for_draft_group(common, group, common.num_input_tokens)
-    torch.testing.assert_close(builder.build(0, draft).block_table, table)

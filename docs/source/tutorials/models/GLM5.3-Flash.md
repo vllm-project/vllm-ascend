@@ -18,8 +18,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+The deployment scripts on this page run on Model Runner V2.
 
 ## 3 Prerequisites
 
@@ -229,7 +228,6 @@ are not interchangeable.
 
     ```shell
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
 
@@ -264,7 +262,6 @@ are not interchangeable.
     ```shell
     #!/bin/sh
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -332,7 +329,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -381,7 +377,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xx.xx.xx.1"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -761,7 +756,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES="$1"
@@ -840,7 +834,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES="$1"
@@ -941,8 +934,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       MTP speculative decoding with three speculative tokens. The MTP draft
       model uses `enforce_eager: true` on Prefill and `enforce_eager: false`
       on Decode.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
-      roles for this configuration.
     - Prefill uses `--max-num-seqs 64` and
       `--max-num-batched-tokens 4096`. Decode uses `--max-num-seqs 32` and
       `--max-num-batched-tokens 192`. Tune these role-specific scheduler limits
@@ -1018,7 +1009,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_SERVER_DEV_MODE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -1153,7 +1143,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
     export VLLM_SERVER_DEV_MODE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -1328,8 +1317,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       with `--enforce-eager`; Decode uses `--max-num-seqs 32` and
       `--max-num-batched-tokens 1024` with `FULL_DECODE_ONLY` graph mode.
       Both roles run with `--async-scheduling`.
-    - Both roles rely on model runner V1 via
-      `VLLM_USE_V2_MODEL_RUNNER=0`, consistent with the other tabs in
+    - Both roles run on Model Runner V2, consistent with the other tabs in
       this guide. `VLLM_HOST_IP` advertises the IP that peers use to
       reach each engine for KV transfer.
     - MTP speculative decoding uses three speculative tokens on A2 series.
@@ -1867,7 +1855,6 @@ and role-specific settings when reproducing the deployment.
 | Optimization | Role | Configuration | Purpose and constraints |
 | --- | --- | --- | --- |
 | FlashComm1 | Prefill and Decode | `enable_flashcomm1: true` | Optimizes tensor-parallel communication. |
-| DSA context parallelism | Prefill | `enable_dsa_cp: true` | Distributes sparse-attention work for long prompts; use model runner V1. |
 | Prefill MoE communication | Prefill | `enable_prefill_mc2: true`, `enable_fused_mc2: 1`, `enable_shared_expert_dp: true` | Uses fused MoE communication with the reference W8A8 weights and EP16 layout; keep `multistream_overlap_shared_expert: false` on this role. |
 | Shared-expert overlap | Decode | `multistream_overlap_shared_expert: true` | Overlaps shared-expert execution with other work; the Decode configuration does not enable fused MC2. |
 | Decode execution | Decode | `FULL_DECODE_ONLY` | Reduces decode launch overhead. |

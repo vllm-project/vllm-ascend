@@ -22,6 +22,8 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_tensor_with_pad
 
 from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -159,4 +161,33 @@ def _apply_all_penalties_triton(
         stride_bin_counts_seq=output_bin_counts.stride(0),
         stride_bin_counts_vocab=output_bin_counts.stride(1),
         BLOCK_SIZE=2048,
+    )
+
+
+def apply_all_penalties(
+    logits: torch.Tensor,
+    prompt_token_ids: torch.Tensor,
+    presence_penalties: torch.Tensor,
+    frequency_penalties: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+    output_token_ids: list[list[int]],
+) -> torch.Tensor:
+    """Apply the Triton penalties to logits with per-request output token lists."""
+    _, vocab_size = logits.shape
+    output_tokens = make_tensor_with_pad(
+        output_token_ids,
+        pad=vocab_size,
+        device="cpu",
+        dtype=torch.int64,
+        pin_memory=is_pin_memory_available(),
+    ).to(logits.device, non_blocking=True)
+    output_tokens.masked_fill_(output_tokens == -1, vocab_size)
+
+    return apply_penalties_triton(
+        logits,
+        prompt_token_ids,
+        output_tokens,
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
     )

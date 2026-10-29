@@ -750,7 +750,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     - `VLLM_USE_V2_MODEL_RUNNER=1`: Keep this environment variable exported in both the Prefill and Decode pooling scripts. PCP requires Model Runner V2, which does not support DSA-CP. Therefore, do not set `enable_dsa_cp` in `--additional-config`.
 
-    - `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. Besides speeding up long-context prefill, enabling PCP also shards the `o_proj` weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure.
+    - `--prefill-context-parallel-size` configures prefill context parallelism (PCP). Besides speeding up long-context prefill, enabling PCP also shards the `o_proj` weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure.
 
     - `--kv-transfer-config` configures KV cache transfer between the Prefill producer and Decode consumer in PD separation.
 

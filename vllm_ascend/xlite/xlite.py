@@ -50,10 +50,9 @@ from vllm_ascend.xlite.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.v1.xlite.xlite_model_runner import XliteModelRunner as XliteModelRunnerV1
     from vllm_ascend.xlite.xlite_model_runner import XliteModelRunnerV2
 
-    XliteModelRunner: TypeAlias = XliteModelRunnerV1 | XliteModelRunnerV2
+    XliteModelRunner: TypeAlias = XliteModelRunnerV2
 
 XliteForwardResult: TypeAlias = torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]
 

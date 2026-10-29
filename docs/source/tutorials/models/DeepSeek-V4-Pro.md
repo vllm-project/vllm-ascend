@@ -1361,7 +1361,7 @@ Select the tab that matches the deployment hardware.
 - `scheduler_config.recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the Decode node is insufficient, requests are sent to Prefill for KV Cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key is deprecated.
 - `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value. Use the value declared by the checkpoint; the 950DT and A3 examples use `5`, while the A2 example uses `7`. The nested `enforce_eager` applies to DSpark draft execution, while the top-level `--enforce-eager` keeps the Prefill target model in eager mode.
 - `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode for graph compilation (Prefill runs eager mode instead); `enable_static_kernel: false` keeps dynamic-shape kernels instead of static-shape kernels for aclgraph execution.
-- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. Besides speeding up long-context prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure. Each hardware tab configures PCP differently; see the tab-specific descriptions.
+- `--prefill-context-parallel-size` configures prefill context parallelism (PCP). Besides speeding up long-context prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure. Each hardware tab configures PCP differently; see the tab-specific descriptions.
 - `--quantization ascend` enables Ascend quantization for the W4A8 model used in the A2 and A3 configurations. The original DeepSeek-V4-Pro-0813 weights used on 950DT products do not require this option.
 
 The hardware-specific parameter differences are listed inside each tab above.
@@ -2638,7 +2638,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | DSpark Speculation Num | Fused MC2 | EP Switch | FC | DSA-CP (MRv1) / PCP (MRv2) |
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | DSpark Speculation Num | Fused MC2 | EP Switch | FC | PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Short Sequence / High Throughput | Prefill Pool | 32 (2 A3 nodes) | 2 | 1 | 16 | 4096 | 150000 | 5 | On | On | On | PCP=8 |
 | Short Sequence / High Throughput | Decode Pool | 32 (2 A3 nodes) | 2 | 16 | 30 | 180 | 150000 | 5 | Off | On | Off | PCP=1 |
@@ -2649,7 +2649,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 > `FC` reports the FlashComm1.
 >
-> `DSA-CP (MRv1) / PCP (MRv2)` describes context parallelism according to the model runner version: MRv1 uses the `enable_dsa_cp` switch, while MRv2 uses `--prefill-context-parallel-size` to specify the PCP size. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. For the long-context Prefill reference, enable FlashComm1 and disable context parallelism (`enable_dsa_cp: false` on MRv1, or PCP size `1` on MRv2). The long-context example for 950DT products runs on the V2 model runner and uses `PCP=8` on Prefill; `enable_dsa_cp` is mutually exclusive with PCP and must stay off there.
+> `PCP` is configured with `--prefill-context-parallel-size`. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. For the long-context Prefill reference, enable FlashComm1 and disable context parallelism (PCP size `1`). The long-context example for 950DT products uses `PCP=8` on Prefill.
 >
 > Fused MC2 is disabled in the long-context reference configuration because it increases memory usage. If sufficient memory is available and higher performance is the priority, enabling Fused MC2 on Prefill is recommended.
 >

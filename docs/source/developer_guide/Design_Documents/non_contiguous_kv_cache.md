@@ -11,8 +11,8 @@ incorrect stride.
 
 This feature keeps the logical block table and block IDs unchanged while
 constructing strided tensor views over the existing physical allocation. It is
-implemented in Model Runner V1 and applies to hybrid Attention + Mamba models
-and supported pure GQA Attention models.
+implemented during Ascend model runner cache construction and applies to hybrid
+Attention + Mamba models and supported pure GQA Attention models.
 
 ## 2. Goals and Non-Goals
 
@@ -222,7 +222,7 @@ removed after the layout implementation is considered stable.
 
 ## 8. Compatibility and Limitations
 
-- The feature is implemented for Model Runner V1 cache construction.
+- The feature is implemented during Ascend model runner cache construction.
 - The logical block table and scheduler-visible block IDs remain unchanged.
 - The exact physical layout depends on the model's Attention and Mamba cache
   specifications and the selected kernel block sizes.

@@ -21,32 +21,13 @@ EPLB is not recommended in the following scenarios because the load-balancing be
     Meeting the above conditions may lead to performance degradation.
     When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
 
-vLLM Ascend provides two EPLB integration paths:
+vLLM Ascend uses the upstream vLLM EPLB controller, configuration, load window,
+asynchronous worker, and rearrangement lifecycle. Ascend adds the STAIR policy
+(the default policy on Ascend), the HIXL and Gloo movement adapters, and the
+`load_collection_phase` extension.
 
-- **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
-  configuration, load window, asynchronous worker, and rearrangement
-  lifecycle. Ascend adds the STAIR policy (the default policy on Ascend),
-  the HIXL and Gloo movement adapters, and the `load_collection_phase`
-  extension.
-- **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic,
-  recording, and static EPLB modes with their own policies
-  (SwiftBalance, DefaultEplb, FlashLB, Random).
-
-The two paths use different switches and configuration schemas:
-
-| | Model Runner V2 | Model Runner V1 |
-| --- | --- | --- |
-| Enable | `--enable-eplb` with `VLLM_USE_V2_MODEL_RUNNER=1` | `eplb_config.dynamic_eplb: true` plus `export DYNAMIC_EPLB="true"` |
-| Configuration surface | Upstream `--eplb-config.*` plus `additional_config.eplb_config` (`load_collection_phase`, `stair_config`) | `additional_config.eplb_config` only |
-| Policies | `stair` (the Ascend default), `default` (the upstream algorithm) | `eplb_policy_type` 0–3 |
-| Movement | Asynchronous only; HIXL by default, Gloo CPU staging as fallback | Layer-by-layer D2D transfers on the forward thread; the placement plan is computed in a per-rank EPLB subprocess |
-
-!!!IMPORTANT
-
-    Do not mix MRv1 environment variables (`DYNAMIC_EPLB`,
-    `EXPERT_MAP_RECORD`) or legacy `eplb_config` fields with MRv2 EPLB
-    configuration. Mixed configurations fail during startup with an explicit
-    error instead of being silently ignored.
+The legacy vLLM Ascend dynamic, recording, and static EPLB modes belonged to
+Model Runner V1 and have been removed.
 
 ### Constraints and Limitations
 
@@ -56,16 +37,14 @@ EPLB applies only to MoE models that support expert parallelism and whose MoE
 quantization method exposes a complete expert-weight movement layout. Support
 also depends on the selected model runner and hardware generation.
 
-Legacy MRv1 performance has primarily been verified on DeepSeek-V3.1/R1. The
-initial MRv2 model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous
-EPLB. Validate accuracy and performance with the target model, topology, and
+The model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous EPLB. Validate accuracy and performance with the target model, topology, and
 traffic before production deployment.
 
 !!!IMPORTANT
 
     A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0` in both runners. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
-#### Model Runner V2 Weight Formats
+#### Weight Formats
 
 The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is covered by an in-repository model-level regression test that runs on Ascend NPUs (`tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py`). Other enabled formats have not undergone the same level of validation and must be validated with the target model and hardware configuration before production deployment.
 
@@ -84,23 +63,12 @@ The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is co
 declare EPLB support (`supports_eplb = False`). This rejection is independent
 of hardware generation.
 
-#### Model Runner V1 Quantization and Hardware
-
-| QuantType                       | Supported Hardware          |
-| ------------------------------- | --------------------------- |
-| W8A8 / W8A8-Dynamic             | A2, A3 |
-| W4A8 (verified with fused MC2 enabled) | A2, A3 |
-| MXFP4                           | 950PR&950DT Products         |
-| MXFP8                           | 950PR&950DT Products         |
-
 ## Feature Usage
 
-### Model Runner V2: Asynchronous EPLB
+### Asynchronous EPLB
 
-On Ascend, Model Runner V2 is selected with the environment variable
-`VLLM_USE_V2_MODEL_RUNNER=1` (DeepSeek V4.1 on 950PR&950DT Products
-additionally requires MRv2: startup fails with an explicit error unless the
-variable is set).
+On Ascend, the V2 runner handles every request because Model Runner V1 has been
+removed, so no environment variable is needed to select it.
 Enable expert parallelism and upstream EPLB. Ascend selects the STAIR policy
 by default and automatically uses the HIXL communicator when it is available
 on every EPLB rank, falling back to Gloo otherwise. Movement is asynchronous
@@ -111,10 +79,6 @@ The STAIR defaults do not require tuning; see
 A minimal production configuration only needs the redundant-expert budget:
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-unset DYNAMIC_EPLB
-unset EXPERT_MAP_RECORD
-
 vllm serve Qwen/Qwen3-30B-A3B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
@@ -239,200 +203,15 @@ MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
 asynchronous movement. It rejects:
 
 - elastic expert parallelism,
-- legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and
-  `EXPERT_MAP_RECORD` (these are MRv1 controls),
+- legacy `dynamic_eplb`, recording/static-map fields, and the `DYNAMIC_EPLB`
+  and `EXPERT_MAP_RECORD` environment variables, all of which belonged to the
+  removed Model Runner V1 EPLB implementation,
 - communicators other than Gloo and HIXL,
 - weight offload and prefetch: enabling EPLB with `cpu_offload_gb > 0` or
   `offload_group_size > 0` raises a configuration error.
 
 Validate the target model, topology, graph mode, and traffic independently
 before production use.
-
-### Model Runner V1: Legacy EPLB
-
-Legacy MRv1 EPLB has three usage modes:
-
-| Mode | Config in `eplb_config` | Env Variable |
-| ---- | ----------------------- | ------------ |
-| **Dynamic EPLB** | `dynamic_eplb: true` | `DYNAMIC_EPLB=true` |
-| **Recording** (generate expert map) | `expert_map_record_path` | `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true` |
-| **Static EPLB** (load pre-recorded map) | `expert_map_path` | none required |
-
-!!!IMPORTANT
-
-    For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB` set to `true` (case-insensitive) or `1`, or `EXPERT_MAP_RECORD` set to exactly lowercase `true`. Use lowercase `true` in scripts to be safe everywhere.
-    Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
-
-#### Dynamic EPLB
-
-We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following: policy of SwiftBalanceEplb(2).
-
-| Parameter | Description | Default |
-| --- | --- | --- |
-| dynamic_eplb | Enable dynamic EPLB. | False |
-| expert_heat_collection_interval | Interval for collecting expert heat. | 600 |
-| algorithm_execution_interval | Interval for executing the balancing algorithm. | 50 |
-| eplb_policy_type | EPLB policy type. | 2 |
-| num_redundant_experts | Number of redundant experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. | 0 |
-| eplb_heat_collection_stage | Request stage used to collect expert heat. Available values: `all`, `prefill`, and `decode`. | `all` |
-
-```mermaid
-graph TB
-   A[start] --> B(collect_heat)
-   B --> C(execute_algorithm)
-   C --> D(update_layer one by one)
-   D --> B
-   D --> F[termination upon service termination]
-```
-
-```shell
-# D node or colocation
-vllm serve Qwen/Qwen3-235B-A22B \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --additional-config '{ "eplb_config": {
-    "dynamic_eplb": true,
-    "expert_heat_collection_interval": 600,
-    "algorithm_execution_interval": 50,
-    "eplb_policy_type": 2,
-    "num_redundant_experts": 16
-    }}'
-
-# P node
-vllm serve Qwen/Qwen3-235B-A22B \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --additional-config '{ "eplb_config": {
-    "dynamic_eplb": true,
-    "expert_heat_collection_interval": 50,
-    "algorithm_execution_interval": 5,
-    "eplb_policy_type": 2,
-    "num_redundant_experts": 16
-    }}'
-```
-
-One full MRv1 update cycle spans `expert_heat_collection_interval +
-algorithm_execution_interval + num_moe_layers` forward iterations: expert
-heat is collected first, the balancing algorithm then runs in a per-rank
-EPLB subprocess, and the resulting plan is applied one MoE layer per forward
-iteration.
-
-##### EPLB Policy Types
-
-The `eplb_policy_type` parameter selects the balancing algorithm used during dynamic expert redistribution:
-
-| Value | Policy | Description |
-|-------|--------|-------------|
-| `0` | Random | Test-only policy that swaps a fixed expert pair between two ranks each cycle; it requires at least four EP ranks and is not a real random balancer. |
-| `1` | DefaultEplb | Open-source EPLB algorithm. Adds redundant experts to the hottest, packs via balanced assignment with local constraint exchange. |
-| `2` | SwiftBalanceEplb | Optimized for low-bandwidth environments. Supports intra-node and inter-node expert redundancy, joint optimization of expert placement. **(Recommended)** |
-| `3` | FlashLB | Statistical method using sliding-window mean/variance/covariance of expert loads. Uses FlashTree layered search for optimal replica allocation and `minimize_redeploy` for incremental adjustment. Best for high-frequency load fluctuations. |
-
-##### Selective Expert Heat Collection
-
-The `eplb_heat_collection_stage` option is intended for prefill-decode aggregation scenarios. Prefill requests usually process many tokens in one iteration, while decode requests usually process fewer tokens. As a result, the expert workload distribution can differ between the two stages. Collecting heat from both stages may hide the imbalance of the stage whose latency you want to optimize.
-
-!!!IMPORTANT
-
-    This section describes the MRv1-only `eplb_heat_collection_stage` field.
-    MRv2 uses `load_collection_phase` as described above; the two fields have different batch-classification semantics and are not interchangeable.
-
-Use `eplb_heat_collection_stage` to select the stage whose expert heat contributes to EPLB:
-
-| Value | Behavior | Typical use |
-| ----- | -------- | ----------- |
-| `all` | Collect expert heat from both prefill and decode iterations. | General workloads; this is the default. |
-| `prefill` | Collect expert heat only from iterations classified as prefill. | Optimize prefill workload balance and TTFT. |
-| `decode` | Collect expert heat only from iterations classified as decode. | Optimize decode workload balance and TPOT. |
-
-Choose the stage according to the actual workload. The following values can be used as initial tuning guidance:
-
-- For workloads whose typical input sequence length is greater than `1024` tokens, start with `prefill`.
-- For workloads whose typical input sequence length is less than `1024` tokens but concurrency is greater than `1024`, try `decode` or `all`.
-- For other or mixed workloads, benchmark `all`, `prefill`, and `decode` against the target TTFT or TPOT before choosing a setting.
-
-These thresholds are empirical starting points rather than strict requirements. Production traffic distribution, concurrency, model configuration, and hardware topology can all affect the optimal stage.
-
-For example, to collect only prefill heat:
-
-```shell
-export DYNAMIC_EPLB="true"
-
-vllm serve Qwen/Qwen3-235B-A22B \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --additional-config '{ "eplb_config": {
-    "dynamic_eplb": true,
-    "expert_heat_collection_interval": 600,
-    "algorithm_execution_interval": 50,
-    "eplb_policy_type": 2,
-    "num_redundant_experts": 16,
-    "eplb_heat_collection_stage": "prefill"
-  }}'
-```
-
-To collect only decode heat, set:
-
-```json
-{
-  "eplb_config": {
-    "dynamic_eplb": true,
-    "eplb_heat_collection_stage": "decode"
-  }
-}
-```
-
-!!!NOTE
-
-    Stage selection applies to dynamic EPLB heat collection. Internally, vLLM-Ascend classifies each forward iteration by comparing its padded scheduled token count with the maximum expected token count of a decode iteration. An iteration above the threshold is treated as prefill; an iteration at or below the threshold is treated as decode. Classification is therefore performed per forward iteration rather than per individual request.
-
-When an iteration does not match the selected stage, its expert load is not accumulated and it does not advance the heat-collection interval. Once heat collection is complete, balancing calculation and layer-by-layer expert weight updates continue normally.
-
-#### Static EPLB
-
-Static EPLB applies a fixed expert placement computed offline. Use recording mode once to capture the placement generated under representative traffic, then reuse the recorded map in subsequent deployments to avoid recalculating distributions at runtime. Static EPLB does not require any environment variable.
-
-!!!NOTE
-
-    Static EPLB and the recording mode are legacy MRv1 features. They are
-    retained for compatibility with existing deployment pipelines; new
-    deployments should prefer MRv2 asynchronous EPLB, which re-learns the
-    placement online.
-
-##### Initial Setup (Record Expert Map)
-
-We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map. Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
-
-```shell
-export EXPERT_MAP_RECORD="true"
-
-vllm serve Qwen/Qwen3-235B-A22B \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --additional-config '{ "eplb_config": {
-    "expert_map_record_path": "/path/to/eplb.json",
-    "num_redundant_experts": 16,
-    "expert_heat_collection_interval": 400,
-    "algorithm_execution_interval": 30
-  }}'
-```
-
-Use an absolute path for `expert_map_record_path`: the parent directory is
-created automatically, and a bare relative file name fails directory
-creation. Only global rank 0 writes the JSON file.
-
-##### Subsequent Deployments (Use Recorded Map)
-
-Load the pre-recorded expert map for consistent performance. This avoids recalculating distributions at runtime.
-
-```shell
-vllm serve Qwen/Qwen3-235B-A22B \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --additional-config '{
-    "eplb_config": {"expert_map_path": "/path/to/eplb.json"}
-  }'
-```
 
 ## Performance Ceiling Analysis (`enable_force_eplb`)
 
@@ -489,9 +268,7 @@ rebalances a layer only when the hysteresis gates above fire, so lowering
 ## Critical Considerations
 
 1. Parameter Tuning:
-    - For MRv2, tune `window_size` and `step_interval` against the target
-      workload. For MRv1, tune `expert_heat_collection_interval` and
-      `algorithm_execution_interval`.
+    - Tune `window_size` and `step_interval` against the target workload.
     - `num_redundant_experts` must make `(num_experts +
       num_redundant_experts)` divisible by the expert-parallel size.
 
@@ -501,16 +278,7 @@ rebalances a layer only when the hysteresis gates above fire, so lowering
     - shm needs to be mounted for container
 
 3. Monitoring & Validation:
-    - MRv1: search for `Expert hotness imbalance` lines (logged as
-      `[eplb/worker] Expert hotness imbalance, current: mean=... max=...,
-      updated: ...`) on EP rank 0 once per balancing cycle. We calculate the
-      peak-to-average ratio of the load for each layer at different ranks,
-      and then find their mean and maximum values. Current means actual
-      peak-to-average ratio, update means estimated peak-to-average ratio
-      after algorithm adjustment. The same values are exported as
-      `eplb:expert_hotness:*` metrics when ms-service-metric collection is
-      enabled.
-    - MRv2: temporarily enable `--eplb-config.log_balancedness true` to log
+    - Temporarily enable `--eplb-config.log_balancedness true` to log
       `EPLB step: ... balancedness=...` per window sample, and check
       `Ascend async EPLB cycle committed` lines for the per-cycle movement
       summary (`mean ... -> ...`, changed layers, transfer counts).

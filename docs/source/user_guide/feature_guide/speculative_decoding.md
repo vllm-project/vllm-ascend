@@ -6,8 +6,8 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
-1. **Proposer** (`vllm_ascend/worker/v1/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
-2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify).
+1. **Proposer** (`vllm_ascend/worker/v2/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
+2. **Rejection Sampler** (`vllm_ascend/worker/v2/spec_decode/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
 
 The following speculative decoding methods are supported:
 
@@ -526,8 +526,8 @@ options.
   the draft attention can read. Omit the key (or remove it) to disable the
   window. Typical values are 512-4096; the window is block-aligned internally,
   so any positive value works.
-- Works on the default model runner (MRV1). Not yet supported under
-  `VLLM_USE_V2_MODEL_RUNNER=1`.
+- Setting this key is rejected: the sliding-window draft attention it
+  configured belonged to Model Runner V1, which has been removed.
 - For `mtp` the window is ignored (force-disabled): MTP reuses the target
   model's own layers, so windowing it would change the target's computation.
 
@@ -607,11 +607,7 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
 
     This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
 
-Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
-
-```shell
-export VLLM_USE_V2_MODEL_RUNNER=1
-```
+Model Runner V2 is the only model runner on Ascend.
 
 > [!NOTE]
 > Model Runner V2 support reuses upstream vLLM's `ExtractHiddenStatesSpeculator`
@@ -853,7 +849,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Model Runner V2 supports upstream vLLM's block verification for speculative decoding. It jointly verifies a block of draft tokens using cumulative target-to-draft probability ratios and samples a recovery token from the corresponding residual distribution. This can increase the accepted draft length while preserving the target sampling distribution. Performance gains depend on the draft model and workload.
 
-Model Runner V2 is enabled by default (`VLLM_USE_V2_MODEL_RUNNER=1`). To enable block verification, set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
+To enable block verification, set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
 
 **Offline inference**:
 
@@ -880,65 +876,6 @@ vllm serve path/to/target/model \
 ```
 
 Block verification supports both greedy and probabilistic draft sampling. Target requests with `temperature=0` retain greedy verification behavior. It cannot be combined with synthetic rejection sampling; do not set `synthetic_acceptance_rates` or `synthetic_acceptance_length` when using `"block"`.
-
-## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
-
-Block Verify and Entropy Verify currently support Model Runner V1 only. Set `VLLM_USE_V2_MODEL_RUNNER=0` before starting the server or offline inference process, then configure these features through `additional_config.rejection_sampler_config` as shown below. Model Runner V2 is enabled by default; its block verification is configured through `speculative_config.rejection_sample_method`, as described in [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
-
-```shell
-export VLLM_USE_V2_MODEL_RUNNER=0
-```
-
-vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
-
-!!! warning
-
-    Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
-
-### Block Verify
-
-Block Verify evaluates all draft tokens as a block using cumulative probability products, rather than checking each token independently. This can improve the acceptance rate and reduce the overhead of rejection sampling, especially when `num_speculative_tokens >= 3`.
-
-### Entropy Verify
-
-Entropy Verify adjusts the acceptance threshold based on the entropy of the target distribution:
-
-- **High entropy** (uncertain distribution) → lower effective threshold → more tokens accepted
-- **Low entropy** (confident distribution) → higher effective threshold → stricter rejection
-
-This entropy-aware threshold is controlled by two parameters:
-
-- **`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.
-- **`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset. When alpha is `0`, entropy has no effect and the threshold equals `posterior_threshold`.
-
-### Usage
-
-- Online inference
-
-    ```shell
-    vllm serve <model> --additional-config \
-        '{"rejection_sampler_config": {"enable_block_verify": true, \
-        "enable_entropy_verify": true, "posterior_threshold": 0.95, \
-        "posterior_alpha": 0.4}}'
-    ```
-
-- Offline inference
-
-    ```python
-    llm = LLM(
-        model,
-        additional_config={
-            "rejection_sampler_config": {
-                "enable_block_verify": True,
-                "enable_entropy_verify": True,
-                "posterior_threshold": 0.95,
-                "posterior_alpha": 0.4,
-            }
-        },
-    )
-    ```
-
-Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
 
 ## Synthetic Rejection Sampling
 
@@ -992,9 +929,6 @@ vllm serve path/to/target/model \
 
 ### Ascend-specific notes
 
-Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode per model-runner path:
+Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode in `vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`: the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
-- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
-- **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
-
-The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
+The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is shared with `standard` mode.
