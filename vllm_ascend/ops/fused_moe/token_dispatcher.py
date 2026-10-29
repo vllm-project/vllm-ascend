@@ -50,7 +50,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
@@ -227,11 +227,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if (
             quant_mode == 4
             and token_dispatch_input.quant.quant_type == QuantType.W8A8MXFP
-            and self.dynamic_mx_quant_scale_alg == 1
+            and self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL
         ):
-            # MC2's fused MX quantizer uses a different scale rounding rule.
-            # Quantize explicitly, then transport the FP8 and E8M0 bytes without
-            # re-quantization. Mode 0 preserves the supplied tensor dtypes.
             quantized, scales = torch_npu.npu_dynamic_mx_quant(
                 hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=self.dynamic_mx_quant_scale_alg
             )
@@ -302,7 +299,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         elif quant_type == QuantType.W8A8MXFP:
             # The down projection already produces BF16. Avoid an additional
             # lossy communication quantizer for models using ceil MX scales.
-            quant_mode = 0 if self.dynamic_mx_quant_scale_alg == 1 else 4
+            quant_mode = 0 if self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL else 4
         else:
             quant_mode = 0
         kwargs_mc2 = {
@@ -403,11 +400,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             with_quant
             and dynamic_scale is None
             and quant_type == QuantType.W8A8MXFP
-            and get_dynamic_mx_quant_scale_alg() == 1
+            and get_dynamic_mx_quant_scale_alg() == DynamicMXQuantScaleAlg.CEIL
         ):
             # init_routing's fused quantizer does not expose scale_alg.
             hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=1
+                hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
             )
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
