@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 _BLOCK_SIZE = 4096
-_BITS_PER_BYTE = tl.constexpr(8)
+_BITS_PER_BYTE = 8
 
 
 @triton.jit
@@ -53,14 +53,14 @@ def _pack_sampling_mask_kernel_ascend(
         # so counts contains the number of finite logits, not the tile count.
         count += tl.sum(keep_i32)
 
-        bits = tl.trans(tl.reshape(keep_i32, (BLOCK_SIZE // _BITS_PER_BYTE, _BITS_PER_BYTE)))
-        bit_weights = (1 << tl.arange(0, _BITS_PER_BYTE))[:, None]
+        bits = tl.trans(tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)))
+        bit_weights = (1 << tl.arange(0, 8))[:, None]
         packed = tl.sum(bits * bit_weights, axis=0).to(tl.uint8)
-        byte_offsets = start_idx // _BITS_PER_BYTE + tl.arange(0, BLOCK_SIZE // _BITS_PER_BYTE)
+        byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
         tl.store(
             packed_mask_ptr + output_row * packed_mask_row_stride + byte_offsets,
             packed,
-            mask=byte_offsets < tl.cdiv(vocab_size, _BITS_PER_BYTE),
+            mask=byte_offsets < tl.cdiv(vocab_size, 8),
         )
 
     tl.store(counts_ptr + output_row, count)
@@ -86,7 +86,7 @@ def sampling_mask_from_logits_npu(
 
     vocab_size = logits.shape[1]
     num_output_rows = num_reqs * rows_per_request
-    packed_width = triton.cdiv(vocab_size, _BITS_PER_BYTE.value)
+    packed_width = triton.cdiv(vocab_size, _BITS_PER_BYTE)
     packed_mask = torch.empty(
         (num_output_rows, packed_width),
         dtype=torch.uint8,
