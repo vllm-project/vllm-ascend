@@ -12,7 +12,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 from vllm_ascend.utils import enable_custom_op
 
-# Existing mode for legacy prefill, decode, and A5 FP8 prefill.
+# Existing mode for A5 FP8 KV-gather-Q prefill.
 _SPARSE_ATTN_INNER_PRECISE = 4
 
 # Existing mode for A5 KV-gather-Q prefill with BF16 inputs.
@@ -22,6 +22,11 @@ _PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
 # outputs to preserve accuracy.
 _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
 _MSA_INDEX_BLOCK_SIZE = 128
+_GBSA_MASK_MODE_CAUSAL = 1
+_GBSA_NO_QUANT = 0
+_GBSA_FP8_STATIC_CAST_P = 5
+_GBSA_SOFTMAX_PRECISION = 0
+_GBSA_FP8_SOFTMAX_PRECISION = 1
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
 
@@ -60,7 +65,7 @@ def _npu_k2q_csr(
     """Convert MiniMax-M3 q2k indices to k2q CSR on NPU."""
     # A5 disables the generic custom-op loader, so register the in-tree
     # MiniMax M3 operators lazily after the NPU runtime has been initialized.
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
     enable_custom_op()
     if total_rows < 0 or max_kv < 0:
@@ -123,6 +128,257 @@ def _select_num_idx_from_topk(topk_idx: torch.Tensor) -> torch.Tensor:
 
 def _to_fp8_e4m3(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+
+def _build_cu_seqlens_q(query_lens: torch.Tensor) -> torch.Tensor:
+    cu_seqlens_q = torch.empty(
+        query_lens.numel() + 1,
+        dtype=torch.int64,
+        device=query_lens.device,
+    )
+    cu_seqlens_q[0] = 0
+    torch.cumsum(
+        query_lens.to(dtype=torch.int64),
+        dim=0,
+        out=cu_seqlens_q[1:],
+    )
+    return cu_seqlens_q
+
+
+def _gbsa_softmax_precision(kv_cache_dtype: torch.dtype) -> int:
+    if kv_cache_dtype == torch.float8_e4m3fn:
+        return _GBSA_FP8_SOFTMAX_PRECISION
+    return _GBSA_SOFTMAX_PRECISION
+
+
+def _decode_gbsa_metadata_key(
+    num_tokens: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    topk: int,
+    query_len: int,
+    kv_cache_dtype: torch.dtype = torch.bfloat16,
+) -> tuple[Any, ...]:
+    return (
+        (num_tokens, num_heads, head_size),
+        (num_kv_heads, num_tokens, topk),
+        (num_kv_heads, num_tokens),
+        num_kv_heads,
+        query_len,
+        kv_cache_dtype,
+        _gbsa_softmax_precision(kv_cache_dtype),
+    )
+
+
+def _build_generic_block_sparse_attention_metadata(
+    topk_idx: torch.Tensor,
+    select_num_idx: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    max_query_len: int,
+    quant_mode: int,
+    softmax_precision: int,
+) -> torch.Tensor:
+    from cann_ops_transformer.ops import generic_block_sparse_attention_metadata
+
+    return generic_block_sparse_attention_metadata(
+        topk_idx,
+        select_num_idx,
+        num_heads,
+        num_kv_heads,
+        head_size,
+        [1, block_size],
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_kv=seq_lens,
+        max_seqlen_q=max_query_len,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        mask_mode=_GBSA_MASK_MODE_CAUSAL,
+        quant_mode=quant_mode,
+        softmax_precision=softmax_precision,
+    )
+
+
+def _decode_gbsa_block_counts(
+    seq_lens: torch.Tensor,
+    query_len: int,
+    num_kv_heads: int,
+    topk: int,
+    logical_block_count: int,
+) -> torch.Tensor:
+    # Match the causal validity mask in index_decode_topk_fused, including
+    # zero-length graph padding and each speculative token's query offset.
+    offsets = torch.arange(query_len, dtype=torch.int32, device=seq_lens.device)
+    visible_blocks = torch.div(
+        seq_lens[:, None] - query_len + offsets + _MSA_INDEX_BLOCK_SIZE,
+        _MSA_INDEX_BLOCK_SIZE,
+        rounding_mode="floor",
+    ).clamp_(0, min(topk, logical_block_count))
+    return visible_blocks.reshape(1, -1).expand(num_kv_heads, -1).contiguous()
+
+
+@torch.no_grad()
+def prepare_decode_gbsa_metadata(
+    seq_lens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    query_len: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    topk: int,
+    logical_block_count: int,
+    kv_cache_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Prepare a supported decode schedule before any layer's IndexScore."""
+    counts = _decode_gbsa_block_counts(seq_lens, query_len, num_kv_heads, topk, logical_block_count)
+    # CANN's metadata operator reads block counts, not selected block IDs;
+    # sparse_block_indices supplies only the [heads, tokens, topk] shape.
+    indices_shape = torch.empty((*counts.shape, topk), dtype=torch.int32, device=seq_lens.device)
+    return _build_generic_block_sparse_attention_metadata(
+        indices_shape,
+        counts,
+        cu_seqlens_q,
+        seq_lens,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        block_size=_MSA_INDEX_BLOCK_SIZE,
+        max_query_len=query_len,
+        quant_mode=_GBSA_FP8_STATIC_CAST_P if kv_cache_dtype == torch.float8_e4m3fn else _GBSA_NO_QUANT,
+        softmax_precision=_gbsa_softmax_precision(kv_cache_dtype),
+    )
+
+
+def _sort_valid_gbsa_prefix(
+    topk_idx: torch.Tensor,
+    select_num_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Sort valid logical blocks, preserving counts and trailing -1 padding."""
+    # Logical block IDs are small exact FP32 integers. Sorting FP32 avoids
+    # the slow integer Sort path on Ascend; GBSA still consumes int32 IDs.
+    indices = topk_idx.to(dtype=torch.float32)
+    positions = torch.arange(indices.shape[-1], device=indices.device, dtype=torch.int32)
+    valid = (positions < select_num_idx.unsqueeze(-1)) & (indices >= 0)
+    sentinel = float("inf")
+    keys = torch.where(valid, indices, sentinel)
+    ordered = torch.sort(keys, dim=-1).values
+    return torch.where(ordered == sentinel, -1, ordered).to(dtype=torch.int32).contiguous()
+
+
+@torch.no_grad()
+def _run_generic_block_sparse_attention(
+    q: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    select_num_idx: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    num_kv_heads: int,
+    sm_scale: float,
+    block_size: int,
+    max_query_len: int = -1,
+    dequant_scale: torch.Tensor | None = None,
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Run MiniMax-M3 sparse attention through CANN Ops GBSA."""
+    del dequant_scale
+    select_num_idx = select_num_idx.to(dtype=torch.int32).contiguous()
+    # Normalize the selected order for correct partial-page masking in GBSA.
+    topk_idx = _sort_valid_gbsa_prefix(topk_idx, select_num_idx)
+    block_table = block_table.to(dtype=torch.int32).contiguous()
+    cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int64).contiguous()
+    seq_lens = seq_lens.to(dtype=torch.int32).contiguous()
+
+    quant_mode = _GBSA_NO_QUANT
+    softmax_precision = _gbsa_softmax_precision(key.dtype)
+    quant_kwargs: dict[str, Any] = {}
+    if key.dtype == torch.float8_e4m3fn:
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        quant_mode = _GBSA_FP8_STATIC_CAST_P
+        # GBSA quant mode 5 requires precision 1. BF16 retains FP32 softmax.
+        quant_kwargs = {"attention_out_dtype": torch.bfloat16}
+    elif q.dtype != key.dtype or value.dtype != key.dtype:
+        raise TypeError("MiniMax-M3 sparse attention requires Q, K, and V to have the same dtype")
+
+    block_shape = [1, block_size]
+    from cann_ops_transformer.ops import generic_block_sparse_attention
+
+    # Opt-in only from the model's supported uniform-decode metadata builder. Direct
+    # callers and prefill must not assume that layer-dependent counts match.
+    # The cache belongs to one decode metadata object, so its sequence/prefix
+    # tensors are shared by all entries. Include all other scheduling inputs.
+    reuse_metadata = (
+        gbsa_metadata_cache is not None
+        and (
+            key.dtype == torch.bfloat16
+            or (
+                key.dtype == torch.float8_e4m3fn
+                and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+            )
+        )
+        and q.dtype == key.dtype
+        and block_size == _MSA_INDEX_BLOCK_SIZE
+        and max_query_len in (1, 4)
+    )
+    cache = gbsa_metadata_cache if reuse_metadata else None
+    cache_key = (
+        tuple(q.shape),
+        tuple(topk_idx.shape),
+        tuple(select_num_idx.shape),
+        num_kv_heads,
+        max_query_len,
+        key.dtype,
+        softmax_precision,
+    )
+    gbsa_metadata = cache.get(cache_key) if cache is not None else None
+    if gbsa_metadata is None:
+        gbsa_metadata = _build_generic_block_sparse_attention_metadata(
+            topk_idx,
+            select_num_idx,
+            cu_seqlens_q,
+            seq_lens,
+            num_heads=q.shape[1],
+            num_kv_heads=num_kv_heads,
+            head_size=q.shape[2],
+            block_size=block_size,
+            max_query_len=max_query_len,
+            quant_mode=quant_mode,
+            softmax_precision=softmax_precision,
+        )
+        if cache is not None:
+            cache[cache_key] = gbsa_metadata
+    out, _ = generic_block_sparse_attention(
+        q,
+        key,
+        value,
+        topk_idx,
+        select_num_idx,
+        block_shape,
+        metadata=gbsa_metadata,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_kv=seq_lens,
+        block_table=block_table,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        softmax_scale=sm_scale,
+        mask_mode=_GBSA_MASK_MODE_CAUSAL,
+        quant_mode=quant_mode,
+        softmax_precision=softmax_precision,
+        return_softmax_lse=False,
+        **quant_kwargs,
+    )
+    return out
 
 
 def _build_cu_block_lens(
@@ -282,41 +538,22 @@ def _minimax_m3_sparse_attn_a3(
     output: torch.Tensor,
     block_size: int,
     *,
-    supports_fp8: bool = False,
+    max_query_len: int = -1,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
-    # Q-gather-KV is also the A5 fallback when experimental Split-KV is
-    # unavailable. Match decode's unscaled E4M3 inputs and BF16 output.
-    op_kwargs: dict[str, Any] = {}
-    if key.dtype == torch.float8_e4m3fn:
-        if not supports_fp8:
-            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
-        if value.dtype != torch.float8_e4m3fn:
-            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
-        q = _to_fp8_e4m3(q)
-        dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
-        op_kwargs = {
-            "q_dequant_scale": dequant_scale,
-            "k_dequant_scale": dequant_scale,
-            "v_dequant_scale": dequant_scale,
-            "attention_out_dtype": torch.bfloat16,
-        }
-    q_lens_t = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    out = torch.ops._C_ascend.npu_sparse_attention_score(
+    out = _run_generic_block_sparse_attention(
         q,
         key,
         value,
         topk_idx,
         block_table,
-        select_num_idx=_select_num_idx_from_topk(topk_idx),
-        actual_seq_lengths=q_lens_t,
-        actual_seq_lengths_kv=seq_lens,
-        num_key_value_heads=num_kv_heads,
-        scale_value=sm_scale,
+        _select_num_idx_from_topk(topk_idx),
+        cu_seqlens_q,
+        seq_lens,
+        num_kv_heads=num_kv_heads,
+        sm_scale=sm_scale,
         block_size=block_size,
-        top_k=topk_idx.shape[-1],
-        inner_precise=_SPARSE_ATTN_INNER_PRECISE,
-        **op_kwargs,
+        max_query_len=max_query_len,
     )
     output.copy_(out)
 
@@ -395,7 +632,7 @@ def _is_minimax_sparse_attention_split_kv_available() -> bool:
     Restart workers after installing the experimental package and sourcing its
     environment; the ACLNN loader also caches its library search paths.
     """
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
     enable_custom_op()
     return torch.ops._C_ascend.is_minimax_sparse_attention_split_kv_available()
@@ -418,7 +655,7 @@ def minimax_m3_sparse_attn(
     total_kv_blocks: int = -1,
     max_kv_blocks: int = -1,
 ) -> None:
-    del prefix_lens, max_query_len
+    del prefix_lens
     common_args = (
         q,
         kv_cache,
@@ -436,7 +673,7 @@ def minimax_m3_sparse_attn(
     # Select the optional optimization by ACLNN availability. The installed
     # experimental package must provide kernels for the current device.
     if not _is_minimax_sparse_attention_split_kv_available():
-        _minimax_m3_sparse_attn_a3(*common_args, supports_fp8=supports_fp8)
+        _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
         return
 
     _minimax_m3_sparse_attn_kv_gather_q(
@@ -462,43 +699,39 @@ def minimax_m3_sparse_attn_decode(
     *,
     select_num_idx: torch.Tensor | None = None,
     dequant_scale: torch.Tensor | None = None,
+    cu_seqlens_q: torch.Tensor | None = None,
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
 ) -> None:
-    """Run sparse decode through the AscendC sparse-attention operator."""
+    """Run sparse decode through CANN Ops generic block sparse attention."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
         raise ValueError("Decode query tokens must equal request count times decode_query_len")
 
     key, value = _split_main_kv_cache(kv_cache)
-    query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+    # The model metadata builder prepares this immutable uniform prefix once
+    # per query length, outside the per-layer attention/graph execution.
+    # Keep the fallback for direct callers that do not supply model metadata.
+    if cu_seqlens_q is None:
+        query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+        cu_seqlens_q = _build_cu_seqlens_q(query_lens)
+    elif cu_seqlens_q.shape != (seq_lens.shape[0] + 1,) or cu_seqlens_q.dtype != torch.int64:
+        raise ValueError("GBSA cu_seqlens_q must be int64 with request_count + 1 entries")
     if select_num_idx is None:
         select_num_idx = _select_num_idx_from_topk(topk_idx)
 
-    op_kwargs: dict[str, Any] = {}
-    if key.dtype == torch.float8_e4m3fn:
-        if value.dtype != torch.float8_e4m3fn:
-            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
-        q = _to_fp8_e4m3(q)
-        if dequant_scale is None:
-            dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
-        op_kwargs = {
-            "q_dequant_scale": dequant_scale,
-            "k_dequant_scale": dequant_scale,
-            "v_dequant_scale": dequant_scale,
-            "attention_out_dtype": torch.bfloat16,
-        }
-    out = torch.ops._C_ascend.npu_sparse_attention_score(
+    out = _run_generic_block_sparse_attention(
         q,
         key,
         value,
         topk_idx,
         block_table,
-        select_num_idx=select_num_idx,
-        actual_seq_lengths=query_lens,
-        actual_seq_lengths_kv=seq_lens,
-        num_key_value_heads=num_kv_heads,
-        scale_value=sm_scale,
+        select_num_idx,
+        cu_seqlens_q,
+        seq_lens,
+        num_kv_heads=num_kv_heads,
+        sm_scale=sm_scale,
         block_size=block_size,
-        top_k=topk_idx.shape[-1],
-        inner_precise=_SPARSE_ATTN_INNER_PRECISE,
-        **op_kwargs,
+        max_query_len=decode_query_len,
+        dequant_scale=dequant_scale,
+        gbsa_metadata_cache=gbsa_metadata_cache,
     )
     output.copy_(out)

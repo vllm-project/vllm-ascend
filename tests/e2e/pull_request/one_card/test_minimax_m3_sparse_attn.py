@@ -2,8 +2,8 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Correctness tests for MiniMax M3 sparse-attention kernels on Ascend.
 
-Covers ``msa_m3_triton`` index top-k operators, ``msa_m3_npu`` block-sparse
-attention (``npu_sparse_attention_score``), and optionally compares against the
+Covers ``msa_m3_triton`` index top-k operators, the CANN Ops
+``generic_block_sparse_attention`` path, and optionally compares against the
 Triton sparse-attention reference.
 
 Default sparse-attention backend selection runs both Triton and torch_npu.
@@ -12,8 +12,7 @@ Select one backend with::
     pytest tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
 
 Test cases are adapted from
-``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and
-``csrc/attention/sparse_attention_score/tests/test_bf16.py``.
+``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py``.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import os
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -68,7 +68,7 @@ SM_SCALE = HEAD_DIM**-0.5
 _SPARSE_MEAN_ATOL = 2.5e-4
 _SPARSE_MAX_ATOL = 1.7e-2
 SparseAttnBackend = Literal["triton", "torch_npu"]
-_NPU_SPARSE_OP_REGISTERED = False
+_CANN_SPARSE_OP_AVAILABLE = False
 # MiniMax-M3 production sparse_attention_config (w8a8 checkpoint).
 PRODUCTION_SPARSE_TOPK = 16
 PRODUCTION_INDEX_HEAD_DIM = 128
@@ -86,6 +86,198 @@ PRODUCTION_KV_CACHE_LAYOUT = "ascend"
 # Matches ``--max-model-len`` in online w8a8 serve scripts (10240 tokens).
 PRODUCTION_MAX_SEQ_LEN = 10240
 PRODUCTION_LONG_PREFILL_QUERY_LEN = 64
+
+
+def _make_prepared_gbsa_builder(kv_dtype):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3SparseMetadataBuilder
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layer.attn": SimpleNamespace(num_heads=16, num_kv_heads=1, head_dim=128, topk_blocks=16),
+            }
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, tensor_parallel_size=1),
+    )
+    spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
+    return AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer.attn"], config, torch.device(DEVICE))
+
+
+def _build_prepared_gbsa_decode(builder, seq_lens, lengths_cpu, query_len, table):
+    from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+    query_lens = (lengths_cpu > 0).to(torch.int32) * query_len
+    prefix = torch.cat((torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0).to(torch.int32)))
+    tokens = int(prefix[-1])
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=prefix.to(DEVICE),
+        query_start_loc_cpu=prefix,
+        seq_lens=seq_lens,
+        _seq_lens_cpu=lengths_cpu,
+        _num_computed_tokens_cpu=(lengths_cpu - query_lens).clamp_min(0),
+        num_reqs=len(lengths_cpu),
+        num_actual_tokens=tokens,
+        max_query_len=query_len,
+        max_seq_len=int(lengths_cpu.max()),
+        block_table_tensor=table,
+        slot_mapping=torch.arange(tokens, dtype=torch.int64, device=DEVICE),
+        causal=True,
+        graph_pad_size=len(lengths_cpu) * query_len,
+        num_input_tokens=len(lengths_cpu) * query_len,
+    )
+    return builder.build(0, common).decode
+
+
+def _assert_prepared_gbsa_dense_reference(query, kv, output, lengths, query_len, table_width):
+    # This fixture selects the first 16 logical blocks in ascending order.
+    # Form the independent dense FP32 reference only over those valid tokens.
+    q = query.to(kv[0].dtype).cpu().float()
+    for request, seq_len in enumerate(lengths):
+        if seq_len == 0:
+            continue
+        start, stop = request * query_len, (request + 1) * query_len
+        key, value = [cache.narrow(0, request * table_width, 16).reshape(2048, 128).cpu().float() for cache in kv]
+        scores = q[start:stop].permute(1, 0, 2) @ key.T * 128**-0.5
+        visible = seq_len - query_len + torch.arange(query_len) + 1
+        scores.masked_fill_(torch.arange(2048)[None, None, :] >= visible[None, :, None], -torch.inf)
+        expected = (scores.softmax(-1) @ value).permute(1, 0, 2)
+        torch.testing.assert_close(output[start:stop].cpu().float(), expected, rtol=0.02, atol=2e-3)
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@torch.inference_mode()
+def test_prepared_gbsa_counts_match_a5_indexer(query_len, kv_dtype):
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _decode_gbsa_block_counts
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_decode as a5_index_decode,
+    )
+
+    if not NPU_AVAILABLE or get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+        pytest.skip("Requires the A5 Triton decode indexer")
+    seq_lens = torch.tensor([128, 2049, 65537, 0], dtype=torch.int32, device=DEVICE)
+    table = torch.arange(4 * 1040, dtype=torch.int32, device=DEVICE).reshape(4, 1040)
+    query = torch.randn(4 * query_len, 1, 128, dtype=torch.bfloat16, device=DEVICE).to(kv_dtype)
+    cache = torch.randn(4 * 1040, 128, 128, dtype=torch.bfloat16, device=DEVICE).to(kv_dtype)
+    indices, counts = a5_index_decode(query, cache, table, seq_lens, 65537, 16, 0, 1, 1, query_len, sm_scale=128**-0.5)
+    expected = _decode_gbsa_block_counts(seq_lens, query_len, 1, 16, table.shape[-1])
+    torch.testing.assert_close(counts, expected, rtol=0, atol=0)
+    torch.testing.assert_close((indices >= 0).sum(-1).to(torch.int32), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("capture", [False, True])
+@torch.inference_mode()
+def test_decode_gbsa_prepared_metadata_replay(query_len, kv_dtype, capture, monkeypatch):
+    """Run real GBSA with a stable schedule refreshed outside the captured layers."""
+    if not NPU_AVAILABLE:
+        pytest.skip("Prepared GBSA metadata requires an Ascend NPU")
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    profile = get_current_hardware_profile()
+    if not profile.supports(HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE):
+        pytest.skip("This hardware does not enable prepared GBSA metadata")
+    if kv_dtype == torch.float8_e4m3fn and not profile.supports(HardwareCapability.FP8_ATTENTION):
+        pytest.skip("This hardware does not enable FP8 KV attention")
+    _ensure_cann_sparse_attention_ops()
+    import cann_ops_transformer.ops as cann_ops
+
+    batch, heads, kv_heads, dim, topk, table_width = 4, 16, 1, 128, 16, 1040
+    tokens = batch * query_len
+    torch.manual_seed(18426)
+    query = torch.randn((tokens, heads, dim), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    key = torch.randn((batch * table_width, BLOCK_SIZE, kv_heads, dim), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    value = torch.randn_like(key) * 0.1
+    kv = (key.to(kv_dtype), value.to(kv_dtype))
+    table = torch.arange(batch * table_width, dtype=torch.int32, device=DEVICE).view(batch, table_width)
+    seq_lens = torch.empty(batch, dtype=torch.int32, device=DEVICE)
+    indices = torch.empty((kv_heads, tokens, topk), dtype=torch.int32, device=DEVICE)
+    counts = torch.empty((kv_heads, tokens), dtype=torch.int32, device=DEVICE)
+    prefix = torch.arange(batch + 1, dtype=torch.int64, device=DEVICE) * query_len
+    builder = _make_prepared_gbsa_builder(kv_dtype)
+    schedule = builder.decode_gbsa_metadata_buffers[(heads, kv_heads, dim, topk, query_len)]
+    cache = None
+    outputs = [torch.empty_like(query) for _ in range(3)]
+    calls = []
+    native_metadata = cann_ops.generic_block_sparse_attention_metadata
+
+    def record_metadata(*args, **kwargs):
+        calls.append((kwargs["quant_mode"], kwargs["softmax_precision"]))
+        return native_metadata(*args, **kwargs)
+
+    monkeypatch.setattr(cann_ops, "generic_block_sparse_attention_metadata", record_metadata)
+
+    def run_layers(reuse):
+        for output in outputs:
+            minimax_m3_sparse_attn_decode_npu(
+                query,
+                kv,
+                indices,
+                table,
+                seq_lens,
+                kv_heads,
+                dim**-0.5,
+                output,
+                query_len,
+                select_num_idx=counts,
+                cu_seqlens_q=prefix,
+                gbsa_metadata_cache=cache if reuse else None,
+            )
+
+    graph = None
+    for lengths in ([128, 2048, 8193, 65537], [129, 2049, 8194, 0], [257, 2050, 8195, 65538]):
+        lengths_cpu = torch.tensor(lengths, dtype=torch.int32)
+        visible = ((lengths_cpu[:, None] - query_len + torch.arange(query_len) + BLOCK_SIZE) // BLOCK_SIZE).clamp(
+            0, topk
+        )
+        valid_counts = visible.reshape(1, -1)
+        selected = torch.arange(topk).view(1, 1, topk).expand(kv_heads, tokens, topk)
+        seq_lens.copy_(lengths_cpu)
+        counts.copy_(valid_counts)
+        indices.copy_(torch.where(selected < valid_counts.unsqueeze(-1), selected, -1))
+        run_layers(False)
+        expected = [output.clone() for output in outputs]
+        calls.clear()
+        metadata = _build_prepared_gbsa_decode(builder, seq_lens, lengths_cpu, query_len, table)
+        assert metadata.gbsa_metadata_prepared
+        cache = metadata.gbsa_metadata_cache
+        assert next(iter(cache.values())) is schedule
+        expected_mode = (
+            5 if kv_dtype == torch.float8_e4m3fn else 0,
+            1 if kv_dtype == torch.float8_e4m3fn else 0,
+        )
+        assert calls == [expected_mode]
+        # Metadata is generated by the real builder before recording any layer.
+        # Replays below keep its storage address while lengths and padding change.
+        if capture and graph is None:
+            stream = torch.npu.Stream()
+            stream.wait_stream(torch.npu.current_stream())
+            with torch.npu.stream(stream):
+                for _ in range(3):
+                    run_layers(True)
+            torch.npu.current_stream().wait_stream(stream)
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph, stream=stream):
+                run_layers(True)
+        if capture:
+            assert graph is not None
+            graph.replay()
+        else:
+            run_layers(True)
+        torch.npu.synchronize()
+        assert calls == [expected_mode], "Layers must consume the prepared schedule without generating metadata"
+        active = lengths_cpu.repeat_interleave(query_len) > 0
+        for actual, reference in zip(outputs, expected):
+            torch.testing.assert_close(actual[active.to(DEVICE)], reference[active.to(DEVICE)], rtol=0, atol=0)
+        _assert_prepared_gbsa_dense_reference(query, kv, outputs[0], lengths, query_len, table_width)
 
 
 def _next_power_of_2(x: int) -> int:
@@ -121,7 +313,7 @@ def msa_m3_sparse_backend(request: pytest.FixtureRequest) -> SparseAttnBackend:
     if backend == "torch_npu":
         if not NPU_AVAILABLE:
             pytest.skip("torch_npu sparse backend requires NPU.")
-        _ensure_npu_sparse_attention_score_op()
+        _ensure_cann_sparse_attention_ops()
     return backend
 
 
@@ -140,30 +332,24 @@ def should_do_global_cleanup_after_test() -> bool:
     return False
 
 
-def _ensure_npu_sparse_attention_score_op() -> None:
-    """Ensure ``torch.ops._C_ascend.npu_sparse_attention_score`` is available."""
-    global _NPU_SPARSE_OP_REGISTERED
-    if _NPU_SPARSE_OP_REGISTERED:
+def _ensure_cann_sparse_attention_ops() -> None:
+    """Ensure the CANN Ops GBSA Python bindings are available."""
+    global _CANN_SPARSE_OP_AVAILABLE
+    if _CANN_SPARSE_OP_AVAILABLE:
         return
 
-    from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
-
-    bootstrap_custom_op_env(include_vendor_lib=True)
-    if not enable_custom_op():
-        pytest.skip("vllm-ascend custom ops are disabled in this build.")
-
-    torch.npu.set_device(0)
-    torch.npu.synchronize()
-
     try:
-        _ = torch.ops._C_ascend.npu_sparse_attention_score
-    except AttributeError:
-        pytest.skip(
-            "torch.ops._C_ascend.npu_sparse_attention_score is not available. "
-            "Rebuild with: pip install -v --no-build-isolation -e ."
+        from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
+            generic_block_sparse_attention,
+            generic_block_sparse_attention_metadata,
         )
+    except ImportError as exc:
+        pytest.skip(f"CANN Ops generic block sparse attention is unavailable: {exc}")
 
-    _NPU_SPARSE_OP_REGISTERED = True
+    if not callable(generic_block_sparse_attention) or not callable(generic_block_sparse_attention_metadata):
+        pytest.skip("CANN Ops generic block sparse attention bindings are not callable.")
+
+    _CANN_SPARSE_OP_AVAILABLE = True
 
 
 def _sparse_tolerances(_backend: SparseAttnBackend) -> tuple[float, float]:
@@ -1906,3 +2092,139 @@ def test_decode_sparse_attention_boundary_repeatable(
             raise AssertionError(
                 f"{hint}; launch={launch_id}; output changed across eager launches; max_delta={delta:.6g}"
             )
+
+
+_SEQ_LENS = (317, 472)
+_BLOCK_SIZE = 128
+_TABLE_WIDTH = 1040
+_NUM_Q_HEADS = 16
+_NUM_KV_HEADS = 1
+_HEAD_DIM = 128
+_TOPK = 16
+_PAGE_COUNT = 16
+_DTYPE = torch.bfloat16
+_REFERENCE_ATOL = 1.7e-2
+_PHYSICAL_PAGES = ((7, 3, 11), (9, 2, 14, 5))
+_DUMMY_PAGES = (4, 12)
+_SELECTED_ORDERS = (
+    ((0, 1, 2), (0, 1, 2, 3)),
+    ((2, 1, 0), (3, 2, 1, 0)),
+    ((1, 2, 0), (1, 0, 3, 2)),
+)
+
+
+def _block_value(request: int, logical_block: int) -> float:
+    return float((1 if request == 0 else -1) * (logical_block + 1))
+
+
+def _dense_reference(q: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    """独立 CPU FP32 dense GQA；q=1 时只包含各请求的有效 causal 前缀。"""
+    expected = []
+    for request, seq_len in enumerate(_SEQ_LENS):
+        pages = torch.tensor(_PHYSICAL_PAGES[request], dtype=torch.int64, device="cpu")
+        logical_k = key[pages].reshape(-1, _NUM_KV_HEADS, _HEAD_DIM)[:seq_len].float()
+        logical_v = value[pages].reshape(-1, _NUM_KV_HEADS, _HEAD_DIM)[:seq_len].float()
+        dense_k = logical_k.repeat_interleave(_NUM_Q_HEADS // _NUM_KV_HEADS, dim=1)
+        dense_v = logical_v.repeat_interleave(_NUM_Q_HEADS // _NUM_KV_HEADS, dim=1)
+        scores = torch.einsum("hd,lhd->hl", q[request].float(), dense_k) * _HEAD_DIM**-0.5
+        probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32)
+        expected.append(torch.einsum("hl,lhd->hd", probabilities, dense_v))
+    return torch.stack(expected)
+
+
+@pytest.mark.parametrize("selected", _SELECTED_ORDERS, ids=["ascending", "descending", "fixed-shuffle"])
+@torch.inference_mode()
+def test_decode_sparse_attention_invalid_kv_tail(
+    msa_m3_sparse_backend: SparseAttnBackend,
+    selected: tuple[tuple[int, ...], tuple[int, ...]],
+) -> None:
+    # 每个请求拥有独立页和合法 dummy 页；长表的未用列也不会越界。
+    request_pages = [set(pages) | {dummy} for pages, dummy in zip(_PHYSICAL_PAGES, _DUMMY_PAGES)]
+    assert request_pages[0].isdisjoint(request_pages[1])
+    q_cpu = torch.ones((len(_SEQ_LENS), _NUM_Q_HEADS, _HEAD_DIM), dtype=_DTYPE, device="cpu")
+    key_cpu = torch.zeros((_PAGE_COUNT, _BLOCK_SIZE, _NUM_KV_HEADS, _HEAD_DIM), dtype=_DTYPE, device="cpu")
+    value_cpu = torch.zeros_like(key_cpu)
+    table_cpu = torch.empty((len(_SEQ_LENS), _TABLE_WIDTH), dtype=torch.int32, device="cpu")
+    topk_cpu = torch.full((_NUM_KV_HEADS, len(_SEQ_LENS), _TOPK), -1, dtype=torch.int32, device="cpu")
+    for request, (pages, dummy) in enumerate(zip(_PHYSICAL_PAGES, _DUMMY_PAGES)):
+        table_cpu[request].fill_(dummy)
+        table_cpu[request, : len(pages)] = torch.tensor(pages, dtype=torch.int32, device="cpu")
+        assert sorted(selected[request]) == list(range(len(pages)))
+        topk_cpu[:, request, : len(pages)] = torch.tensor(selected[request], dtype=torch.int32, device="cpu")
+        assert int((topk_cpu[:, request] >= 0).sum()) == len(pages)
+        for logical_block, page in enumerate(pages):
+            value_cpu[page].fill_(_block_value(request, logical_block))
+        value_cpu[dummy].fill_(_block_value(request, 0))
+
+    expected = _dense_reference(q_cpu, key_cpu, value_cpu)
+    # 参考值也独立核对按有效 token 数加权的均值，防止漏合法块被常量 V 掩盖。
+    for request, seq_len in enumerate(_SEQ_LENS):
+        expected_mean = (
+            sum(
+                _block_value(request, logical_block) * min(_BLOCK_SIZE, seq_len - logical_block * _BLOCK_SIZE)
+                for logical_block in range(len(_PHYSICAL_PAGES[request]))
+            )
+            / seq_len
+        )
+        torch.testing.assert_close(
+            expected[request], torch.full_like(expected[request], expected_mean), rtol=0, atol=1e-5
+        )
+
+    q = q_cpu.to(DEVICE)
+    key, value = key_cpu.to(DEVICE), value_cpu.to(DEVICE)
+    # 与既有 helper 的接口一致；真实 wrapper 使用独立连续的 K/V。
+    cache = torch.stack((key_cpu, value_cpu), dim=1).to(DEVICE)
+    topk, table = topk_cpu.to(DEVICE), table_cpu.to(DEVICE)
+    seq_lens = torch.tensor(_SEQ_LENS, dtype=torch.int32, device=DEVICE)
+    output = torch.empty_like(q)
+
+    def invoke(candidate: torch.Tensor) -> torch.Tensor:
+        candidate_device = candidate.to(DEVICE)
+        value.copy_(candidate_device)
+        cache[:, 1].copy_(candidate_device)
+        output.fill_(float("nan"))
+        # 保留已有 fixture 的后端可用性检测，缺少实际算子时明确 skip。
+        # 同一公共 helper 会调用当前分支实际实现，不替换为其他后端冒充通过。
+        _run_decode_sparse_attention(
+            msa_m3_sparse_backend,
+            q=q,
+            kv_cache=(key, value),
+            kv_cache_fused=cache,
+            topk_idx=topk,
+            block_table=table,
+            seq_lens=seq_lens,
+            num_kv_heads=_NUM_KV_HEADS,
+            sm_scale=_HEAD_DIM**-0.5,
+            output=output,
+            decode_query_len=1,
+            active_batch=len(_SEQ_LENS),
+        )
+        _synchronize()
+        return output.cpu().float().clone()
+
+    baseline = invoke(value_cpu)
+    repeated = invoke(value_cpu)
+    runs = [("baseline", baseline), ("same-input-repeat", repeated)]
+    for request, seq_len in enumerate(_SEQ_LENS):
+        last_page = _PHYSICAL_PAGES[request][-1]
+        valid_last_page_tokens = seq_len % _BLOCK_SIZE
+        assert valid_last_page_tokens != 0
+        donor = 1 - request
+        donor_value = _block_value(donor, len(_PHYSICAL_PAGES[donor]) - 1)
+        for sentinel in (0.0, 64.0, donor_value):
+            modified = value_cpu.clone()
+            modified[last_page, valid_last_page_tokens:].fill_(sentinel)
+            # 在 CPU 上核实两请求的所有合法 V 都保持不变。
+            for owner, owner_len in enumerate(_SEQ_LENS):
+                pages = torch.tensor(_PHYSICAL_PAGES[owner], dtype=torch.int64, device="cpu")
+                before = value_cpu[pages].reshape(-1, _NUM_KV_HEADS, _HEAD_DIM)[:owner_len]
+                after = modified[pages].reshape(-1, _NUM_KV_HEADS, _HEAD_DIM)[:owner_len]
+                assert torch.equal(after, before)
+            runs.append((f"request-{request}-tail-{sentinel}", invoke(modified)))
+    runs.append(("baseline-recovery", invoke(value_cpu)))
+
+    # 先完成所有真实调用，再断言，原始故障版本也能完整观察尾块变更。
+    for label, actual in runs:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=_REFERENCE_ATOL, msg=label)
+        # 同一 selected 排列下只修改无效 V，不应改变任一请求的任何输出位。
+        torch.testing.assert_close(actual, baseline, rtol=0, atol=0, msg=f"Tail invariance: {label}")

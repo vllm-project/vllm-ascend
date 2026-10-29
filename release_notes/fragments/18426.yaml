@@ -1,0 +1,4 @@
+pr: 18426
+entries:
+  - category: bugfix
+    text: Prevented invalid KV-page tails from affecting MiniMax-M3 GBSA attention by normalizing valid selected blocks in decode and the GBSA prefill fallback.
