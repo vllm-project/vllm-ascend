@@ -61,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     group_concurrent_contiguous as base_group_concurrent_contiguous,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.transfer_backend import ensure_mooncake_backend
 from vllm_ascend.distributed.kv_transfer.utils.utils import RegisterRegions, validate_register_region_count
 from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer, refresh_block_size
 
@@ -2227,6 +2228,9 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
 class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
+        # Reject a backend selection this connector cannot honour before the
+        # inherited base worker builds the engine.
+        ensure_mooncake_backend(vllm_config, type(self).__name__)
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._is_hma_required: bool = bool(getattr(self, "_is_hma_required", False))
         self.remote_local_block_map: dict[str, dict[tuple[int, ...], int]] = {}

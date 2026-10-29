@@ -142,6 +142,26 @@ def test_mooncake_only_connectors_reject_memfabric():
         tb.ensure_mooncake_backend(_config(transfer_protocol="ascend_direct"), "MooncakeLayerwiseConnector")
 
 
+def test_d2rh_worker_rejects_memfabric_before_base_init(monkeypatch):
+    """The D2RH worker inherits the base worker that builds the engine, so it must
+    reject a non-Mooncake backend before the base ``__init__`` runs. Otherwise it
+    would register buffers with the wrong registry and fail at transfer time."""
+    from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh
+
+    base_init_called = []
+
+    def fake_base_init(self, vllm_config, engine_id, kv_cache_config):
+        base_init_called.append(True)
+
+    monkeypatch.setattr(d2rh.BaseMooncakeConnectorWorker, "__init__", fake_base_init)
+
+    worker = object.__new__(d2rh.MooncakeConnectorWorker)
+    with pytest.raises(ValueError, match="supports transfer_backend='mooncake' only"):
+        d2rh.MooncakeConnectorWorker.__init__(worker, _config(transfer_backend="memfabric"), "engine", None)
+
+    assert not base_init_called, "the guard must fire before the base worker builds the engine"
+
+
 # --- backend construction ----------------------------------------------------
 
 
