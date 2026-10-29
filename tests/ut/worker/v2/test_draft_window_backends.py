@@ -184,6 +184,40 @@ def test_native_only_dflash2_keeps_a_typed_builder_without_a_full_group(types, t
     require_compatible_direct_prefix_routes(selected)
 
 
+@pytest.mark.parametrize("allowed,window", [(True, 1024), (False, 1024), (True, 4096)])
+def test_noncausal_native_only_dflash2_needs_explicit_resident_certificate(types, topology, allowed, window):
+    routes, _, context = native_swa_bundle(types, topology)
+    options = dict(
+        window_size=window,
+        max_query_tokens=512,
+        future_offset_bound=7,
+        context=context,
+        dense_impl_type=DenseBuilder,
+        group_causal={0: False},
+        noncausal_dflash2=allowed,
+        query_width=8,
+    )
+    if allowed and window == 1024:
+        (route,) = select_native_swa_subset_routes(routes[:1], **options)
+        assert route.status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+    else:
+        with pytest.raises(NotImplementedError, match="non-causal|resident"):
+            select_native_swa_subset_routes(routes[:1], **options)
+
+
+def test_unmasked_rebased_read_covers_future_queries_without_fabricating_a_causal_band():
+    for end in (520, 1151, 1152, 4095, 4096):
+        span, window, width, native = 128, 1024, 8, 2048
+        assert window + span - 1 + width <= native
+        start = max(end - window, 0) // span * span
+        assert start >= max(end - native + width, 0)
+        # sparse_mode=0 keeps every valid key through E, including query
+        # positions to the right of the first query; rebasing changes no mask.
+        actual = {start + key for key in range(end - start)}
+        assert actual == set(range(start, end))
+        assert end - 1 in actual
+
+
 @pytest.mark.parametrize("change", [{"sliding_window": 1024}, {"sinks": object()}, {"use_bnsd_kv_cache": True}])
 def test_native_swa_actual_consumer_must_match_certificate(types, topology, change):
     routes, impl, context = native_swa_bundle(types, topology)

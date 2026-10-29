@@ -250,12 +250,14 @@ def materialize_native_swa_intersection(
     row_indices: torch.Tensor | None = None,
     retain: Callable[..., None] | None = None,
 ) -> DraftReadView:
-    """Rebase a causal native band without claiming its evicted prefix.
+    """Rebase a certified native read interval without claiming its evicted prefix.
 
     After cropping at S, native right-aligned q coordinates move by -S and
     native pre_tokens=P is unchanged. Mapping back yields original band
     intersected with [S,E). Thus no newly required resident key is introduced.
-    The caller must keep that actual causal native consumer and its P.
+    The caller must retain its actual mask. An unmasked native consumer must
+    separately certify that every key in [S,E) remains resident; it cannot
+    inherit the causal-band proof above merely from the same KV spec.
     """
     if not isinstance(source, NativeSWASource) or source.native_window <= 0 or query_width <= 0:
         raise ValueError("Native SWA projection requires its typed positive band")

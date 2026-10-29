@@ -537,6 +537,11 @@ options.
   with the extra window, including drafts with only native SWA layers.
   Plain Eagle and dynamic speculative length remain unsupported with a
   window. DFlash2 requires an eager Draft; this does not disable Target Graph.
+  A native-only non-causal DFlash2 draft keeps its original unmasked query
+  semantics and requires `W + B - 1 + Q <= P` to keep every projected key
+  resident (B: kernel table-column span, Q: prepared query width, P: native
+  storage window). Larger windows and other non-causal native layouts are
+  rejected rather than treated as causal SWA.
   Continuing prefill chunks retain full reads. Eagle3 also keeps
   full reads for its first prefill pass. An unfinished prompt keeps full reads
   at every autoregressive step; after prompt completion, eligible steps use

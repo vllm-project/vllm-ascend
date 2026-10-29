@@ -79,6 +79,7 @@ class DraftWindowRuntime:
         self.dsa_layer_names: tuple[str, ...] = ()
         self.dsa_native_windows: dict[int, int] = {}
         self.native_swa_intersections: dict[int, int] = {}
+        self.native_swa_causal: dict[int, bool] = {}
         self._dsa_builders = None
         self._dense_device_reads = False
         self.gids = self._validate_route(speculator)
@@ -144,6 +145,10 @@ class DraftWindowRuntime:
         if self.native_swa_intersections:
             if self.window_size < speculator.num_query_per_req:
                 raise ValueError("DFlash draft_window_size must cover its query width")
+            declared = getattr(speculator, "_group_causal", True)
+            self.native_swa_causal = {
+                gid: declared[gid] if isinstance(declared, dict) else declared for gid in self.native_swa_intersections
+            }
             routes = tuple(route for route in routes if route.gid not in self.native_swa_intersections)
         if (
             routes
@@ -839,7 +844,14 @@ class DraftWindowRuntime:
 
                 if self._owner is not owner:
                     raise RuntimeError("Native SWA builder selection belongs to a stale proposal")
-                owned = NativeSWABuilder(builder, self, owner, gid, self.native_swa_intersections[gid])
+                owned = NativeSWABuilder(
+                    builder,
+                    self,
+                    owner,
+                    gid,
+                    self.native_swa_intersections[gid],
+                    causal=self.native_swa_causal.get(gid, True),
+                )
                 self.pool.retain(owner, owned)
                 return owned
             if gid not in self.dsa_native_windows or not set(layer_names).issubset(self.dsa_layer_names):

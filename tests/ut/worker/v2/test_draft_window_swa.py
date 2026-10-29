@@ -236,12 +236,40 @@ def test_misnamed_cpu_field_is_not_a_new_exact_consumer():
     assert result.seq_lens_cpu.device.type == "cpu"
 
 
+def test_noncausal_native_window_preserves_declared_mask_and_full_writes():
+    runtime, owner, common, original, table, retained, builder = prepared()
+    original.causal = False
+    before = table.clone()
+    result = NativeSWABuilder(builder, runtime, owner, 0, 4096, causal=False).build(0, common)
+    assert result.causal is False
+    assert result.seq_lens_list == [1151, 1024]
+    assert result.slot_mapping is original.slot_mapping
+    assert result.positions is original.positions
+    assert any(item is result for item in retained)
+    torch.testing.assert_close(table, before, atol=0, rtol=0)
+
+
+def test_noncausal_native_window_requires_resident_read_geometry():
+    runtime, owner, _, _, _, _, builder = prepared(window=4096)
+    with pytest.raises(NotImplementedError, match="resident"):
+        NativeSWABuilder(builder, runtime, owner, 0, 4096, causal=False)
+    assert builder.calls == 0
+
+
+def test_noncausal_metadata_cannot_change_its_declared_mask():
+    runtime, owner, common, _, _, _, builder = prepared()
+    with pytest.raises(ValueError, match="fresh unprojected"):
+        NativeSWABuilder(builder, runtime, owner, 0, 4096, causal=False).build(0, common)
+
+
 @pytest.mark.parametrize("continuing", [False, True])
-def test_native_only_runtime_accounts_for_the_actual_builder_and_retains_readers(monkeypatch, continuing):
+@pytest.mark.parametrize("causal", [False, True])
+def test_native_only_runtime_accounts_for_the_actual_builder_and_retains_readers(monkeypatch, continuing, causal):
     from vllm_ascend.worker.v2.spec_decode import draft_window_runtime as runtime_module
     from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
 
     prepared_runtime, _, common, original, table, _, builder = prepared(continuing=(continuing, continuing))
+    original.causal = causal
     speculator = prepared_runtime.speculator
     speculator.draft_model_config = SimpleNamespace(enforce_eager=True)
     speculator.speculative_config = SimpleNamespace(enforce_eager=True)
@@ -250,6 +278,7 @@ def test_native_only_runtime_accounts_for_the_actual_builder_and_retains_readers
 
     def native_only(runtime, spec):
         runtime.native_swa_intersections = {0: 4096}
+        runtime.native_swa_causal = {0: causal}
         return ()
 
     class Completion:

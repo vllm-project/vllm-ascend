@@ -487,6 +487,9 @@ def select_native_swa_subset_routes(
     future_offset_bound: int,
     context: Any,
     dense_impl_type: type,
+    group_causal: dict[int, bool] | bool = True,
+    noncausal_dflash2: bool = False,
+    query_width: int | None = None,
 ) -> tuple[DraftWindowGroupRoute, ...]:
     """Keep a certified native SWA reader unchanged, never claim its residency.
 
@@ -509,6 +512,24 @@ def select_native_swa_subset_routes(
         native_window = route.native_window
         if native_window is None or native_window <= 0:
             raise NotImplementedError(f"Draft Window gid={route.gid} has no native-SWA geometry")
+        causal = group_causal.get(route.gid) if isinstance(group_causal, dict) else group_causal
+        if type(causal) is not bool:
+            raise ValueError("Native SWA requires an explicit per-group causal declaration")
+        if not causal:
+            if not (noncausal_dflash2 and native_only):
+                raise NotImplementedError("Draft Window non-causal native groups require the DFlash2 resident provider")
+            # sparse_mode=0 reads the entire projected interval, including
+            # future query positions. It must not inherit a causal-band
+            # certificate or assume an evicted Full prefix is resident.
+            if (
+                query_width is None
+                or query_width < 1
+                or window_size + route.table_column_span - 1 + query_width > native_window
+            ):
+                raise NotImplementedError(
+                    "DFlash2 non-causal draft_window_size plus column alignment and query width "
+                    "must fit its resident native window"
+                )
         for name in route.layers:
             impl = getattr(context.get(name), "impl", None)
             if (
@@ -523,7 +544,11 @@ def select_native_swa_subset_routes(
                 replace(
                     route,
                     status=DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION,
-                    reason="Typed causal native band intersected using its builder's current exact pair",
+                    reason=(
+                        "Typed causal native band intersected using its builder's current exact pair"
+                        if causal
+                        else "Typed DFlash2 unmasked resident interval using its builder's current exact pair"
+                    ),
                 )
             )
     if not projected:
@@ -555,6 +580,9 @@ def require_direct_prefix_routes(
             future_offset_bound=speculator.num_speculative_steps,
             context=config.compilation_config.static_forward_context,
             dense_impl_type=AscendAttentionBackendImpl,
+            group_causal=getattr(speculator, "_group_causal", True),
+            noncausal_dflash2=getattr(speculator.draft_model_config, "architectures", ()) == ["DFlash2DraftModel"],
+            query_width=speculator.num_query_per_req,
         )
     if any(route.status is DraftWindowProviderStatus.DIRECT_SFA for route in routes):
         from vllm_ascend.worker.v2.spec_decode.draft_window_sfa import validate_sfa_read_consumers

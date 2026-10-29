@@ -19,15 +19,24 @@ class NativeSWABuilder:
 
     Its CPU length consumer already establishes exact at this preparation.
     Reuse that result instead of copying device lengths again. Only a typed
-    ordinary causal GQA SWA route can select this adapter.
+    ordinary GQA SWA route can select this adapter. Non-causal DFlash2
+    additionally requires the entire projected interval to remain resident.
     """
 
-    def __init__(self, builder: Any, runtime: Any, owner: Any, gid: int, native_window: int):
+    def __init__(self, builder: Any, runtime: Any, owner: Any, gid: int, native_window: int, *, causal: bool = True):
         self.builder = builder
         self.runtime = runtime
         self.owner = owner
         self.gid = gid
         self.native_window = native_window
+        if type(causal) is not bool:
+            raise ValueError("Native SWA requires an explicit causal declaration")
+        if not causal:
+            span = runtime.speculator.block_tables.kernel_block_sizes[gid]
+            width = runtime.speculator.num_query_per_req
+            if runtime.window_size + span - 1 + width > native_window:
+                raise NotImplementedError("Non-causal native Window must fit its certified resident interval")
+        self.causal = causal
         self.built = False
 
     def __getattr__(self, name: str) -> Any:
@@ -66,7 +75,7 @@ class NativeSWABuilder:
             or not isinstance(values, list)
             or len(values) != n
             or any(type(value) is not int for value in values)
-            or not metadata.causal
+            or metadata.causal is not self.causal
         ):
             raise ValueError("Native SWA requires its concrete builder's fresh unprojected exact pair")
         exact = torch.tensor(values, dtype=torch.int32)

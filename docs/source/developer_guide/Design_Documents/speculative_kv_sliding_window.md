@@ -493,7 +493,7 @@ It does not convert a native SWA group to dense Full attention.
 
 When the requested Window covers the complete native band for every supported
 query, that native reader remains unchanged and only the Full group receives
-a Window projection. For a native-SWA-only draft, including DFlash2, each
+a Window projection. For a native-SWA-only causal draft, each
 native group retains the typed adapter even when the extra window covers
 its band: there is no companion Full callback to certify preparation.
 Otherwise a proposal-local adapter calls the original
@@ -515,7 +515,7 @@ coordinates and identities. Original metadata, DMA sources, private table
 and length destinations remain owned until the existing native reader
 completion releases the proposal.
 
-This provider is limited to the concrete ordinary causal ND GQA consumer,
+The causal-band provider is limited to the concrete ordinary causal ND GQA consumer,
 with no sinks, compression, offload or CP-sharded Draft layout. It requires
 an unpadded current request extent. Native-only proposals are certified only
 after every participating native group has built its fresh metadata. Mixed
@@ -531,6 +531,21 @@ are not replaced by ordinary DFlash. Window OFF returns before creating a
 Window policy runtime, and keeps the baseline DFlash2 dispatch and checks.
 An enabled Window rejects unknown DFlash architectures and a non-eager
 Draft during initialization. Target Graph selection remains independent.
+
+A DFlash2 checkpoint can explicitly declare `is_causal=False` even when all
+its groups use `SlidingWindowSpec`. The concrete Ascend consumer then uses
+unmasked FIA (`sparse_mode=0`), not the causal native-band branch. The adapter
+preserves this declaration and reads the complete projected interval
+`[S,E)`, including the later query positions. It never inserts a causal mask
+or infers resident Full-prefix storage from the SWA spec. This typed path is
+limited to native-only DFlash2 groups and requires
+`W + B - 1 + Q <= P`, where B is the actual kernel-column span, Q is the
+prepared query width and P is the native storage window. This conservative
+bound leaves room for column rounding and the current proposal; it is
+checked at provider admission and by the proposal adapter. Other non-causal
+native layouts or larger windows are rejected before proposal execution.
+The fresh metadata must retain the declared causal flag as well as the
+current exact/table identities. OFF still runs its original consumer.
 
 The native-SWA adapter pins its completed CPU int64 start vector before H2D.
 The exact pinned DMA source remains held by the proposal owner; converting it
