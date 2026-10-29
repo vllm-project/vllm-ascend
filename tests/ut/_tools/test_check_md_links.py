@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 import time
+from builtins import ExceptionGroup
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ import httpx
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+HUAWEI_HELP_URL = "https://support.huaweicloud.com/intl/en-us/usermanual-cce/cce_10_0239.html"
 
 
 @pytest.fixture(scope="module")
@@ -35,19 +37,16 @@ def checker_module():
 def settings(checker_module):
     return checker_module.Settings(
         global_concurrency=4,
-        default_host=checker_module.HostPolicy(2, 4, 1000, 2000),
-        cooldown=0.02,
         retry_delay=0.002,
-        growth_window=0.01,
         total_timeout=2,
     )
 
 
-def run_check(module, settings, urls, handler=None, transport=None):
+def run_check(module, settings, urls, handler=None, transport=None, sources=("docs/source/test.md",)):
     async def run():
         async with httpx.AsyncClient(transport=transport or httpx.MockTransport(handler)) as client:
             checker = module.LinkChecker(settings, client)
-            results = await checker.run({url: ["docs/source/test.md"] for url in urls})
+            results = await checker.run({url: list(sources) for url in urls})
             return results, checker
 
     return asyncio.run(run())
@@ -127,8 +126,8 @@ def test_examples_never_make_requests(checker_module, settings, url):
 
 
 def test_localhost_substrings_do_not_skip_public_targets(checker_module):
-    assert not checker_module.skip_reason("https://example.com/docs/localhost")
-    assert not checker_module.skip_reason("https://localhost.example.com/a")
+    assert not checker_module.example_reason("https://example.com/docs/localhost")
+    assert not checker_module.example_reason("https://localhost.example.com/a")
 
 
 def test_head_fallback_and_real_broken_links(checker_module, settings):
@@ -158,7 +157,7 @@ def test_head_fallback_and_real_broken_links(checker_module, settings):
     assert calls.count(("HEAD", "/gone")) == calls.count(("GET", "/gone")) == 1
 
 
-def test_redirect_uses_destination_policy_and_detects_loops(checker_module, settings):
+def test_redirect_records_destination_and_detects_loops(checker_module, settings):
     calls = []
 
     def handler(request):
@@ -169,39 +168,39 @@ def test_redirect_uses_destination_policy_and_detects_loops(checker_module, sett
             return httpx.Response(301, headers={"location": "/loop"})
         return httpx.Response(200)
 
-    results, checker = run_check(
-        checker_module, settings, ["https://a.example/start", "https://b.example/loop"], handler
-    )
+    results, _ = run_check(checker_module, settings, ["https://a.example/start", "https://b.example/loop"], handler)
     assert results[0].status == "passed" and results[0].history[-1]["url"] == "https://b.example/final"
     assert results[1].status == "broken"
-    assert checker.hosts["b.example"].requests == len(calls) - 1
 
 
 def test_failures_rechecked_after_first_pass(checker_module, settings):
     calls = []
 
-    def handler(request):
-        calls.append(request.url.path)
-        return httpx.Response(503 if request.url.path == "/flaky" and calls.count("/flaky") == 1 else 200)
+    async def handler(request):
+        if request.url.path == "/healthy":
+            await asyncio.sleep(0.01)
+        calls.append((request.method, request.url.path))
+        return httpx.Response(503 if request.url.path == "/flaky" and request.method == "HEAD" else 200)
 
     results, _ = run_check(checker_module, settings, ["https://a.example/flaky", "https://a.example/healthy"], handler)
-    assert calls == ["/flaky", "/healthy", "/flaky"]
+    assert calls == [("HEAD", "/flaky")] * 3 + [("HEAD", "/healthy"), ("GET", "/flaky")]
     assert all(result.accepted for result in results)
-    assert [event["round"] for event in results[0].history] == [1, 2]
+    assert [event["attempt"] for event in results[0].history] == [1, 2, 3, 4]
+    assert [event["phase"] for event in results[0].history] == ["initial"] * 3 + ["recheck"]
 
 
-def test_rate_limit_cools_whole_host_without_blocking_other_hosts(checker_module, settings):
+def test_explicit_server_wait_frees_slots_for_other_hosts(checker_module, settings):
     calls = []
 
     def handler(request):
         calls.append((request.url.host, request.url.path, time.monotonic()))
         if request.url.path == "/limited" and sum(path == "/limited" for _, path, _ in calls) == 1:
-            return httpx.Response(429, headers={"retry-after": "0"})
+            return httpx.Response(429, headers={"retry-after": "0.04"})
         return httpx.Response(200)
 
-    results, checker = run_check(
+    results, _ = run_check(
         checker_module,
-        settings,
+        replace(settings, global_concurrency=1),
         [
             "https://a.example/limited",
             "https://a.example/other",
@@ -212,28 +211,30 @@ def test_rate_limit_cools_whole_host_without_blocking_other_hosts(checker_module
     first_a = next(stamp for host, _, stamp in calls if host == "a.example")
     second_a = [stamp for host, _, stamp in calls if host == "a.example"][1]
     b_time = next(stamp for host, _, stamp in calls if host == "b.example")
-    assert second_a - first_a >= settings.cooldown * 0.9
+    assert second_a - first_a >= 0.035
     assert b_time < second_a
     assert all(result.accepted for result in results)
-    assert checker.hosts["a.example"].concurrency == 1
 
 
-def test_unrecoverable_host_stops_bulk_requests(checker_module, settings):
+def test_limits_without_headers_defer_without_default_host_wait(checker_module, settings):
     calls = Counter()
 
     def handler(request):
         calls[request.url.host] += 1
         return httpx.Response(429 if request.url.host == "a.example" else 200)
 
-    results, _ = run_check(
+    results, checker = run_check(
         checker_module,
         settings,
-        [*[f"https://a.example/{index}" for index in range(100)], "https://b.example/ok"],
+        [*[f"https://a.example/{index}" for index in range(3)], "https://b.example/ok"],
         handler,
     )
-    assert calls["a.example"] < 10
+    assert calls["a.example"] == 3 * (1 + settings.recheck_attempts)
     assert calls["b.example"] == 1
     assert all(result.status == "rate_limited" for result in results if "a.example" in result.url)
+    assert all(result.attempts == 1 + settings.recheck_attempts for result in results if "a.example" in result.url)
+    assert checker.blocked_until == {}
+    assert all([event["method"] for event in result.history] == ["HEAD"] + ["GET"] * 4 for result in results[:3])
 
 
 def test_retry_after_and_deadline_are_not_shortened(checker_module, settings):
@@ -265,34 +266,54 @@ def test_inflight_requests_cancel_at_deadline(checker_module, settings):
     assert results[0].status == "unverified"
 
 
-def test_network_errors_exhaust_round_budget(checker_module, settings):
+def test_network_errors_exhaust_two_stage_attempt_budget(checker_module, settings):
     def handler(request):
         raise httpx.ReadTimeout("read timed out", request=request)
 
     results, _ = run_check(checker_module, settings, ["https://a.example/timeout"], handler)
     assert results[0].status == "network_error"
-    assert len(results[0].history) == settings.max_rounds
+    assert results[0].attempts == len(results[0].history) == settings.initial_attempts + settings.recheck_attempts
+    assert [event["method"] for event in results[0].history] == ["HEAD"] * 3 + ["GET"] * 4
 
 
-def test_unexpected_error_is_reported_without_losing_other_results(checker_module, settings):
-    def handler(request):
+def test_programming_error_propagates_and_cancels_other_requests(checker_module, settings):
+    started = asyncio.Event()
+    cancelled = []
+
+    async def handler(request):
         if request.url.path == "/crash":
+            await started.wait()
             raise AssertionError("bad host")
-        return httpx.Response(200)
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.append(str(request.url))
 
-    results, _ = run_check(checker_module, settings, ["https://a.example/crash", "https://a.example/good"], handler)
-    assert [result.status for result in results] == ["checker_error", "passed"]
-    assert "AssertionError" in results[0].message
+    with pytest.raises(ExceptionGroup) as error:
+        run_check(checker_module, settings, ["https://a.example/crash", "https://a.example/slow"], handler)
+    assert len(error.value.exceptions) == 1
+    assert isinstance(error.value.exceptions[0], AssertionError)
+    assert str(error.value.exceptions[0]) == "bad host"
+    assert cancelled == ["https://a.example/slow"]
 
 
-def test_concurrency_and_request_spacing(checker_module, settings):
+def test_programming_error_in_recheck_propagates(checker_module, settings):
+    def handler(request):
+        if request.method == "GET":
+            raise TypeError("broken recheck")
+        return httpx.Response(503)
+
+    with pytest.raises(TypeError, match="broken recheck"):
+        run_check(checker_module, settings, ["https://a.example/crash"], handler)
+
+
+def test_global_concurrency_spreads_hosts_without_extra_host_limits(checker_module, settings):
     running = Counter()
     peak = Counter()
-    starts = []
 
     async def handler(request):
         host = request.url.host
-        starts.append((host, time.monotonic()))
         running[host] += 1
         running["total"] += 1
         peak[host] = max(peak[host], running[host])
@@ -302,8 +323,7 @@ def test_concurrency_and_request_spacing(checker_module, settings):
         running["total"] -= 1
         return httpx.Response(200)
 
-    policy = checker_module.HostPolicy(3, 3, 500, 500)
-    settings = replace(settings, global_concurrency=5, default_host=policy)
+    settings = replace(settings, global_concurrency=5)
     results, _ = run_check(
         checker_module,
         settings,
@@ -313,66 +333,67 @@ def test_concurrency_and_request_spacing(checker_module, settings):
     assert all(result.accepted for result in results)
     assert peak["a.example"] == peak["b.example"] == 3
     assert peak["total"] == 5
-    for host in ("a.example", "b.example"):
-        timestamps = [stamp for name, stamp in starts if name == host]
-        assert all(right - left >= 0.0015 for left, right in zip(timestamps, timestamps[1:]))
 
 
-def test_adaptive_growth_and_single_wave_reduction(checker_module, settings):
-    host = checker_module.HostState(checker_module.HostPolicy(12, 24, 8, 16))
-    host.window_started -= 100
-    for _ in range(checker_module.STABLE_RESPONSES):
-        host.succeeded(settings)
-    assert (host.concurrency, host.rate) == (14, 10)
-    host.limited(10)
-    host.limited(10)
-    assert (host.concurrency, host.rate, host.cooldowns) == (7, 5, 1)
+def test_host_order_is_interleaved_without_queues(checker_module):
+    links = [checker_module.Link(f"https://{host}.example/{index}", []) for host in ("a", "b") for index in range(3)]
+    assert [link.url for link in checker_module.interleave_links(links)] == [
+        f"https://{host}.example/{index}" for index in range(3) for host in ("a", "b")
+    ]
+    assert checker_module.interleave_links([]) == []
 
 
-def test_restricted_exceptions_are_scoped_and_visible(checker_module, settings):
-    rule = checker_module.ExceptionRule(r"^https://a\.example/", "CI anti-bot restriction", "allow_restricted")
-    settings = replace(settings, exceptions=(rule,))
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_huawei_help_url_has_no_restricted_access_exception(checker_module, settings, status):
     results, _ = run_check(
         checker_module,
         settings,
-        ["https://a.example/help", "https://b.example/help"],
-        lambda request: httpx.Response(403),
+        [HUAWEI_HELP_URL],
+        lambda request: httpx.Response(status),
     )
-    assert [result.status for result in results] == ["restricted", "restricted"]
-    assert [result.accepted for result in results] == [True, False]
-    assert not checker_module.ExceptionRule(".*", "attribution", files="contributors.md$").matches(
-        "https://a.example/",
-        ["contributors.md", "guide.md"],
-    )
+    assert results[0].status == ("broken" if status == 404 else "restricted")
+    assert not results[0].accepted
+    assert results[0].attempts == 1
+    assert [event["method"] for event in results[0].history] == ["HEAD", "GET"]
 
 
-def test_config_validation_and_repository_defaults(checker_module, tmp_path):
-    settings = checker_module.load_settings(REPO_ROOT / ".github/workflows/configs/doc_linkcheck.toml")
-    assert settings.hosts["github.com"].concurrency == 12
-    assert settings.hosts["github.com"].max_concurrency == 24
-    bad = tmp_path / "bad.toml"
-    bad.write_text("[check]\nglobal_concurrency = 0\n")
-    with pytest.raises(ValueError):
-        checker_module.load_settings(bad)
-    bad.write_text("[check]\nmisspelled = 2\n")
-    with pytest.raises(ValueError):
-        checker_module.load_settings(bad)
+@pytest.mark.parametrize(
+    "url,sources,skipped",
+    [
+        ("https://github.com/alice", ["docs/source/community/contributors.md"], True),
+        ("https://github.com/alice/", ["/repo/docs/source/community/contributors.md"], True),
+        ("https://github.com/alice", ["docs/source/community/contributors.md", "guide.md"], False),
+        ("https://github.com/alice", ["docs/source/other/contributors.md"], False),
+        ("https://github.com/owner/repo/pull/1", ["docs/source/community/contributors.md"], False),
+    ],
+)
+def test_contributor_profile_skip_is_scoped_to_all_sources(checker_module, settings, url, sources, skipped):
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200)
+
+    results, _ = run_check(checker_module, settings, [url], handler, sources=sources)
+    assert results[0].status == ("skipped" if skipped else "passed")
+    assert calls == ([] if skipped else [url])
 
 
-def test_reports_include_failures_sources_and_host_metrics(checker_module, settings, tmp_path):
-    results, checker = run_check(
+def test_reports_include_failure_reasons_sources_and_attempts(checker_module, settings, tmp_path):
+    results, _ = run_check(
         checker_module,
         settings,
         ["https://a.example/a", "https://a.example/gone"],
         lambda request: httpx.Response(404 if request.url.path == "/gone" else 200),
     )
-    checker_module.write_reports(tmp_path, results, checker, 0.5)
+    checker_module.write_reports(tmp_path, results, 0.5)
     report = json.loads((tmp_path / "output.json").read_text())
     assert report["counts"] == {"passed": 1, "broken": 1}
-    assert report["hosts"]["a.example"]["requests"] == 3
     assert report["links"][1]["sources"] == ["docs/source/test.md"]
+    assert report["links"][1]["attempts"] == 1
+    assert [event["method"] for event in report["links"][1]["history"]] == ["HEAD", "GET"]
     summary = (tmp_path / "summary.md").read_text()
-    assert "https://a.example/gone" in summary and "broken" in summary
+    assert "https://a.example/gone" in summary and "HTTP 404" in summary
 
 
 def test_real_http_head_get_redirect_and_retry(checker_module, settings, monkeypatch):
@@ -408,7 +429,7 @@ def test_real_http_head_get_redirect_and_retry(checker_module, settings, monkeyp
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     # Local endpoints are intentional only in this isolated transport test.
-    monkeypatch.setattr(checker_module, "skip_reason", lambda url: "")
+    monkeypatch.setattr(checker_module, "example_reason", lambda url: "")
     try:
         base = f"http://127.0.0.1:{server.server_port}"
         results, _ = run_check(
@@ -430,12 +451,11 @@ def test_malformed_target_does_not_abort_healthy_links(checker_module, settings)
     assert [result.status for result in results] == ["broken", "passed"]
 
 
-def test_explicit_403_rate_limit_is_not_accepted_as_restricted(checker_module, settings):
-    rule = checker_module.ExceptionRule(".*", "known restriction", "allow_restricted")
+def test_explicit_403_rate_limit_is_classified_separately(checker_module, settings):
     results, _ = run_check(
         checker_module,
-        replace(settings, total_timeout=0.025, exceptions=(rule,)),
-        ["https://a.example/limit"],
+        replace(settings, total_timeout=0.025),
+        [HUAWEI_HELP_URL],
         lambda request: httpx.Response(403, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9999999999"}),
     )
     assert results[0].status == "rate_limited" and not results[0].accepted
@@ -454,11 +474,16 @@ def test_invalid_redirects_fail(checker_module, settings, location):
     assert len(results[0].history) == 1
 
 
-def test_request_budget_is_unverified_not_a_false_broken_link(checker_module, settings, monkeypatch):
-    monkeypatch.setattr(checker_module, "MAX_REQUESTS", 1)
-    results, _ = run_check(checker_module, settings, ["https://a.example/head"], lambda request: httpx.Response(405))
-    assert results[0].status == "unverified"
-    assert len(results[0].history) == 1
+@pytest.mark.parametrize("status", [404, 410])
+def test_permanent_failures_never_enter_compensation(checker_module, settings, status):
+    def handler(request):
+        return httpx.Response(status if request.url.path == "/gone" else 503)
+
+    results, _ = run_check(checker_module, settings, ["https://a.example/gone", "https://a.example/flaky"], handler)
+    assert results[0].status == "broken" and results[0].attempts == 1
+    assert all(event["phase"] == "initial" for event in results[0].history)
+    assert [event["method"] for event in results[0].history] == (["HEAD", "GET"] if status == 404 else ["HEAD"])
+    assert results[1].attempts == settings.initial_attempts + settings.recheck_attempts
 
 
 def test_streaming_get_closes_without_downloading_body(checker_module, settings):
@@ -489,7 +514,16 @@ def test_deleted_files_input_and_empty_report(checker_module, tmp_path, monkeypa
     assert json.loads((report / "output.json").read_text())["links"] == []
 
 
-def test_large_host_uses_and_grows_high_concurrency(checker_module, settings):
+@pytest.mark.parametrize("value", ["guide.md", [123]])
+def test_invalid_file_list_fails_instead_of_checking_nothing(checker_module, tmp_path, monkeypatch, value):
+    paths = tmp_path / "files.json"
+    paths.write_text(json.dumps(value))
+    monkeypatch.setattr(sys, "argv", ["check_md_links.py", "--files-from", str(paths)])
+    with pytest.raises(ValueError, match="JSON array of strings"):
+        asyncio.run(checker_module.main())
+
+
+def test_large_host_keeps_fixed_high_concurrency(checker_module, settings):
     active = 0
     peak = 0
 
@@ -501,20 +535,16 @@ def test_large_host_uses_and_grows_high_concurrency(checker_module, settings):
         active -= 1
         return httpx.Response(200)
 
-    policy = checker_module.HostPolicy(12, 24, 2000, 2000)
-    settings = replace(settings, global_concurrency=32, default_host=policy, growth_window=0.005, total_timeout=5)
-    results, checker = run_check(
-        checker_module, settings, [f"https://a.example/{index}" for index in range(400)], handler
-    )
+    settings = replace(settings, global_concurrency=12, total_timeout=5)
+    results, _ = run_check(checker_module, settings, [f"https://a.example/{index}" for index in range(400)], handler)
     assert all(result.accepted for result in results)
-    assert peak == 24
-    assert checker.hosts["a.example"].concurrency == 24
+    assert peak == 12
 
 
 def test_unknown_server_error_is_not_mislabeled_as_broken(checker_module, settings):
     results, _ = run_check(checker_module, settings, ["https://a.example/help"], lambda request: httpx.Response(567))
     assert results[0].status == "network_error"
-    assert len(results[0].history) == settings.max_rounds
+    assert len(results[0].history) == settings.initial_attempts + settings.recheck_attempts
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 405, 501])
@@ -530,15 +560,19 @@ def test_head_method_failure_confirmed_with_get(checker_module, settings, status
 
 
 @pytest.mark.parametrize("reset", ["inf", "NaN", "garbage"])
-def test_invalid_rate_reset_cannot_poison_reports(checker_module, settings, tmp_path, reset):
-    results, checker = run_check(
+def test_invalid_rate_reset_does_not_block_other_requests(checker_module, settings, reset):
+    def handler(request):
+        if request.url.path == "/limit":
+            return httpx.Response(403, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset})
+        return httpx.Response(200)
+
+    results, _ = run_check(
         checker_module,
-        replace(settings, max_rounds=1),
-        ["https://a.example/limit"],
-        lambda request: httpx.Response(403, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset}),
+        replace(settings, global_concurrency=1, recheck_attempts=0),
+        ["https://a.example/limit", "https://a.example/healthy"],
+        handler,
     )
-    checker_module.write_reports(tmp_path, results, checker, 0)
-    json.dumps(json.loads((tmp_path / "output.json").read_text()), allow_nan=False)
+    assert [result.status for result in results] == ["rate_limited", "passed"]
 
 
 def test_intermittent_limits_do_not_abort_healthy_host(checker_module, settings):
@@ -550,36 +584,93 @@ def test_intermittent_limits_do_not_abort_healthy_host(checker_module, settings)
         return httpx.Response(429 if limited else 200)
 
     urls = [f"https://a.example/{index}" for index in range(30)]
-    results, checker = run_check(checker_module, settings, urls, handler)
+    results, _ = run_check(checker_module, settings, urls, handler)
     assert all(result.accepted for result in results)
-    assert sum(event["event"] == "cooldown" for event in checker.hosts["a.example"].changes) == 3
+    assert all(count == (2 if path in {"/0", "/10", "/20"} else 1) for path, count in calls.items())
 
 
-def test_recovery_probe_is_single_and_restores_reduced_budget(checker_module, settings):
-    host = checker_module.HostState(checker_module.HostPolicy(12, 24, 8, 16))
-    host.limited(10)
-    assert host.concurrency == 6 and host.limit == 1
-    host.recovered()
-    assert host.limit == 1  # In-flight responses during cooldown cannot reopen it.
-    host.blocked_until = time.monotonic() - 1
-    host.recovered()
-    assert host.limit == 6 and host.cooldowns == 0
-
-
-def test_long_first_pass_reserves_time_for_failed_link_recheck(checker_module, settings):
+def test_late_get_rechecks_are_serial_and_stop_on_recovery(checker_module, settings):
+    active = 0
+    peak = 0
     calls = Counter()
 
     async def handler(request):
-        calls[request.url.path] += 1
-        await asyncio.sleep(0.01)
-        return httpx.Response(503 if request.url.path == "/flaky" and calls["/flaky"] == 1 else 200)
+        nonlocal active, peak
+        calls[(request.method, request.url.path)] += 1
+        if request.method == "HEAD":
+            return httpx.Response(503)
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.005)
+        active -= 1
+        return httpx.Response(503 if calls[("GET", request.url.path)] == 1 else 200)
 
-    settings = replace(settings, global_concurrency=1, total_timeout=0.3)
+    results, _ = run_check(checker_module, settings, ["https://a.example/a", "https://b.example/b"], handler)
+    assert all(result.accepted for result in results)
+    assert peak == 1
+    assert calls == Counter({("HEAD", "/a"): 3, ("HEAD", "/b"): 3, ("GET", "/a"): 2, ("GET", "/b"): 2})
+
+
+def test_domain_skip_list_is_exact_and_does_not_request_skipped_hosts(checker_module, settings):
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.host)
+        return httpx.Response(200)
+
     results, _ = run_check(
         checker_module,
         settings,
-        ["https://a.example/flaky", *[f"https://a.example/{index}" for index in range(50)]],
+        [
+            "https://DeepWiki.com/a",
+            "https://deepwiki.com./b",
+            "https://mcp.deepwiki.com/",
+            "https://deepwiki.com.example/",
+        ],
         handler,
     )
-    assert results[0].accepted and calls["/flaky"] == 2
-    assert any(result.status == "unverified" for result in results)
+    assert [result.status for result in results] == ["skipped", "skipped", "passed", "passed"]
+    assert "Vercel browser challenge" in results[0].message
+    assert requested == ["mcp.deepwiki.com", "deepwiki.com.example"]
+
+
+def test_redirect_to_skipped_domain_is_reported_without_following(checker_module, settings):
+    requested = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://deepwiki.com/vllm-project/vllm-ascend"})
+
+    results, _ = run_check(
+        checker_module,
+        settings,
+        ["https://a.example/wiki"],
+        handler,
+    )
+    assert requested == ["https://a.example/wiki"]
+    assert results[0].status == "skipped" and results[0].accepted
+    assert "redirect to skipped domain" in results[0].message
+
+
+def test_deadline_preserves_completed_results_and_cancels_unfinished_work(checker_module, settings):
+    async def handler(request):
+        if request.url.path == "/slow":
+            await asyncio.sleep(10)
+        return httpx.Response(404 if request.url.path == "/gone" else 200)
+
+    settings = replace(settings, total_timeout=0.03)
+    results, _ = run_check(
+        checker_module,
+        settings,
+        ["https://a.example/gone", "https://a.example/healthy", "https://a.example/slow"],
+        handler,
+    )
+    assert [result.status for result in results] == ["broken", "passed", "unverified"]
+    assert results[0].attempts == 1
+
+
+def test_deadline_during_recheck_delay_stops_without_extra_requests(checker_module, settings):
+    settings = replace(settings, total_timeout=0.03, retry_delay=10)
+    results, _ = run_check(checker_module, settings, ["https://a.example/slow"], lambda request: httpx.Response(503))
+    assert results[0].status == "unverified"
+    assert [event["method"] for event in results[0].history] == ["HEAD"] * 3 + ["GET"]

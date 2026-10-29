@@ -13,7 +13,6 @@ on:
       - 'mkdocs.yml'
       - '.github/workflows/schedule_doc_linkcheck.yaml'
       - '.github/workflows/scripts/check_md_links.py'
-      - '.github/workflows/configs/doc_linkcheck.toml'
       - 'tests/ut/_tools/test_check_md_links.py'
   workflow_dispatch:
 
@@ -63,7 +62,6 @@ jobs:
               - 'mkdocs.yml'
               - '.github/workflows/schedule_doc_linkcheck.yaml'
               - '.github/workflows/scripts/check_md_links.py'
-              - '.github/workflows/configs/doc_linkcheck.toml'
               - 'tests/ut/_tools/test_check_md_links.py'
 
       - name: Install checker dependencies
