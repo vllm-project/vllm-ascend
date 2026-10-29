@@ -79,6 +79,8 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: true
 env_prefill: &env_prefill
   <<: *env_common
+  # Covers DispatchFFNCombine's 2314 MiB check at M=16384, K=6144, topK=8.
+  HCCL_BUFFSIZE: "2560"
   VLLM_USE_FASTOKENS: "1"
   VLLM_PP_LAYER_PARTITION: "42,36"
 
