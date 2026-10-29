@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -38,6 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -135,6 +136,7 @@ class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     initial_state_mode: torch.Tensor | None
+    output_buffer: torch.Tensor | None = None
 
 
 @dataclass
@@ -142,6 +144,7 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    output_buffer: torch.Tensor | None = None
 
 
 @dataclass
@@ -467,12 +470,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if non_spec_cache_indices is None:
             raise RuntimeError("Expected non_spec_cache_indices for Ascend GDN prefill conv1d path.")
         prefill_num_rows = attn_metadata.non_spec_query_start_loc.size(0) - 1
-        pcp_size = getattr(self.vllm_config.parallel_config, "prefill_context_parallel_size", 1)
-        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        if pcp_rank > 0 and attn_metadata.num_prefills > 0:
-            prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
-            initial_state_mode = initial_state_mode.clone()
-            initial_state_mode[prefill_seq_offset:] = True
+        # MRV2 builds complete request metadata for recurrent attention.
+        # Fresh requests must ignore reused convolution state on every rank.
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
@@ -703,11 +702,24 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
+        mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        mamba_block_table = m.block_table_tensor
+        # vLLM #58737 derives num_reqs from the block table and asserts that
+        # seq_lens has the same number of rows. Ascend's unpadded() intentionally
+        # keeps the padded block-table rows, so on vLLM main pass only the real
+        # request rows. v0.32.0's align path already derives its output rows from
+        # seq_lens, so the result is unchanged there.
+        if (
+            not vllm_version_is("0.32.0")
+            and mamba_cache_mode != "none"
+            and mamba_block_table.shape[0] != m.seq_lens.shape[0]
+        ):
+            mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
         block_table_tensor = mamba_get_block_table_tensor(
-            m.block_table_tensor,
+            mamba_block_table,
             m.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            mamba_cache_mode,
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
@@ -1012,6 +1024,26 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_layer_name = layer_names[0] if layer_names else None
         self._spec_conv_indices: torch.Tensor | None = None
         self._non_spec_conv_indices: torch.Tensor | None = None
+        self._conv_output_buffer: torch.Tensor | None = None
+
+    def _ensure_conv_output_buffer(self) -> None:
+        if self._conv_output_buffer is not None:
+            return
+        layers = getattr(self.compilation_config, "static_forward_context", {})
+        layer = layers.get(self._conv_layer_name)
+        if layer is None or not getattr(layer, "use_shared_conv_output", False):
+            return
+        # Decode needs at most K+1 tokens per request; prefill does not use this
+        # buffer. Include graph padding without reserving the prefill token budget.
+        token_capacity = max(
+            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
+            self.decode_cudagraph_max_bs,
+        )
+        self._conv_output_buffer = torch.empty(
+            (token_capacity, 3 * layer.local_projection_size),
+            dtype=self.vllm_config.model_config.dtype,
+            device=self.spec_sequence_masks.device,
+        )
 
     def _ensure_conv_index_buffers(self) -> None:
         if self._spec_conv_indices is not None:
@@ -1055,6 +1087,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
         self._ensure_conv_index_buffers()
+        self._ensure_conv_output_buffer()
         metadata = super().build(
             common_prefix_len,
             common_attn_metadata,
@@ -1063,6 +1096,16 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
+        metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
+        if self._conv_output_buffer is not None:
+            # Layers in this group consume the same decode rows in sequence.
+            # Clear once per step, including inactive captured branches: rows
+            # that were active on the previous replay can now be padding.
+            self._conv_output_buffer.zero_()
+            if metadata.spec_decode_metadata is not None:
+                metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer = self._conv_output_buffer
+            if metadata.non_spec_decode_metadata is not None:
+                metadata.non_spec_decode_metadata.causal_conv1d.output_buffer = self._conv_output_buffer
         if self._spec_conv_indices is None:
             return metadata
         assert self._non_spec_conv_indices is not None
@@ -1084,7 +1127,20 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+    def get_builder_cls() -> type[GDNAttentionMetadataBuilder]:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config.hf_text_config.model_type in (
+            "glm5_next",
+            "glm5_next_text",
+        ):
+            # The RecoverSSM builder imports these host descriptors. Resolve it
+            # lazily. Selection only reads the opt-in validated at config init.
+            from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+
+            if use_glm_recoverssm(vllm_config):
+                from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+
+                return AscendKDARecoverSSMMetadataBuilder
         return AscendGDNHostMetadataBuilder
 
 

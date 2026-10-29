@@ -28,6 +28,19 @@ def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
 
 
+def test_loaded_group_ids_hook_is_version_gated() -> None:
+    assert "get_loaded_kv_cache_group_ids" in MooncakeBaseConnector.__dict__
+
+
+def test_loaded_group_ids_returns_transfer_groups() -> None:
+    # A P/D transfer restores the request's own blocks, so the scheduler must
+    # skip zeroing (and SWA replay) for every transfer group, not only the
+    # prefix-cacheable ones.
+    connector = make_facade()
+    connector._kv_cache_config = SimpleNamespace(transfer_group_ids=(0, 2))  # type: ignore[attr-defined]
+    assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 2)
+
+
 def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None:
     config = SimpleNamespace(model_config=SimpleNamespace(use_mla=False))
     assert MooncakeBaseConnector.get_required_kvcache_layout(config) == "HND"  # type: ignore[arg-type]

@@ -24,7 +24,7 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -56,6 +56,8 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # Both supported vLLM lanes read this during model/parallel validation.
+        enable_hc_sp=False,
     )
 
     ModelConfig.verify_with_parallel_config(model_config, parallel_config)
@@ -81,6 +83,8 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # Both supported vLLM lanes read this during model/parallel validation.
+        enable_hc_sp=False,
     )
 
     with pytest.raises(NotImplementedError):
@@ -217,7 +221,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 
@@ -274,7 +278,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 

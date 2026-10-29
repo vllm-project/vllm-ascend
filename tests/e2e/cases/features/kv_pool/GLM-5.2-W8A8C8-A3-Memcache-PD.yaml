@@ -31,7 +31,8 @@ config:
     dp_size: 2
     dp_size_local: 1
     dp_rank_start: 0
-    tp_size: 16
+    tp_size: 1
+    cp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -40,7 +41,8 @@ config:
     dp_size: 2
     dp_size_local: 1
     dp_rank_start: 1
-    tp_size: 16
+    tp_size: 1
+    cp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
@@ -85,6 +87,7 @@ env_common: &env_common
 
 env_prefill: &env_prefill
   <<: *env_common
+  HCCL_BUFFSIZE: "1024"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
@@ -107,6 +110,8 @@ prefill_server_cmd: &prefill_server_cmd
   - "${DP_RPC_PORT}"
   - "--tensor-parallel-size"
   - "${TP_SIZE}"
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
   - "--enable-expert-parallel"
   - "--speculative-config"
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
@@ -119,7 +124,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true}'
+  - '{"ascend_compilation_config": {"fuse_muls_add": true}}'
   - "--max-num-batched-tokens"
   - "8192"
   - "--trust-remote-code"
@@ -137,7 +142,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--reasoning-parser"
   - "glm45"
   - "--kv-transfer-config"
-  - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"${DP_RANK}","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_buffer_device":"npu","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false}}]}}'
+  - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"${DP_RANK}","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_buffer_device":"npu","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":1},"decode":{"dp_size":2,"tp_size":16}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false}}]}}'
 
 decode_server_cmd: &decode_server_cmd
   - "--host"
@@ -185,7 +190,7 @@ decode_server_cmd: &decode_server_cmd
   - "--reasoning-parser"
   - "glm45"
   - "--kv-transfer-config"
-  - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_port":"30000","engine_id":"${DP_RANK}","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_buffer_device":"npu","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":16},"decode":{"dp_size":2,"tp_size":16}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false}}]}}'
+  - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_port":"30000","engine_id":"${DP_RANK}","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_buffer_device":"npu","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":1},"decode":{"dp_size":2,"tp_size":16}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false}}]}}'
 
 templates:
   - node_index: 0

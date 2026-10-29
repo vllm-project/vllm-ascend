@@ -10,7 +10,7 @@ import torch
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 
 def _local_lengths(lengths, size, rank, interleave):
@@ -111,7 +111,7 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
 
 @pytest.mark.parametrize("size,rank,interleave", [(2, 0, 4), (2, 1, 4), (8, 7, 1)])
 def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, interleave):
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "MLA"
     speculator.use_dcp = True
     speculator.max_model_len = 128

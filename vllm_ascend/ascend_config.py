@@ -569,8 +569,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -828,7 +829,7 @@ class AscendConfig:
                 )
 
         finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
@@ -940,11 +941,11 @@ class AscendConfig:
             self._sparse_li_c4_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
-        self.enable_sp_by_pass = (
-            vc.model_config is not None
-            and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
-        )
+        # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
+        # (and `PassConfig.enable_sp`) in both v0.32.0 and verified main.
+
+        enable_sp_by_pass = False
+        self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
 
@@ -960,6 +961,15 @@ class AscendConfig:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            if (
+                self.enable_pcp_embedding_lmhead_weight_sharding
+                and vc.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "batch-sharded sampling is incompatible with "
+                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
                     "Please disable one of them."
                 )
 
@@ -1121,18 +1131,16 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
-        # validated SiTU shape without widening support for unrelated models.
-        supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3 or is_kimi_k3:
-            supported_intermediate_sizes.add(6144)
-        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
-        intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in supported_intermediate_sizes:
+        # intermediate_hidden (the post-activation intermediate width) must be in
+        # [256, 4096] and aligned to 128.
+        # TODO: A5 already meets this requirement, but A3 does not — the A3 operator
+        # only supports [512, 3072] aligned to 256.
+        moe_intermediate_size = int(moe_intermediate_size)
+        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
-                intermediate_hidden,
-                sorted(supported_intermediate_sizes),
+                "mega moe operator is not supported by current a5 config, for moe_intermediate_size %s "
+                "is not in [256, 4096] or not aligned to 128",
+                moe_intermediate_size,
             )
             return False
 

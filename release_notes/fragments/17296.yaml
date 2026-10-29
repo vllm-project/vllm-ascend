@@ -1,0 +1,4 @@
+pr: 17296
+entries:
+  - category: bugfix
+    text: Fixed encoder-only sliding-window attention and graph capture, preserving symmetric window boundaries and excluding padded tokens.

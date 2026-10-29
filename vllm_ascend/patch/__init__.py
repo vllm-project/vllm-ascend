@@ -28,6 +28,23 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_kda_recoverssm.py:
+#   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
+#   Why: The upstream metadata builder imports its CUDA context directly.
+#   How: Replace only the context class on GLM workers with RecoverSSM enabled.
+#   Related PR: No upstream context-factory extension point exists yet.
+#   Future plan: Remove when upstream allows the backend to select the context.
+# --------------------------------
+# * platform/patch_replayssm_config.py:
+#   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
+#   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
+#        while Ascend also implements it for GLM-Next.
+#   How: Validate GLM's supported execution/cache/PD contract and derive
+#        use_kda_recoverssm from the existing use_replayssm flag. Other models
+#        and disabled configurations retain the upstream validator.
+#   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
+#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+# --------------------------------
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
@@ -198,10 +215,10 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
 #    Why:
-#       GLM-5.3 always generates reasoning, but the supported vLLM v0.31.0
-#       and verified main pin do not include PR #56994. Passing thinking=False
-#       or enable_thinking=False disables extraction and leaks reasoning into
-#       content, including for streamed responses.
+#       GLM-5.3 always generates reasoning. This compatibility fallback
+#       normalizes thinking=False and enable_thinking=False to prevent
+#       reasoning from leaking into content; v0.32.0 also handles this
+#       upstream through PR #56994.
 #    How:
 #       Detect the GLM-5.3 template using the upstream signature and normalize
 #       both switches on a copy of the parser kwargs before initialization.
@@ -241,7 +258,9 @@
 #       vLLM #44243 has landed in the supported upstream version, so this
 #       override is kept only for the drop exemption of entry 2; remove it
 #       together with entry 2 once upstream exposes the PD role.
-#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
+#      v0.32.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
+#      #61183),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
@@ -692,6 +711,23 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
+#   3. `xgrammar.GrammarCompiler.compile_json_schema`
+#    Why:
+#       vLLM #58067 (included in v0.32.0 and verified main) passes
+#       `separators=(",", ":")` when `disable_any_whitespace` is set. The
+#       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
+#       stricter grammar makes small models loop on `","` until `max_tokens`
+#       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
+#       test).
+#    How:
+#       Wrap `GrammarCompiler.compile_json_schema` in both supported lanes to
+#       force `separators=None`, restoring the legacy grammar.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58067
+#    Future Plan:
+#       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
+#       pinned.
+#
 # ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
@@ -763,8 +799,7 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, VL encoder disaggregation,
-#       draft_window_size, enable_dsa_cp, suffix
+#       V2-ready (pooling KV, draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)
 #       default to v1.
@@ -792,7 +827,7 @@
 #    Why:
 #       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
 #    How:
-#       Removed with the v0.30.0 boundary: the release-only validator override
+#       Removed with the v0.31.0 boundary: the release-only validator override
 #       is no longer applied.
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
@@ -800,7 +835,7 @@
 #
 #   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
 #    Why:
-#       vLLM 0.31 rejects V1 PP with async scheduling for a GPU runner
+#       Both supported vLLM lanes reject V1 PP with async scheduling for a GPU runner
 #       limitation. Ascend has separate PP communication and scheduler patches.
 #    How:
 #       Add this feature to the existing Ascend V1 allowlist, preserving
@@ -956,7 +991,7 @@
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
 #
-#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
 #    Why:
 #       310P needs to protect the tail slot during MTP input_ids shift to avoid
 #       GatherV2 corruption from persistent drafter input buffers.
@@ -1073,6 +1108,23 @@
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
+# ** 11. File: worker/patch_mm_input_norm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fusion.mm_input_norm.FusedMMInputNorm`
+#    Why:
+#       v0.32.0 persists processor-derived normalization buffers, so legacy
+#       sharded checkpoints fail with missing visual.input_norm.weight/bias.
+#       Dummy loading can also overwrite these constants.
+#    How:
+#       Wrap construction once and register weight/bias as nonpersistent
+#       buffers, preserving device normalization and strict weight validation.
+#       Applying this on upstream main with the fix retains the same behavior.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/62767
+#    Future Plan:
+#       Remove when all supported vLLM baselines contain commit
+#       90c4a1a73eecea0428ee4303ad96c9fdeaac3f80 (or an equivalent backport).
+#
 #
 # ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1133,21 +1185,6 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
-#
-# ** 18. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
 #
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1272,6 +1309,22 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
+#   3. `vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes`
+#    Why:
+#       vLLM #57169 stops splitting a cache group whose KV tensors are
+#       block-outermost packed (`block_stride > layer_stride`). Ascend layerwise
+#       reuse aliases layers inside one physical slot (`layer_stride == 0`), so
+#       the group silently keeps the manager block size while NoPE SFA
+#       addresses 256-token blocks although its backend, metadata builder and
+#       block table all expect 128-token kernel blocks, so KV is read wrong.
+#    How：
+#       Re-run the selection with an alias-aware packing check
+#       (`0 < layer_stride < block_stride`) so alias layouts still split.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove this patch once upstream stops treating alias layouts as packed.
+#
 # ** 23. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1302,7 +1355,9 @@
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
+#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
+#       upstream vLLM #60335; both supported lanes use the new path).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1615,7 +1670,7 @@
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       Removed with the v0.31.0 boundary: v0.31.0 equals the pinned main and
 #       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files

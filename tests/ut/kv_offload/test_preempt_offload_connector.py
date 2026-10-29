@@ -974,6 +974,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.kv_cache_manager = MagicMock()
     # vLLM main tracks prefix-replay bookkeeping on the scheduler.
     scheduler.prefix_replay_tokens = 0
+    scheduler.prefix_replay_group_ids = ()
 
     request = SimpleNamespace(
         request_id="req-1",

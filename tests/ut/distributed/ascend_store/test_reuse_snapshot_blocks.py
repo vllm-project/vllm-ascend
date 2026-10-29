@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker as module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta, RequestTracker
 
 
@@ -63,7 +63,6 @@ def worker():
 def reset(w):
     w._step_load_keys = set()
     w._masked_runs_cache = {}
-    w._step_keyinfo_cache, w._step_lease_result, w._step_exist_cache = {}, {}, {}
     w.layer_save_tasks, w.layer_load_tasks = [[], []], [[], []]
 
 

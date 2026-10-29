@@ -42,7 +42,11 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import (
+    get_potential_max_tokens,
+    npu_stream_switch,
+    oproj_tp_enable,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -751,7 +755,22 @@ class AscendDSAV41Impl:
             output = torch.empty_like(hidden_states)
         forward_context = get_forward_context()
         if forward_context.attn_metadata is None:
+            projector = attn.dsa_attn.dsa_attn.impl
             output.zero_()
+            if oproj_tp_enable():
+                capacity = (
+                    projector._oproj_send_buf.shape[1]
+                    if hasattr(projector, "_oproj_send_buf")
+                    else get_potential_max_tokens()
+                )
+                profile_tokens = min(hidden_states.shape[0], capacity)
+                o_proj_input = hidden_states.new_zeros((profile_tokens, attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif getattr(projector, "enable_pcp_o_proj_weight_sharding", False):
+                # Match V4 profiling: exercise OTP communication buffers or
+                # PCP resident weight shards before graph capture.
+                o_proj_input = hidden_states.new_zeros((hidden_states.shape[0], attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         q, qr, prepared_indexer = self._prepare_inputs_and_caches(
@@ -1553,6 +1572,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @staticmethod
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls():

@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.spec_decode.utils import compact_mtp_topk_indices
+from vllm_ascend.worker.v1.spec_decode.utils import compact_mtp_topk_indices
 
 
 @pytest.mark.parametrize(
