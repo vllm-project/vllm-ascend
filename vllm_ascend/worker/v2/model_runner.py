@@ -794,6 +794,16 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if batch_state is not None and batch_state.has_prefill and batch_state.decode_graph_eligible:
+            replay_state = getattr(self.model_state, "decoder_replay_state", None)
+            if replay_state is not None and replay_state.needs_eager_forward(
+                batch_state.idx_mapping_np,
+                batch_state.is_prefilling_np,
+            ):
+                # A one-token prefill extension otherwise qualifies for a decode
+                # graph, which cannot use this step's replay-only window floor.
+                batch_state = batch_state._replace(decode_graph_eligible=False)
+                uniform_token_count = None
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
