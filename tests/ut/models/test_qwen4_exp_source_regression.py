@@ -80,12 +80,13 @@ def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
     assert ": num_actual_reqs + 1" in branch
 
 
-def test_qsa_uses_only_fused_runtime_backends() -> None:
+def test_qsa_uses_fused_sparse_backends_and_upstream_qkv_projection() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
     assert "return qsa_select_paged_tokens_lightning(" in qsa
     assert "return qsa_gbsa_attention(" in qsa
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
-    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" in qsa
+    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" not in qsa
+    assert "def _project_qkv_gate(" not in qsa
     for fallback in (
         "qsa_select_paged_tokens_reference",
         "qsa_select_paged_tokens_triton",

@@ -380,7 +380,8 @@ def get_quant_type_for_layer(
     else:
         if prefix_mapper is not None:
             prefix = prefix_mapper(prefix)
-        quant_type = quant_description.get(prefix + ".weight")
+        quant_key = _find_quant_description_key(quant_description, prefix)
+        quant_type = quant_description.get(quant_key) if quant_key is not None else None
     return quant_type if quant_type != "FLOAT" else None
 
 
@@ -605,13 +606,19 @@ class AscendModelSlimConfig(QuantizationConfig):
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
     def _has_quant_weight(self, prefix: str) -> bool:
+        if _find_quant_description_key(self.quant_description, prefix) is not None:
+            return True
         proj_name = prefix.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             return all(
-                f"{prefix.removesuffix(proj_name) + shard_proj_name}.weight" in self.quant_description
+                _find_quant_description_key(
+                    self.quant_description,
+                    prefix.removesuffix(proj_name) + shard_proj_name,
+                )
+                is not None
                 for shard_proj_name in self.packed_modules_mapping[proj_name]
             )
-        return f"{prefix}.weight" in self.quant_description
+        return False
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
@@ -661,16 +668,6 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             if not self._has_quant_weight(prefix) and self._has_quant_weight(candidate):
                 return candidate
-
-        if model_type in (
-            "qwen4_exp",
-            "qwen4_exp_mtp",
-            "qwen3_5_moe",
-            "qwen3_5_mtp",
-        ) and prefix.startswith("mtp.layers."):
-            # Qwen4Exp/Qwen3.5 MTP checkpoints store local draft layer zero,
-            # while the runtime module may expose its global layer index.
-            prefix = re.sub(r"(?<=^mtp\.layers\.)\d+", "0", prefix, count=1)
 
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use

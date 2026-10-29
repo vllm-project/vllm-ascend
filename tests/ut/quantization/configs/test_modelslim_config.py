@@ -1167,19 +1167,6 @@ class TestGetQuantTypeForLayer(TestBase):
 
         self.assertEqual(result, "W8A8_DYNAMIC")
 
-    def test_qwen4_exp_mtp_quant_prefix_uses_local_layer_zero(self):
-        quant_desc = {
-            "mtp.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
-        }
-        config = AscendModelSlimConfig(quant_desc)
-
-        prefix = config.quant_prefix_mapper(
-            "qwen4_exp_mtp",
-            "mtp.layers.48.self_attn.q_proj",
-        )
-
-        self.assertEqual(prefix, "mtp.layers.0.self_attn.q_proj")
-
     def test_packed_experts_accept_fused_float_description(self):
         quant_desc = {
             "mtp.layers.0.mlp.experts.gate_up_proj": "FLOAT",
@@ -1253,6 +1240,22 @@ class TestGetQuantTypeForLayer(TestBase):
         )
 
         self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_non_packed_module_accepts_modelslim_bare_key(self):
+        quant_desc = {"model.layers.0.mlp.down_proj": "W8A8_DYNAMIC"}
+
+        result = get_quant_type_for_layer(
+            quant_desc,
+            "model.layers.0.mlp.down_proj",
+        )
+
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_has_quant_weight_accepts_bare_fused_gate_up_key(self):
+        config = AscendModelSlimConfig({"model.layers.0.mlp.gate_up_proj": "W8A8_DYNAMIC"})
+        config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+        self.assertTrue(config._has_quant_weight("model.layers.0.mlp.gate_up_proj"))
 
     def test_fused_module_inconsistent_shards_raises(self):
         """Fused module with inconsistent shard quant types raises ValueError."""

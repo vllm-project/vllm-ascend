@@ -14,7 +14,11 @@
 
 """Ascend wrapper for Qwen3.8-Flash-Next MTP."""
 
+import re
+from typing import Any
+
 import torch
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
@@ -22,6 +26,68 @@ from vllm.sequence import IntermediateTensors
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
 from . import model as _model  # noqa: F401
+
+_MTP_LAYER_PREFIX = re.compile(r"^mtp\.layers\.(\d+)(?=\.)")
+
+
+def _remap_modelslim_mtp_layer_ids(
+    quant_config: Any,
+    mtp_start_layer_idx: int,
+    num_mtp_layers: int,
+) -> None:
+    """Map checkpoint-local Qwen MTP layer ids to runtime layer ids.
+
+    ModelSlim descriptions number the standalone draft layers from zero, while
+    Qwen4Exp constructs them after the target layers. Keep this Qwen-specific
+    namespace adaptation next to the model and match the same ``mtp.layers``
+    strings used by the upstream weight loader.
+    """
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, dict):
+        return
+
+    def remap_name(name: str) -> str:
+        match = _MTP_LAYER_PREFIX.match(name)
+        if match is None:
+            return name
+        local_layer_idx = int(match.group(1))
+        if local_layer_idx >= num_mtp_layers:
+            return name
+        runtime_layer_idx = mtp_start_layer_idx + local_layer_idx
+        return _MTP_LAYER_PREFIX.sub(
+            f"mtp.layers.{runtime_layer_idx}",
+            name,
+            count=1,
+        )
+
+    quant_config.quant_description = {remap_name(name): description for name, description in quant_description.items()}
+
+
+_upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
+
+
+def _make_draft_vllm_config(
+    vllm_config: VllmConfig,
+    mtp_start_layer_idx: int,
+) -> VllmConfig:
+    draft_vllm_config = _upstream_make_draft_vllm_config(
+        vllm_config,
+        mtp_start_layer_idx,
+    )
+    num_mtp_layers = getattr(
+        vllm_config.model_config.hf_text_config,
+        "mtp_num_hidden_layers",
+        1,
+    )
+    _remap_modelslim_mtp_layer_ids(
+        draft_vllm_config.quant_config,
+        mtp_start_layer_idx,
+        num_mtp_layers,
+    )
+    return draft_vllm_config
+
+
+upstream_mtp._make_draft_vllm_config = _make_draft_vllm_config
 
 
 class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor):
