@@ -661,17 +661,17 @@ def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
 def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
     """Align with MRV1 ``tests/ut/sample/test_sampler.py`` mask checks.
 
-    310P MRV2 calls the same Triton-free ``apply_top_k_top_p`` path; assert
-    discarded logits become ``-inf`` and the kept set size matches top-k / top-p.
+    310P MRV2 keeps the Triton-free reference masking path; assert discarded
+    logits become ``-inf`` and the kept set size matches top-k / top-p.
     """
-    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+    from vllm_ascend.worker.v2.sample.apply_top_k_top_p import _apply_top_k_top_p_pytorch
 
     # token0 > token1 >> rest
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     k = torch.tensor([2], dtype=torch.int32)
     p = torch.tensor([0.5], dtype=torch.float32)
 
-    top_k_only = apply_top_k_top_p(logits.clone(), k, None)
+    top_k_only = _apply_top_k_top_p_pytorch(logits.clone(), k, None)
     finite_k = (top_k_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
     assert finite_k.tolist() == [0, 1]
     assert top_k_only[0, 0] == pytest.approx(5.0)
@@ -679,12 +679,12 @@ def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
     assert not torch.isfinite(top_k_only[0, 2:]).any()
 
     # Mirror MRV1: combined filter keeps finite values and original shape.
-    filtered = apply_top_k_top_p(logits.clone(), k, p)
+    filtered = _apply_top_k_top_p_pytorch(logits.clone(), k, p)
     assert filtered.shape == logits.shape
     assert torch.isfinite(filtered).any()
     assert 0 in (filtered[0] > float("-inf")).nonzero(as_tuple=False).view(-1).tolist()
 
-    top_p_only = apply_top_k_top_p(logits.clone(), None, p)
+    top_p_only = _apply_top_k_top_p_pytorch(logits.clone(), None, p)
     finite_p = (top_p_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
     assert 0 in finite_p.tolist()
     assert finite_p.numel() >= 1
