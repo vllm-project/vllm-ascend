@@ -4,11 +4,16 @@
 """CPU constructor coverage for decoder-to-Engram sequence-parallel wiring."""
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
 
-torch = pytest.importorskip("torch")
+if TYPE_CHECKING:
+    import torch
+else:
+    torch = pytest.importorskip("torch")
+
 pytest.importorskip(
     "vllm.models.deepseek_v41",
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
