@@ -967,8 +967,7 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP/PCP/DCP=1, disabled prefix caching,
-Mamba cache mode `none`, and disabled stochastic rounding. Eager execution is
-also supported; use `--enforce-eager` instead of the compilation option above.
+Mamba cache mode `none`, and disabled stochastic rounding.
 For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,
 and RecoverSSM settings on both sides.
