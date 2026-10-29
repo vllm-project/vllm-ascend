@@ -6,7 +6,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -962,8 +962,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        W_UV = W_UV.transpose(0, 1).contiguous()
         # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
         # scenario the graph is captured once, so every later weight update
         # reload has to refresh the stored tensors in place instead of
@@ -977,13 +975,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         replace_parameter(
             self,
             "W_UV",
-            W_UV,  # (L, N, V) -> (N, L, V)
+            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
             prefer_copy=True,
         )
         replace_parameter(
             self,
             "W_UK_T",
-            W_UK_T,  # (L, N, P) -> (N, P, L)
+            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
             prefer_copy=True,
         )
 
@@ -1607,10 +1605,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         rotated = self.turboquant.forward(ql_nope)
         return torch.cat([rotated, q_pe], dim=-1).contiguous()
 
-    def _tq_inverse_output(self, attn_out: torch.Tensor) -> torch.Tensor:
-        assert self.turboquant is not None
-        return self.turboquant.inverse(attn_out)
-
     def _turboquant_sfa(
         self,
         query: torch.Tensor,
@@ -1678,7 +1672,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 actual_seq_lengths_key,
                 sparse_mode=3,
             )
-            return self._tq_inverse_output(attn_out)
+            assert self.turboquant is not None
+            return self.turboquant.inverse(attn_out)
         if self.final_prefill is not None and attn_metadata.num_decode_tokens:
             # Mixed batches compute against authoritative C8 pages. Keep
             # existing decoders' mirrors current for the next pure-decode step.
@@ -1694,7 +1689,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 actual_seq_lengths_key,
                 sparse_mode=3,
             )
-            return self._tq_inverse_output(attn_out)
+            assert self.turboquant is not None
+            return self.turboquant.inverse(attn_out)
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
             return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
         if self.qk_rope_head_dim == 0:
@@ -2060,7 +2056,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
             kv_outputs = self.exec_kv(
-                kv_no_split, cos, sin, kv_cache, parallel_context.kv_slot_mapping, attn_metadata
+                kv_no_split,
+                cos,
+                sin,
+                kv_cache,
+                parallel_context.kv_slot_mapping,
+                attn_metadata,
             )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
@@ -2073,6 +2074,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 knope_scale,
                 parallel_context.gather_full_o_proj,
             )
+
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
@@ -2206,8 +2208,7 @@ def turboquant_kv_rmsnorm_rope(
     # fp16 bytes of s_t = ||latent|| / ||dequantized unit vector||, the factor
     # attention applies to rescale the whole slot.
     packed_bytes = get_tq_packed_bytes(kv_lora_rank)
-    row = turboquant.compress(k_nope)
-    row = row.reshape(k_nope.shape[0], -1)
+    row = turboquant.compress(k_nope).reshape(k_nope.shape[0], -1)
     nibbles = row[:, :packed_bytes].view(torch.int8)
     scale = row[:, packed_bytes:].contiguous().view(torch.float16).reshape(-1, 1)
 

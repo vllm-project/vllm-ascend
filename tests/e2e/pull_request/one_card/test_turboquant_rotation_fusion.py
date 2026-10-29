@@ -71,7 +71,7 @@ def test_original_projections_with_tq4_attention(query_tokens, page, heads):
     expected = project(transform.inverse(attend(transform.forward(project(q, uk)))), uv)
     impl = SimpleNamespace(turboquant=transform)
     rotated_query = AscendSFAImpl._tq_rotate_query(impl, project(q, uk), qr)
-    actual = project(AscendSFAImpl._tq_inverse_output(impl, attend(rotated_query[:, :, :512])), uv)
+    actual = project(impl.turboquant.inverse(attend(rotated_query[:, :, :512])), uv)
     expected, actual = expected.float().cpu(), actual.float().cpu()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

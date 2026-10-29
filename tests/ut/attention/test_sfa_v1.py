@@ -1875,7 +1875,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         impl.qk_rope_head_dim = self.ROPE_HEAD_DIM
         impl._turboquant_sfa = MagicMock()
         impl._tq_rotate_query = MagicMock()
-        impl._tq_inverse_output = MagicMock()
+        impl.turboquant = MagicMock()
         impl._get_sfa_kv_slot_mapping = MagicMock(return_value=torch.tensor([0]))
         cache = (torch.randn(2, 128, 1, 512, dtype=torch.bfloat16),
                  torch.randn(2, 128, 1, 64, dtype=torch.bfloat16))
@@ -1895,7 +1895,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
                 self.assertIs(mock_bf16.call_args.args[3], cache)
                 impl._turboquant_sfa.assert_not_called()
                 impl._tq_rotate_query.assert_not_called()
-                impl._tq_inverse_output.assert_not_called()
+                impl.turboquant.inverse.assert_not_called()
 
     def test_forward_initializes_transform_outside_graph_capture(self):
         """The transform tensors are built before any graph-captured dispatch."""

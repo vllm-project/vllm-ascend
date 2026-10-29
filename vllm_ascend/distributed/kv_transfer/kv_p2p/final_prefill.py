@@ -224,7 +224,12 @@ class FinalPrefillExporter:
                 group = local.tensor_group_idx[0]
                 src_ids, dst_ids = request.local_block_ids[group], request.remote_block_ids[group]
                 if remote.cache_format == TQ_ABI:
-                    self._convert_and_write(name, local, remote, src_ids, dst_ids, session, indices_cache)
+                    try:
+                        self._convert_and_write(name, local, remote, src_ids, dst_ids, session, indices_cache)
+                    except Exception:
+                        # Nonincremental conversion can also leave source reads queued.
+                        self.stream.synchronize()
+                        raise
                 else:
                     src, dst, lengths = [], [], []
                     for i, scale in enumerate(local.block_size_scale):

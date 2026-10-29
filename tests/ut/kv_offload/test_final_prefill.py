@@ -438,3 +438,44 @@ def test_bulk_overlap_keeps_passthrough_pages_and_final_empty_layer_safe():
     expected = fake_pack(exporter.caches["b"][0][4:6].reshape(4, 656), None)
     torch.testing.assert_close(destinations["b"][3].reshape(4, 386), expected, rtol=0, atol=0)
     exporter.stream.synchronize.assert_called_once()
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+@pytest.mark.parametrize("failure", ["indices", "pack", "write"])
+def test_layerwise_failure_drains_conversion_before_releasing_source(incremental, failure):
+    exporter, layers, destinations = make_bulk_exporter()
+    exporter.incremental = incremental
+    exporter.staging = exporter.staging_buffers[0]
+    remote, source, destination = layers["a"]
+    remote.tensor_group_idx = exporter.metadata["a"].tensor_group_idx
+    request = SimpleNamespace(
+        chunk_finish=True, remote_host="localhost", remote_te_rpc_port=100,
+        local_block_ids=[source], remote_block_ids=[destination],
+        remote_layer_metadata={"a": remote},
+    )
+    task = SimpleNamespace(wait_event=MagicMock(), send_request={"r": request}, layer_names=["a"])
+    original = exporter.caches["a"][0].clone()
+    indices = exporter._source_indices
+    error = RuntimeError("injected conversion failure")
+
+    def source_indices(*args):
+        result = indices(*args)
+        if failure == "indices":
+            raise error  # The index upload may already be queued.
+        return result
+
+    def pack(*args):
+        if failure == "pack":
+            raise error  # Source index_select has already been queued.
+        return fake_pack(*args)
+
+    if failure == "write":
+        exporter.engine.batch_transfer_sync_write = MagicMock(return_value=-1)
+    with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=pack), patch.object(
+            exporter, "_source_indices", side_effect=source_indices):
+        with pytest.raises(RuntimeError, match="transfer failed" if failure == "write" else str(error)):
+            exporter.transfer(task)
+    exporter.stream.synchronize.assert_called()
+    torch.testing.assert_close(exporter.caches["a"][0], original, rtol=0, atol=0)
+    assert torch.all(destinations["a"] == 7)
