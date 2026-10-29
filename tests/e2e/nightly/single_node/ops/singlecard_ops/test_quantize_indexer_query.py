@@ -9,7 +9,8 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 
-pytestmark = pytest.mark.skipif(get_ascend_device_type() == AscendDeviceType.A5)
+if get_ascend_device_type() == AscendDeviceType.A5:
+    pytestmark = pytest.mark.skip
 
 
 def reference(query):
