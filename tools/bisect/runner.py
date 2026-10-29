@@ -39,6 +39,7 @@ from tools.bisect import git_ops
 from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
 from tools.bisect.config import (
     MULTI_NODE_RUN_SH,
+    SCENE_SINGLE,
     SINGLE_NODE_TEST_PATH,
     BisectInput,
     BisectOptions,
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 # commits created before the framework moved under tests/e2e/common or before
 # the common multi-node dispatcher existed.
 _LEGACY_SINGLE_NODE_TEST = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
+_LEGACY_SINGLE_NODE_CONFIG_DIR = "tests/e2e/nightly/single_node/models/configs"
 _MULTI_NODE_TEST = "tests/e2e/common/multi_node/test_multi_node.py"
 _LEGACY_MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
@@ -145,8 +147,17 @@ class BaseRunner:
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
-        if self.inp.config_base_path:
-            env["CONFIG_BASE_PATH"] = self.inp.config_base_path
+        config_base_path = self.inp.config_base_path
+        if self.inp.scene == SCENE_SINGLE and config_base_path:
+            requested = self.repo / config_base_path / self.inp.config_yaml
+            legacy_base = self.repo / _LEGACY_SINGLE_NODE_CONFIG_DIR
+            legacy_config = legacy_base / Path(self.inp.config_yaml).name
+            if not requested.is_file() and legacy_config.is_file():
+                config_base_path = str(legacy_base)
+                env["CONFIG_YAML_PATH"] = legacy_config.name
+                logger.info("[single] config moved in candidate; using %s", legacy_config)
+        if config_base_path:
+            env["CONFIG_BASE_PATH"] = config_base_path
         return env
 
     @staticmethod

@@ -61,11 +61,12 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
+    SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
     AscendConfig = None
@@ -123,6 +124,10 @@ class NPUPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
@@ -403,17 +408,6 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        # Upstream derives this threshold only for CUDA/XPU. Without an Ascend
-        # default, an explicit SP/MMRS request is disabled during VllmConfig
-        # validation before the graph fusion pass can observe it.
-        # vLLM #60517 removed PassConfig.enable_sp/fuse_gemm_comms/
-        # sp_min_token_num on main; the pass-based SP this defaulted no longer
-        # exists there.
-        if vllm_version_is("0.31.0"):
-            pass_config = vllm_config.compilation_config.pass_config
-            if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
-                pass_config.sp_min_token_num = 1
-
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
         reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
@@ -570,7 +564,7 @@ class NPUPlatform(Platform):
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
-        if not vllm_version_is("0.31.0"):
+        if not vllm_version_is("0.32.0"):
             from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
             seen: set[int] = set()
@@ -1402,13 +1396,8 @@ def _setup_compile_backend(
         and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
-        # vLLM #60517 removed `update_sizes_for_sequence_parallelism` on main;
-        # inline its behaviour (keep sizes that are multiples of tp_size).
-        if vllm_version_is("0.31.0"):
-            sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
-        else:
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
-            sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
             raise AssertionError(
                 f"cudagraph_capture_sizes {original_sizes} does not contain"
@@ -1451,6 +1440,7 @@ def _setup_compile_backend(
                 "vllm::mla_forward",
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
+                "vllm::glm5next_kda_forward",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
@@ -1664,8 +1654,29 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+    """Match supported target/draft pairs against the live loader tag."""
+    # V2 keeps the target model_config while loading the draft. Match the live
+    # loader tag so the target and other auxiliary models retain their backend.
+    target = spec.target_model_config
+    if spec.method == "dflash":
+        return (
+            bool(spec.enforce_eager)
+            and model_tag == "dflash_head"
+            and target.hf_text_config.model_type == "glm_moe_dsa"
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+        )
+    if spec.method == "dspark":
+        return (
+            model_tag == "dspark_head"
+            and not _MINIMAX_M3_ARCHITECTURES.isdisjoint(target.hf_config.architectures or ())
+            and "Qwen3DSparkModel" in (spec.draft_model_config.architectures or ())
+        )
+    return False
+
+
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
-    """Select CANN FlashAttn for A5 V2 DFlash2 eager drafts with GLM MoE DSA targets."""
+    """Select CANN FlashAttn for A5 GLM DFlash2 and MiniMax-M3 DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.DEVICE_LENGTH_FLASH_ATTN
@@ -1677,22 +1688,12 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not spec.enforce_eager:
-        return False
-    # V2 keeps the target model_config while loading the draft. Read the live
-    # loader tag rather than relying on V1's runner_type="draft" convention.
-    if backends.model_tag != "dflash_head":
-        return False
-    target = spec.target_model_config
-    # Restrict target models to the GLM MoE DSA family, including GLM-5.3.
-    if target.hf_text_config.model_type != "glm_moe_dsa":
+    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     return (
-        spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
-        and selector.dtype in (torch.float16, torch.bfloat16)
+        selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
         # These features require additional metadata or batch-invariance guarantees.
         and not (

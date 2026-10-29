@@ -16,7 +16,9 @@
 #
 
 import copy
+import tempfile
 import unittest
+from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -32,12 +34,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from zmq.constants import RCVTIMEO
+from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
+from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
@@ -46,7 +50,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     LookupKeyClient,
-    get_zmq_rpc_path_lookup,
 )
 
 
@@ -195,6 +198,7 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
     config.kv_transfer_config.get_from_extra_config.return_value = True
     config.parallel_config.data_parallel_rank = 0
+    config.parallel_config.data_parallel_index = 0
     config.parallel_config.prefill_context_parallel_size = 1
     config.parallel_config.decode_context_parallel_size = 1
     config.parallel_config.tensor_parallel_size = 1
@@ -246,10 +250,29 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
             with self.subTest(extra_config=extra_config, rank=rank):
                 config = MagicMock()
                 config.parallel_config.data_parallel_rank = rank
+                config.parallel_config.data_parallel_index = rank
                 config.kv_transfer_config.kv_connector_extra_config = extra_config
                 result = get_zmq_rpc_path_lookup(config)
                 self.assertIn(f"lookup_rpc_port_{port}", result)
                 self.assertIn(f"dp_rank{rank}", result)
+
+    def test_independent_dp_lookup_servers_bind_distinct_paths(self):
+        """Two dense engines with compute DP rank zero need separate RPC servers."""
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+        with tempfile.TemporaryDirectory(prefix="kv-dp-") as rpc_dir, ExitStack() as stack:
+            stack.enter_context(patch(f"{module}.envs.VLLM_RPC_BASE_PATH", rpc_dir))
+            context = stack.enter_context(Context())
+            paths = []
+            for dp_index in range(2):
+                config = SimpleNamespace(
+                    parallel_config=SimpleNamespace(data_parallel_rank=0, data_parallel_index=dp_index),
+                    kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"lookup_rpc_port": "0"}),
+                )
+                paths.append(get_zmq_rpc_path_lookup(config))
+            self.assertNotEqual(paths[0], paths[1])
+            for path in paths:
+                server = stack.enter_context(context.socket(REP))
+                server.bind(path)
 
 
 class TestKVPoolScheduler(unittest.TestCase):
@@ -645,6 +668,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
@@ -1027,12 +1051,13 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
 
 class TestLookupKeyClient(unittest.TestCase):
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup(self, mock_encoder_cls, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -1043,20 +1068,21 @@ class TestLookupKeyClient(unittest.TestCase):
         client = LookupKeyClient(config)
         self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 32)
         mock_socket.send_multipart.assert_called_once()
-        self.assertEqual(
-            mock_socket.send_multipart.call_args.args[0],
-            [(64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"hashes"],
-        )
+        frames = mock_socket.send_multipart.call_args.args[0]
+        self.assertEqual(frames[0], b"lookup")
+        self.assertEqual(int.from_bytes(frames[1], "big"), 64)
+        self.assertEqual(int.from_bytes(frames[3], "big"), 16)
         client.close()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup_zmq_error_returns_zero_and_closes_client(
         self, mock_encoder_cls, mock_context_cls, mock_make_socket
     ):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -1070,11 +1096,12 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_socket_sets_receive_timeout(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -1107,11 +1134,12 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertIs(scheduler.client, second_client)
         self.assertEqual(mock_client_cls.call_count, 2)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_close_is_idempotent_and_terminates_context(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -1123,6 +1151,101 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertTrue(client.closed)
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
+    def test_reset_ack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x01"
+
+        client = LookupKeyClient(config)
+        self.assertTrue(client.reset())
+        mock_socket.send.assert_called_once_with(b"reset")
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
+    def test_reset_nack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x00"
+
+        client = LookupKeyClient(config)
+        self.assertFalse(client.reset())
+
+
+class TestKVPoolSchedulerResetStore(unittest.TestCase):
+    def _scheduler(self):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.backend_name = "mooncake"
+        scheduler.use_layerwise = False
+        scheduler.vllm_config = MagicMock()
+        scheduler.client = MagicMock()
+        scheduler.client.reset.return_value = True
+        scheduler.sending_events = {}
+        scheduler.sending_blocks = {}
+        scheduler._loading_req_ids = set()
+        scheduler._block_pool = None
+        return scheduler
+
+    def _bind_pool(self, scheduler, used: int):
+        pool = MagicMock()
+        pool.num_gpu_blocks = used + 10
+        pool.get_num_free_blocks.return_value = 10
+        scheduler._block_pool = pool
+
+    def test_reset_store_acks(self):
+        scheduler = self._scheduler()
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+
+    def test_reset_store_nack(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.return_value = False
+        self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rpc_error(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.side_effect = RuntimeError("zmq")
+        self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rejects_inflight_sends(self):
+        scheduler = self._scheduler()
+        scheduler.sending_events = {1: 0}
+        scheduler.sending_blocks = {1: [10, 11]}
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler.sending_events, {1: 0})
+        self.assertEqual(scheduler.sending_blocks, {1: [10, 11]})
+
+    def test_reset_store_rejects_loading_while_blocks_held(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self._bind_pool(scheduler, used=21)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler._loading_req_ids, {"req"})
+
+    def test_reset_store_clears_stale_ids_when_blocks_free(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"loading"}
+        self._bind_pool(scheduler, used=1)
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+        self.assertEqual(scheduler._loading_req_ids, set())
+
+    def test_reset_store_rejects_loading_without_block_pool(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self.assertIsNone(scheduler._block_pool)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
@@ -1407,6 +1530,7 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1

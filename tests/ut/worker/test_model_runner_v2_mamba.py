@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
     _align_hybrid_attention_page_sizes,
@@ -205,12 +204,9 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
     ctx = MagicMock()
-    if vllm_version_is("0.31.0"):
-        state._ensure_align_ctx = MagicMock(return_value=ctx)
-    else:
-        # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
-        # Ascend override must resolve the context built in initialize_kv_cache.
-        state._mamba_ctx = ctx
+    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
+    # Ascend override must resolve the context built in initialize_kv_cache.
+    state._mamba_ctx = ctx
     input_batch = SimpleNamespace(
         num_reqs=2,
         idx_mapping=torch.arange(2, dtype=torch.int32),
@@ -234,7 +230,6 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only regression: _ensure_align_ctx moved")
 def test_ensure_align_ctx_falls_back_to_mamba_ctx():
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
     # override must return the context built in initialize_kv_cache instead of
@@ -247,7 +242,6 @@ def test_ensure_align_ctx_falls_back_to_mamba_ctx():
     assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only regression: _ensure_align_ctx moved")
 def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
     # The align context can be absent when preprocess_state runs (e.g. it was
     # torn down by the CUDA-graph memory profiler), so the main-lane override
@@ -376,7 +370,10 @@ def test_prepare_inputs_propagates_padded_request_count():
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("num_spec", [0, 3])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
-def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
+@pytest.mark.parametrize("recover", [False, True])
+def test_prepare_attn_keeps_actual_counts_separate_from_padding(
+    mock_build_attn_metadata, num_spec, graph_mode, recover
+):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
@@ -386,6 +383,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -417,6 +415,8 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     )
 
     assert metadata is expected_metadata
+    if recover:
+        state.recoverssm.record_step.assert_called_once_with(expected_metadata, [], for_capture=False)
     kwargs = mock_build_attn_metadata.call_args.kwargs
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
@@ -441,6 +441,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=None,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,
