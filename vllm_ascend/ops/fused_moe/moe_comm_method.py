@@ -566,6 +566,14 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
+        # The quant layout alone does not prove this device can dispatch it: the
+        # INT and MXFP MegaMoe families are mutually exclusive, so fail here with
+        # an actionable message instead of inside the operator's dtype checks.
+        moe_utils.validate_cann_mega_moe_dispatch_mode(
+            fused_experts_input.quant.quant_type,
+            dispatch_quant_mode,
+            profile=get_current_hardware_profile(),
+        )
 
         if self.mega_moe_symm_buffer is None:
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
