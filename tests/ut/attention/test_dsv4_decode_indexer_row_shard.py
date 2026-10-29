@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.models.deepseek_v4.decode_row_shard import make_decode_indexer_row_plan
@@ -306,3 +307,198 @@ def test_cache_update_receives_all_rows_before_sharded_selection():
         ops.quantize_update_cache_and_select_topk(query, key, weights, key_cache, scale_cache, None, slots, metadata)
     scatter.assert_called_once_with(query, key, key_cache, scale_cache, None, slots)
     select.assert_called_once_with(quantized, weights, q_scale, key_cache, scale_cache, metadata)
+
+
+def make_metadata_builder(mode="eager", deferred=False):
+    builder, common = make_builder(8)
+    common.num_input_tokens = builder.num_actual_tokens
+    common.query_start_loc = common.query_start_loc_cpu.to(torch.int32)
+    builder.common_ratio_to_sas_metadata = {}
+    builder.model_config.hf_config.sliding_window = 4096
+    builder.model_config.max_model_len = 65536
+    builder.speculative_config.num_speculative_tokens = 7
+    builder.vllm_config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    builder.vllm_config.use_v2_model_runner = mode in ("graph", "small_graph")
+    builder.model_config.enforce_eager = mode not in ("graph", "small_graph", "fallback")
+    builder.decode_row_shard_graph_states = {}
+    builder.start_pos_prefill = torch.zeros(13, dtype=torch.int32)
+    builder._zero_i32 = torch.zeros(1, dtype=torch.int32)
+    builder.seqused_q = torch.empty(0, dtype=torch.int32)
+    builder.cu_seqlens_ori_kv = torch.empty(0, dtype=torch.int32)
+    builder.cu_seqlens_cmp_kv = torch.empty(0, dtype=torch.int32)
+    builder._device_metadata_enabled = deferred
+    builder.qli_metadata_buffer = torch.full((1024,), 17, dtype=torch.int32)
+    builder.qli_seqused_k = torch.full((32,), 19, dtype=torch.int32)
+    builder.qli_cmp_residual_k = torch.full((32,), 23, dtype=torch.int32)
+    builder.sas_metadata_buffer = torch.zeros(1024, dtype=torch.int32)
+    builder.compressor_metadata_buffers = None
+    builder.storage_block_size = 128
+    builder.cache_group_key = "indexer-cache"
+    cos = sin = torch.zeros((common.num_input_tokens, 1, 1, 4))
+    return builder, common, cos, sin
+
+
+@pytest.fixture
+def metadata_build_context():
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_config",
+            return_value=SimpleNamespace(enable_dsa_cp=False, enable_dsv4_decode_indexer_tp_shard=True),
+        ) as config,
+        patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size", return_value=8),
+        patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank", return_value=3),
+        patch("vllm_ascend.attention.dsa_v1.DeviceOperator.get_dsa_indexer_quant_mode", return_value=2),
+        patch("vllm_ascend.attention.dsa_v1.DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv"),
+        patch("vllm_ascend.attention.dsa_v1.DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv"),
+        patch("vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa", return_value=(None, None)),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_quant_lightning_indexer_v2_metadata",
+            create=True,
+            return_value=torch.ones(1024, dtype=torch.int32),
+        ) as tiling,
+    ):
+        yield config.return_value, tiling
+
+
+@pytest.mark.parametrize(
+    ("mode", "deferred"),
+    [
+        ("disabled", False),
+        ("disabled", True),
+        ("fallback", False),
+        ("fallback", True),
+        ("eager", False),
+        ("eager", True),
+        ("graph", False),
+        ("small_graph", False),
+    ],
+)
+def test_only_selected_qli_metadata_is_prepared(mode, deferred, metadata_build_context):
+    config, tiling = metadata_build_context
+    config.enable_dsv4_decode_indexer_tp_shard = mode != "disabled"
+    needs_full = mode in ("disabled", "fallback", "small_graph")
+    builder, common, cos, sin = make_metadata_builder(mode, deferred)
+    original_full_buffers = [
+        value.clone() for value in (builder.qli_metadata_buffer, builder.qli_seqused_k, builder.qli_cmp_residual_k)
+    ]
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.MIN_DSV4_DECODE_INDEXER_TP_SHARD_REQUESTS", 32 if mode == "small_graph" else 8
+        ),
+        patch.object(builder, "_build_sas_metadata", return_value=builder.sas_metadata_buffer) as sas,
+        patch.object(builder, "_build_qli_metadata", wraps=builder._build_qli_metadata) as full,
+        patch.object(
+            builder, "_build_decode_row_shard_qli_metadata", wraps=builder._build_decode_row_shard_qli_metadata
+        ) as local,
+    ):
+        req = builder.build_req_metadata(
+            common, builder.seq_lens, 13, cos, sin, full_graph_mode=mode in ("graph", "small_graph")
+        )
+        tasks = builder.take_device_metadata_tasks()
+        if deferred:
+            sas.assert_not_called()
+            tiling.assert_not_called()
+            indexer_tasks = [task for task in tasks if task.stage == DeviceMetadataStage.INDEXER]
+            assert len(indexer_tasks) == 1
+            expected_buffer = builder.qli_metadata_buffer if needs_full else req.decode_row_shard.qli_metadata
+            assert indexer_tasks[0].group_id == id(expected_buffer)
+            for task in tasks:
+                task.run()
+        else:
+            assert tasks == ()
+        sas.assert_called_once()
+        tiling.assert_called_once()
+        if needs_full:
+            full.assert_called_once()
+            local.assert_not_called()
+            assert req.decode_row_shard is None
+            assert req.qli_metadata is builder.qli_metadata_buffer
+            assert torch.equal(req.qli_cu_seqlens_q, common.query_start_loc)
+            assert torch.equal(req.qli_seqused_k, builder.seq_lens // 4)
+            assert torch.equal(req.qli_cmp_residual_k, builder.seq_lens % 4)
+            assert tiling.call_args.kwargs["batch_size"] == 13
+        else:
+            full.assert_not_called()
+            assert local.call_count == (1 if mode == "eager" else 0)
+            assert req.qli_metadata is None
+            assert req.qli_cu_seqlens_q is None
+            assert req.qli_seqused_k is None
+            assert req.qli_cmp_residual_k is None
+            assert torch.equal(req.decode_row_shard.qli_seqused_k, builder.seq_lens[[3, 11]] // 4)
+            assert tiling.call_args.kwargs["batch_size"] == 2
+            for previous, current in zip(
+                original_full_buffers,
+                (builder.qli_metadata_buffer, builder.qli_seqused_k, builder.qli_cmp_residual_k),
+            ):
+                assert torch.equal(previous, current)
+
+
+def test_fallback_after_sharding_refreshes_full_metadata(metadata_build_context):
+    config, tiling = metadata_build_context
+    builder, common, cos, sin = make_metadata_builder()
+    with (
+        patch.object(builder, "_build_sas_metadata", return_value=builder.sas_metadata_buffer),
+        patch.object(builder, "_build_qli_metadata", wraps=builder._build_qli_metadata) as full,
+    ):
+        first = builder.build_req_metadata(common, builder.seq_lens, 13, cos, sin)
+        assert first.decode_row_shard is not None
+        full.assert_not_called()
+        config.enable_dsv4_decode_indexer_tp_shard = False
+        builder.seq_lens.add_(5)
+        builder.common_ratio_to_sas_metadata = {}
+        second = builder.build_req_metadata(common, builder.seq_lens, 13, cos, sin)
+    full.assert_called_once()
+    assert tiling.call_count == 2
+    assert second.decode_row_shard is None
+    assert second.qli_metadata is builder.qli_metadata_buffer
+    assert torch.equal(second.qli_seqused_k, builder.seq_lens // 4)
+    assert torch.equal(second.qli_cmp_residual_k, builder.seq_lens % 4)
+
+
+def test_fullgraph_refreshes_only_local_metadata_as_live_count_changes(metadata_build_context):
+    _, tiling = metadata_build_context
+    builder, common, cos, sin = make_metadata_builder("graph")
+    with (
+        patch.object(builder, "_build_sas_metadata", return_value=builder.sas_metadata_buffer),
+        patch.object(builder, "_build_qli_metadata", wraps=builder._build_qli_metadata) as full,
+    ):
+        first = builder.build_req_metadata(common, builder.seq_lens, 13, cos, sin, full_graph_mode=True)
+        state = first.decode_row_shard
+        pointers = {name: value.data_ptr() for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
+        builder.num_actual_tokens = 8
+        builder.common_ratio_to_sas_metadata = {}
+        second = builder.build_req_metadata(common, builder.seq_lens, 1, cos, sin, full_graph_mode=True)
+    full.assert_not_called()
+    assert tiling.call_count == 2
+    assert first.qli_metadata is second.qli_metadata is None
+    assert second.decode_row_shard is state
+    assert torch.all(state.seq_lens == 0)
+    assert torch.all(state.invalid_rows)
+    assert pointers == {
+        name: value.data_ptr() for name, value in vars(state).items() if isinstance(value, torch.Tensor)
+    }
+    assert builder.take_device_metadata_tasks() == ()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_non_c4_groups_do_not_prepare_qli_metadata(deferred, metadata_build_context):
+    _, tiling = metadata_build_context
+    builder, common, cos, sin = make_metadata_builder(deferred=deferred)
+    builder.compressor_ratio = 128
+    with (
+        patch.object(builder, "_build_sas_metadata", return_value=builder.sas_metadata_buffer) as sas,
+        patch.object(builder, "_build_qli_metadata") as full,
+        patch.object(builder, "_build_decode_row_shard_qli_metadata") as local,
+    ):
+        req = builder.build_req_metadata(common, builder.seq_lens, 13, cos, sin)
+        tasks = builder.take_device_metadata_tasks()
+        assert all(task.stage != DeviceMetadataStage.INDEXER for task in tasks)
+        for task in tasks:
+            task.run()
+    sas.assert_called_once()
+    full.assert_not_called()
+    local.assert_not_called()
+    tiling.assert_not_called()
+    assert req.decode_row_shard is None
+    assert req.qli_metadata is None

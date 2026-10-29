@@ -1839,18 +1839,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dspark_swa=dspark_swa_indices is not None,
             )
 
+        # A row shard carries all QLI inputs consumed by the indexer. Only
+        # fallback batches need the full-batch QLI buffers and producer task.
+        needs_full_qli_metadata = self.compressor_ratio == 4 and decode_row_shard is None
         if self._device_metadata_enabled:
+            if needs_full_qli_metadata:
 
-            def build_qli_metadata() -> None:
-                self._build_qli_metadata(
-                    metadata_cache=metadata_cache,
-                    query_start_loc=query_start_loc,
-                    seq_lens=seq_lens,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                )
+                def build_qli_metadata() -> None:
+                    self._build_qli_metadata(
+                        metadata_cache=metadata_cache,
+                        query_start_loc=query_start_loc,
+                        seq_lens=seq_lens,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                    )
 
-            if self.compressor_ratio == 4:
                 self._device_metadata_tasks = (
                     DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
@@ -1872,7 +1875,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ),
                 )
             sas_metadata = self.sas_metadata_buffer
-            qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
+            qli_metadata = self.qli_metadata_buffer if needs_full_qli_metadata else None
         else:
             self._device_metadata_tasks = ()
             sas_metadata = build_sas_metadata()
@@ -1884,7 +1887,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                 )
-                if self.compressor_ratio == 4
+                if needs_full_qli_metadata
                 else None
             )
 
@@ -1908,10 +1911,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         qli_cu_seqlens_q = None
         qli_seqused_k = None
         qli_cmp_residual_k = None
-        if self.compressor_ratio == 4:
-            # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length; the persistent builder buffers are
-            # refreshed in _build_qli_metadata.
+        if needs_full_qli_metadata:
+            # Only expose full QLI inputs after scheduling their producer.
+            # Sharded consumers use decode_row_shard instead.
             qli_cu_seqlens_q = query_start_loc
             qli_seqused_k = self.qli_seqused_k[:num_reqs]
             qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
