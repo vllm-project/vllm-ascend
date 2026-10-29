@@ -145,6 +145,9 @@ def _make_modelslim_moe_weight_loader(
     # `__wrapped__` to the bound method and reintroduce the layer reference.
     # Preserve its `__dict__` merge semantics for loader flags such as
     # `supports_moe_loading` without retaining the bound method.
+    modelslim_moe_weight_loader.__module__ = getattr(
+        unbound_loader, "__module__", modelslim_moe_weight_loader.__module__
+    )
     modelslim_moe_weight_loader.__name__ = getattr(unbound_loader, "__name__", modelslim_moe_weight_loader.__name__)
     modelslim_moe_weight_loader.__qualname__ = getattr(
         unbound_loader, "__qualname__", modelslim_moe_weight_loader.__qualname__

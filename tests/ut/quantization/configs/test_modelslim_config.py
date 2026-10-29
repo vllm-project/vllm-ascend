@@ -312,6 +312,9 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertIsInstance(mapped_loader, MethodType)
         self.assertIs(mapped_loader.__self__, layer)
         self.assertIs(mapped_loader.supports_moe_loading, True)
+        # The remaining `functools.wraps` metadata must also survive the copy.
+        self.assertEqual(mapped_loader.__name__, "weight_loader")
+        self.assertEqual(mapped_loader.__module__, MoELayer.weight_loader.__module__)
         # `functools.wraps` would store the bound method back in `__wrapped__`.
         self.assertFalse(hasattr(mapped_loader, "__wrapped__"))
 
