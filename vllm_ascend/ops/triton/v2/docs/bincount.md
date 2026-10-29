@@ -83,24 +83,19 @@ operator component in the frozen runtime, not full-framework/model dispatch.
 A2, model E2E, graph execution and empirical recompilation counts are outside
 the measured scope.
 
-## Reproducible performance cases
+## Profiling protocol
 
-`benchmarks/benchmark_bincount.py` selects shape, distribution and optional
-frozen source from the command line. It checks final outputs against a CPU
-reference and reports source hashes and call counts. It does not use Python
-wall-clock timing. `profile-all` warms up and runs a declared number of calls;
-`profile-op` invokes the wrapper once for externally selected kernel profiling.
+Single-operator measurements use an external msprof capture and a task-local,
+source-identified driver. It selects one declared shape, warms up the wrapper,
+runs a fixed number of calls and checks final outputs against an independent
+CPU reference. Timing comes from the exported device-task CSVs, rather than
+Python wall-clock measurements. Both sources receive identical inputs, layouts,
+workspace policy and generation history. The cases and retained sample counts
+are specified below.
 
-```bash
-msprof --output=./bincount-profile \
-  --application="python benchmarks/benchmark_bincount.py --requests 64 --prompt 4096 --output 256 --warmup-calls 3 --measured-calls 10"
-```
-
-The issue's legal stress case is selected with `--requests 64 --state-rows 64
---prompt 1047552 --output 0 --pattern repeat`; the next boundaries use 1048576
-and 1049600. Use `--token 31` for the smaller repeated-token control.
-Use a fresh process and an external timeout for old launch-limit failures.
-Do not treat failed launches as zero latency.
+The issue cases use exactly 64 backing rows, repeated token7 and no output
+history. Use a fresh process and an external timeout when reproducing an old
+launch-limit failure; a failed launch is not a zero-latency sample.
 
 ### Recorded scope
 
@@ -110,7 +105,7 @@ Matched captures use one Ascend910_9362 (40 Vector cores), CANN9.2.0,
 PyTorch2.10.0, torch_npu2.10.0.post4 and Triton-Ascend3.2.2.
 Inputs/mappings are int32 and outputs are contiguous for these measurements.
 Ordinary cases have two inactive backing rows and descending active mappings;
-the exact issue cases have 64 backing rows. The benchmark supports both.
+the exact issue cases have 64 backing rows.
 Each ordinary capture has three warmups and ten retained complete invocations,
 with a post-capture exact output check. The table sums device-task durations
 per invocation, including Torch initialization; it is not host-call or model
