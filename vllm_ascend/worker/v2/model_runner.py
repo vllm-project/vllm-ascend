@@ -443,6 +443,7 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
@@ -476,6 +477,7 @@ class NPUModelRunner(GPUModelRunner):
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
+                is_profiling=is_profiling,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
             self._uses_flashmla = any(
@@ -650,7 +652,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not (dummy_run or is_profile):
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)

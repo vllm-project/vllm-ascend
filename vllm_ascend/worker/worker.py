@@ -780,6 +780,11 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if getattr(getattr(self.vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            # HiSparse uses Core's shared-slab builder and allocator. The builder
+            # already accounts for resident pages, indexer pages and hot slots;
+            # Ascend's independent per-layer allocation correction does not apply.
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory

@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -239,6 +240,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             mamba_specs[layer_name] = spec
             continue
 
+        if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
+            # HiSparse owns row-packed host/resident/hot views. Keep the
+            # upstream MLA spec instead of selecting Ascend's split K/RoPE layout.
+            # Ascend may retain an indexer only for cache writes while reusing
+            # another layer's top-k. The physical pool must follow the actual
+            # runtime group, not merely the presence of an indexer module.
+            kv_cache_spec[layer_name] = replace(
+                spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader
+            )
+            continue
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
@@ -303,6 +314,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
+            if vllm_config.attention_config.hisparse_config is not None and (cache_sparse_li_c8 or cache_sparse_li_c4):
+                raise ValueError("Ascend HiSparse currently requires an unquantized indexer KV cache")
             head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -329,6 +342,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_li_c4=cache_sparse_li_c4,
                 cache_sparse_li_c8=cache_sparse_li_c8,
                 sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
+                cache_role=SparseCacheRole.INDEXER,
             )
             continue
 
@@ -359,6 +373,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
+    if vllm_config.attention_config.hisparse_config is not None:
+        from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+        from vllm_ascend.distributed.kv_transfer.hisparse.binding import align_hisparse_indexer_specs
+
+        return align_hisparse_indexer_specs(resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers))
     return kv_cache_spec
 
 
@@ -504,6 +524,9 @@ def build_attn_metadata(
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
     for i, kv_cache_spec in enumerate(kv_cache_groups):
+        # HiSparse resident/hot groups have storage but no attention layers.
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.

@@ -155,6 +155,9 @@ class NPUPlatform(Platform):
     def is_pin_memory_available(cls):
         return True
 
+    def get_hisparse_backend_cls(self) -> str:
+        return "vllm_ascend.distributed.kv_transfer.hisparse.backend.AscendHiSparseBackend"
+
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True

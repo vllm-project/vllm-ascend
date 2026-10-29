@@ -159,6 +159,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            return AscendHiSparseIndexerMetadataBuilder
         return AscendSFAIndexerMetadataBuilder
 
     @staticmethod
@@ -1107,3 +1109,45 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
         )
+
+
+class AscendHiSparseIndexerMetadataBuilder(AscendSFAIndexerMetadataBuilder):
+    """Map logical indexer pages into HiSparse's shared device allocation."""
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        context = vllm_config.compilation_config.static_forward_context
+        self._cache_layers = [context[name] for name in layer_names]
+        self._physical_metadata_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        scheduler = vllm_config.scheduler_config
+        max_capture = vllm_config.compilation_config.max_cudagraph_capture_size or 0
+        self._table_capacity = (
+            max(scheduler.max_num_seqs, max_capture) + 1,
+            _round_up(vllm_config.model_config.max_model_len, self.kernel_block_size) // self.kernel_block_size,
+        )
+
+    def _build(self, common_attn_metadata, buffer_key, use_cached_rope, copy_rope, **kwargs):
+        metadata = super()._build(common_attn_metadata, buffer_key, use_cached_rope, copy_rope, **kwargs)
+        strides = {getattr(layer, "hisparse_block_stride", 1) for layer in self._cache_layers}
+        if len(strides) != 1:
+            raise RuntimeError("HiSparse indexers sharing metadata must have the same physical block stride")
+        stride = strides.pop()
+        if stride == 1:
+            return metadata
+        if buffer_key not in self._physical_metadata_buffers:
+            self._physical_metadata_buffers[buffer_key] = (
+                torch.empty(self._table_capacity, dtype=metadata.block_table.dtype, device=self.device),
+                torch.empty(self._slot_capacity, dtype=metadata.slot_mapping.dtype, device=self.device),
+            )
+        table_buffer, slot_buffer = self._physical_metadata_buffers[buffer_key]
+        rows, columns = metadata.block_table.shape
+        table = table_buffer[:rows, :columns]
+        slots = slot_buffer[: metadata.slot_mapping.numel()]
+        torch.mul(metadata.block_table, stride, out=table)
+        logical = metadata.slot_mapping
+        physical = (logical // self.kernel_block_size) * (self.kernel_block_size * stride)
+        physical += logical % self.kernel_block_size
+        slots.copy_(torch.where(logical >= 0, physical, -1))
+        metadata.block_table = table
+        metadata.slot_mapping = slots
+        return metadata

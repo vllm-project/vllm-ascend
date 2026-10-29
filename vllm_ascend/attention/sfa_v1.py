@@ -366,6 +366,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
+
+            return AscendHiSparseMetadataBuilder
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
@@ -386,6 +390,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+
+            return AscendHiSparseImpl
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
@@ -678,9 +686,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope:
+        elif self.nope or self.vllm_config.attention_config.hisparse_config is not None:
             # MTP accepted counts are device-resident. NoPE operators use
-            # device lengths and scheduler upper bounds, so need no CPU copy.
+            # device lengths and scheduler upper bounds, as does HiSparse's
+            # staging plan, so neither path needs an exact CPU copy.
             seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")

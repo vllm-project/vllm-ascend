@@ -87,8 +87,6 @@ def _deepseek_v2_mla_attention_init(
 ) -> None:
     # Zero-argument super() is unavailable because this function is defined
     # outside the class and assigned to DeepseekV2MLAAttention.__init__.
-    # index_group_builder is a GPU HiSparse feature; the Ascend MLA stack
-    # does not consume it, so it is accepted for signature compatibility.
     nn.Module.__init__(self)
 
     self.hidden_size = hidden_size
@@ -282,6 +280,7 @@ def _deepseek_v2_mla_attention_init(
         quant_config,
         prefix,
         skip_topk=_skip_topk and not mtp_layer,
+        index_group_builder=index_group_builder,
         non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 
