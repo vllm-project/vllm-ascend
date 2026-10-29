@@ -206,7 +206,6 @@ class EngramGvaPool:
         self.slot_bytes = ((self.used_bytes + _GIB - 1) // _GIB) * _GIB
         self._offload = self._initialize_offload()
         self._pool_base = 0
-        self._backing = None
         self._owner_storage = None
         self.encoded_ids = None
         self.count = None
@@ -316,9 +315,9 @@ class EngramGvaPool:
             backing = (ctypes.c_uint8 * self.used_bytes).from_address(self._pool_base)
             storage = torch.frombuffer(backing, dtype=torch.uint8).reshape(self.rows_per_slot, self.row_bytes)
             storage.zero_()
-            return backing, storage
+            return storage
 
-        self._backing, self._owner_storage = self._run_collective_stage("owner backing creation", create)
+        self._owner_storage = self._run_collective_stage("owner backing creation", create)
 
     def _create_lookup_buffers(self, capacity: int) -> None:
         def create():
@@ -421,7 +420,6 @@ class EngramGvaPool:
         self._release_offload()
         self._pool_base = 0
         self._owner_storage = None
-        self._backing = None
         self.owner_map = None
         self.encoded_ids = None
         self.count = None
