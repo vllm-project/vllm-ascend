@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib.metadata import version
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from packaging.version import Version
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -23,7 +26,12 @@ def reference(selected, positions, compress_ratio):
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @torch.inference_mode()
 def test_prepare_indexer_indices(topk, tokens, compress_ratio):
-    if tokens == 129 and topk == 1 and get_ascend_device_type() == AscendDeviceType.A5:
+    if (
+        tokens == 129
+        and topk == 1
+        and get_ascend_device_type() == AscendDeviceType.A5
+        and Version(version("triton-ascend")).base_version == "3.2.2"
+    ):
         pytest.skip("A5 Triton Ascend 3.2.2 returns incorrect indices for tokens=129, topk=1")
     torch.manual_seed(41)
     selected = torch.randint(-3, 1000, (tokens, topk), dtype=torch.int32, device="npu")

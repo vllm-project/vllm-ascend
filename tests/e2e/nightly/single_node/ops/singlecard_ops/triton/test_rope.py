@@ -1,7 +1,9 @@
 import gc
+from importlib.metadata import version
 
 import pytest
 import torch
+from packaging.version import Version
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -152,8 +154,8 @@ def _rope_fp8_pytorch_native(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="Requires Ascend A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim", ORDINARY_ROPE_CASES)
@@ -172,6 +174,13 @@ def test_rotary_embedding_triton_kernel(
     seed: int,
     device: str,
 ) -> None:
+    if (
+        get_ascend_device_type() == AscendDeviceType.A5
+        and Version(version("triton-ascend")).base_version == "3.2.2"
+        and not is_neox_style
+        and (num_tokens, num_q_heads, num_k_heads, head_size, rotary_dim) == (1, 64, 1, 64, 64)
+    ):
+        pytest.skip("A5 Triton Ascend 3.2.2 fails non-NeoX ordinary RoPE for the small full-RoPE scene")
     torch.manual_seed(seed)
     torch.set_default_device(device)
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
@@ -193,8 +202,8 @@ def test_rotary_embedding_triton_kernel(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="Requires Ascend A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -215,6 +224,13 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
     seed: int,
     device: str,
 ) -> None:
+    if (
+        get_ascend_device_type() == AscendDeviceType.A5
+        and Version(version("triton-ascend")).base_version == "3.2.2"
+        and not is_neox_style
+        and (num_tokens, num_q_heads, num_k_heads, head_size, rotary_dim) == (1, 64, 1, 64, 64)
+    ):
+        pytest.skip("A5 Triton Ascend 3.2.2 fails non-NeoX ordinary RoPE for the small full-RoPE scene")
     torch.manual_seed(seed)
     torch.set_default_device(device)
     cos_sin_cache = torch.randn(max_position_embeddings, rotary_dim, dtype=dtype, device=device)
