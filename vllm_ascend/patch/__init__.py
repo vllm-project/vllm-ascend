@@ -28,6 +28,23 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_kda_recoverssm.py:
+#   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
+#   Why: The upstream metadata builder imports its CUDA context directly.
+#   How: Replace only the context class on GLM workers with RecoverSSM enabled.
+#   Related PR: No upstream context-factory extension point exists yet.
+#   Future plan: Remove when upstream allows the backend to select the context.
+# --------------------------------
+# * platform/patch_replayssm_config.py:
+#   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
+#   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
+#        while Ascend also implements it for GLM-Next.
+#   How: Validate GLM's supported execution/cache/PD contract and derive
+#        use_kda_recoverssm from the existing use_replayssm flag. Other models
+#        and disabled configurations retain the upstream validator.
+#   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
+#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+# --------------------------------
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
@@ -796,8 +813,7 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, VL encoder disaggregation,
-#       draft_window_size, enable_dsa_cp, suffix
+#       V2-ready (pooling KV, draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)
 #       default to v1.
@@ -1105,6 +1121,23 @@
 #       No, fp8 load format and backend constraints are model/backend specific.
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
+#
+# ** 11. File: worker/patch_mm_input_norm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fusion.mm_input_norm.FusedMMInputNorm`
+#    Why:
+#       v0.32.0 persists processor-derived normalization buffers, so legacy
+#       sharded checkpoints fail with missing visual.input_norm.weight/bias.
+#       Dummy loading can also overwrite these constants.
+#    How:
+#       Wrap construction once and register weight/bias as nonpersistent
+#       buffers, preserving device normalization and strict weight validation.
+#       Applying this on upstream main with the fix retains the same behavior.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/62767
+#    Future Plan:
+#       Remove when all supported vLLM baselines contain commit
+#       90c4a1a73eecea0428ee4303ad96c9fdeaac3f80 (or an equivalent backport).
 #
 #
 # ** 14. File: worker/patch_qwen3_5.py**

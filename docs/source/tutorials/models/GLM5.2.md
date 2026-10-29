@@ -30,9 +30,9 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
-|  `GLM-5.2-w8a8c8`        | 2 A3 series (128GB × 8) nodes or 4 A2 series (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-w8a8c8`        | 2 A3 series (64GB × 16) nodes or 4 A2 series (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
 |  `GLM-5.2-W8A8C8-mxfp8` | 2 950DT products (96GB × 8) nodes for colocated deployment | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
-|  `GLM-5.3-w8a8c8`        | 2 A3 series (128GB × 8) nodes or 4 A2 series (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-w8a8c8`        | 2 A3 series (64GB × 16) nodes or 4 A2 series (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
 |  `GLM-5.3-W8A8C8-mxfp8` | 2 950DT products (96GB × 8) nodes for colocated deployment | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
 |  `GLM-5.3-W4A4C8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w4a4c8-mxfp4) |
 |  `GLM-5.2-w4a4c8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
@@ -41,9 +41,13 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 - `GLM-5.2-w4a4c8-mxfp4` (950PR&950DT Products, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
+The checkpoints linked above are already quantized and can be served directly. For self-quantization, follow the installation and command examples in the [msModelSlim quantization guide](https://www.hiascend.com/document/detail/en/mindstudio/2610/TITools/msModelSlim/docs/en/user_guide/feature_guide/quick_quantization_v1/usage.md) and select the configuration for the exact model and target hardware from the [model recipes](https://gitcode.com/Ascend/msmodelslim/tree/master/lab_practice). Do not reuse a different model's YAML file.
+
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
+Before using any script with `VLLM_USE_FASTOKENS=1`, install the [fastokens tokenizer](https://github.com/crusoecloud/fastokens) in the same Python environment as vLLM with `python -m pip install fastokens`. Run `python -c "import fastokens"` in that environment to check that the package is available.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -230,7 +234,7 @@ Before running a role script, export `MODEL_PATH`, `LOCAL_IP`, and
 master address; non-master PP ranks run headless. Follow the master-address
 variable in the selected script. Use the same checkpoint path on all nodes.
 
-#### 5.1.1 Single-Node Deployment
+#### 5.1.1 Single-Node Deployment {: #511-single-node-deployment }
 
 === "950DT products"
 
@@ -297,7 +301,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
 
     ##### A3 Series {: #glm52-53-5-1-1-a3 }
 
-    For a reduced context of 32768 tokens, the W8A8C8 checkpoint can run on 1 A3 series (128GB × 8) with DP1/TP16. Select the GLM-5.2 or GLM-5.3 checkpoint below. This is not the full-context deployment: use the multi-node deployment for longer contexts.
+    For a reduced context of 32768 tokens, the W8A8C8 checkpoint can run on 1 A3 series (64GB × 16) with DP1/TP16. Select the GLM-5.2 or GLM-5.3 checkpoint below. This is not the full-context deployment: use the multi-node deployment for longer contexts.
 
     ```shell
     # GLM-5.3:
@@ -345,7 +349,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       three speculative tokens with an eager draft model.
     - `HCCL_BUFFSIZE=200` follows the common HCCL buffer definition above.
 
-#### 5.1.2 Multi-node Deployment
+#### 5.1.2 Multi-node Deployment {: #512-multi-node-deployment }
 
 If you want to deploy a multi-node environment, first verify the data-plane network by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
@@ -890,7 +894,7 @@ is deprecated); `fuse_muls_add` belongs under `ascend_compilation_config`.
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 The A2 four-node commands in this section do not enable fused MC2.
 
-#### 5.1.3 Prefill-Decode Disaggregation
+#### 5.1.3 Prefill-Decode Disaggregation {: #513-prefill-decode-disaggregation }
 
 Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
 Topology, role-specific limits and connector settings are explained in each
@@ -899,7 +903,7 @@ hardware tab; apply only the settings for the selected platform.
 Select the hardware tab below for the prefill and decode topology. Prefill and decode run on separate node groups and exchange KV cache through Mooncake.
 
 The ordinary PD examples use Mooncake for KV transfer between Prefill and
-Decode. KV pooling is configured separately in Section 5.1.4: all three
+Decode. KV pooling is configured separately in [Section 5.1.4](#514-memcache-kv-cache-pool-deployment): all three
 hardware tabs combine Mooncake P-to-D transfer with an Ascend Store
 connector backed by MemCache. Follow each tab's connector version,
 layerwise setting and topology.
@@ -919,6 +923,8 @@ layerwise setting and topology.
     1. prepare the script `launch_online_dp.py` on each Decode node:
 
         <a id="glm-950-dp-launcher"></a>
+
+        The launcher passes these positional arguments to `run_dp_template.sh`: `$1` = visible devices, `$2` = API port, `$3` = global DP size, `$4` = global DP rank, `$5` = DP master IP, `$6` = DP RPC port, and `$7` = TP size. Start the launcher from the directory containing both scripts; do not invoke the Decode template without its arguments.
 
         ```python
         import argparse
@@ -1360,7 +1366,7 @@ layerwise setting and topology.
             8000 8001 8002 8003 8004 8005 8006 8007
     ```
 
-    Use `glm` in requests to the proxy and follow Section 6 for smoke tests.
+    Use `glm` in requests to the proxy and follow [Section 6](#6-functional-verification) for smoke tests.
     For pooling, additionally verify MemCache saves, remote loads and hit metrics
     with repeated prefixes; a successful request alone is not evidence of pool
     reuse. Validate long-context capacity and accuracy on the exact model/build
@@ -1408,7 +1414,7 @@ layerwise setting and topology.
     This A3 reference serves GLM-5.3 W8A8C8 with a **200,000-token** maximum
     sequence length for the 198k workload. It uses one Prefill engine spanning
     P0/P1 with TP16 and PP2, and sixteen TP2 Decode engines on D0/D1.
-    Section 5.1.4 adds MemCache KV pooling to the same deployment.
+    [Section 5.1.4](#514-memcache-kv-cache-pool-deployment) adds MemCache KV pooling to the same deployment.
 
     These scripts incorporate the supplied 198k PD+PP configuration; no new
     runtime, accuracy, or performance validation is implied. The 200,000-token
@@ -1424,6 +1430,8 @@ layerwise setting and topology.
     `LOCAL_WORLD_SIZE=16` and OpenMP settings from the source. Check static-kernel
     compatibility with the selected build and TP2 worker layout. Fused MC2 mode
     selection is version-dependent; confirm the effective mode in startup logs.
+
+    Here, “198k” is the workload label, not an additional sequence-length setting. The `--max-model-len 200000` limit applies to prompt and generated tokens together; leave room for the requested output. The colocated example's separate 202752-token limit does not apply to this PD deployment.
 
     ###### Topology and Prerequisites
 
@@ -1453,7 +1461,11 @@ layerwise setting and topology.
        environment and both roles' connector topology. Both roles explicitly
        use int8 KV cache and int8 indexer KV cache for these W8A8C8 weights.
 
+    For `MooncakeConnectorV2`, let `B` be `kv_port` and `N = DP × PP × PCP × TP`. Worker handshake ports occupy `B` through `B + N - 1`; scheduler control ports occupy `B + N` through `B + N + DP - 1`. In this A3 PD example, allow Prefill ports `30000-30032` and Decode ports `30100-30147` between the participating nodes. The transfer engine also advertises its own RPC port; check the startup handshake metadata for the selected build rather than assuming `kv_port` is its only network port.
+
     <a id="glm53-pd-a3-scripts"></a>
+
+    The launcher passes these positional arguments to `run_dp_template.sh`: `$1` = visible devices, `$2` = API port, `$3` = global DP size, `$4` = global DP rank, `$5` = DP master IP, `$6` = DP RPC port, and `$7` = TP size. Start the launcher from the directory containing both scripts; do not invoke the Decode template without its arguments.
 
     ###### Prepare the Scripts
 
@@ -2390,7 +2402,7 @@ layerwise setting and topology.
 
     The request counts report successful completion, not an accuracy score.
 
-#### 5.1.4 MemCache KV Cache Pool Deployment
+#### 5.1.4 MemCache KV Cache Pool Deployment {: #514-memcache-kv-cache-pool-deployment }
 
 Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
 Topology, role-specific limits and connector settings are explained in each
@@ -2414,7 +2426,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     1. prepare the script `launch_online_dp.py` on each Decode node:
 
-        Use the [950DT DP launcher](#glm-950-dp-launcher) from Section 5.1.3.
+        Use the [950DT DP launcher](#glm-950-dp-launcher) from [Section 5.1.3](#513-prefill-decode-disaggregation).
 
     2. prepare the script `run_dp_template.sh` on each node.
 
@@ -2880,7 +2892,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     This extends the same four-node PP/PD topology with `MultiConnector`:
     `MooncakeConnectorV2` transfers KV cache from Prefill to Decode, and
     `AscendStoreConnector` provides non-layerwise MemCache pooling. Retain
-    the launcher, PP placement, and proxy routing from the A3 tab of Section 5.1.3.
+    the launcher, PP placement, and proxy routing from the A3 tab of [Section 5.1.3](#513-prefill-decode-disaggregation).
     This is the supplied 198k pooled variant, with `--max-model-len 200000`.
     Both roles enable prefix caching; unlike the non-pooled variant, Decode
     must not use `--no-enable-prefix-caching`. Prefill retains fused MC2 mode 2
@@ -3860,7 +3872,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             8000 8001 8002 8003 8000 8001 8002 8003
         ```
 
-### 5.2 1M Context Configuration
+### 5.2 1M Context Configuration {: #52-1m-context-configuration }
 
 Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
 Topology, role-specific limits and connector settings are explained in each
@@ -3884,7 +3896,7 @@ Select the tab that matches your deployment hardware.
 
     1. prepare the script `launch_online_dp.py` on each node:
 
-        Use the [950DT DP launcher](#glm-950-dp-launcher) from Section 5.1.3.
+        Use the [950DT DP launcher](#glm-950-dp-launcher) from [Section 5.1.3](#513-prefill-decode-disaggregation).
 
     2. prepare the script `run_dp_template.sh` on each node.
 
@@ -4193,54 +4205,8 @@ Select the tab that matches your deployment hardware.
 
     1. Save `launch_online_dp.py` on each Decode node:
 
-        ```python
-        import argparse
-        import multiprocessing
-        import subprocess
-        import sys
+        Use the [A3 DP launcher](#glm53-pd-a3-scripts) from [Section 5.1.3](#513-prefill-decode-disaggregation) unchanged. Save it beside the Decode template on each Decode node.
 
-
-        def run_command(args, local_rank):
-            dp_rank = args.dp_rank_start + local_rank
-            devices = ",".join(str(i) for i in range(
-                local_rank * args.tp_size, (local_rank + 1) * args.tp_size))
-            subprocess.run([
-                "bash", args.script, devices, str(args.vllm_start_port + local_rank),
-                str(args.dp_size), str(dp_rank), args.dp_address,
-                str(args.dp_rpc_port), str(args.tp_size),
-            ], check=True)
-
-
-        def main():
-            parser = argparse.ArgumentParser()
-            parser.add_argument("--dp-size", type=int, required=True)
-            parser.add_argument("--tp-size", type=int, required=True)
-            parser.add_argument("--dp-size-local", type=int, required=True)
-            parser.add_argument("--dp-rank-start", type=int, required=True)
-            parser.add_argument("--dp-address", required=True)
-            parser.add_argument("--dp-rpc-port", type=int, default=16600)
-            parser.add_argument("--vllm-start-port", type=int, default=8000)
-            parser.add_argument("--script", default="./run_dp_template.sh")
-            args = parser.parse_args()
-            if min(args.dp_size, args.tp_size, args.dp_size_local) <= 0:
-                parser.error("Parallel sizes must be positive")
-            if args.dp_rank_start < 0 or args.dp_rank_start + args.dp_size_local > args.dp_size:
-                parser.error("Local ranks must be within the global DP group")
-            if args.dp_size_local * args.tp_size > 16:
-                parser.error("This A3 configuration exposes 16 devices per node")
-            processes = []
-            for local_rank in range(args.dp_size_local):
-                process = multiprocessing.Process(target=run_command, args=(args, local_rank))
-                processes.append(process)
-                process.start()
-            for process in processes:
-                process.join()
-            return 1 if any(process.exitcode != 0 for process in processes) else 0
-
-
-        if __name__ == "__main__":
-            sys.exit(main())
-        ```
 
     2. prepare the script `run_dp_template.sh` on each node.
 
@@ -4713,7 +4679,7 @@ Select the tab that matches your deployment hardware.
     - TurboQuant cannot be combined with DCP or the int8 C8 cache and therefore
       does not apply to this 1M example. See [Performance Tuning](#9-performance-tuning).
 
-## 6 Functional Verification
+## 6 Functional Verification {: #6-functional-verification }
 
 All serving commands on this page use `--served-model-name glm`, including GLM-5.3. For colocated deployment, use the API-facing node and its configured HTTP port. For PD deployment, use the proxy host and port `8000`; do not send client requests to a headless worker.
 
@@ -4853,12 +4819,12 @@ request; reserve output tokens within the 1,048,576-token context limit.
 
 | Scenario | Hardware | Input / Output | Prefix cache hit rate | Deployment reference |
 | --- | --- | --- | --- | --- |
-| Prefill-only | A3 | 16k / 1, 128k / 1 | 0% | Section 5.1.3 |
-| Decode-only | A3 | 16k / 1k, 128k / 1k | 100% | Section 5.1.3 |
-| Complete PD | A3 | 16k / 1k | 0% | Section 5.1.3 |
-| Complete PD, 1M context | A3 | Approximately 1M / 1k | 0% | Section 5.2 |
-| Pooling | A3 | 128k / 1k | 90%, 32 distinct prefixes | Section 5.1.4 |
-| Pooling | A3 | 40k-80k / 2.5k | Repeated prefixes | Section 5.1.4 |
+| Prefill-only | A3 | 16k / 1, 128k / 1 | 0% | [Section 5.1.3](#513-prefill-decode-disaggregation) |
+| Decode-only | A3 | 16k / 1k, 128k / 1k | 100% | [Section 5.1.3](#513-prefill-decode-disaggregation) |
+| Complete PD | A3 | 16k / 1k | 0% | [Section 5.1.3](#513-prefill-decode-disaggregation) |
+| Complete PD, 1M context | A3 | Approximately 1M / 1k | 0% | [Section 5.2](#52-1m-context-configuration) |
+| Pooling | A3 | 128k / 1k | 90%, 32 distinct prefixes | [Section 5.1.4](#514-memcache-kv-cache-pool-deployment) |
+| Pooling | A3 | 40k-80k / 2.5k | Repeated prefixes | [Section 5.1.4](#514-memcache-kv-cache-pool-deployment) |
 
 ### 9.3 TurboQuant KV Cache for GLM-5.2 and GLM-5.3
 
@@ -4870,7 +4836,7 @@ Use `--dtype bfloat16` on A2/A3 and disable xLite graph mode.
 `--kv-cache-dtype turboquant_4bit_nc` replaces the int8 attention KV cache
 and cannot be combined with `enable_sparse_sfa_c8: true`.
 It does not support context parallelism (DCP/PCP), so it must not be
-enabled in the DCP-enabled 1M reference deployment in Section 5.2.
+enabled in the DCP-enabled 1M reference deployment in [Section 5.2](#52-1m-context-configuration).
 In PD deployments, set `"use_ascend_direct": false` on the Mooncake
 connector on both roles, and keep the cache format consistent across
 Prefill and Decode. Revalidate capacity and accuracy after changing it.

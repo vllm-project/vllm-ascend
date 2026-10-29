@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -190,6 +191,17 @@ def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculat
 
     assert scheduler._get_transfer_block_ids((), prompt_len=32) == ()
     assert scheduler._get_transfer_block_ids(([10, 11],), prompt_len=32) == ([10, 11],)
+
+
+def test_base_scheduler_keeps_recoverssm_checkpoint_and_trims_native_scratch_blocks() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    scheduler.num_speculative_tokens = 5
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [[make_mamba_spec()], [replace(make_mamba_spec(), num_speculative_blocks=5)]]
+
+    assert scheduler._get_transfer_block_ids(([7], [20, 21, 22, 23, 24, 25]), prompt_len=32) == ([7], [20])
 
 
 def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:

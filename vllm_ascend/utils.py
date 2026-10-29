@@ -1024,6 +1024,20 @@ def enable_sp(vllm_config=None) -> bool:
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
+def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
+    """Pad the token dim of ``hidden_states`` up to the TP size.
+
+    Always call pad(), even with zero padding, to avoid specializing the
+    padding branch during tracing.
+    """
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    padding = (-hidden_states.shape[0]) % tp_size
+    pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
+    return torch.nn.functional.pad(hidden_states, pad)
+
+
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp
@@ -1386,9 +1400,6 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 # the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
 A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 
-# Dense-kernel minimum for upstream alignment, not the final M3 cache block.
-MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
-
 # Enabled with ``--kv-cache-dtype mxfp8``, like the other Ascend C8 KV cache
 # flavors. The ModelSlim checkpoint recipe (fa_v.scale weights) is loaded when
 # present; it is not the switch.
@@ -1400,24 +1411,6 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
-
-
-def is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:
-    if vllm_config is None:
-        return False
-    model_config = vllm_config.model_config
-    cache_config = vllm_config.cache_config
-    architectures = getattr(getattr(model_config, "hf_config", None), "architectures", None) or ()
-    return (
-        any(
-            architecture in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
-            for architecture in architectures
-        )
-        and cache_config is not None
-        and cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-        and bool(cache_config.kv_cache_dtype_skip_layers)
-        and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-    )
 
 
 def refresh_block_size(vllm_config):

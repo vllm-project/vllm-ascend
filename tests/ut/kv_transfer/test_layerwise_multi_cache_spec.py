@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     NamedKVCacheSpec,
     build_layerwise_reuse_layout,
 )

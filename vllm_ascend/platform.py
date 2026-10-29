@@ -125,6 +125,10 @@ class NPUPlatform(Platform):
         pass
 
     @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+
+    @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
         """Resolve a bound runtime device ordinal to its host physical NPU ID.
 
@@ -1435,6 +1439,7 @@ def _setup_compile_backend(
                 "vllm::mla_forward",
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
+                "vllm::glm5next_kda_forward",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False

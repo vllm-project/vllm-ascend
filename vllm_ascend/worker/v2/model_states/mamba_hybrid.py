@@ -392,6 +392,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             use_pcp_padding=pcp_context is not None,
             pcp_context=pcp_context,
         )
+        if self.recoverssm is not None:
+            self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
 
     def _build_attn_metadata_for_batch(
