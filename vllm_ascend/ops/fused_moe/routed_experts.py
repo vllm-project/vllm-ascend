@@ -338,38 +338,6 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
-def _record_v2_eplb_load(
-    router: FusedMoERouter, result: FusedExpertsResult, local_load: torch.Tensor | None = None
-) -> None:
-    """Record the local expert counts supplied by the MoE operator."""
-    eplb_state = router.eplb_state
-    if eplb_state is None:
-        return
-    expert_tokens = result.expert_tokens
-    if expert_tokens is None:
-        raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
-    expert_load_view = eplb_state.expert_load_view
-    record_enabled = eplb_state.should_record_tensor
-    if local_load is not None:
-        expert_tokens = local_load
-        assert eplb_state.allgather_record_tensor is not None
-        record_enabled = eplb_state.allgather_record_tensor > 0
-    if expert_load_view is None or record_enabled is None:
-        raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
-    if expert_tokens.numel() != eplb_state.local_expert_count:
-        raise RuntimeError(
-            "MoE expert count does not match local EPLB experts: "
-            f"{expert_tokens.numel()} != {eplb_state.local_expert_count}"
-        )
-    torch.ops.vllm.ascend_eplb_record_expert_tokens(
-        expert_tokens,
-        expert_load_view,
-        record_enabled,
-        result.group_list_type if local_load is None else 1,
-        eplb_state.local_expert_start,
-    )
-
-
 def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
     if tensor.device.type != "npu":
@@ -762,7 +730,30 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 )
         if self._use_v2_model_runner:
             assert self.router is not None
-            _record_v2_eplb_load(self.router, result, local_load)
+            if eplb_state is not None:
+                expert_tokens = result.expert_tokens
+                if expert_tokens is None:
+                    raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
+                expert_load_view = eplb_state.expert_load_view
+                record_enabled = eplb_state.should_record_tensor
+                if local_load is not None:
+                    expert_tokens = local_load
+                    assert eplb_state.allgather_record_tensor is not None
+                    record_enabled = eplb_state.allgather_record_tensor > 0
+                if expert_load_view is None or record_enabled is None:
+                    raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
+                if expert_tokens.numel() != eplb_state.local_expert_count:
+                    raise RuntimeError(
+                        "MoE expert count does not match local EPLB experts: "
+                        f"{expert_tokens.numel()} != {eplb_state.local_expert_count}"
+                    )
+                torch.ops.vllm.ascend_eplb_record_expert_tokens(
+                    expert_tokens,
+                    expert_load_view,
+                    record_enabled,
+                    result.group_list_type if local_load is None else 1,
+                    eplb_state.local_expert_start,
+                )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = result.expert_tokens

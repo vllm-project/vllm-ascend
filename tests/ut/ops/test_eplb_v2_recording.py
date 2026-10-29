@@ -10,11 +10,15 @@ import torch
 from vllm_ascend.ops.fused_moe import routed_experts as routed_module
 from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, _record_v2_eplb_load
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 
 
-def _router(record_enabled: bool = True):
-    return SimpleNamespace(
+def _layer(record_enabled: bool = True):
+    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    layer._use_v2_model_runner = True
+    layer.dynamic_eplb = False
+    layer.moe_config = SimpleNamespace(ep_rank=2, num_local_experts=2)
+    layer.router = SimpleNamespace(
         eplb_state=SimpleNamespace(
             expert_load_view=torch.zeros(8, dtype=torch.int32),
             should_record_tensor=torch.tensor(record_enabled),
@@ -22,47 +26,62 @@ def _router(record_enabled: bool = True):
             local_expert_count=2,
         )
     )
+    return layer
 
 
-def test_record_v2_eplb_load_uses_operator_counts():
-    router = _router()
+def test_record_eplb_load_uses_operator_counts():
+    layer = _layer()
     counts = torch.tensor([2, 3], dtype=torch.int64)
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=counts)
 
     with patch.object(torch.ops.vllm, "ascend_eplb_record_expert_tokens") as record_op:
-        _record_v2_eplb_load(router, result)
+        layer._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
 
     record_op.assert_called_once_with(
         counts,
-        router.eplb_state.expert_load_view,
-        router.eplb_state.should_record_tensor,
+        layer.router.eplb_state.expert_load_view,
+        layer.router.eplb_state.should_record_tensor,
         1,
         4,
     )
 
 
-def test_record_v2_eplb_load_requires_counts_even_when_collection_is_disabled():
-    router = _router(record_enabled=False)
+def test_record_eplb_load_requires_counts_even_when_collection_is_disabled():
+    layer = _layer(record_enabled=False)
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=None)
     with pytest.raises(RuntimeError, match="operator-provided expert counts"):
-        _record_v2_eplb_load(router, result)
+        layer._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
 
 
-def test_record_v2_eplb_load_rejects_wrong_local_count():
+def test_record_eplb_load_rejects_wrong_local_count():
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.zeros(3))
     with pytest.raises(RuntimeError, match="does not match local EPLB experts"):
-        _record_v2_eplb_load(_router(), result)
+        _layer()._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
+
+
+@pytest.mark.parametrize("field", ["expert_load_view", "should_record_tensor"])
+def test_record_eplb_load_requires_initialized_v2_state(field):
+    layer = _layer()
+    setattr(layer.router.eplb_state, field, None)
+    result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.tensor([2, 3]))
+    with pytest.raises(RuntimeError, match="load-recording state is not initialized"):
+        layer._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
+
+
+def test_record_eplb_load_skips_v2_without_eplb_state():
+    layer = _layer()
+    layer.router.eplb_state = None
+    result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=None)
+    with patch.object(torch.ops.vllm, "ascend_eplb_record_expert_tokens") as record_op:
+        layer._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
+    record_op.assert_not_called()
 
 
 def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch):
-    router = _router(record_enabled=False)
+    layer = _layer(record_enabled=False)
+    router = layer.router
     router.eplb_state.allgather_record_tensor = torch.tensor(-1, dtype=torch.int32)
     record_pointer = router.eplb_state.allgather_record_tensor.data_ptr()
-    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    layer.router = router
-    layer._use_v2_model_runner = True
-    layer.dynamic_eplb = False
-    layer.moe_config = SimpleNamespace(ep_rank=2, num_local_experts=2)
     # Operator counts include communication/graph padding and ineligible sources.
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.tensor([9, 8]))
     topk_ids = torch.tensor([[4, 5], [4, 0], [4, 5]])
@@ -86,10 +105,7 @@ def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch):
 @pytest.mark.parametrize("group_list_type", [0, 1])
 @pytest.mark.parametrize("record_enabled", [False, True])
 def test_record_eplb_load_preserves_v2_operator_counts(monkeypatch, group_list_type, record_enabled):
-    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    layer.router = _router(record_enabled)
-    layer._use_v2_model_runner = True
-    layer.dynamic_eplb = False
+    layer = _layer(record_enabled)
     result = FusedExpertsResult(
         routed_out=torch.empty(0),
         expert_tokens=torch.tensor([2, 5] if group_list_type == 0 else [2, 3]),
