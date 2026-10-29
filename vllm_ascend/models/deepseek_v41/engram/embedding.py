@@ -527,7 +527,7 @@ def engram_checkpoint_identity(root, layer_ids: tuple[int, ...] | list[int]) -> 
                 header = (tensor.get_dtype(), tuple(tensor.get_shape()))
             digest.update(key.encode())
             digest.update(str(index[key]).encode())
-            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}:{header}".encode())
+            digest.update(f"{stat.st_size}:{header}".encode())
     return digest.hexdigest()
 
 

@@ -5,6 +5,7 @@
 
 import ctypes
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -497,6 +498,17 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+def test_checkpoint_identity_ignores_mtime(tmp_path):
+    key = "layers.1.engram.embed.weight"
+    index = {"weight_map": {key: "model.safetensors"}}
+    save_file({key: torch.arange(128).reshape(4, 32).bfloat16()}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    identity = embedding_mod.engram_checkpoint_identity(tmp_path, [1])
+    os.utime(tmp_path / "model.safetensors", ns=(10_000_000_000, 10_000_000_000))
+
+    assert embedding_mod.engram_checkpoint_identity(tmp_path, [1]) == identity
 
 
 @pytest.mark.parametrize("source_format", ["int8", "mxfp8", "bf16"])

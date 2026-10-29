@@ -44,7 +44,6 @@ def _engram_gva_encode_ids_kernel(
     global_row = tl.load(ids_ptr + token * ids_stride_t + HEAD_START + head_local, mask=in_bounds, other=0).to(tl.int64)
     valid = in_bounds & (global_row >= vocab_start) & (global_row < vocab_end)
     local_row = tl.where(valid, global_row - vocab_start, 0)
-    owner = tl.full((BLOCK,), 0, tl.int64)
     owner_start = tl.full((BLOCK,), 0, tl.int64)
     owner_slot = tl.full((BLOCK,), 0, tl.int64)
     for owner_id in range(NUM_OWNERS):
@@ -52,7 +51,6 @@ def _engram_gva_encode_ids_kernel(
         end = tl.load(owner_ranges_ptr + owner_id * 3 + 1).to(tl.int64)
         slot = tl.load(owner_ranges_ptr + owner_id * 3 + 2).to(tl.int64)
         owns_row = (local_row >= start) & (local_row < end)
-        owner = tl.where(owns_row, owner_id, owner)
         owner_start = tl.where(owns_row, start, owner_start)
         owner_slot = tl.where(owns_row, slot, owner_slot)
     encoded = owner_slot * ROWS_PER_SLOT + BLOCK_OFFSET + local_row - owner_start
@@ -175,8 +173,7 @@ def _engram_gva_staged_gather_dequant_kernel(
     vocab_start,
     vocab_end,
     ids_stride_t,
-    CODE_STRIDE: tl.constexpr,
-    SCALE_STRIDE: tl.constexpr,
+    ROW_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
     GROUP: tl.constexpr,
     HEAD_START: tl.constexpr,
@@ -192,8 +189,8 @@ def _engram_gva_staged_gather_dequant_kernel(
     owned = (source_row >= vocab_start) & (source_row < vocab_end)
     offsets = tl.arange(0, WIDTH)
     groups = tl.arange(0, WIDTH // GROUP)
-    codes = tl.load(codes_ptr + row * CODE_STRIDE + offsets).to(tl.float32)
-    scale = tl.load(scales_ptr + row * SCALE_STRIDE + groups)
+    codes = tl.load(codes_ptr + row * ROW_STRIDE + offsets).to(tl.float32)
+    scale = tl.load(scales_ptr + row * ROW_STRIDE + groups)
     scale = _decode_e8m0(scale)
     values = tl.reshape(codes, (WIDTH // GROUP, GROUP)) * scale[:, None]
     values = tl.reshape(values, (WIDTH,)).to(tl.bfloat16)

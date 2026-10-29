@@ -6,9 +6,6 @@ from __future__ import annotations
 
 import atexit
 import ctypes
-import hashlib
-import json
-import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,8 +17,6 @@ from vllm_ascend import envs
 _GIB = 1 << 30
 _ENCODE_BLOCK_SIZE = 128
 _STORE_PORT_BASE = 8500
-_MANIFEST_SCHEMA = 3
-_MXFP8_FORMAT = "F8_E4M3/F8_E8M0"
 
 
 def use_engram_gva(eligible: bool, mode: str | None = None) -> bool:
@@ -80,7 +75,7 @@ def _balanced_owner_ranges(rows: int, world_size: int) -> tuple[tuple[int, int],
 def make_engram_gva_local_tables(
     table_ids: list[str], head_sizes: list[tuple[int, ...]], tp_rank: int, tp_size: int
 ) -> tuple[tuple[int, ...], tuple[str, ...], int]:
-    """Return each TP rank's head-local row counts and stable table IDs.
+    """Return each TP rank's head-local row counts, IDs, and maximum heads.
 
     TP/head sharding and GVA row ownership are independent axes. Each TP
     group owns only its head columns; the local DP sharing group row-shards
@@ -127,201 +122,6 @@ def make_engram_gva_tables(
         tables.append(table)
         offset += table.max_rows_per_owner
     return tuple(tables), offset
-
-
-def make_engram_gva_manifest(
-    tables: tuple[EngramGvaTable, ...],
-    *,
-    generation: str,
-    checkpoint_identity: str,
-    owner_ids: list[str],
-    table_ids: list[str],
-    row_bytes: int,
-    weight_bytes: int,
-) -> dict[str, Any]:
-    """Describe a packed pool where every local rank owns a balanced row shard."""
-    if not generation or not checkpoint_identity:
-        raise ValueError("Engram GVA manifest needs a generation and checkpoint identity")
-    if len(owner_ids) == 0 or len(set(owner_ids)) != len(owner_ids):
-        raise ValueError("Engram GVA manifest owner IDs must be non-empty and unique")
-    if len(table_ids) != len(tables) or len(set(table_ids)) != len(table_ids):
-        raise ValueError("Engram GVA manifest table IDs must uniquely match the registered tables")
-    if row_bytes <= weight_bytes or weight_bytes <= 0:
-        raise ValueError("Engram GVA manifest has invalid packed row widths")
-    world_size = len(tables[0].owner_ranges) if tables else 0
-    if world_size < 2 or len(owner_ids) != world_size:
-        raise ValueError("Engram GVA manifest requires one owner for every local rank")
-    if any(len(table.owner_ranges) != world_size for table in tables):
-        raise ValueError("Engram GVA manifest tables must use the same fixed local owner membership")
-
-    manifest: dict[str, Any] = {
-        "schema": _MANIFEST_SCHEMA,
-        "generation": generation,
-        "checkpoint_identity": checkpoint_identity,
-        "members": [
-            {
-                "member_id": member_id,
-                "rank": rank,
-                "role": "owner",
-            }
-            for rank, member_id in enumerate(owner_ids)
-        ],
-        "owners": [
-            {"owner_id": owner_id, "owner_rank": rank, "object_id": rank} for rank, owner_id in enumerate(owner_ids)
-        ],
-        "row_bytes": row_bytes,
-        "weight_bytes": weight_bytes,
-        "scale_bytes": row_bytes - weight_bytes,
-        "tables": [],
-    }
-    for table, table_id in zip(tables, table_ids):
-        shards = []
-        for rank, (owner_id, (row_start, row_end)) in enumerate(zip(owner_ids, table.owner_ranges)):
-            object_offset = table.block_offset * row_bytes
-            shards.append(
-                {
-                    "row_start": row_start,
-                    "row_end": row_end,
-                    "owner_id": owner_id,
-                    "owner_rank": rank,
-                    "objects": {
-                        "weight": {
-                            "object_id": rank,
-                            "byte_offset": object_offset,
-                            "row_stride": row_bytes,
-                            "intra_row_offset": 0,
-                        },
-                        "scale": {
-                            "object_id": rank,
-                            "byte_offset": object_offset,
-                            "row_stride": row_bytes,
-                            "intra_row_offset": weight_bytes,
-                        },
-                    },
-                }
-            )
-        manifest["tables"].append(
-            {
-                "table_id": table_id,
-                "global_rows": table.global_rows,
-                "format": _MXFP8_FORMAT,
-                "planes": ["weight", "scale"],
-                "row_bytes": row_bytes,
-                "shards": shards,
-            }
-        )
-    validate_engram_gva_manifest(manifest)
-    return manifest
-
-
-def validate_engram_gva_manifest(manifest: dict, expected_generation: str | None = None) -> None:
-    """Reject incompatible or incomplete owner layouts before pool mapping."""
-    schema = manifest.get("schema")
-    if schema != _MANIFEST_SCHEMA:
-        raise ValueError(f"Unsupported Engram GVA manifest schema {schema}; expected {_MANIFEST_SCHEMA}")
-    generation = manifest.get("generation")
-    if not generation or (expected_generation is not None and generation != expected_generation):
-        raise ValueError("Engram GVA manifest generation is missing or does not match the expected generation")
-    if not manifest.get("checkpoint_identity"):
-        raise ValueError("Engram GVA manifest checkpoint identity is missing")
-    owners = manifest.get("owners")
-    if not isinstance(owners, list) or not owners:
-        raise ValueError("Engram GVA manifest has no owners")
-    members = manifest.get("members")
-    if not isinstance(members, list) or len(members) < 2:
-        raise ValueError("A5 Engram GVA manifest requires at least two local owners")
-    if [member.get("rank") for member in members] != list(range(len(members))):
-        raise ValueError("Engram GVA manifest member ranks must match the fixed membership order")
-    member_ids = [member.get("member_id") for member in members]
-    if any(not member_id for member_id in member_ids) or len(set(member_ids)) != len(member_ids):
-        raise ValueError("Engram GVA manifest member IDs must be present and unique")
-    if any(member.get("role") != "owner" for member in members):
-        raise ValueError("A5 Engram GVA requires every local pool member to own rows")
-    owner_ids = [owner.get("owner_id") for owner in owners]
-    owner_ranks = [owner.get("owner_rank") for owner in owners]
-    object_ids = [owner.get("object_id") for owner in owners]
-    if any(not owner_id for owner_id in owner_ids) or len(set(owner_ids)) != len(owner_ids):
-        raise ValueError("Engram GVA manifest owner IDs must be present and unique")
-    if any(not isinstance(rank, int) or rank < 0 or rank >= len(members) for rank in owner_ranks):
-        raise ValueError("Engram GVA manifest owner rank is outside the pool membership")
-    if len(set(owner_ranks)) != len(owner_ranks):
-        raise ValueError("Engram GVA manifest owner ranks must be unique")
-    if len(set(object_ids)) != len(object_ids):
-        raise ValueError("Engram GVA manifest owner object IDs must be unique")
-    if owner_ranks != list(range(len(members))) or owner_ids != member_ids:
-        raise ValueError("A5 Engram GVA owner membership must match every local pool member")
-    row_bytes = manifest.get("row_bytes")
-    weight_bytes = manifest.get("weight_bytes")
-    scale_bytes = manifest.get("scale_bytes")
-    if (
-        not isinstance(row_bytes, int)
-        or row_bytes <= 0
-        or not isinstance(weight_bytes, int)
-        or weight_bytes <= 0
-        or not isinstance(scale_bytes, int)
-        or scale_bytes <= 0
-    ):
-        raise ValueError("Engram GVA manifest row and plane widths must be positive integers")
-    if weight_bytes + scale_bytes != row_bytes:
-        raise ValueError("Engram GVA manifest packed plane widths do not match row_bytes")
-
-    tables = manifest.get("tables")
-    if not isinstance(tables, list) or not tables:
-        raise ValueError("Engram GVA manifest has no tables")
-    table_ids = [table.get("table_id") for table in tables]
-    if any(not table_id for table_id in table_ids) or len(set(table_ids)) != len(table_ids):
-        raise ValueError("Engram GVA manifest table IDs must be present and unique")
-    for table in tables:
-        global_rows = table.get("global_rows")
-        if not isinstance(global_rows, int) or global_rows <= 0:
-            raise ValueError("Engram GVA manifest global_rows must be positive")
-        if table.get("format") != _MXFP8_FORMAT or table.get("planes") != ["weight", "scale"]:
-            raise ValueError("Engram GVA manifest format or data planes do not match native MXFP8")
-        if table.get("row_bytes") != row_bytes:
-            raise ValueError("Engram GVA manifest table row width differs from the pool row width")
-        shards = table.get("shards")
-        if not isinstance(shards, list) or len(shards) != len(owners):
-            raise ValueError("Engram GVA manifest shard count does not match owner membership")
-        cursor = 0
-        shard_rows = []
-        seen_objects = set()
-        for owner_index, shard in enumerate(shards):
-            row_start, row_end = shard.get("row_start"), shard.get("row_end")
-            if (
-                not isinstance(row_start, int)
-                or not isinstance(row_end, int)
-                or row_start != cursor
-                or row_end <= row_start
-                or row_end > global_rows
-            ):
-                raise ValueError("Engram GVA manifest row ranges must be ordered and completely covered")
-            if shard.get("owner_id") != owner_ids[owner_index] or shard.get("owner_rank") != owner_ranks[owner_index]:
-                raise ValueError("Engram GVA manifest shard owner is missing or out of order")
-            objects = shard.get("objects")
-            if not isinstance(objects, dict) or set(objects) != {"weight", "scale"}:
-                raise ValueError("Engram GVA manifest shard must define weight and scale objects")
-            plane_descriptors = [objects[name] for name in ("weight", "scale")]
-            if any(
-                descriptor.get("object_id") != object_ids[owner_index]
-                or not isinstance(descriptor.get("byte_offset"), int)
-                or descriptor["byte_offset"] < 0
-                or descriptor.get("row_stride") != row_bytes
-                for descriptor in plane_descriptors
-            ):
-                raise ValueError("Engram GVA manifest shard object descriptor is invalid")
-            if plane_descriptors[0].get("intra_row_offset") != 0:
-                raise ValueError("Engram GVA weight plane must start at byte zero in a packed row")
-            if plane_descriptors[1].get("intra_row_offset") != weight_bytes:
-                raise ValueError("Engram GVA scale plane offset does not match the packed weight width")
-            if object_ids[owner_index] in seen_objects:
-                raise ValueError("Engram GVA manifest reuses an object within one table")
-            seen_objects.add(object_ids[owner_index])
-            shard_rows.append(row_end - row_start)
-            cursor = row_end
-        if cursor != global_rows:
-            raise ValueError("Engram GVA manifest row ranges do not cover global_rows")
-        if max(shard_rows) - min(shard_rows) > 1:
-            raise ValueError("A5 Engram GVA row shards must be balanced across all local owners")
 
 
 def close_engram_gva_pools(model) -> None:
@@ -378,7 +178,6 @@ class EngramGvaPool:
             raise ValueError("Engram GVA sharing rank is outside the group")
         self.row_bytes = row_bytes
         self.weight_bytes = weight_bytes
-        self.scale_bytes = row_bytes - weight_bytes
         self.capacity = capacity
         self.device = torch.device(device)
         layout_error = None
@@ -395,46 +194,7 @@ class EngramGvaPool:
         if failures:
             raise RuntimeError(f"Engram GVA {failures}")
         table_ids = table_ids or [f"engram-table-{index}" for index in range(len(global_rows))]
-        manifest_wire = None
-        manifest_error = None
-        try:
-            pool_members = [
-                f"{socket.gethostname()}/global-rank-{dist.get_global_rank(self.group.cpu_group, rank)}"
-                for rank in range(self.world_size)
-            ]
-            owner_ids = pool_members
-            generation_content = {
-                "checkpoint_identity": checkpoint_identity,
-                "table_ids": table_ids,
-                "global_rows": global_rows,
-                "owner_ids": owner_ids,
-                "pool_members": pool_members,
-                "owner_ranges": [table.owner_ranges for table in self.tables],
-                "row_bytes": row_bytes,
-                "weight_bytes": weight_bytes,
-            }
-            self.generation = hashlib.sha256(
-                json.dumps(generation_content, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-            self.manifest = make_engram_gva_manifest(
-                self.tables,
-                generation=self.generation,
-                checkpoint_identity=checkpoint_identity,
-                owner_ids=owner_ids,
-                table_ids=table_ids,
-                row_bytes=row_bytes,
-                weight_bytes=weight_bytes,
-            )
-            manifest_wire = json.dumps(self.manifest, sort_keys=True, separators=(",", ":"))
-        except Exception as exc:  # noqa: BLE001 - fail together before mapping the pool
-            manifest_error = f"{type(exc).__name__}: {exc}"
-        failures = self._collective_failures("manifest construction", manifest_error)
-        if failures:
-            raise RuntimeError(f"Engram GVA {failures}")
-        manifests: list[str | None] = [None] * self.world_size
-        dist.all_gather_object(manifests, manifest_wire, group=self.group.cpu_group)
-        if any(candidate != manifest_wire for candidate in manifests):
-            raise RuntimeError("Engram GVA local pool members built different owner-map manifests")
+        self._validate_shared_layout(checkpoint_identity, table_ids, global_rows)
         self.owner_map = self._run_collective_stage(
             "owner-map descriptor allocation",
             lambda: torch.tensor(
@@ -510,6 +270,13 @@ class EngramGvaPool:
         dist.all_gather_object(errors, error, group=self.group.cpu_group)
         failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
         return f"{stage} failed ({failures})" if failures else ""
+
+    def _validate_shared_layout(self, checkpoint_identity: str, table_ids: list[str], global_rows: list[int]) -> None:
+        layout = (checkpoint_identity, tuple(table_ids), tuple(global_rows), self.row_bytes, self.weight_bytes)
+        layouts: list[Any] = [None] * self.world_size
+        dist.all_gather_object(layouts, layout, group=self.group.cpu_group)
+        if any(candidate != layout for candidate in layouts):
+            raise RuntimeError("Engram GVA ranks must use the same checkpoint and table layout")
 
     def _run_collective_stage(self, stage: str, operation) -> Any:
         result = None
@@ -665,10 +432,6 @@ class EngramGvaPool:
         self.count = None
         self.staging = None
         atexit.unregister(self.close)
-
-    def uninitialize(self) -> None:
-        """Compatibility alias for explicit offload teardown."""
-        self.close()
 
 
 def _load_memfabric_offload() -> Any:

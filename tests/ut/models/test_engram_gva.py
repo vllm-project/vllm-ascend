@@ -7,10 +7,8 @@ import torch.distributed as dist
 from vllm_ascend.models.deepseek_v41.engram.gva import (
     EngramGvaPool,
     make_engram_gva_local_tables,
-    make_engram_gva_manifest,
     make_engram_gva_tables,
     use_engram_gva,
-    validate_engram_gva_manifest,
 )
 
 
@@ -103,73 +101,20 @@ def test_gva_layout_rejects_tables_smaller_than_local_owner_count():
         make_engram_gva_tables([3], world_size=4)
 
 
-def _valid_manifest():
-    tables, _ = make_engram_gva_tables([11, 4], world_size=3)
-    return make_engram_gva_manifest(
-        tables,
-        generation="generation-a",
-        checkpoint_identity="checkpoint-a",
-        owner_ids=["node/rank-0", "node/rank-1", "node/rank-2"],
-        table_ids=["layer-0", "layer-1"],
-        row_bytes=264,
-        weight_bytes=256,
-    )
+def test_gva_collective_layout_validation_rejects_rank_mismatch(monkeypatch):
+    pool = object.__new__(EngramGvaPool)
+    pool.world_size = 2
+    pool.row_bytes = 264
+    pool.weight_bytes = 256
+    pool.group = type("Group", (), {"cpu_group": object()})()
 
+    def all_gather(layouts, layout, group):
+        assert group is pool.group.cpu_group
+        layouts[:] = [layout, ("other-checkpoint", *layout[1:])]
 
-def test_gva_manifest_describes_all_balanced_owner_shards_and_packed_planes():
-    manifest = _valid_manifest()
-    assert manifest["schema"] == 3
-    assert [member["role"] for member in manifest["members"]] == ["owner"] * 3
-    assert manifest["tables"][0]["format"] == "F8_E4M3/F8_E8M0"
-    assert manifest["tables"][0]["shards"][1]["row_start"] == 4
-    assert manifest["tables"][0]["shards"][1]["row_end"] == 8
-    assert manifest["tables"][0]["shards"][1]["objects"]["weight"]["byte_offset"] == 0
-    assert manifest["tables"][1]["shards"][0]["objects"]["weight"]["byte_offset"] == 4 * 264
-    assert manifest["tables"][1]["shards"][0]["objects"]["scale"]["intra_row_offset"] == 256
-    validate_engram_gva_manifest(manifest, expected_generation="generation-a")
-
-
-@pytest.mark.parametrize(
-    "mutation,match",
-    [
-        (lambda manifest: manifest.update(schema=2), "schema"),
-        (lambda manifest: manifest["tables"][0]["shards"].pop(), "shard count"),
-        (lambda manifest: manifest["tables"][0]["shards"][1].update(row_start=5), "ordered"),
-        (lambda manifest: manifest["tables"][0].update(format="F8_E4M3/FP32"), "format"),
-        (
-            lambda manifest: manifest["tables"][0]["shards"][1]["objects"]["weight"].update(object_id=0),
-            "descriptor",
-        ),
-    ],
-)
-def test_gva_manifest_rejects_incompatible_layouts(mutation, match):
-    manifest = _valid_manifest()
-    mutation(manifest)
-    with pytest.raises(ValueError, match=match):
-        validate_engram_gva_manifest(manifest, expected_generation="generation-a")
-
-
-def test_gva_manifest_rejects_consumer_members():
-    manifest = _valid_manifest()
-    manifest["members"][1]["role"] = "consumer"
-    with pytest.raises(ValueError, match="every local pool member to own rows"):
-        validate_engram_gva_manifest(manifest)
-
-
-def test_gva_manifest_rejects_nonuniform_row_shards():
-    manifest = _valid_manifest()
-    shards = manifest["tables"][0]["shards"]
-    shards[0]["row_end"] = 5
-    shards[1]["row_start"] = 5
-    shards[1]["row_end"] = 9
-    shards[2]["row_start"] = 9
-    with pytest.raises(ValueError, match="balanced"):
-        validate_engram_gva_manifest(manifest)
-
-
-def test_gva_manifest_rejects_generation_mismatch():
-    with pytest.raises(ValueError, match="generation"):
-        validate_engram_gva_manifest(_valid_manifest(), expected_generation="generation-b")
+    monkeypatch.setattr(dist, "all_gather_object", all_gather)
+    with pytest.raises(RuntimeError, match="same checkpoint and table layout"):
+        pool._validate_shared_layout("checkpoint", ["layer-0", "layer-1"], [11, 4])
 
 
 def test_gva_collective_stage_reports_failures_from_all_ranks(monkeypatch):

@@ -1,4 +1,4 @@
-pr: 20159
+pr: 20171
 entries:
   - category: feature
     text: Added A5 single-node shared GVA support for DeepSeek V4.1 Engram FP8/E8M0 tables. Each local sharing rank owns a balanced contiguous row shard, and users can select automatic GVA, required GVA, or host UVA comparison with VLLM_ASCEND_ENGRAM_GVA_MODE.
