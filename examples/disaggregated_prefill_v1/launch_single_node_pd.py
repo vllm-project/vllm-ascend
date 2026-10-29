@@ -154,9 +154,12 @@ class EngineConfig:
         env.update(self.extra_env)
         env["ASCEND_RT_VISIBLE_DEVICES"] = self.visible_devices
         ld = env.get("LD_LIBRARY_PATH", "")
-        mooncake_ld = "/usr/local/lib64/python3.12/site-packages/mooncake"
+        try:
+            import mooncake
+            mooncake_ld = os.path.dirname(mooncake.__file__)
+        except ImportError:
+            mooncake_ld = "/usr/local/1ib64/python3.12/site-packages/mooncake"
         env["LD_LIBRARY_PATH"] = f"{mooncake_ld}:{ld}" if ld else mooncake_ld
-        return env
 
 
 def wait_for_http(url: str, timeout: int = 600, interval: float = 2.0) -> bool:
@@ -171,7 +174,7 @@ def wait_for_http(url: str, timeout: int = 600, interval: float = 2.0) -> bool:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     return True
-        except (urllib.error.URLError, ConnectionError, OSError):
+        except Exception:
             pass
         time.sleep(interval)
     return False
@@ -181,17 +184,17 @@ def launch_engine(config: EngineConfig, log_file: str) -> subprocess.Popen:
     """Launch one vLLM serve subprocess and return its process handle."""
     cmd = config.build_command()
     env = config.build_env()
-    log_handle = open(log_file, "w")
     print(f"[{config.role}] Launching: {' '.join(cmd)}")
     print(f"[{config.role}] ASCEND_RT_VISIBLE_DEVICES={config.visible_devices}")
     print(f"[{config.role}] Log: {log_file}")
-    proc = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-    )
+    with open(log_file, "w") as log_handle:
+        proc = subprocess.Popen(
+            cmd,
+            env = env,
+            stdout = log_handle,
+            stderr = subprocess.STDOUT,
+            preexec_fn = os.setsid if hasattr(os, "setsid") else None,
+        )
     return proc
 
 
