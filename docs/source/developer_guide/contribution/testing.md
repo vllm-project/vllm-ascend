@@ -396,25 +396,76 @@ For block extraction, plan preview, and selection rules, see the usage notes and
 
 ### Run docs link check
 
-You can validate external links in the Sphinx docs locally with:
+The standalone checker validates rendered HTTP(S) links and images in Markdown,
+including references, HTML links, and MkDocs tabs/admonitions. It skips code,
+example service addresses, and template URLs. It does not validate remote anchors,
+relative links, or execute MkDocs hooks/macros.
+
+Run from the repository root inside a virtual environment (Python 3.11 or later):
 
 ```bash
-make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+python -m pip install -r docs/requirements-linkcheck.txt
+python .github/workflows/scripts/check_md_links.py docs/source
 ```
 
-To check links in a specific Markdown file, pass the file to `sphinx-build`.
-For example, to check only `docs/source/user_guide/release_notes.md`:
+To check specific files, pass their paths. To inspect extraction without network
+requests, add `--extract-only`:
 
 ```bash
-cd docs
-sphinx-build -b linkcheck -W --keep-going \
-  source _build/linkcheck source/user_guide/release_notes.md
+python .github/workflows/scripts/check_md_links.py \
+  docs/source/user_guide/release_notes.md --timeout 300
+python .github/workflows/scripts/check_md_links.py docs/source --extract-only
 ```
 
-The detailed report will be written to:
+Settings and documented exceptions live in
+`.github/workflows/configs/doc_linkcheck.toml`. GitHub starts at 12 concurrent
+requests (up to 24), with a separate launch rate starting at 8 requests/second
+(up to 16). Other hosts use their own queues and budgets; the global concurrency
+limit is 32. These are client defaults, not guaranteed provider quotas.
 
-- `docs/_build/linkcheck/output.txt`
+After a stable window, the checker gradually raises concurrency and launch rate.
+A 429 or explicit 403 rate-limit response cools the whole host, honors
+`Retry-After`/rate-reset headers, and halves its budgets. Other hosts continue.
+After cooling down, one request probes recovery before resuming the host's queue.
+Only consecutive failed recovery probes stop further requests to the host;
+intermittent limits separated by healthy responses do not accumulate toward that
+stop condition. A repeatable shuffled URL order spreads issue/PR/commit pages
+throughout the scan instead of requesting entire routes in lexical batches. Network
+errors and 5xx responses are rechecked after the current pass, with at
+most three rounds per URL, including the initial pass. Redirects and streaming
+GET fallbacks share the same scheduler and a bounded HTTP request budget.
+
+The overall deadline defaults to 20 minutes; `--timeout` overrides it in seconds.
+If the first pass is still running in the last quarter of this budget, due
+rechecks take priority over new targets so a long scan cannot starve them.
+Exhausted limits, timeouts, unaccepted 401/403 responses, broken links, and checker
+errors fail the check. A configured restricted-access exception is reported as
+`restricted`, rather than `passed`; every exception requires a reason. Historical
+GitHub profile links are skipped only when all their references are in the
+generated contributors page. PR/commit/file links remain checked.
+
+Reports are written even when individual checks fail:
+
 - `docs/_build/linkcheck/output.json`
+- `docs/_build/linkcheck/summary.md`
+
+The JSON report includes all source files, request/redirect history, error details,
+per-host latency, and budget changes. Use `--report-dir` to change the destination.
+The workflow publishes a summary and uploads reports for PR and full checks.
+
+PRs check changed Markdown files, preserving file names with spaces and ignoring
+deleted files. Changes to the checker, configuration, dependencies, tests, or
+`mkdocs.yml` run its tests and a full link check. Scheduled/manual full scans share
+a concurrency group; a new PR revision cancels its previous run. No cross-run
+success cache is used.
+
+The CPU-only regression suite needs no vLLM, torch, or NPU environment:
+
+```bash
+python -m pip install 'pytest>=8,<9'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
+  --confcutdir=tests/ut/_tools tests/ut/_tools/test_check_md_links.py
+```
 
 ## PR testing requirements
 
