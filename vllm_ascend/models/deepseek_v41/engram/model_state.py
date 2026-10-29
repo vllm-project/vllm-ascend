@@ -242,6 +242,17 @@ class EngramModelState(AscendModelState):
             )
         return attn_metadata
 
+    def capture_inner_cudagraphs(self, input_buffers, block_tables, attn_groups, kv_cache_config) -> None:
+        state = self.decoder_replay_state
+        if state is None or state.layers.trim_threshold is None:
+            return
+        from vllm_ascend.models.deepseek_v41.decoder_replay_aclgraph import DecoderReplayAclGraphManager
+
+        state.graph_manager = DecoderReplayAclGraphManager(
+            self.vllm_config, self.device, state, input_buffers.input_ids.dtype
+        )
+        state.graph_manager.capture_replay_graphs(input_buffers, block_tables, attn_groups)
+
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
         model_inputs: dict[str, Any] = {}
         window = self.lookback_token_ids
@@ -285,10 +296,8 @@ class EngramModelState(AscendModelState):
             # FULL replay runs its own producers. No Python-side hash/lookup
             # and no ExternalEvent records may precede it on this route.
             return model_inputs
-        # TODO: Support breakable PIECEWISE by refreshing lookups under the
-        # forward context before replay, which bypasses the model pre-hook.
-        # Align capture bindings with that path so replay does not retain
-        # dummy graph-producer coordinates.
+        # PIECEWISE refreshes these lookups from ModelAclGraphManager before
+        # replay, because graph segments bypass the model's forward pre-hook.
         # DP lookup needs the forward context, which is not established yet.
         self._engram_inputs = {
             "input_ids": batch.input_ids[: batch.num_tokens],
@@ -311,7 +320,10 @@ class EngramModelState(AscendModelState):
             # The captured graph reads this buffer; replays refill it in place.
             window.fill_(-1)
             model_inputs["lookback_token_ids"] = window
-            if self._engram_graph_inputs is not None:
+            if (
+                self._engram_graph_inputs is not None
+                and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
+            ):
                 for buffer in self._engram_graph_inputs.values():
                     buffer.zero_()
                 model_inputs.update(self._engram_graph_inputs)

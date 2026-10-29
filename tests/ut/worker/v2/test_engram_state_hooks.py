@@ -201,6 +201,23 @@ def test_prepare_dummy_inputs_skips_models_without_engram(monkeypatch):
     assert state.prepare_dummy_inputs(num_reqs=4, num_tokens=64) == {}
 
 
+def test_piecewise_engram_dummy_avoids_full_graph_producer():
+    from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+
+    state = EngramModelState.__new__(EngramModelState)
+    state.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE))
+    state.lookback_token_ids = torch.zeros(1, 2, dtype=torch.int32)
+    state._engram_graph_inputs = {"engram_query_start_loc": torch.zeros(2, dtype=torch.int32)}
+    state.model = SimpleNamespace(
+        prime_engram_v2_graph_inputs=Mock(return_value={"engram_lookups": {"layer": torch.zeros(1)}})
+    )
+
+    result = state.prepare_engram_dummy_inputs(num_reqs=1, num_tokens=32)
+
+    assert "engram_query_start_loc" not in result
+    state.model.prime_engram_v2_graph_inputs.assert_called_once_with(32)
+
+
 @pytest.fixture
 def engram_model():
     model = model_mod.DeepseekV41Model.__new__(model_mod.DeepseekV41Model)
@@ -306,3 +323,15 @@ def test_full_replay_refreshes_engram_inside_dp_context(monkeypatch, updatable, 
     assert calls == (["lookup"] if failure == "lookup" else ["lookup", "replay"])
     metadata.finish_replay.assert_called_once_with()
     assert not is_forward_context_available()
+
+
+def test_piecewise_replay_refreshes_engram_before_graph():
+    from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+
+    manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager.use_breakable_cg = False
+    manager.model_runner = SimpleNamespace(model_state=SimpleNamespace(prepare_engram=lambda: {"lookup": "current"}))
+
+    result = manager.run_pw_graph(lambda **kwargs: kwargs, {"input_ids": "fixed"})
+
+    assert result == {"input_ids": "fixed", "lookup": "current"}

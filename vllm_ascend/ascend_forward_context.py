@@ -268,6 +268,14 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
     if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    elif (
+        getattr(vllm_config.compilation_config, "cudagraph_decoder_replay", False)
+        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    ):
+        # PIECEWISE captures prefill token counts above the decode batch size.
+        # Those larger batches use all-to-all; reserving MC2 for the largest
+        # capture size triggers an unsupported MoE dispatch profile on A5.
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
     else:

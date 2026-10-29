@@ -1286,11 +1286,12 @@ def test_sample_tokens_leaves_draft_broadcast_to_upstream():
 
 @pytest.mark.parametrize("a5", [False, True])
 @pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "OtherModel"])
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture):
+@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture, cudagraph_mode):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
     runner.input_buffers = object()
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.compilation_config = SimpleNamespace(static_forward_context={}, cudagraph_mode=cudagraph_mode)
     runner.vllm_config = SimpleNamespace(
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
@@ -1338,10 +1339,9 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    assert runner.model_state.device_metadata == (
-        "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
-    )
-    assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
+    metadata_enabled = a5 and architecture == "DeepseekV41ForCausalLM" and cudagraph_mode == CUDAGraphMode.FULL
+    assert runner.model_state.device_metadata == ("metadata" if metadata_enabled else None)
+    assert metadata_cls.call_count == int(metadata_enabled)
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original

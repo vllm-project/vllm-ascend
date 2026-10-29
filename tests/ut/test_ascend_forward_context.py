@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -179,6 +180,20 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(mon
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 264
+
+
+def test_set_mc2_tokens_capacity_piecewise_decoder_replay_uses_decode_batch():
+    vllm_config = _make_vllm_config(
+        cudagraph_capture_sizes=[1, 128, 256, 1024],
+        max_cudagraph_capture_size=1024,
+        max_num_batched_tokens=2048,
+    )
+    vllm_config.compilation_config.cudagraph_decoder_replay = True
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=1, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 1
 
 
 def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeypatch):

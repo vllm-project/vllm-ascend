@@ -511,7 +511,11 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if (
+                uses_a5_packed_cache()
+                and self.model_config.architecture == "DeepseekV41ForCausalLM"
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            )
             else None
         )
 
