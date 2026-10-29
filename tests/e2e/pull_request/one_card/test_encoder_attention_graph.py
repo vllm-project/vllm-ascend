@@ -60,7 +60,7 @@ def test_encoder_attention_changed_input_replay(dtype, num_heads, num_kv_heads, 
         return impl._forward_encoder_attention(*device, metadata, output)
 
     atol = 0.008 if dtype == torch.bfloat16 else 0.001
-    expected = encoder_reference(*cpu, lengths, sliding_window)
+    expected = encoder_reference(cpu[0], cpu[1], cpu[2], lengths, sliding_window)
     actual = forward()
     torch.testing.assert_close(actual[: lengths[-1]].cpu().float(), expected, atol=atol, rtol=0.01)
     stream = torch.npu.Stream()
@@ -81,7 +81,7 @@ def test_encoder_attention_changed_input_replay(dtype, num_heads, num_kv_heads, 
         torch.npu.synchronize()
         torch.testing.assert_close(
             captured[: lengths[-1]].cpu().float(),
-            encoder_reference(*cpu, lengths, sliding_window),
+            encoder_reference(cpu[0], cpu[1], cpu[2], lengths, sliding_window),
             atol=atol,
             rtol=0.01,
         )
