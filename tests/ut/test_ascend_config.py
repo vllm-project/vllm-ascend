@@ -1414,7 +1414,7 @@ class TestUpstreamConfigCompatibility(TestBase):
         vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-        for field, value in (("hidden_size", 896), ("intermediate_size", 4096), ("num_experts_per_tok", 33)):
+        for field, value in (("hidden_size", 896), ("intermediate_size", 4224), ("num_experts_per_tok", 33)):
             with self.subTest(field=field), patch.object(text_config, field, value):
                 self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         for world_size in (1, 3):
@@ -1423,7 +1423,11 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        # The intermediate-size check is a plain range + alignment rule now, so
+        # 6144-wide first projections are accepted for every architecture.
         text_config.moe_intermediate_size = 3072
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 4608
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
@@ -1506,7 +1510,7 @@ class TestUpstreamConfigCompatibility(TestBase):
                 self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
                     ("hidden_size", 3584),
-                    ("moe_intermediate_size", 3072),
+                    ("moe_intermediate_size", 4608),
                     ("moe_intermediate_size", None),
                     ("num_experts_per_tok", 33),
                 ):

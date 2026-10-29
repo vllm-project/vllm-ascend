@@ -65,6 +65,7 @@ def make_sending_thread(
 def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     scheduler.need_truncate = False
+    scheduler._logged_mamba_allocation = False
     scheduler.num_speculative_tokens = 0
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
@@ -412,7 +413,7 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),

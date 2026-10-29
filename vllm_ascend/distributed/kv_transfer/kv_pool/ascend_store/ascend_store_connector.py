@@ -1,9 +1,7 @@
-import threading
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
-import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
@@ -23,15 +21,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
-    LOOKUP_MSG,
-    RESET_MSG,
-    RESP_ERR,
-    RESP_OK,
-)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -39,7 +30,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -48,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     validate_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
 )
@@ -57,7 +48,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
-    get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
@@ -542,93 +532,3 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_push_work(self) -> bool:
         return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())
-
-
-class LookupKeyServer:
-    def __init__(
-        self,
-        pool_worker: KVPoolWorker,
-        vllm_config: "VllmConfig",
-    ):
-        self.decoder = MsgpackDecoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REP,  # type: ignore[attr-defined]
-            bind=True,
-        )
-
-        self.pool_worker = pool_worker
-        self.running = True
-        self._closed = False
-
-        def process_request():
-            poller = zmq.Poller()  # type: ignore[attr-defined]
-            poller.register(self.socket, zmq.POLLIN)  # type: ignore[attr-defined]
-            try:
-                while self.running:
-                    if not poller.poll(timeout=100):
-                        continue
-
-                    # A failed receive leaves a REP socket in an unknown
-                    # protocol state. Do not try to send a synthetic reply.
-                    try:
-                        all_frames = self.socket.recv_multipart(copy=False)
-                    except zmq.ZMQError:  # type: ignore[attr-defined]
-                        if self.running:
-                            logger.exception("Failed to receive KV pool lookup request")
-                        break
-
-                    try:
-                        msg_type = bytes(all_frames[0])
-                        if msg_type == LOOKUP_MSG:
-                            token_len = int.from_bytes(all_frames[1], byteorder="big")
-                            kv_group_ids = self.decoder.decode([all_frames[2]])
-                            hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
-                            hashes_str = self.decoder.decode(all_frames[4:])
-                            result = self.pool_worker.lookup_scheduler(
-                                token_len,
-                                hashes_str,
-                                kv_group_ids,
-                                use_layerwise=False,
-                                hbm_hit_tokens=hbm_hit_tokens,
-                            )
-                            logger.debug(
-                                "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                                token_len,
-                                kv_group_ids,
-                                result,
-                            )
-                            response = result.to_bytes(4, "big")
-                        elif msg_type == RESET_MSG:
-                            self.pool_worker.reset_store()
-                            logger.info("AscendStore reset via remove_all succeeded.")
-                            response = RESP_OK
-                        else:
-                            logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
-                            response = RESP_ERR
-                    except Exception as e:
-                        logger.error("Error handling lookup request: %s", e)
-                        response = RESP_ERR
-
-                    try:
-                        self.socket.send(response)
-                    except zmq.ZMQError:  # type: ignore[attr-defined]
-                        if self.running:
-                            logger.exception("Failed to send KV pool lookup response")
-                        break
-            finally:
-                self.socket.close(linger=0)
-                self.ctx.term()
-
-        self.thread = threading.Thread(target=process_request, daemon=True)
-        self.thread.start()
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self.running = False
-        self.thread.join()
