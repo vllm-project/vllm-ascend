@@ -207,6 +207,10 @@ int main() {
   const Case cases[] = {
       {1, 8, 7168, 40, true, true, false, true},
       {4, 8, 7168, 40, true, true, true, true},
+      {16, 8, 7168, 40, true, true, true, true},    // Four row tasks on some A2/A3 cores.
+      {16, 8, 7168, 56, true, true, false, false},  // Three row tasks on some A5 cores.
+      {20, 8, 513, 40, false, true, true, true},    // Inclusive token-parallelism cutoff.
+      {28, 8, 513, 56, true, false, false, true},
       {4, 4, 7168, 40, false, true, false, true},
       {1, 1, 7168, 40, true, false, false, false},
       {1, 16, 7168, 40, false, true, true, false},

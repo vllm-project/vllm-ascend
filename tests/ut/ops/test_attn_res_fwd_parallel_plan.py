@@ -165,8 +165,8 @@ int main() {
 #include "csrc/attention/attn_res_fwd/op_host/attn_res_fwd_parallel_plan.h"
 using namespace AttnResFwd;
 int main() {
-    for (uint32_t cores : {1U, 4U, 8U, 40U, 48U, 64U})
-    for (uint32_t tokens : {0U, 1U, 4U, 10U, 11U, 16U, 40U, 128U})
+    for (uint32_t cores : {1U, 4U, 8U, 40U, 48U, 56U, 64U})
+    for (uint32_t tokens : {0U, 1U, 4U, 10U, 11U, 16U, 20U, 21U, 28U, 29U, 40U, 128U})
     for (uint32_t rows : {1U, 2U, 9U, 17U, 65U, 128U, 129U})
     for (uint32_t hidden : {0U, 65U, 511U, 512U, 1537U, 7168U, 32768U})
     for (uint64_t ub : {0ULL, 192ULL * 1024, 248ULL * 1024})
@@ -236,6 +236,16 @@ int main() {
     assert(!MakeParallelPlan(1, 9, 7168, 40, paddedBudget - 1, true, true).rowParallel);
     assert(MakeParallelPlan(1, 9, 7168, 40, 192*1024, true, true).usedCores == 9);
     assert(MakeParallelPlan(4, 9, 7168, 40, 192*1024, true, true).usedCores == 36);
+    // B=16 keeps full-H output ownership and uses all AIVs for scoring.
+    for (bool regBase : {false, true}) {
+        const uint32_t cores = regBase ? 56 : 40;
+        auto batch16 = MakeParallelPlan(16, 9, 7168, cores, 192*1024, true, true, regBase);
+        assert(batch16.rowParallel && batch16.usedCores == cores);
+        assert(batch16.scoreSplits == 1 && batch16.outputSplits == 1);
+        assert(batch16.workspaceBytes == uint64_t(16 * 9) * COOPERATIVE_SLOT_BYTES);
+        assert(MakeParallelPlan(cores / 2, 9, 7168, cores, 192*1024, true, true, regBase).rowParallel);
+        assert(!MakeParallelPlan(cores / 2 + 1, 9, 7168, cores, 192*1024, true, true, regBase).usedCores);
+    }
     assert(MakeParallelPlan(1, 9, 32768, 40, 192*1024, true, true).scoreSplits > 1);
     auto large = MakeParallelPlan(4, 9, 32768, 40, 192*1024, true, true);
     assert(large.usedCores && uint64_t(4*9) * large.scoreSplits > large.usedCores);

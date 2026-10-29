@@ -10,7 +10,7 @@
 
 namespace AttnResFwd {
 
-constexpr uint32_t COOPERATIVE_CORE_GAIN = 4;
+constexpr uint32_t COOPERATIVE_CORE_GAIN = 2;
 constexpr uint32_t COOPERATIVE_MIN_HIDDEN = 512;
 constexpr uint32_t COOPERATIVE_MAX_OUTPUT_SPLITS = 8;
 constexpr uint32_t COOPERATIVE_MAX_SCORE_SPLITS = 32;
@@ -76,7 +76,7 @@ inline uint64_t RowParallelUbBytes(uint32_t rows, uint64_t tile, bool regBase = 
          COOPERATIVE_SLOT_BYTES + COOPERATIVE_UB_ALLOWANCE + rowPadding;
 }
 
-// Only choose cooperation on supported devices when token parallelism leaves most cores idle.
+// Only choose cooperation when token parallelism uses at most half the AIVs.
 // Prefer whole-H output ownership when the full-row buffer budget fits UB.
 inline ParallelPlan MakeParallelPlan(uint32_t tokens, uint32_t rows, uint32_t hidden, uint32_t cores, uint64_t ubBytes,
                                      bool outputNorm, bool supportsCooperative, bool regBase = false) {

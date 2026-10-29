@@ -29,3 +29,9 @@ entries:
       Fused output RMSNorm conversion and statistics in RegBase for the
       complete-row AttnResFwd path, reducing small-batch kernel latency
       while retaining the BF16 mixture boundary and one readiness barrier.
+  - category: performance
+    hardware: [A2, A3, A5]
+    text: >-
+      Extended AttnResFwd cooperative dispatch to batches using at most half
+      the available AIV cores, enabling row-parallel scoring for B=16 while
+      retaining full-row output ownership and existing UB checks.
