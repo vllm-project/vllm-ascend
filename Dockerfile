@@ -14,100 +14,142 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-ARG CANN_QUAY_URL="quay.io/ascend/cann"
-ARG CANN_VERSION="9.1.0"
-ARG BASE_OS="ubuntu22.04"
-FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-${BASE_OS}-py3.12
-
-ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
-ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-ARG APTMIRROR=""
-ARG GIT_PROXY=""
-ARG PIP_TRUSTED_HOST=""
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-910b-ubuntu22.04-py3.12
 
 WORKDIR /workspace
 
-# Install clang-15 (for triton-ascend) and Mooncake
-ARG MOONCAKE_TAG=0.3.11.post1
-RUN if [ -n "$APTMIRROR" ]; then \
-        sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
-    fi && \
-    apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
+# Install clang-15 (for triton-ascend)
+RUN apt-get update -y && \
+    apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url ${MOONCAKE_INDEX_URL} && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download) and ray (for multinode)
-RUN pip config set global.index-url ${PIP_INDEX_URL} && \
-    if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
-    python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.26.0
+ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
-      if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
+
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
 # Install vllm-ascend
+# Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend910b1"
-ARG COMPILE_CUSTOM_KERNELS=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
+# Install _rust_tool_parser for the Rust frontend.
+# The default toolchain is read from vllm's rust-toolchain.toml (falling back
+# to stable).
+ENV PATH="/root/.cargo/bin:$PATH"
+RUN cd /vllm-workspace/vllm && \
+    export PROTOC_INCLUDE=/usr/include && \
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
+
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
-# ===== Conditional installation based on BUILD_TYPE =====
-# All ARG definitions are in the same stage for better maintainability
-ARG BUILD_TYPE="release"
-ARG MEMCACHE_VERSION
-ARG MEMCACHE_DATE
-ARG MEMFABRIC_VERSION
-ARG MEMFABRIC_DATE
-ARG TORCH_NPU_VERSION
-ARG TORCH_NPU_DATE
-ARG TRITON_ASCEND_VERSION
-ARG TRITON_ASCEND_PACKAGE_VERSION
-ARG DAILY_DEPS_MODE="full"
+# ===== Install pinned dependencies =====
+# Update the pinned versions here.
+ARG TARGETPLATFORM
+ARG MEMCACHE_VERSION="1.3.0"
+ARG MEMCACHE_DATE="20261024.1"
+ARG MEMFABRIC_VERSION="1.3.0"
+ARG MEMFABRIC_DATE="20261024.1"
+ARG TORCH_NPU_VERSION="26.2.0"
+ARG TORCH_NPU_DATE="20261015.5"
+ARG FLA_VERSION="26.9.1+dev5cc6990"
+ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
+ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
+ARG HYBRID_OBS_BASE="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com"
+ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
+ARG TRITON_ASCEND_URL_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/triton-ascend"
+ARG TRITON_ASCEND_VERSION="20261019175332"
+ARG TRITON_ASCEND_PACKAGE_VERSION="3.6.0"
+RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
+        "linux/amd64"|"x86_64") \
+            ARCH_SUFFIX="x86_64"; \
+            TRITON_ASCEND_URL="${TRITON_ASCEND_URL_BASE}/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
+            MEMFABRIC_URL="${HYBRID_OBS_BASE}/mf/release/${MEMFABRIC_VERSION}/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
+            MEMCACHE_URL="${HYBRID_OBS_BASE}/memcache/release/${MEMCACHE_VERSION}/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl"; \
+            FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
+            FLA_SHA256="f9e5b2cac5278eee9b781e758a896f6f2dbae42b43b9f36a3073e4493167918a" ;; \
+        "linux/arm64"|"aarch64") \
+            ARCH_SUFFIX="aarch64"; \
+            TRITON_ASCEND_URL="${TRITON_ASCEND_URL_BASE}/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"; \
+            MEMFABRIC_URL="${HYBRID_OBS_BASE}/mf/release/${MEMFABRIC_VERSION}/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"; \
+            MEMCACHE_URL="${HYBRID_OBS_BASE}/memcache/release/${MEMCACHE_VERSION}/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"; \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl"; \
+            FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
+            FLA_SHA256="2577eca3f1015ca83897bf638046f41cb54691a0c15c433d9e43946fa32d985b" ;; \
+        *) echo "Unsupported platform: ${TARGETPLATFORM:-$(uname -m)}" && exit 1 ;; \
+    esac && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+# Install triton-ascend
+    echo "Install triton-ascend..." && \
+    python3 -m pip install "$TRITON_ASCEND_URL" && \
+# Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
+    wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
+    python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+# Install memfabric_hybrid kernels (A3/A5)
+    case "${SOC_VERSION:-}" in \
+        ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
+        ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
+    esac && \
+# Install flash-linear-attention-npu
+    wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
+    echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
+    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
+# Install torch-npu
+    mkdir -p /tmp/torch_npu && \
+    wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
+        -O /tmp/torch_npu/torch_npu.tar.gz \
+        "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
+    tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
+    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
+    python3 -m pip cache purge
 
-# Install daily packages via shared script
-COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
-RUN if [ "$BUILD_TYPE" = "daily" ]; then \
-        bash /tmp/install_daily_deps.sh; \
-    else \
-        echo "Building release version without daily packages"; \
-    fi && rm -f /tmp/install_daily_deps.sh
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    git clone https://github.com/MinghuasLab/flash-attention-npu.git /tmp/flash-attention-npu && \
+    cd /tmp/flash-attention-npu && \
+    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git submodule update --init --recursive && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    python3 setup.py install && \
+    cd /workspace && \
+    rm -rf /tmp/flash-attention-npu
 
 CMD ["/bin/bash"]

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from torch import nn
 
-from vllm_ascend.models import deepseek_v4
+from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
 
 class StubModule(nn.Module):
@@ -13,12 +13,12 @@ class StubModule(nn.Module):
 def test_routed_moe_receives_configured_swiglu_limit(monkeypatch):
     fused_moe_kwargs = {}
 
-    class StubFusedMoE(nn.Module):
+    class StubFusedMoEFactory(nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
             fused_moe_kwargs.update(kwargs)
 
-    monkeypatch.setattr(deepseek_v4, "FusedMoE", StubFusedMoE)
+    monkeypatch.setattr(deepseek_v4, "FusedMoEFactory", StubFusedMoEFactory)
     monkeypatch.setattr(deepseek_v4, "ReplicatedLinear", StubModule)
     monkeypatch.setattr(deepseek_v4, "DeepseekV2MLP", StubModule)
     monkeypatch.setattr(deepseek_v4, "get_tensor_model_parallel_world_size", lambda: 1)

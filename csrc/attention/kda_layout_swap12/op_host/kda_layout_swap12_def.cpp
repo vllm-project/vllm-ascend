@@ -8,6 +8,8 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
+// Swap logical axes 1 and 2 for rank-4 KDA tensors. The rank-3 TND/NTD
+// equivalent swaps axes 0 and 1, so both layouts share the same operator.
 class KdaLayoutSwap12 : public OpDef {
 public:
     explicit KdaLayoutSwap12(const char *name) : OpDef(name)

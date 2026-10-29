@@ -24,12 +24,12 @@ namespace optiling {
 
 ge::graphStatus KvQuantSASTilingCheck::CheckFeatureWinKV() const
 {
-    OP_CHECK_IF(oriWinLeft_ != 127, // 127:当前不泛化
-        OP_LOGE(opName_, "oriWinLeft_ only support 127, but got %u", oriWinLeft_),
+    OP_CHECK_IF(oriWinLeft_ < 0,
+        OP_LOGE(opName_, "oriWinLeft_ should be non-negative, but got %ld", oriWinLeft_),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(oriWinRight_ != 0, // 0:当前不泛化
-        OP_LOGE(opName_, "oriWinRight_ only support 0, but got %u", oriWinRight_),
+    OP_CHECK_IF(oriWinRight_ < 0,
+        OP_LOGE(opName_, "oriWinRight_ should be non-negative, but got %ld", oriWinRight_),
         return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;

@@ -1,206 +1,95 @@
-# Layerwise and Sparse KV Cache Offloading
+# Layerwise and Sparse KV Cache Offloading Guide
 
-## 1. Background
+Layerwise and sparse KV cache offloading are supported only in disaggregated
+Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
 
-KV cache is a major NPU memory cost in long-sequence inference. Prefill and
-Decode have different performance characteristics, so they use different
-offloading strategies:
+This guide explains how to configure:
 
-| Stage | Feature | What remains on the NPU |
-| :--- | :--- | :--- |
-| Prefill | Layerwise KV Cache Offload | A few reusable full-layer KV buffers |
-| Decode | Sparse KV Cache Offload | Indexer cache and a hot top-k KV buffer |
+- Layerwise KV cache offloading during the Prefill phase
+- Sparse KV cache offloading during the Decode phase
+- Combining both features in a disaggregated Prefill/Decode deployment
 
-Prefill has enough computation to overlap full-layer transfers. Decode does
-not, so it keeps the full KV cache in host memory and loads only the top-k
-entries needed by sparse attention.
+For the underlying architecture and implementation details, see
+[Layerwise and Sparse KV Cache Offloading Design](../../developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md).
 
-The design comes from
-[RFC #48203](https://github.com/vllm-project/vllm/issues/48203). Its experiments
-show the potential to substantially increase sequence length or batch size, but
-actual results depend on the model, hardware, and configuration.
+## Supported Models
 
-## 2. Layerwise KV Cache Offload for Prefill
+The combined deployment currently supports the following sparse-attention
+model families:
 
-### How it works
+- [GLM-5.1](../../tutorials/models/GLM5.md)
+- [GLM-5.2](../../tutorials/models/GLM5.2.md)
+- [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)
 
-Layerwise Prefill KV Cache Offload maps many logical layers onto a smaller
-number of physical NPU buffers:
+Other sparse-attention models have not been validated.
 
-1. load a layer's cached KV into a reusable buffer;
-2. run attention;
-3. save the updated KV to host memory; and
-4. reuse the buffer only after the save and any remote read complete.
+## 1. Preparation
 
-Multiple buffers allow transfer and computation to overlap. The current
-implementation uses `AscendStoreConnector` with the Memcache backend.
+### Prefill Nodes
 
-### Requirements
+=== "A3 series"
 
-- Use a dedicated Prefill node with `kv_role: "kv_producer"`.
-- Use `backend: "memcache"` and `use_layerwise: true`.
-- Use an MLA, SFA, or DSA attention backend with eager execution.
-- Install MemFabric Hybrid first, then Memcache Hybrid on the Prefill node.
-  Memcache is the host KV Pool backend; MemFabric is its dependency.
-- Configure `mmc-meta.conf` and `mmc-local.conf`, and start MetaService before
-  starting Prefill.
+    Prefill offload relies on memcache service. Here we provide a simple guidance to launch memcache service. Configure `mmc-meta.conf`:
 
-Install the dependencies in order:
+    ```ini
+    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+    ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+    ock.mmc.meta.lease_ttl_ms = 30000
+    ock.mmc.log_level = error
+    ```
 
-```bash
-pip install memfabric-hybrid
-pip install memcache-hybrid
-```
+    Configure `mmc-local.conf` on every Prefill node:
 
-Prepare the host before starting Prefill:
+    ```ini
+    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+    ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+    ock.mmc.log_level = error
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_sdma
+    ock.mmc.local_service.dram.size = 10GB
+    ```
 
-```bash
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-export PYTHONHASHSEED=0
-```
+    Start MetaService in a separate process:
 
-### Configuration
+    ```bash
+    export MMC_META_CONFIG_PATH=/path/to/config/mmc-meta.conf
+    python -c "from memcache_hybrid import MetaService; MetaService.main()"
+    ```
 
-This example keeps layer 0 independent and assigns all other layers to three
-reusable buffers:
+    Prepare every Prefill node before starting vLLM:
 
-```json
-{
-    "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_producer",
-    "kv_connector_extra_config": {
-        "backend": "memcache",
-        "use_layerwise": true,
-        "layerwise_num_shared_buffers": 3,
-        "layerwise_independent_layers": [0]
-    }
-}
-```
+    ```bash
+    export MMC_LOCAL_CONFIG_PATH=/path/to/config/mmc-local.conf
+    ```
 
-| Parameter | Description |
-| :--- | :--- |
-| `layerwise_num_shared_buffers` | Number of reusable NPU buffers. More buffers use more memory but provide more opportunity to overlap transfer and computation. |
-| `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
+### Decode Nodes
 
-The buffer count is workload-dependent. Start with two to four buffers and tune
-it according to NPU memory and transfer bandwidth.
+There is no extra work to do on decode nodes.
 
-### Verification and limitations
+## 2. Layerwise KV Cache Offload on Prefill
 
-The following log means buffer reuse is active:
+Requirements and limitations:
 
-```text
-Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
-```
+- Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
+- `SfaRemoteD2HConnector` is the only supported connector to be used with prefill offload and decode offload.
 
-- Shared-buffer offload currently requires Memcache and eager execution.
-- Context parallelism has not been validated.
-- AscendStore's own layerwise P/D transfer does not support TP mismatch. This
-  limitation does not apply when `SfaRemoteD2HConnector` performs P/D transfer.
-- MTP layers and optional SFA indexer caches participate in buffer reuse and
-  memory accounting automatically.
+For a combined deployment, Prefill TP must be greater than or equal to Decode
+TP and divisible by it.
 
-## 3. Sparse KV Cache Offload for Decode
-
-### How it works
-
-Sparse KV Cache Offload stores the full KV cache in host memory. The NPU keeps:
-
-- the indexer cache used to select important tokens; and
-- a hot buffer containing recently used top-k KV entries.
-
-On each Decode step, entries already in the hot buffer are reused and only
-cache misses are loaded from host memory. `SfaRemoteD2HConnector` transfers the
-Prefill KV cache directly into the Decode-side storage.
-
-### Requirements
-
-- Use a sparse-attention model such as
-  [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) or
-  [DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2).
-- Use disaggregated P/D deployment and enable the feature only on Decode.
-- Tensor parallelism is supported; context and pipeline parallelism are not.
-- Model Runner V1 is required.
-- Install MemFabric Hybrid release 1.2. The current version requires NPU driver
-  `25.5.1` or later.
-- Install Clang and OpenMP if they are not already available in the image.
-
-If MemFabric Hybrid 1.2 is not already installed in the image:
+Add the following options to the Prefill launch command. `MultiConnector` lets
+`AscendStoreConnector` offload layer buffers to Memcache while
+`SfaRemoteD2HConnector` exposes the same buffers to Decode:
 
 ```bash
-pip uninstall -y memfabric_hybrid
-git clone https://gitcode.com/Ascend/memfabric_hybrid.git -b release/1.2
-cd memfabric_hybrid
-bash script/build_and_pack_run.sh
-bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
-export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-```
-
-### Configuration
-
-Add the following options to the Decode launch command:
-
-```bash
---additional-config '{
-    "sparse_kv_offload_config": {
-        "enabled": true,
-        "topk_buffer_size": 4096,
-        "dram_size_per_dp_GB": 128
-    }
-}' \
+--enforce-eager \
 --kv-transfer-config '{
-    "kv_connector": "SfaRemoteD2HConnector",
-    "kv_role": "kv_consumer",
-    "kv_port": 20050,
-    "kv_connector_extra_config": {
-        "transfer_backend": "memfabric",
-        "use_layerwise": true
-    }
-}'
-```
-
-| Parameter | Description |
-| :--- | :--- |
-| `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
-| `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
-| `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
-
-## 4. Use Them Together
-
-The combined data flow is:
-
-```mermaid
-flowchart LR
-    PHost["Prefill host KV pool"]
-    PNPU["Prefill NPU<br/>reusable layer buffers"]
-    DHost["Decode host<br/>full KV cache"]
-    DNPU["Decode NPU<br/>indexer + top-k buffer"]
-
-    PHost <-->|"Layerwise offload / load"| PNPU
-    PNPU -->|"Remote D2H pull"| DHost
-    DHost -->|"Top-k cache misses"| DNPU
-```
-
-### Prefill configuration
-
-Use `MultiConnector` so Prefill can save KV to Memcache and expose the same
-layer buffer to Decode:
-
-```json
-{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
     "kv_connector_extra_config": {
         "connectors": [
             {
                 "kv_connector": "SfaRemoteD2HConnector",
-                "kv_role": "kv_producer",
-                "kv_port": 20050,
-                "kv_connector_extra_config": {
-                    "transfer_backend": "memfabric"
-                }
+                "kv_role": "kv_producer"
             },
             {
                 "kv_connector": "AscendStoreConnector",
@@ -214,22 +103,69 @@ layer buffer to Decode:
             }
         ]
     }
-}
+}'
 ```
 
-Do not enable `sparse_kv_offload_config` on Prefill. A reusable Prefill buffer
-is released only after AscendStore has saved it and Decode has completed the
-Remote D2H read.
+Do not set `sparse_kv_offload_config` on Prefill. The
+`AscendStoreConnector` entry uses the following buffer options:
 
-### Decode configuration
+| Parameter | Description |
+| :--- | :--- |
+| `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
+| `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
 
-Use the Sparse KV Cache Offload configuration from chapter 3. Decode owns the
-destination and pulls main KV directly into its host pool; indexer KV remains
-in rank-local NPU memory.
+The following log confirms that buffer reuse is enabled:
 
-### Proxy
+```text
+Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
+```
 
-Start the layerwise proxy after Prefill and Decode are ready:
+## 3. Sparse KV Cache Offload on Decode
+
+Requirements and limitations:
+
+- Sparse Decode Offload is currently not supported on 950PR&950DT Products. We are actively working on it to support it in the near future.
+- Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
+- The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
+  not supported. INT8 indexer KV is supported separately through
+  `--attention_config.indexer_kv_dtype int8`; it does not enable main-cache C8.
+- Sparse Decode Offload supports DP and TP on Decode; CP are not supported.
+- Sparse Decode Offload and `PreemptOffloadConnector` are mutually exclusive,
+  including when the connector is configured inside `MultiConnector`. Use only
+  one of these offload mechanisms on a Decode node.
+
+The current decode offload use a different host pool compared to prefill. So the configuration on decode node is slightly different. Add the following options to the Decode launch command:
+
+```bash
+--additional-config '{
+    "sparse_kv_offload_config": {
+        "enabled": true,
+        "dram_size_per_dp_GB": 110
+    }
+}' \
+--kv-transfer-config '{
+    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": 20050
+}'
+```
+
+On Decode, reserve
+`decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
+starting from `kv_port`.
+
+| Parameter | Description |
+| :--- | :--- |
+| `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
+| `dram_size_per_dp_GB` | Defaults to `110` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
+| `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |
+
+Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
+
+## 4. Start the P/D Proxy
+
+Start Prefill and Decode with the configurations above. After both nodes are
+ready, start the layerwise proxy:
 
 ```bash
 python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
@@ -241,18 +177,5 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_exa
     --decoder-ports 8200
 ```
 
-Use reachable addresses for multi-node deployment. Do not advertise
-`0.0.0.0`, because Decode calls the proxy's `/v1/metaserver` endpoint. Send
-inference requests to the proxy port (`9000` in this example).
-
-### Deployment checklist
-
-- Set `transfer_backend` to `memfabric` on both Prefill and Decode.
-- Prefill TP must be greater than or equal to Decode TP and divisible by it.
-- `kv_port` is the Decode control-port base. Reserve
-  `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports.
-  Prefill does not bind these ports; Decode supplies the target through request
-  metadata.
-
-For implementation details, see
-[SFA Remote D2H Connector Design](../../developer_guide/Design_Documents/sfa_remote_d2h_connector.md).
+For multi-node deployment, advertise reachable addresses instead of
+`0.0.0.0`. Send inference requests to the proxy port (`9000` in this example).

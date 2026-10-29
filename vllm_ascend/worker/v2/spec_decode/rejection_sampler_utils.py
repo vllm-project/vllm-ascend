@@ -20,172 +20,19 @@
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_cumulative_log_p_kernel,
+    _compute_global_residual_mass,
+    _compute_local_residual_mass_kernel,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_global_logsumexp as _compute_global_lse,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _insert_resampled_kernel,
-)
 
-
-@triton.jit
-def _npu_gumbel_block_argmax(
-    logits,
-    block,
-    mask,
-    token_idx,
-    expanded_idx_mapping_ptr,
-    temp_ptr,
-    seeds_ptr,
-    pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
-    vocab_size,
-    APPLY_TEMPERATURE: tl.constexpr,
-):
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
-        else:
-            col = 0
-        tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
-            logits,
-            mask=mask,
-        )
-
-    logits = logits.to(tl.float32)
-    if temp != 0.0:
-        seed = tl.load(seeds_ptr + req_state_idx)
-        # NPU: cast pos to int32 to avoid uint64 in philox (NPU umulhi only
-        # supports int32/uint32). Position values fit in int32 in practice.
-        pos = tl.load(pos_ptr + token_idx).to(tl.int32)
-        gumbel_seed = tl.randint(seed, pos)
-        # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
-
-    value, idx = tl.max(logits, axis=0, return_indices=True)
-    return value, idx
-
-
-@triton.jit
-def _resample_kernel(
-    # [num_reqs, num_blocks]
-    resampled_local_argmax_ptr,
-    resampled_local_argmax_stride,
-    # [num_reqs, num_blocks]
-    resampled_local_max_ptr,
-    resampled_local_max_stride,
-    # [num_logits, V]
-    target_logits_ptr,
-    target_logits_stride,
-    # [num_reqs]
-    target_rejected_logsumexp_ptr,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits_ptr,
-    draft_logits_stride_0,
-    draft_logits_stride_1,
-    # [num_reqs]
-    draft_rejected_logsumexp_ptr,
-    # [num_reqs]
-    rejected_step_ptr,
-    # [num_reqs + 1]
-    cu_num_logits_ptr,
-    # [num_logits]
-    expanded_idx_mapping_ptr,
-    # [num_logits]
-    draft_sampled_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    # [max_num_reqs]
-    seed_ptr,
-    # [num_logits]
-    pos_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-    HAS_DRAFT_LOGITS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    resample_idx = tl.load(rejected_step_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    resample_token_idx = start_idx + resample_idx
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
-
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    is_bonus = resample_token_idx == end_idx - 1
-    if temp == 0.0 and not is_bonus:
-        return
-
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    target_logits = tl.load(
-        target_logits_ptr + resample_token_idx * target_logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
-
-    if is_bonus:
-        residual_logits = target_logits
-    elif HAS_DRAFT_LOGITS:
-        draft_logits = tl.load(
-            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
-        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = target_logits - target_lse
-        draft_log_probs = draft_logits - draft_lse
-        ratio = tl.exp(draft_log_probs - target_log_probs)
-        residual_logits = tl.where(
-            ratio < 1.0,
-            target_log_probs + tl.log(1 - ratio),
-            float("-inf"),
-        ).to(tl.float32)
-    else:
-        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
-        residual_logits = tl.where(
-            block != rejected_draft_token,
-            target_logits,
-            float("-inf"),
-        ).to(tl.float32)
-
-    value, idx = _npu_gumbel_block_argmax(
-        residual_logits,
-        block,
-        mask,
-        resample_token_idx,
-        expanded_idx_mapping_ptr,
-        temp_ptr,
-        seed_ptr,
-        pos_ptr,
-        None,
-        0,
-        None,
-        vocab_size,
-        APPLY_TEMPERATURE=False,
-    )
-    token_id = block_idx * BLOCK_SIZE + idx
-    tl.store(
-        resampled_local_argmax_ptr + req_idx * resampled_local_argmax_stride + block_idx,
-        token_id,
-    )
-    tl.store(
-        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
-        value,
-    )
+from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+from vllm_ascend.utils import vllm_version_is
 
 
 @triton.jit
@@ -233,19 +80,31 @@ def _probabilistic_rejection_kernel(
     seed_ptr,
     # [num_logits]
     pos_ptr,
+    # [num_speculative_steps]
+    synthetic_conditional_rates_ptr,
+    # [num_logits]
+    cumulative_log_p_ptr,
+    # [num_logits, num_blocks]
+    local_residual_mass_ptr,
+    local_residual_mass_stride,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SYNTHETIC_MODE: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    # Cast to int64 before pointer arithmetic: triton-ascend computes
+    # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+    # (upstream vllm #46560).
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
     seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
-    rejected_step = 0
+    rejected_step = tl.full((), 0, tl.int64)
     target_lse = 0.0
     draft_lse = 0.0
     accepted = True
@@ -268,9 +127,68 @@ def _probabilistic_rejection_kernel(
                 target_argmax = tl.load(
                     target_local_argmax_ptr + logit_idx * target_local_argmax_stride + max_target_block_idx
                 )
-                accepted &= target_argmax == draft_sampled
-                tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
+                if SYNTHETIC_MODE:
+                    # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
+                    # Upstream uses tl_rand32(seed, pos, includes_zero=False);
+                    # NPU Triton lacks scalar tl.rand, so reuse the 1-element
+                    # block + reduction pattern from the non-greedy path below.
+                    u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                    u_seed = tl.randint(seed, u_pos)
+                    u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                    u = tl.maximum(u, 4.6566127342e-10)
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                    # -1 placeholder draft tokens can never be accepted.
+                    accepted &= draft_sampled >= 0
+                    # Keep the accepted draft token; store the target argmax
+                    # upon rejection so resampling can be skipped.
+                    token = tl.where(accepted, draft_sampled.to(tl.int64), target_argmax)
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, token)
+                else:
+                    accepted &= target_argmax == draft_sampled
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
+            elif USE_BLOCK_VERIFICATION:
+                accepted = draft_sampled >= 0
+                if accepted:
+                    u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                    u_seed = tl.randint(seed, u_pos)
+                    u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                    u = tl.maximum(u, 4.6566127342e-10)
+                    prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))
+                    next_draft_token = tl.load(
+                        draft_sampled_ptr + logit_idx + 2,
+                        mask=i < num_tokens - 2,
+                        other=-1,
+                    ).to(tl.int64)
+                    if next_draft_token >= 0:
+                        residual_mass = _compute_global_residual_mass(
+                            local_residual_mass_ptr,
+                            local_residual_mass_stride,
+                            prefix_joint_ratio,
+                            target_logits_ptr,
+                            target_logits_stride,
+                            target_local_max_ptr,
+                            target_local_max_stride,
+                            target_local_sumexp_ptr,
+                            target_local_sumexp_stride,
+                            next_draft_token,
+                            logit_idx + 1,
+                            vocab_num_blocks,
+                            PADDED_VOCAB_NUM_BLOCKS,
+                            HAS_DRAFT_LOGITS,
+                        )
+                        denom = residual_mass + 1.0 - prefix_joint_ratio
+                        h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
+                    else:
+                        h = prefix_joint_ratio
+                    rejected_step = tl.where(u <= h, i + 1, rejected_step)
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             else:
+                # -1 is used for placeholder draft token ids that should be
+                # rejected.
+                is_valid_draft = draft_sampled >= 0
+                # Avoid possible OOB ptr access.
+                draft_sampled = tl.maximum(0, draft_sampled)
                 target_logit = tl.load(target_logits_ptr + logit_idx * target_logits_stride + draft_sampled).to(
                     tl.float32
                 )
@@ -284,8 +202,17 @@ def _probabilistic_rejection_kernel(
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
-                # NPU does not support tl_rand64; always accept the draft token.
-                u = tl.full([], 0.0, dtype=tl.float32)
+                # Draw the acceptance threshold u ~ U(0, 1). Upstream uses
+                # tl_rand64/tl_rand32; NPU Triton lacks float64 tl_rand64 and
+                # scalar tl.rand, so generate u from a 1-element block and
+                # clamp away from 0 so that tl.log(u) stays finite.
+                # NPU: cast pos to int32 so philox uses the 32-bit path.
+                # uint64 umulhi is not supported by the Ascend vector core.
+                # Position values fit in int32 in practice.
+                u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                u_seed = tl.randint(seed, u_pos)
+                u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                u = tl.maximum(u, 4.6566127342e-10)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
@@ -293,6 +220,8 @@ def _probabilistic_rejection_kernel(
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
+                    # Match the temperature-scaled block statistics.
+                    draft_logit = draft_logit / temp
                     draft_lse = _compute_global_lse(
                         draft_local_max_ptr,
                         draft_local_max_stride,
@@ -306,12 +235,43 @@ def _probabilistic_rejection_kernel(
                 else:
                     # One-hot draft: q(draft_token) = 1, log_q = 0.
                     draft_log_prob = 0
-                # Probability ratio test: p(x) > u * q(x)
-                # Equivalent log form: log_p(x) > log(u) + log_q(x)
-                accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                if SYNTHETIC_MODE:
+                    # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
+                    # The logprob/LSE values above are still needed to
+                    # resample the rejected token.
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                else:
+                    # Probability ratio test: p(x) > u * q(x)
+                    # Equivalent log form: log_p(x) > log(u) + log_q(x)
+                    accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                # -1 placeholder draft tokens can never be accepted.
+                accepted &= is_valid_draft
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
-            rejected_step += accepted
+            if not USE_BLOCK_VERIFICATION or temp == 0.0:
+                rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
+    if USE_BLOCK_VERIFICATION and (temp != 0.0 and rejected_step < num_tokens - 1):
+        rejected_idx = start_idx + rejected_step
+        target_lse = _compute_global_lse(
+            target_local_max_ptr,
+            target_local_max_stride,
+            target_local_sumexp_ptr,
+            target_local_sumexp_stride,
+            rejected_idx,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS,
+        )
+        if HAS_DRAFT_LOGITS:
+            draft_lse = _compute_global_lse(
+                draft_local_max_ptr,
+                draft_local_max_stride,
+                draft_local_sumexp_ptr,
+                draft_local_sumexp_stride,
+                rejected_idx,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS,
+            )
     tl.store(target_rejected_logsumexp_ptr + req_idx, target_lse)
     tl.store(draft_rejected_logsumexp_ptr + req_idx, draft_lse)
 
@@ -341,30 +301,58 @@ def rejection_sample(
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
-    # TODO: refactor speculative decoding functionality in a future PR.
-    # `use_block_verification` is accepted but not yet implemented on NPU;
-    # wire it up when the block verification path is supported.
     use_block_verification: bool = False,
+    # vLLM main (#59554) forwards these watermarking kwargs when a watermark
+    # key is configured; the NPU kernels do not implement watermarking.
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
+    # mode. Accept the kwargs so the shared call site keeps working, but reject
+    # the mode itself.
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
-
-    if synthetic_conditional_rates is not None:
-        # Synthetic rejection sampling needs tl_rand64, which NPU Triton does
-        # not support. The greedy fallback below would silently use u=0.0 and
-        # produce wrong acceptance — refuse loudly instead.
-        raise NotImplementedError(
-            "Synthetic rejection sampling is not supported on NPU yet; use rejection_sample_method='standard'."
+    if fly_window_size > 0:
+        raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
+    if (
+        contexts is not None
+        or watermarking is not None
+        or watermarking_skip_mask is not None
+        or watermark_key is not None
+    ):
+        raise NotImplementedError("Watermarking is not supported in the NPU rejection sampler.")
+    if use_block_verification:
+        assert synthetic_conditional_rates is None, (
+            "Block verification is incompatible with synthetic acceptance rates."
         )
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
+
+    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
+    # kernels to `num_logits` and moved bonus-token detection into
+    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
+    # count. Passing `num_speculative_steps` there makes the kernels treat every
+    # logit after the first one as a bonus token and return early, leaving the
+    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
+    # `num_speculative_steps`.
+    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
         draft_logits = target_logits.new_empty(1, 1, 1)
+    else:
+        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
+        # vocab size is larger than the draft's due to padding.
+        vocab_size = min(vocab_size, draft_logits.size(-1))
 
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
@@ -397,10 +385,75 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        stats_num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+        # bug for max-with-index reductions is fixed.
+        has_auto_blockify_blacklist_op=True,
     )
+
+    if use_block_verification:
+        cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
+        _compute_cumulative_log_p_kernel[(num_reqs,)](
+            cumulative_log_p,
+            target_logits,
+            target_logits.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_sampled,
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            cu_num_logits,
+            idx_mapping,
+            temperature,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            num_warps=1,
+        )
+        if has_draft_logits:
+            local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+            if num_logits > 1:
+                _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                    local_residual_mass,
+                    local_residual_mass.stride(0),
+                    cumulative_log_p,
+                    target_logits,
+                    target_logits.stride(0),
+                    target_local_max,
+                    target_local_max.stride(0),
+                    target_local_sumexp,
+                    target_local_sumexp.stride(0),
+                    draft_logits,
+                    draft_logits.stride(0),
+                    draft_logits.stride(1),
+                    draft_local_max,
+                    draft_local_max.stride(0),
+                    draft_local_sumexp,
+                    draft_local_sumexp.stride(0),
+                    draft_sampled,
+                    expanded_idx_mapping,
+                    expanded_local_pos,
+                    temperature,
+                    vocab_size,
+                    stats_num_logits,
+                    vocab_num_blocks,
+                    BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                    PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                )
+        else:
+            local_residual_mass = None
+    else:
+        cumulative_log_p = None
+        local_residual_mass = None
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
@@ -435,56 +488,34 @@ def rejection_sample(
         temperature,
         seed,
         pos,
+        synthetic_conditional_rates,
+        cumulative_log_p,
+        local_residual_mass,
+        local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+        USE_BLOCK_VERIFICATION=use_block_verification,
         num_warps=1,
     )
 
     # Resample the rejected/bonus tokens.
-    RESAMPLE_BLOCK_SIZE = 1024
-    resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
-    resampled_local_argmax = target_logits.new_empty(num_reqs, resample_num_blocks, dtype=torch.int64)
-    # NPU does not support float64; use float32 for resampled_local_max.
-    resampled_local_max = target_logits.new_empty(num_reqs, resample_num_blocks, dtype=torch.float32)
-    _resample_kernel[(num_reqs, resample_num_blocks)](
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
+    resample(
+        sampled,
+        num_sampled,
         target_logits,
-        target_logits.stride(0),
         target_rejected_logsumexp,
         draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
         draft_rejected_logsumexp,
-        num_sampled,
         cu_num_logits,
         expanded_idx_mapping,
         draft_sampled,
         temperature,
         seed,
         pos,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-    )
-
-    # Insert the resampled tokens into the output sampled.
-    _insert_resampled_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        num_sampled,
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
-        resample_num_blocks,
-        cu_num_logits,
-        expanded_idx_mapping,
-        temperature,
-        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        has_draft_logits=has_draft_logits,
+        cumulative_log_p=cumulative_log_p,
+        use_block_verification=use_block_verification,
     )
     return sampled, num_sampled

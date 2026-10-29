@@ -279,7 +279,6 @@ def cpu_sparse_attention_score_fp16(
     block_size=128,
     scale_value=1.0,
 ):
-    """Compute the FP16 CPU reference for block-sparse causal attention."""
     select_idx_cpu = select_idx.to(torch.int64)
     block_table_cpu = block_table.to(torch.int64)
 
@@ -380,10 +379,10 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
     def make_case(
         self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1, head_dim=128, block_size=128, top_k=1, seed=42
     ):
+        batch = 1
         group_size = q_heads // kv_heads
         total_blocks = ceil(kv_seqlen / block_size)
         max_blocks_per_batch = total_blocks
-        batch = 1
         actual_seq_lengths = torch.tensor([q_seqlen] * batch, dtype=torch.int32)
         actual_seq_lengths_kv = torch.tensor([kv_seqlen] * batch, dtype=torch.int32)
 
@@ -566,6 +565,8 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
         )
 
         npu_out_cpu = npu_out.cpu()
+        print(f"[fp16-multi-batch] npu_out dtype: {npu_out_cpu.dtype}")
+
         diff = (npu_out_cpu.float() - cpu_out.float()).abs()
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
@@ -717,6 +718,7 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
             inner_precise=4,
         )
         p_npu_cpu = p_npu_out.cpu()
+        print(f"[fp16-prefill] npu_out dtype: {p_npu_cpu.dtype}")
 
         p_diff = (p_npu_cpu.float() - p_cpu_fp16.float()).abs()
         print(f"  [Prefill] max_diff={p_diff.max().item():.6f}, mean_diff={p_diff.mean().item():.6f}")
@@ -781,6 +783,7 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
             inner_precise=4,
         )
         d_npu_cpu = d_npu_out.cpu()
+        print(f"[fp16-decode] npu_out dtype: {d_npu_cpu.dtype}")
 
         d_diff = (d_npu_cpu.float() - d_cpu_fp16.float()).abs()
         print(f"  [Decode] max_diff={d_diff.max().item():.6f}, mean_diff={d_diff.mean().item():.6f}")
@@ -872,6 +875,7 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
             inner_precise=4,
         )
         p_npu_cpu = p_npu_out.cpu()
+        print(f"[fp16-prefill] npu_out dtype: {p_npu_cpu.dtype}")
 
         # --- Decode ---
         d_q_seqlen = 1
@@ -927,6 +931,7 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
             inner_precise=4,
         )
         d_npu_cpu = d_npu_out.cpu()
+        print(f"[fp16-decode] npu_out dtype: {d_npu_cpu.dtype}")
 
         # Report
         p_diff = (p_npu_cpu.float() - p_cpu_fp16.float()).abs()
@@ -1023,6 +1028,8 @@ class TestNpuSparseAttentionScoreFp16(TestCase):
         )
 
         npu_out_cpu = npu_out.cpu()
+        print(f"[fp16] npu_out dtype: {npu_out_cpu.dtype}")
+
         diff = (npu_out_cpu.float() - cpu_out.float()).abs()
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
@@ -1568,6 +1575,7 @@ def _test_fp16_q64_kv4_seqlen132_topk16(self):
     )
 
     npu_out_cpu = npu_out.cpu()
+    print(f"[fp16] npu_out dtype: {npu_out_cpu.dtype}")
     diff = (npu_out_cpu.float() - cpu_out.float()).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()

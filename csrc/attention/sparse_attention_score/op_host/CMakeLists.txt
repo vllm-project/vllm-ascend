@@ -15,12 +15,15 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-add_ops_compile_options(
-    OP_NAME SparseAttentionScore
-    OPTIONS --cce-auto-sync=off
-            -Wno-deprecated-declarations
-)
-
-if (NOT BUILD_OPS_RTY_KERNEL)
+if (BUILD_OPS_RTY_KERNEL)
+    add_ops_compile_options(
+            OP_NAME SparseAttentionScore
+            OPTIONS --cce-auto-sync=off
+                    -DASCENDC_DUMP=1
+                    -Wno-deprecated-declarations
+                    -Werror
+                    -fpermissive
+    )
+else()
     add_modules_sources(OPTYPE sparse_attention_score ACLNNTYPE aclnn_exclude)
 endif()

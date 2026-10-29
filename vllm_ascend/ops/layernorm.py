@@ -21,8 +21,27 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.triton.fused_norm_gate import layer_norm_fwd_npu
+from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
+
+# Scanning quant_description is O(number of quantized tensors) and every
+# RMSNorm used to redo it. The answer is a property of the checkpoint, so
+# cache it per quant_description object. The dict is kept in the entry so its
+# id cannot be recycled by a later allocation, and the identity check makes a
+# stale entry harmless either way.
+_NORM_BIAS_IN_QUANT_DESCRIPTION: dict[int, tuple[dict, bool]] = {}
+
+
+def _quant_description_has_norm_bias(quant_description: dict) -> bool:
+    if not quant_description:
+        return False
+    cache_key = id(quant_description)
+    cached = _NORM_BIAS_IN_QUANT_DESCRIPTION.get(cache_key)
+    if cached is not None and cached[0] is quant_description:
+        return cached[1]
+    has_norm_bias = any("norm.bias" in name for name in quant_description)
+    _NORM_BIAS_IN_QUANT_DESCRIPTION[cache_key] = (quant_description, has_norm_bias)
+    return has_norm_bias
 
 
 class AscendRMSNorm(RMSNorm):
@@ -40,9 +59,8 @@ class AscendRMSNorm(RMSNorm):
         self.bias_loaded = False
 
         # quantization with anti_method m4 will generate none-zero norm bias
-        if vllm_config.quant_config is not None and any(
-            "norm.bias" in name for name in vllm_config.quant_config.quant_description
-        ):
+        quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None) or {}
+        if _quant_description_has_norm_bias(quant_description):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
 
@@ -68,15 +86,12 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, self.weight, self.bias, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
-                if self.bias is not None:
-                    x.add_(self.bias)
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+            enable_custom_op()
+            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                x, residual, self.weight, self.bias, self.variance_epsilon
+            )
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
@@ -95,7 +110,6 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
@@ -147,7 +161,6 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
-            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -190,7 +203,6 @@ class AscendRMSNormGated(RMSNormGated):
         self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
-        self.activation = activation
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -198,14 +210,16 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(
-            x,
-            self.weight,
-            self.bias,
-            z,
-            self.eps,
-            self.group_size,
-            self.norm_before_gate,
-            True,
-            self.activation,
-        )
+        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+
+
+def __getattr__(name: str):
+    # Keep the existing class import available without loading FLA during
+    # ordinary layernorm discovery. Python serializes the lazy module import.
+    # TODO: Remove this lazy accessor when the class moves back here after
+    # supported vLLM FLA or Triton Ascend versions fix import-time NPU init.
+    if name == "AscendFusedRMSNormGated":
+        from vllm_ascend.utils import register_ascend_fla_customop
+
+        return register_ascend_fla_customop()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -39,9 +42,9 @@ Usage:
 """
 
 import asyncio
+import logging
 import os
 import uuid
-from dataclasses import asdict
 
 import ray
 import torch
@@ -49,19 +52,20 @@ import vllm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
+from vllm.distributed.weight_transfer.base import ModuleSource
+from vllm.distributed.weight_transfer.clients import RayVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-    HCCLTrainerSendWeightsArgs,
-    HCCLWeightTransferEngine,
-    HCCLWeightTransferInitInfo,
-    HCCLWeightTransferUpdateInfo,
+from vllm_ascend.distributed.weight_transfer import register_engine
+from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
@@ -136,40 +140,27 @@ class TrainModel:
         self.port = get_open_port()
         self.master_address = get_ip()
 
-    def get_master_address_and_port(self):
-        return self.master_address, self.port
-
-    def get_weight_metadata(self):
-        """Return weight names, dtypes and shapes for weight transfer."""
-        names = []
-        dtype_names = []
-        shapes = []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
-
-    def init_weight_transfer_group(self, world_size):
-        """Initialize the HCCL process group for weight transfer."""
-        self.model_update_group = HCCLWeightTransferEngine.trainer_init(
-            dict(
+    def init_weight_transfer_group(self, world_size, inference_engine):
+        """Initialize both ends through the trainer engine's Ray client."""
+        register_engine()
+        self.weight_transfer_engine = WeightTransferTrainerFactory.trainer_init(
+            HCCLTrainerInitInfo(
+                rank=0,
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                packed=True,
             ),
+            client=RayVLLMWeightSyncClient(inference_engine),
+            source=ModuleSource(self.model),
         )
 
-    def broadcast_weights(self, packed: bool = True):
-        """Broadcast weights to the inference engine via HCCL."""
-        trainer_args = HCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        HCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Run the complete weight-update transaction through the trainer."""
+        self.weight_transfer_engine.send_weights()
+
+    def shutdown_weight_transfer(self):
+        self.weight_transfer_engine.shutdown()
 
     @torch.inference_mode()
     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
@@ -190,9 +181,6 @@ ray_env_vars = {
     "VLLM_BATCH_INVARIANT": "1",
     "HCCL_DETERMINISTIC": "strict",
     "LCCL_DETERMINISTIC": "1",
-    # Disable FRACTAL_NZ mode (also handled by batch invariance override_envs)
-    "VLLM_ASCEND_ENABLE_NZ": "0",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "0",
     # Enable expandable segments for PyTorch NPU allocator
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
@@ -210,7 +198,8 @@ llm_kwargs = dict(
     max_model_len=8192,
     distributed_executor_backend="ray",
     gpu_memory_utilization=0.75,
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),
+    additional_config={"weight_nz_mode": 0},
+    weight_transfer_config=WeightTransferConfig(backend="hccl"),
 )
 
 # Launch the vLLM inference engine.
@@ -242,40 +231,18 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_V1)
 batch_prompt_token_ids = [tokenizer.encode(prompt, add_special_tokens=False) for prompt in PROMPTS]
 
 
-# Set up the communication channel between the training process and the
-# inference engine.
-master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
-
+# The trainer initializes the inference workers through its Ray client.
 world_size = 2  # 1 trainer + 1 inference worker
-inference_handle = llm.init_weight_transfer_engine.remote(
-    WeightTransferInitRequest(
-        init_info=asdict(
-            HCCLWeightTransferInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=1,
-                world_size=world_size,
-            )
-        )
-    )
-)
-
-# Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(world_size)
-ray.get([train_handle, inference_handle])
-
+ray.get(train_model.init_weight_transfer_group.remote(world_size, llm))
 
 N_NEW_TOKENS = 100
 
-# Collect weight metadata once
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
-
 # -- Phase 1: concurrent requests with weight sync --------------------
-print(f"\n{'=' * 50}")
-print(f"Prompts ({len(PROMPTS)}):")
+logger.info("\n%s", "=" * 50)
+logger.info("Prompts (%d):", len(PROMPTS))
 for p in PROMPTS:
-    print(f"  - {p!r}")
-print(f"{'=' * 50}")
+    logger.info("  - %r", p)
+logger.info("%s", "=" * 50)
 
 sampling_params = SamplingParams(temperature=0, max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS)
 
@@ -283,24 +250,7 @@ gen_futures = [llm.do_generate.remote(ptids, sampling_params) for ptids in batch
 
 ray.get(llm.pause_after_n_tokens.remote())
 
-ray.get(llm.start_weight_update.remote())
-
-inference_handle = llm.update_weights.remote(
-    WeightTransferUpdateRequest(
-        update_info=asdict(
-            HCCLWeightTransferUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=True,
-            )
-        )
-    )
-)
-train_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([train_handle, inference_handle])
-
-ray.get(llm.finish_weight_update.remote())
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)
@@ -309,10 +259,10 @@ for i, (output, pause_idx) in enumerate(results):
     all_token_ids = list(output.outputs[0].token_ids)
     before_text = tokenizer.decode(all_token_ids[:pause_idx])
     after_text = tokenizer.decode(all_token_ids[pause_idx:])
-    print(f"\n  Request {i} ({PROMPTS[i]!r}):")
-    print(f"    Old weights ({pause_idx} tokens): {before_text!r}")
+    logger.info("\n  Request %d (%r):", i, PROMPTS[i])
+    logger.info("    Old weights (%d tokens): %r", pause_idx, before_text)
     n_after = len(all_token_ids) - pause_idx
-    print(f"    New weights ({n_after} tokens): {after_text!r}")
+    logger.info("    New weights (%d tokens): %r", n_after, after_text)
 
 # -- Phase 2: validate with a fresh V2 vLLM instance --------------------
 # This validation relies on batch-invariant (deterministic) generation to
@@ -321,11 +271,12 @@ for i, (output, pause_idx) in enumerate(results):
 # generation should be deterministic. Require 100% exact match.
 MIN_PASS_RATE = 1.0
 
-print(f"\n{'=' * 50}")
-print("VALIDATION: comparing weight-synced vLLM with fresh V2 instance")
-print(f"  (Ascend NPU batch-invariant mode: requiring {MIN_PASS_RATE:.0%} exact match)")
-print(f"{'=' * 50}")
+logger.info("\n%s", "=" * 50)
+logger.info("VALIDATION: comparing weight-synced vLLM with fresh V2 instance")
+logger.info("  (Ascend NPU batch-invariant mode: requiring %.0f%% exact match)", MIN_PASS_RATE * 100)
+logger.info("%s", "=" * 50)
 
+ray.get(train_model.shutdown_weight_transfer.remote())
 ray.get(llm.shutdown.remote())
 ray.kill(llm)
 ray.kill(train_model)
@@ -363,17 +314,20 @@ for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_resu
 
     if match:
         num_pass += 1
-        print(f"  [PASS] {PROMPTS[i]!r}")
+        logger.info("  [PASS] %r", PROMPTS[i])
     else:
-        print(f"  [FAIL] {PROMPTS[i]!r}")
-        print(f"         weight-synced vLLM: {tokenizer.decode(expected)!r}")
-        print(f"         V2 vLLM:           {tokenizer.decode(actual)!r}")
+        logger.info("  [FAIL] %r", PROMPTS[i])
+        logger.info("         weight-synced vLLM: %r", tokenizer.decode(expected))
+        logger.info("         V2 vLLM:           %r", tokenizer.decode(actual))
         for j, (e, a) in enumerate(zip(expected, actual)):
             if e != a:
-                print(
-                    f"         first divergence at output token {j}: "
-                    f"expected {e} ({tokenizer.decode([e])!r}) vs "
-                    f"actual {a} ({tokenizer.decode([a])!r})"
+                logger.info(
+                    "         first divergence at output token %d: expected %d (%r) vs actual %d (%r)",
+                    j,
+                    e,
+                    tokenizer.decode([e]),
+                    a,
+                    tokenizer.decode([a]),
                 )
                 break
 
@@ -381,12 +335,12 @@ ray.get(llm_v2.shutdown.remote())
 ray.kill(llm_v2)
 
 pass_rate = num_pass / num_total
-print(f"\n  Result: {num_pass}/{num_total} prompts passed ({pass_rate:.0%})")
-print(f"  Required: >= {MIN_PASS_RATE:.0%}")
+logger.info("\n  Result: %d/%d prompts passed (%.0f%%)", num_pass, num_total, pass_rate * 100)
+logger.info("  Required: >= %.0f%%", MIN_PASS_RATE * 100)
 
 assert pass_rate >= MIN_PASS_RATE, (
     f"Validation pass rate {pass_rate:.0%} ({num_pass}/{num_total}) "
     f"is below the required {MIN_PASS_RATE:.0%} threshold. "
     f"See failures above for details."
 )
-print("=" * 50)
+logger.info("%s", "=" * 50)

@@ -11,6 +11,46 @@ from vllm_ascend.patch.worker import patch_qwen3_5
 
 
 @pytest.mark.skipif(
+    not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"),
+    reason="The 310P branch intentionally does not install packed GDN weights.",
+)
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
+    def fake_original_init(layer, *args, **kwargs):
+        del args, kwargs
+        torch.nn.Module.__init__(layer)
+        layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+        layer.conv1d = torch.nn.Module()
+        layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
+        layer.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda _layer: None)
+
+    with patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init):
+        layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
+        patch_qwen3_5._gdn_init_with_packed_weight(layer)
+
+    packed = layer.conv1d.get_parameter("ascend_conv1d_weight")
+    assert isinstance(packed, torch.nn.Parameter)
+    assert packed.shape == (4, 6)
+    assert packed.dtype == torch.bfloat16
+    assert not packed.requires_grad
+
+
+def test_qwen3_5_text_attention_uses_standard_rope():
+    attention = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+        rotary_emb=SimpleNamespace(),
+    )
+    assert not patch_qwen3_5._uses_multimodal_rope(attention)
+
+
+def test_qwen3_5_multimodal_attention_uses_mrope():
+    attention = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_5_moe"),
+        rotary_emb=SimpleNamespace(mrope_section=[11, 11, 10]),
+    )
+    assert patch_qwen3_5._uses_multimodal_rope(attention)
+
+
+@pytest.mark.skipif(
     patch_qwen3_5.Qwen3_5MultiTokenPredictor is None,
     reason="Qwen3.5 MTP model is not available in this vLLM version.",
 )
@@ -59,9 +99,20 @@ def test_qwen3_5_mtp_forward_returns_intermediate_tensors_on_non_last_pp_rank():
     predictor.layers = [MagicMock(return_value=(torch.full((1, 4), 3.0), torch.full((1, 4), 4.0)))]
     predictor.norm = MagicMock()
 
-    with patch(
-        "vllm_ascend.patch.worker.patch_qwen3_5.get_pp_group",
-        return_value=SimpleNamespace(is_last_rank=False),
+    with (
+        patch(
+            "vllm_ascend.patch.worker.patch_qwen3_5.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=False),
+        ),
+        patch(
+            "vllm.model_executor.models.utils.sequence_parallel_chunk",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "vllm_ascend.patch.worker.patch_qwen3_5.sequence_parallel_chunk",
+            side_effect=lambda x: x,
+            create=True,
+        ),
     ):
         output = predictor.forward(
             input_ids=torch.tensor([1]),

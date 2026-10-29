@@ -1,0 +1,333 @@
+from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from vllm.config import CUDAGraphMode
+from vllm.sequence import IntermediateTensors
+
+from tests.ut.base import TestBase
+
+
+class TestNPUWorkerV2(TestBase):
+    def test_worker_imports_planning_helpers_from_supported_lane(self):
+        from vllm_ascend.utils import vllm_version_is
+        from vllm_ascend.worker import worker
+
+        if vllm_version_is("0.32.0"):
+            from vllm.v1.core import kv_cache_utils as planning
+        else:
+            from vllm.v1.core import kv_cache_planning as planning
+
+        self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
+        self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
+
+    def test_get_encoder_cudagraph_stats_is_serializable(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            manager = MagicMock()
+            manager.is_captured.return_value = True
+            manager.get_cumulative_stats.return_value = {
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            }
+            worker.model_runner = SimpleNamespace(
+                model_state=SimpleNamespace(
+                    encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+                ),
+            )
+
+            stats = worker.get_encoder_cudagraph_stats()
+
+        self.assertEqual(
+            stats,
+            {
+                "manager": type(manager).__name__,
+                "captured": True,
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            },
+        )
+
+    @staticmethod
+    def _make_worker_for_lifecycle_test():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+        worker.use_v2_model_runner = True
+        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.model_config.enable_sleep_mode = False
+        worker.vllm_config.weight_transfer_config = None
+        return worker
+
+    def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        device = object()
+        runner = MagicMock()
+        events = []
+
+        @contextmanager
+        def wrapper():
+            events.append("wrapper_enter")
+            yield
+            events.append("wrapper_exit")
+
+        def make_runner(vllm_config, runner_device):
+            events.append("runner")
+            return runner
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+            patch.object(NPUWorker, "_init_device", return_value=device),
+            patch("vllm_ascend.worker.worker.init_workspace_manager"),
+            patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
+            patch(
+                "vllm_ascend.worker.v2.utils.torch_cuda_wrapper",
+                side_effect=wrapper,
+            ) as torch_cuda_wrapper,
+            patch(
+                "vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner",
+                side_effect=make_runner,
+            ) as mm_encoder_runner,
+        ):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
+            worker.rank = 1
+
+            worker.init_device()
+
+        self.assertEqual(events, ["wrapper_enter", "runner", "wrapper_exit"])
+        torch_cuda_wrapper.assert_called_once_with()
+        mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
+        self.assertIs(worker.model_runner, runner)
+        report_usage_stats.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=True)
+    def test_load_model_starts_ec_worker_services(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        """Start MRV2 EC services only after model loading completes."""
+        events = []
+        connector = mock_get_ec_transfer.return_value
+        connector.start_worker_services.side_effect = lambda: events.append("ec")
+        worker = self._make_worker_for_lifecycle_test()
+        worker.model_runner.load_model.side_effect = lambda: events.append("model")
+
+        worker.load_model()
+
+        self.assertEqual(events, ["model", "ec"])
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_called_once_with()
+        connector.start_worker_services.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.get_ec_transfer")
+    @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=False)
+    def test_load_model_skips_ec_worker_services_when_disabled(
+        self,
+        mock_has_ec_transfer,
+        mock_get_ec_transfer,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+
+        worker.load_model()
+
+        mock_has_ec_transfer.assert_called_once_with()
+        mock_get_ec_transfer.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_releases_ec_connector(
+        self,
+        mock_kv_shutdown,
+        mock_ec_shutdown,
+    ):
+        worker = self._make_worker_for_lifecycle_test()
+        worker.profiler = None
+
+        worker.shutdown()
+
+        mock_kv_shutdown.assert_called_once_with()
+        mock_ec_shutdown.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    def test_execute_model_middle_rank_pp(
+        self, mock_get_tp_group, mock_get_pp_group, mock_enable_sp, mock_get_ascend_config
+    ):
+        """MRV2 PP middle ranks send intermediate tensors and return None."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config = MagicMock()
+            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker.use_v2_model_runner = True
+            worker.profiler = None
+            worker._pp_send_work = []
+
+            mock_pp_group = MagicMock()
+            mock_pp_group.is_first_rank = False
+            mock_pp_group.is_last_rank = False
+            mock_pp_group.irecv_tensor_dict.return_value = ({"tensor": "data"}, None, None)
+            mock_pp_group.isend_tensor_dict.return_value = []
+            mock_get_pp_group.return_value = mock_pp_group
+
+            intermediate_output = IntermediateTensors({"output_tensor": "data"})
+            worker.model_runner.execute_model.return_value = intermediate_output
+
+            scheduler_output = MagicMock()
+            scheduler_output.total_num_scheduled_tokens = 1
+
+            result = worker.execute_model(scheduler_output)
+
+            mock_pp_group.irecv_tensor_dict.assert_called_once_with(all_gather_group=mock_get_tp_group.return_value)
+            worker.model_runner.execute_model.assert_called_once()
+            mock_pp_group.isend_tensor_dict.assert_called_once_with(
+                intermediate_output.tensors,
+                all_gather_group=mock_get_tp_group.return_value,
+            )
+            self.assertIsNone(result)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    def test_execute_model_pooling_uses_pool_output(self, mock_get_pp_group, mock_get_ascend_config):
+        """MRV2 pooling must finish in execute_model instead of sampling logits."""
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+        mock_get_pp_group.return_value.is_first_rank = True
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.is_pooling_model = True
+            worker.vllm_config = MagicMock()
+            worker.use_v2_model_runner = True
+            worker.profiler = None
+            worker._pp_send_work = []
+
+            pooling_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            worker.model_runner.execute_model.return_value = None
+            worker.model_runner.pool.return_value = pooling_output
+
+            scheduler_output = MagicMock()
+            scheduler_output.total_num_scheduled_tokens = 1
+
+            result = worker.execute_model(scheduler_output)
+
+        self.assertIs(result, pooling_output)
+        worker.model_runner.execute_model.assert_called_once()
+        worker.model_runner.pool.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    def test_profile_prefill_latency_v2_delegates_cpp_state(
+        self,
+        mock_get_pp_group,
+        mock_synchronize,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.scheduler_config = SimpleNamespace(max_num_batched_tokens=1024)
+
+            model_runner = MagicMock()
+            model_runner.max_num_reqs = 8
+            worker.model_runner = model_runner
+
+            mock_get_pp_group.return_value.is_first_rank = True
+
+            with patch("time.perf_counter", side_effect=[10.0, 10.25]):
+                latency_ms = worker.profile_prefill_latency(512)
+
+            self.assertEqual(latency_ms, 250.0)
+            model_runner._dummy_run.assert_called_once_with(
+                num_tokens=512,
+                force_attention=True,
+                is_profile=False,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                profile_cpp=True,
+            )
+            self.assertEqual(mock_synchronize.call_count, 2)
+
+    @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    def test_profile_prefill_latency_v2_propagates_dummy_error(
+        self,
+        mock_get_pp_group,
+        mock_synchronize,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.scheduler_config = SimpleNamespace(max_num_batched_tokens=1024)
+
+            model_runner = MagicMock()
+            model_runner.max_num_reqs = 8
+            model_runner._dummy_run.side_effect = RuntimeError("dummy failure")
+            worker.model_runner = model_runner
+
+            mock_get_pp_group.return_value.is_first_rank = True
+
+            with self.assertRaisesRegex(RuntimeError, "dummy failure"):
+                worker.profile_prefill_latency(512)
+
+            self.assertEqual(mock_synchronize.call_count, 1)
+
+    def test_sample_tokens_v2_attaches_execution_time(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+
+            profiling_config = SimpleNamespace(need_timing=True)
+            model_runner = MagicMock()
+            model_runner.ascend_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(
+                    profiling_chunk_config=profiling_config,
+                )
+            )
+            model_runner._cpp_execution_time_ms = 125.0
+            model_runner_output = SimpleNamespace()
+            output = SimpleNamespace(model_runner_output=model_runner_output)
+            model_runner.sample_tokens.return_value = output
+            worker.model_runner = model_runner
+
+            grammar_output = SimpleNamespace()
+            result = worker.sample_tokens(grammar_output)
+
+            self.assertIs(result, output)
+            self.assertEqual(model_runner_output.execution_time_ms, 125.0)
+            self.assertIsNone(model_runner._cpp_execution_time_ms)
+            model_runner.sample_tokens.assert_called_once_with(grammar_output)

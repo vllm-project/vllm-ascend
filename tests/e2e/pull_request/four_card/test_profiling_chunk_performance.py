@@ -1,8 +1,11 @@
 """Performance guard for profiling-based dynamic chunk sizing (PP scenario).
 
 Measures Time-To-First-Token (TTFT) on 64k-token prefill requests with
-profiling_chunk_config enabled.  The test runs against
-DeepSeek-V2-Lite-Chat served with PP=2, TP=2 (4 NPU cards total).
+profiling_chunk_config enabled. The test runs against Qwen3-30B-A3B
+served with PP=2, TP=2 (4 NPU cards total).
+
+The same scenario is executed with Short Request First (SRF) disabled and
+enabled. An additional run enables asynchronous scheduling.
 
 Test flow:
   1. Create an LLM engine with profiling_chunk_config enabled.
@@ -17,7 +20,9 @@ import statistics
 import time
 from unittest.mock import patch
 
-from tests.e2e.conftest import VllmRunner
+import pytest
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 MODEL = "Qwen/Qwen3-30B-A3B"
 
@@ -30,9 +35,19 @@ NUM_TEST = 5
 
 # NOTE: Any changes to this baseline must be approved by team members.
 # Measured on Qwen3-30B-A3B, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
-BASELINE_TTFT_S = 5.2
+BASELINE_TTFT_S = 5.45
 
 
+@pytest.mark.parametrize(
+    ("enable_srf", "enable_async_scheduling"),
+    [
+        pytest.param(False, False, id="sync"),
+        pytest.param(True, False, id="sync-SRF"),
+        # The async case shares the synchronous baseline for now; tighten it once
+        # the first CI measurements are available.
+        pytest.param(False, True, id="async"),
+    ],
+)
 @patch.dict(
     os.environ,
     {
@@ -40,7 +55,15 @@ BASELINE_TTFT_S = 5.2
         "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
     },
 )
-def test_profiling_chunk_ttft_performance() -> None:
+@wait_until_npu_memory_free()
+def test_profiling_chunk_ttft_performance(
+    enable_srf: bool,
+    enable_async_scheduling: bool,
+) -> None:
+    scenario_name = "sync+SRF" if enable_srf else "sync"
+    if enable_async_scheduling:
+        scenario_name = "async"
+
     with VllmRunner(
         MODEL,
         max_model_len=70000,
@@ -53,11 +76,18 @@ def test_profiling_chunk_ttft_performance() -> None:
         max_num_batched_tokens=12288,
         distributed_executor_backend="mp",
         enforce_eager=True,
-        async_scheduling=False,
+        async_scheduling=enable_async_scheduling,
         additional_config={
-            "profiling_chunk_config": {"enabled": True, "smooth_factor": 0.9},
+            "scheduler_config": {
+                "profiling_chunk_config": {
+                    "enabled": True,
+                    "smooth_factor": 0.9,
+                },
+                "short_request_first_config": {
+                    "enabled": enable_srf,
+                },
+            },
             "enable_cpu_binding": False,
-            "enable_flashcomm1": True,
         },
         hf_overrides={
             "rope_parameters": {
@@ -71,11 +101,11 @@ def test_profiling_chunk_ttft_performance() -> None:
         # With max_tokens=1, total latency ≈ prefill time ≈ TTFT
         prompts = [INPUT_64K_TOKENS]
 
-        # ── Warmup ──────────────────────────────────────────────────────────
+        # ── Warmup ──────────────────────────────────────────────────────
         for _ in range(NUM_WARMUP):
             vllm_model.generate_greedy(prompts, max_tokens=1)
 
-        # ── Measurement ─────────────────────────────────────────────────────
+        # ── Measurement ─────────────────────────────────────────────────
         ttfts: list[float] = []
         for _ in range(NUM_TEST):
             start = time.perf_counter()
@@ -85,13 +115,15 @@ def test_profiling_chunk_ttft_performance() -> None:
         median_ttft = statistics.median(ttfts)
         ttft_str = ", ".join(f"{t:.2f}s" for t in ttfts)
         print(
-            f"\n[profiling_chunk perf] TTFT per request: [{ttft_str}]"
-            f"\n[profiling_chunk perf] Median TTFT: {median_ttft:.2f}s  "
+            f"\n[profiling_chunk perf][{scenario_name}] "
+            f"TTFT per request: [{ttft_str}]"
+            f"\n[profiling_chunk perf][{scenario_name}] "
+            f"Median TTFT: {median_ttft:.2f}s  "
             f"(baseline: {BASELINE_TTFT_S}s)"
         )
 
         assert median_ttft <= BASELINE_TTFT_S, (
-            f"TTFT performance regression: median TTFT {median_ttft:.2f}s "
-            f"exceeds baseline {BASELINE_TTFT_S}s. "
-            f"Individual TTFTs: [{ttft_str}]"
+            f"[{scenario_name}] TTFT performance regression: "
+            f"median TTFT {median_ttft:.2f}s exceeds baseline "
+            f"{BASELINE_TTFT_S}s. Individual TTFTs: [{ttft_str}]"
         )

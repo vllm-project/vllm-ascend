@@ -15,21 +15,41 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
+"""310P MTP e2e under default Model Runner V2 (1-card CI safe)."""
+
+import os
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+# CI uses hub id; local verify can override (e.g. /home/weights/Qwen3.5-4B-W8A8).
+QWEN35_MTP_MODEL = os.environ.get("QWEN35_MTP_MODEL", "Qwen/Qwen3.5-4B")
+QWEN35_MTP_QUANTIZATION = os.environ.get("QWEN35_MTP_QUANTIZATION")  # e.g. "ascend"
 
 
+def _quant_kw():
+    return {"quantization": QWEN35_MTP_QUANTIZATION} if QWEN35_MTP_QUANTIZATION else {}
+
+
+@wait_until_npu_memory_free()
 def test_qwen3_5_mtp_tp1_eager():
-    example_prompts = ["Hello, my name is"]
+    """Default 310P MRV2 MTP eager smoke.
+
+    FULL_DECODE_ONLY is covered by local/nightly runs: 1-card PR CI OOMs during
+    target+draft ACLGraph capture (Engine core init fails with empty Failed core
+    proc(s)).
+    """
     with VllmRunner(
-        "Qwen/Qwen3.5-4B",
+        QWEN35_MTP_MODEL,
         tensor_parallel_size=1,
         enforce_eager=True,
         dtype="float16",
         max_model_len=2048,
         mamba_ssm_cache_dtype="float16",
         speculative_config={
-            "method": "qwen3_5_mtp",
+            "method": "mtp",
             "num_speculative_tokens": 1,
         },
+        **_quant_kw(),
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens=8)
+        assert vllm_model.model.llm_engine.vllm_config.use_v2_model_runner
+        vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)

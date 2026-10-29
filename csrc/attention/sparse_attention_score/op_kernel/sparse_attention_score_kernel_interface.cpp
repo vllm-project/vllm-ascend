@@ -27,7 +27,7 @@ using namespace NpuArch;
 
 using namespace SasaKernelArch22;
 
-template <class InDtype, class SMDtype>
+template <class InDtype, class SMDtype, bool IS_FD>
 __global__ __aicore__ void SasaInferIntfRegularArch22(
     GM_ADDR q, GM_ADDR k, GM_ADDR v,
     GM_ADDR selectIdx, GM_ADDR blockTable, GM_ADDR selectNumIdx,
@@ -89,7 +89,7 @@ __global__ __aicore__ void SasaInferIntfRegularArch22(
         DispatchPolicyRescaleO, OType, OTmpType, OTmpUpdateType, LseType>;
 
     using SasaKernel = SasaRegularKernelArch22<
-        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO>;
+        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, IS_FD>;
 
     SasaKernelParamsArch22 params{q, k, v, selectIdx, blockTable, selectNumIdx,
         actualQseqlen, actualKvseqlen, o, softmaxLse, workspace, tiling};
@@ -102,7 +102,7 @@ __global__ __aicore__ void SasaInferIntfRegularArch22(
 
 using namespace SasaKernelArch35;
 
-template <class InDtype, class SMDtype, class REDtype, Format qFormat>
+template <class InDtype, class SMDtype, class REDtype, Format qFormat, bool IS_FD>
 __global__ __aicore__ void SasaInferIntfRegular(
     GM_ADDR q, GM_ADDR k, GM_ADDR v,
     GM_ADDR selectIdx, GM_ADDR blockTable, GM_ADDR selectNumIdx,
@@ -161,10 +161,10 @@ __global__ __aicore__ void SasaInferIntfRegular(
     using TileCopyRescaleO = Epilogue::Tile::TileCopyRescaleO<
         ArchTag, ElementO, LayoutO, LayoutOTmp>;
     using EpilogueRescaleO = Epilogue::Block::BlockEpilogue<
-        DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS, TileCopyRescaleO, Arch::PositionL0C>;
+        DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS, ElementK, TileCopyRescaleO, Arch::PositionL0C>;
 
     using SasaKernel = SasaRegularKernelArch35<
-        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat>;
+        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat, IS_FD>;
 
     SasaKernelParamsArch35 params{q, k, v, selectIdx, blockTable, selectNumIdx,
         actualQseqlen, actualKvseqlen, o, softmaxLse, workspace, tiling};
@@ -172,7 +172,7 @@ __global__ __aicore__ void SasaInferIntfRegular(
     sasaKernel(params);
 }
 
-template <class InDtype, class SMDtype, class REDtype, Format qFormat>
+template <class InDtype, class SMDtype, class REDtype, Format qFormat, bool IS_FD>
 __global__ __aicore__ void SasaInferInterfaceFullQuant(
     GM_ADDR q, GM_ADDR k, GM_ADDR v,
     GM_ADDR selectIdx, GM_ADDR blockTable, GM_ADDR selectNumIdx,
@@ -203,8 +203,7 @@ __global__ __aicore__ void SasaInferInterfaceFullQuant(
     using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK;
     using TileCopyQK = Gemm::Tile::PackedTileCopyTlaToUB<
         ArchTag, ElementQ, LayoutQ, ElementK, LayoutK, ElementS, LayoutS,
-        void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT, false,
-        Gemm::Tile::ScaleGranularity::PER_TENSOR>;
+        void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<
         DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK,
         ElementQ, ElementK, ElementS, void, TileCopyQK>;
@@ -220,8 +219,7 @@ __global__ __aicore__ void SasaInferInterfaceFullQuant(
     using DispatchPolicyPV = Gemm::MmadAtlasA5BsaPV;
     using TileCopyPV = Gemm::Tile::PackedTileCopyTlaToUB<
         ArchTag, ElementP, LayoutPDummy, ElementV, LayoutV, ElementOTmp, LayoutOTmp,
-        void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT, false,
-        Gemm::Tile::ScaleGranularity::PER_TENSOR>;
+        void, Gemm::Tile::CopyL0CToUBMode::SPLIT_M>;
     using BlockMmadPV = Gemm::Block::BlockMmadTla<
         DispatchPolicyPV, L1TileShapePV, L0TileShapePV,
         ElementP, ElementV, ElementOTmp, void, TileCopyPV>;
@@ -230,10 +228,10 @@ __global__ __aicore__ void SasaInferInterfaceFullQuant(
     using TileCopyRescaleO = Epilogue::Tile::TileCopyRescaleO<
         ArchTag, ElementO, LayoutO, LayoutOTmp>;
     using EpilogueRescaleO = Epilogue::Block::BlockEpilogue<
-        DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS, TileCopyRescaleO, Arch::PositionL0C>;
+        DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS, ElementK, TileCopyRescaleO, Arch::PositionL0C>;
 
     using SasaKernel = SasaFullQuantKernelArch35<
-        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat>;
+        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat, IS_FD>;
 
     SasaFullQuantKernelParamsArch35 params{
         q, k, v, selectIdx, blockTable, selectNumIdx,

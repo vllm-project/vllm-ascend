@@ -1,313 +1,572 @@
-#
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from torch import nn
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-    record_metadata_for_reloading,
-)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
-    AscendKimiGatedDeltaNetAttention,
-    _load_a_log,
-    _zero_padded_spec_output,
+    AscendKimiK3DeltaAttention,
+    _KDAFusedBFGLinear,
+    _prepare_beta,
+)
+from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 
-class _NoopQuantMethod(QuantizeMethodBase):
-    def create_weights(self, layer: nn.Module, *args, **kwargs):
-        raise NotImplementedError
+class _RecordingLinear(nn.Module):
+    def __init__(self, output: torch.Tensor) -> None:
+        super().__init__()
+        self.output = output
 
-    def apply(self, layer: nn.Module, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
+    def forward(self, _input: torch.Tensor):
+        return self.output, None
 
 
-def _make_conv_pack_attention(
-    *,
-    local_num_heads: int = 2,
-    head_dim: int = 3,
-    conv_size: int = 4,
-    model_dtype: torch.dtype = torch.bfloat16,
-) -> AscendKimiGatedDeltaNetAttention:
-    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
-    nn.Module.__init__(attention)
-    attention.local_num_heads = local_num_heads
-    attention.head_dim = head_dim
-    attention.conv_size = conv_size
-    attention.model_config = SimpleNamespace(dtype=model_dtype)
+class _RecordingStream:
+    def __init__(self, name: str, event_names: list[str], trace: list[str]) -> None:
+        self.name = name
+        self.event_names = iter(event_names)
+        self.trace = trace
 
-    local_channels = local_num_heads * head_dim
-    for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
-        conv = nn.Module()
-        conv.weight = nn.Parameter(
-            torch.empty(
-                local_channels,
-                1,
-                conv_size,
-                dtype=torch.float32,
-            )
+    def record_event(self) -> str:
+        event = next(self.event_names)
+        self.trace.append(f"{self.name}.record:{event}")
+        return event
+
+    def wait_event(self, event: str) -> None:
+        self.trace.append(f"{self.name}.wait:{event}")
+
+
+class _RecordingTensor:
+    def __init__(self, name: str, trace: list[str]) -> None:
+        self.name = name
+        self.trace = trace
+
+    def record_stream(self, stream: _RecordingStream) -> None:
+        self.trace.append(f"{self.name}.record_stream:{stream.name}")
+
+
+class _RecordingStreamSwitch:
+    def __init__(self, stream: _RecordingStream, trace: list[str]) -> None:
+        self.stream = stream
+        self.trace = trace
+
+    def __enter__(self) -> None:
+        self.trace.append(f"enter:{self.stream.name}")
+
+    def __exit__(self, *args) -> None:
+        self.trace.append(f"exit:{self.stream.name}")
+
+
+def test_kda_output_norm_uses_checkpoint_epsilon():
+    def fake_upstream_init(attention, _config, _vllm_config, _prefix):
+        nn.Module.__init__(attention)
+        attention.o_norm = SimpleNamespace(eps=1e-5)
+        attention.conv_size = 4
+        attention.local_projection_size = 2
+        attention.model_config = SimpleNamespace(dtype=torch.bfloat16)
+        attention.conv1d = nn.Module()
+        attention.conv1d.weight = nn.Parameter(torch.empty(6, 1, 4))
+        attention.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda: None)
+
+    config = SimpleNamespace(rms_norm_eps=1e-6)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            multimodal_config=None,
+            enable_prompt_embeds=False,
         )
-        conv.weight.weight_loader = default_weight_loader
-        conv.quant_method = _NoopQuantMethod()
-        setattr(attention, name, conv)
-
-    attention.q_conv1d.register_parameter(
-        _PACKED_CONV_WEIGHT_NAME,
-        nn.Parameter(
-            torch.empty(
-                attention._packed_conv_shape(),
-                dtype=model_dtype,
-            ),
-            requires_grad=False,
-        ),
     )
-    for conv in (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d):
-        attention._wrap_conv_process_weights(conv)
-    return attention
+    with patch(
+        "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
+        new=fake_upstream_init,
+    ):
+        attention = AscendKimiK3DeltaAttention(config, vllm_config)
+
+    assert attention.o_norm.eps == config.rms_norm_eps
 
 
-def _process_conv_weights(
-    attention: AscendKimiGatedDeltaNetAttention,
-) -> None:
-    for conv in (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d):
-        conv.quant_method.process_weights_after_loading(conv)
+def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
+    raw_beta = torch.tensor(
+        [[[-20.0], [0.0], [20.0], [100.0]]],
+        dtype=torch.bfloat16,
+    )
+
+    beta = _prepare_beta(raw_beta, num_actual_tokens=3)
+
+    assert beta.dtype == torch.float32
+    assert beta.shape == (1, 3, 1)
+    torch.testing.assert_close(beta, raw_beta[:, :3].float().sigmoid())
+    assert torch.all((beta >= 0.0) & (beta <= 1.0))
 
 
-def _expected_packed_conv_weights(
-    attention: AscendKimiGatedDeltaNetAttention,
-) -> torch.Tensor:
-    return torch.cat(
-        [
-            conv.weight[:, 0, :].transpose(0, 1)
-            for conv in (
-                attention.q_conv1d,
-                attention.k_conv1d,
-                attention.v_conv1d,
-            )
-        ],
-        dim=1,
-    ).to(attention.model_config.dtype)
+def test_prepare_beta_does_not_repeat_auxiliary_sigmoid():
+    raw_beta = torch.tensor(
+        [[[-20.0], [0.0], [20.0], [100.0]]],
+        dtype=torch.bfloat16,
+    )
+    preprocessed_beta = raw_beta.float().sigmoid()
+
+    beta = _prepare_beta(
+        preprocessed_beta,
+        num_actual_tokens=3,
+        is_preprocessed=True,
+    )
+
+    assert beta.dtype == torch.float32
+    assert beta.shape == (1, 3, 1)
+    torch.testing.assert_close(beta, preprocessed_beta[:, :3])
 
 
-def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():
-    param = torch.empty(1, 1, 2, 1)
-    loaded_weight = torch.arange(6, dtype=torch.float32)
+@pytest.mark.parametrize("f_b_is_local", [False, True])
+def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
+    with (
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=2),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
+    ):
+        linear = _KDAFusedBFGLinear(
+            hidden_size=6,
+            num_heads=8,
+            head_dim=3,
+            tp_size=4,
+            quant_config=None,
+            prefix="model.layers.0.self_attn.in_proj_gfab",
+        )
 
-    with patch("vllm_ascend.ops.kimi_kda.get_tensor_model_parallel_rank", return_value=1):
-        _load_a_log(param, loaded_weight, num_heads=4)
+    linear.weight.data.zero_()
+    b_weight = torch.arange(8 * 6, dtype=linear.weight.dtype).reshape(8, 6)
+    f_a_weight = torch.arange(3 * 6, dtype=linear.weight.dtype).reshape(3, 6) + 100
+    global_f_b_weight = torch.arange(24 * 3, dtype=linear.weight.dtype).reshape(24, 3) + 200
+    local_f_b_weight = global_f_b_weight[12:18]
+    g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
 
-    torch.testing.assert_close(param, torch.tensor([[[[2.0], [3.0]]]]))
+    linear.weight.weight_loader(linear.weight, b_weight, 0)
+    linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
+    linear.f_b_weight.weight_loader(
+        linear.f_b_weight,
+        local_f_b_weight if f_b_is_local else global_f_b_weight,
+    )
+    linear.weight.weight_loader(linear.weight, g_weight, 2)
 
-
-def test_load_a_log_preserves_exact_local_4d_checkpoint():
-    param = torch.empty(1, 1, 2, 1)
-    loaded_weight = torch.tensor([[[[4.0], [5.0]]]])
-
-    _load_a_log(param, loaded_weight, num_heads=4)
-
-    torch.testing.assert_close(param, loaded_weight)
-
-
-def test_load_a_log_rejects_unsupported_layout():
-    with pytest.raises(ValueError, match="must be 1-D or 4-D"):
-        _load_a_log(torch.empty(1, 1, 2, 1), torch.empty(2, 2), num_heads=4)
-
-
-def test_zero_padded_spec_output_clears_uninitialized_tail():
-    output = torch.arange(16 * 2 * 3, dtype=torch.float32).reshape(1, 16, 2, 3)
-    output[:, 8:] = torch.nan
-    query_start_loc = torch.tensor([0, 8, 8], dtype=torch.int32)
-
-    masked = _zero_padded_spec_output(output, query_start_loc)
-
-    torch.testing.assert_close(masked[:, :8], output[:, :8])
-    assert torch.equal(masked[:, 8:], torch.zeros_like(masked[:, 8:]))
-    assert torch.isfinite(masked).all()
-
-
-def test_zero_padded_spec_output_preserves_fully_covered_output():
-    output = torch.randn(1, 16, 2, 3)
-    query_start_loc = torch.tensor([0, 8, 16], dtype=torch.int32)
-
-    masked = _zero_padded_spec_output(output, query_start_loc)
-
-    torch.testing.assert_close(masked, output)
+    expected_f = (local_f_b_weight.float() @ f_a_weight.float()).to(linear.weight.dtype)
+    assert tuple(linear.weight.shape) == (14, 6)
+    torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
+    torch.testing.assert_close(linear.weight[2:8], expected_f)
+    torch.testing.assert_close(linear.weight[8:], g_weight[12:18])
 
 
-def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
-    output = torch.randn(1, 32, 2, 3)
-    expected = output[:, :16].clone()
-    output[:, 16:] = torch.nan
-    query_start_loc = torch.tensor([0, 8, 16, 16, 16], dtype=torch.int32)
+def test_fused_bfg_linear_recomposes_f_after_source_reload():
+    with (
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=1),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+    ):
+        linear = _KDAFusedBFGLinear(
+            hidden_size=4,
+            num_heads=2,
+            head_dim=2,
+            tp_size=1,
+            quant_config=None,
+            prefix="model.layers.0.self_attn.in_proj_gfab",
+        )
 
-    masked = _zero_padded_spec_output(output, query_start_loc)
+    linear.weight.data.zero_()
+    first_f_a = torch.arange(8, dtype=linear.weight.dtype).reshape(2, 4)
+    first_f_b = torch.arange(8, dtype=linear.weight.dtype).reshape(4, 2)
+    linear.f_a_weight.weight_loader(linear.f_a_weight, first_f_a)
+    torch.testing.assert_close(linear.weight[2:6], torch.zeros_like(linear.weight[2:6]))
+    linear.f_b_weight.weight_loader(linear.f_b_weight, first_f_b)
+    torch.testing.assert_close(linear.weight[2:6], first_f_b.float() @ first_f_a.float())
 
-    torch.testing.assert_close(masked[:, :16], expected)
-    assert torch.equal(masked[:, 16:], torch.zeros_like(masked[:, 16:]))
-    assert masked.shape == output.shape
-    assert masked.dtype == output.dtype
-    assert masked.device == output.device
+    reloaded_f_a = first_f_a + 10
+    reloaded_f_b = first_f_b + 20
+    linear.f_a_weight.weight_loader(linear.f_a_weight, reloaded_f_a)
+    linear.f_b_weight.weight_loader(linear.f_b_weight, reloaded_f_b)
+    torch.testing.assert_close(linear.weight[2:6], reloaded_f_b.float() @ reloaded_f_a.float())
 
 
-def test_output_norm_gate_uses_kda_fused_triton_kernel():
-    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+def test_fused_bfg_projection_preserves_staged_outputs():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
-    attention.o_norm = SimpleNamespace(
-        weight=nn.Parameter(torch.randn(3)),
-        eps=1e-6,
-    )
-    core_attn_out = torch.randn(1, 4, 2, 3)
+    attention.head_dim = 3
+    attention._fused_bfg_output_sizes = (2, 6, 6)
+    hidden_states = torch.randn(4, 5)
+    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14).to(torch.bfloat16)
+    attention.fused_bfg_proj = _RecordingLinear(fused_output)
+
+    projected_bfg = attention._project_bfg(hidden_states)
+    assert projected_bfg is fused_output
+
+    beta, raw_gate, output_gate = attention._postprocess_bfg(projected_bfg)
+    assert beta.dtype == torch.float32
+    torch.testing.assert_close(beta, fused_output[:, :2].float().sigmoid().unsqueeze(0))
+    torch.testing.assert_close(raw_gate, fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0))
+    torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
+
+
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.uses_mixed_projection = True
+    attention.local_num_heads = 2
+    attention.head_dim = 3
+    hidden_states = torch.randn(4, 6)
+    positions = torch.arange(4)
+    mixed_qkv = torch.randn(4, 18)
+    beta = torch.rand(1, 4, 2, dtype=torch.float32)
+    raw_gate = torch.randn(1, 4, 2, 3)
     output_gate = torch.randn(4, 2, 3)
-    expected = torch.randn_like(core_attn_out)
+    projected = torch.randn(4, 6)
+    attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate))
+    attention._forward = MagicMock()
+    attention.o_proj = _RecordingLinear(projected)
+
+    actual = attention.forward(hidden_states, positions)
+
+    assert actual is projected
+    assert attention._forward.call_args.kwargs["beta"] is beta
+    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
+
+
+def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    trace: list[str] = []
+    main_stream = _RecordingStream("main", ["hidden_ready", "quant_ready"], trace)
+    bfg_stream = _RecordingStream("bfg", ["bfg_projection_ready", "bfg_ready"], trace)
+    hidden_states = _RecordingTensor("hidden", trace)
+    fused_bfg = _RecordingTensor("fused_bfg", trace)
+    processed_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta", "raw_gate", "output_gate"))
+    quantized_qkv = object()
+    qkv = object()
+
+    def record_project_bfg(_hidden_states: object) -> _RecordingTensor:
+        trace.append("project_bfg")
+        return fused_bfg
+
+    def record_dynamic_quant(_hidden_states: object) -> object:
+        trace.append("dynamic_quant")
+        return quantized_qkv
+
+    def record_qkv_matmul(_qkv_input: object) -> object:
+        trace.append("qkv_matmul")
+        return qkv
+
+    def record_postprocess_bfg(*_args: object) -> tuple[_RecordingTensor, ...]:
+        trace.append("postprocess_bfg")
+        return processed_bfg
+
+    attention._project_bfg = MagicMock(side_effect=record_project_bfg)
+    attention._quantize_fused_qkv = MagicMock(side_effect=record_dynamic_quant)
+    attention._matmul_fused_qkv = MagicMock(side_effect=record_qkv_matmul)
+    attention._postprocess_bfg = MagicMock(side_effect=record_postprocess_bfg)
+
+    with (
+        patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
+        patch("vllm_ascend.ops.kimi_kda._kda_bfg_stream", return_value=bfg_stream),
+        patch(
+            "vllm_ascend.ops.kimi_kda.npu_stream_switch",
+            side_effect=lambda stream: _RecordingStreamSwitch(stream, trace),
+        ),
+    ):
+        actual = attention._run_overlapped_qkv_bfg(hidden_states)
+
+    assert actual == (qkv, *processed_bfg)
+    assert trace == [
+        "main.record:hidden_ready",
+        "hidden.record_stream:bfg",
+        "enter:bfg",
+        "bfg.wait:hidden_ready",
+        "project_bfg",
+        "bfg.record:bfg_projection_ready",
+        "exit:bfg",
+        "dynamic_quant",
+        "main.record:quant_ready",
+        "main.wait:bfg_projection_ready",
+        "qkv_matmul",
+        "enter:bfg",
+        "bfg.wait:quant_ready",
+        "postprocess_bfg",
+        "bfg.record:bfg_ready",
+        "exit:bfg",
+        "beta.record_stream:main",
+        "raw_gate.record_stream:main",
+        "output_gate.record_stream:main",
+        "main.wait:bfg_ready",
+    ]
+
+
+@pytest.mark.parametrize(
+    "quant_method_type",
+    [AscendW4A8MXFPDynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod],
+)
+def test_fused_qkv_splits_mxfp_dynamic_quant_from_matmul(quant_method_type):
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    inner_quant_method = quant_method_type.__new__(quant_method_type)
+    if isinstance(inner_quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        inner_quant_method.dynamic_mx_quant_scale_alg = "floor"
+    adapter = SimpleNamespace(
+        quant_method=inner_quant_method,
+        apply=MagicMock(return_value=torch.randn(4, 18)),
+    )
+    attention.in_proj_qkvgfab = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6, dtype=torch.bfloat16)
+    quantized = torch.empty(4, 6, dtype=torch.float8_e4m3fn)
+    dynamic_scale = torch.empty(4, 1, dtype=torch.uint8)
 
     with patch(
-        "vllm_ascend.ops.kimi_kda.apply_kda_rms_norm_sigmoid_gate",
-        return_value=expected,
-    ) as fused_norm_gate:
-        actual = attention._apply_output_norm_gate(core_attn_out, output_gate)
+        "vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant",
+        return_value=(quantized, dynamic_scale),
+    ) as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
 
-    assert actual is expected
-    fused_norm_gate.assert_called_once_with(
-        core_attn_out,
-        output_gate,
-        attention.o_norm.weight,
-        attention.o_norm.eps,
+    assert isinstance(qkv_input, tuple)
+    assert qkv_input[0] is quantized
+    assert qkv_input[1] is dynamic_scale
+    if isinstance(inner_quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        dynamic_quant.assert_called_once_with(
+            hidden_states,
+            dst_type=torch.float8_e4m3fn,
+            scale_alg="floor",
+        )
+    else:
+        dynamic_quant.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn)
+    output = attention._matmul_fused_qkv(qkv_input)
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(attention.in_proj_qkvgfab, qkv_input, bias=None)
+
+
+def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    adapter = SimpleNamespace(
+        quant_method=object(),
+        apply=MagicMock(return_value=torch.randn(4, 18)),
     )
+    attention.in_proj_qkvgfab = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6)
+
+    with patch("vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant") as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
+
+    assert qkv_input is hidden_states
+    dynamic_quant.assert_not_called()
+    output = attention._matmul_fused_qkv(qkv_input)
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(attention.in_proj_qkvgfab, hidden_states, bias=None)
 
 
-def test_conv_post_load_processing_packs_kernel_layout_in_place():
-    attention = _make_conv_pack_attention()
-    convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
-    for shard_id, conv in enumerate(convs):
-        conv.weight.data.copy_(
-            torch.arange(
-                conv.weight.numel(),
-                dtype=torch.float32,
-            ).reshape_as(conv.weight)
-            + shard_id * 100
+@pytest.mark.parametrize("lower_bound", [None, -4.0])
+def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
+    """Prepared state copy preserves fused-gate arguments and cache updates."""
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.head_dim = 2
+    attention.gate_lower_bound = lower_bound
+    attention.A_log = nn.Parameter(torch.randn(1))
+    attention.dt_bias = nn.Parameter(torch.randn(2))
+
+    q = torch.randn(1, 2, 1, 2)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    raw_gate = torch.randn_like(q)
+    beta = torch.randn(1, 2, 1)
+    recurrent_state = torch.randn(1, 1, 2, 2)
+    state_indices = torch.tensor([0], dtype=torch.int32)
+    has_initial_state = torch.tensor([True])
+    metadata = SimpleNamespace(
+        cu_seqlens_host=(0, 2),
+        cu_seqlens_kern=None,
+        keep_meta=None,
+        chunk_indices_chunk64_host=(0, 0),
+    )
+    output = torch.randn_like(v)
+    final_state = torch.randn(1, 1, 2, 2)
+    # This unit test bypasses worker startup; supply the plan normally bound there.
+    attention._ascend_kda_state_copy = SimpleNamespace(
+        gather=lambda state, indices, flags: state[indices].contiguous(),
+        scatter=lambda state, packed, indices: state.__setitem__(indices, packed.to(state.dtype)),
+    )
+    attention._kda_state_copy_ready = True
+    chunk_kda_fwd = MagicMock(return_value=(output, final_state, *([None] * 10)))
+
+    with (
+        patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.kda.chunk_kda_fwd", new=chunk_kda_fwd),
+    ):
+        actual = attention._run_prefill(
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
+            recurrent_state,
+            state_indices,
+            has_initial_state,
+            metadata,
         )
 
-    packed = attention.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
-    original_ptr = packed.data_ptr()
-    _process_conv_weights(attention)
+    assert actual is output
+    assert chunk_kda_fwd.call_args.args[3] is raw_gate
+    assert chunk_kda_fwd.call_args.kwargs["use_gate_in_kernel"] is True
+    assert chunk_kda_fwd.call_args.kwargs["state_v_first"] is True
+    assert chunk_kda_fwd.call_args.args[4] is beta
+    assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is (lower_bound is not None)
+    assert chunk_kda_fwd.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)
+    torch.testing.assert_close(recurrent_state[state_indices], final_state)
 
+
+@pytest.mark.parametrize("lower_bound", [None, -4.0])
+@pytest.mark.parametrize("qkv_padding", [0, 64])
+def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_padding):
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.gate_lower_bound = lower_bound
+    attention.A_log, attention.dt_bias = torch.zeros(1), torch.zeros(128)
+    q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
+    beta = torch.full((1, 4, 1), 0.25)
+    state = torch.zeros(8, 1, 128, 128)
+    starts = torch.tensor([0, 4], dtype=torch.int32)
+    slots = torch.tensor([[2, 3, 4, 5]], dtype=torch.int32)
+    accepted = torch.tensor([2], dtype=torch.int32)
+    recurrent = MagicMock(return_value=(q, None))
+    with patch("vllm_ascend.ops.kda.recurrent_kda", new=recurrent):
+        output = attention._run_recurrent(q, k, v, q, beta, state, starts, slots, num_accepted_tokens=accepted)
+    assert output is q
+    assert recurrent.call_args.args[0] is q
+    assert recurrent.call_args.args[1] is k
+    assert recurrent.call_args.args[2] is v
+    assert recurrent.call_args.args[4] is beta
+    assert recurrent.call_args.args[5] is state
+    assert recurrent.call_args.kwargs["cu_seqlens"] is starts
+    assert recurrent.call_args.kwargs["ssm_state_indices"] is slots
+    assert recurrent.call_args.kwargs["state_v_first"] is True
+    assert recurrent.call_args.kwargs["inplace_final_state"] is True
+    assert recurrent.call_args.kwargs["output_final_state"] is False
+    assert recurrent.call_args.kwargs["num_accepted_tokens"] is accepted
+    assert recurrent.call_args.kwargs["use_beta_sigmoid_in_kernel"] is False
+    assert recurrent.call_args.kwargs["safe_gate"] is (lower_bound is not None)
+    assert recurrent.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)
+
+
+def test_kda_empty_forward_context_clears_preallocated_output():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    core_attn_out = torch.full((1, 4, 2, 3), torch.nan)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.get_forward_context",
+        return_value=SimpleNamespace(attn_metadata=None),
+    ):
+        attention._forward(
+            mixed_qkv=torch.empty(4, 18),
+            g1=torch.empty(1, 4, 2, 3),
+            g2=torch.empty(4, 2, 3),
+            beta=torch.empty(1, 4, 2),
+            core_attn_out=core_attn_out,
+        )
+
+    assert torch.equal(core_attn_out, torch.zeros_like(core_attn_out))
+
+
+def test_kda_conv_weight_is_packed_once_in_kernel_layout():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.conv_size = 4
+    attention.local_projection_size = 6
+    attention.conv1d = nn.Module()
+    source = torch.arange(18 * 4, dtype=torch.float32).reshape(18, 1, 4)
+    attention.conv1d.weight = nn.Parameter(source)
+    attention.register_parameter(
+        _PACKED_CONV_WEIGHT_NAME,
+        nn.Parameter(torch.empty(4, 18, dtype=torch.bfloat16), requires_grad=False),
+    )
+    original = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    original_ptr = original.data_ptr()
+
+    attention._pack_conv_weights()
+
+    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
     assert packed.data_ptr() == original_ptr
-    torch.testing.assert_close(packed, _expected_packed_conv_weights(attention))
     assert packed.dtype == torch.bfloat16
     assert packed.is_contiguous()
-    assert attention._conv_weights_t().data_ptr() == original_ptr
-    parameter_name = f"q_conv1d.{_PACKED_CONV_WEIGHT_NAME}"
-    assert dict(attention.named_parameters())[parameter_name] is packed
-    assert attention.state_dict()[parameter_name].data_ptr() == original_ptr
-
-    convs[1].weight.data.fill_(777)
-    convs[1].quant_method.process_weights_after_loading(convs[1])
-
-    assert attention._conv_weights_t().data_ptr() == original_ptr
     torch.testing.assert_close(
-        attention._conv_weights_t(),
-        _expected_packed_conv_weights(attention),
+        packed,
+        source[:, 0, :].transpose(0, 1).to(torch.bfloat16),
     )
 
 
-def test_full_checkpoint_reload_refreshes_packed_weight_in_place():
-    attention = _make_conv_pack_attention()
-    convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
-    for shard_id, conv in enumerate(convs, start=1):
-        conv.weight.data.fill_(shard_id)
-    _process_conv_weights(attention)
-    original_packed = attention._conv_weights_t()
-    original_ptr = original_packed.data_ptr()
-
-    record_metadata_for_reloading(attention)
-    initialize_layerwise_reload(attention)
-    for shard_id, conv in enumerate(convs, start=11):
-        loaded_weight = torch.full(
-            conv.weight.shape,
-            shard_id,
-            dtype=torch.float32,
-        )
-        conv.weight.weight_loader(conv.weight, loaded_weight)
-    finalize_layerwise_reload(
-        attention,
-        SimpleNamespace(dtype=torch.bfloat16),
+@pytest.mark.parametrize("mode", ["spec", "decode", "mixed"])
+def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
+    state = torch.zeros(1)
+    conv_meta = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 4]), cache_indices=torch.tensor([0]), num_accepted_tokens=None
     )
-
-    refreshed = attention._conv_weights_t()
-    assert refreshed is original_packed
-    assert refreshed.data_ptr() == original_ptr
-    torch.testing.assert_close(
-        refreshed,
-        _expected_packed_conv_weights(attention),
+    metadata = SimpleNamespace(
+        num_actual_tokens=6,
+        num_prefills=0,
+        num_decodes=0 if mode == "spec" else 1,
+        num_decode_tokens=4,
+        spec_sequence_masks=None if mode == "decode" else torch.tensor([True]),
+        spec_token_indx=torch.tensor([0, 2, 4]),
+        non_spec_token_indx=torch.tensor([1, 3, 5]),
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
+        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
+        spec_query_start_loc=torch.tensor([0, 2 if mode == "mixed" else 4]),
+        non_spec_query_start_loc=torch.tensor([0, 2 if mode == "mixed" else 4]),
+        spec_state_indices_tensor=torch.tensor([0]),
+        non_spec_state_indices_tensor=torch.tensor([0]),
     )
+    values = torch.arange(1, 9, dtype=torch.float32).view(8, 1).repeat(1, 6)
+    values[4:] = torch.nan
+    gate = torch.zeros(8, 1, 2)
+    gate[4:] = torch.nan
 
+    def recurrent(q, k, v, raw_gate, beta, recurrent_state, query_start_loc, state_indices, **kwargs):
+        recurrent_state.add_(1)
+        return v.clone()
 
-def test_repack_waits_until_all_source_weights_are_materialized():
-    attention = _make_conv_pack_attention()
-    source_convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
-    for value, conv in enumerate(source_convs, start=1):
-        conv.weight.data.fill_(value)
-    packed = attention._conv_weights_t()
-    packed.data.fill_(-1)
-    before = packed.clone()
-    v_shape = attention.v_conv1d.weight.shape
-    attention.v_conv1d.weight = nn.Parameter(
-        torch.empty(v_shape, device="meta"),
+    def norm_into(x, g, *, out):
+        assert out is x
+        out.copy_(x * torch.sigmoid(g))
+
+    attention = SimpleNamespace(
+        prefix="kda",
+        head_dim=2,
+        num_spec=3,
+        kv_cache=(torch.zeros(1), state),
+        get_parameter=lambda name: torch.empty(1),
+        _run_causal_conv1d=lambda x, *args, **kwargs: x,
+        _run_recurrent=recurrent,
+        o_norm=SimpleNamespace(forward_oot=norm_into),
     )
-
-    attention.q_conv1d.quant_method.process_weights_after_loading(attention.q_conv1d)
-
-    torch.testing.assert_close(packed, before)
-
-    attention.v_conv1d.weight = nn.Parameter(
-        torch.full(v_shape, 3, dtype=torch.float32),
-    )
-    attention.v_conv1d.quant_method.process_weights_after_loading(attention.v_conv1d)
-
-    torch.testing.assert_close(packed, _expected_packed_conv_weights(attention))
-
-
-def test_kernel_format_reload_updates_named_packed_parameter():
-    attention = _make_conv_pack_attention(model_dtype=torch.float16)
-    for shard_id, conv in enumerate(
-        (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d),
-        start=1,
+    output = torch.full((1, 8, 1, 2), torch.nan)
+    with (
+        patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
+        ),
     ):
-        conv.weight.data.fill_(shard_id)
-    _process_conv_weights(attention)
-
-    parameter_name = f"q_conv1d.{_PACKED_CONV_WEIGHT_NAME}"
-    packed = attention.get_parameter(parameter_name)
-    original_ptr = packed.data_ptr()
-    kernel_weight = torch.arange(
-        packed.numel(),
-        dtype=packed.dtype,
-    ).reshape_as(packed)
-
-    with torch.no_grad():
-        attention.get_parameter(parameter_name).copy_(kernel_weight)
-
-    assert attention._conv_weights_t().data_ptr() == original_ptr
-    torch.testing.assert_close(attention._conv_weights_t(), kernel_weight)
+        AscendKimiK3DeltaAttention._forward(
+            attention,
+            values,
+            torch.zeros(1, 8, 1, 2),
+            gate,
+            torch.zeros(1, 8, 1),
+            output,
+        )
+    torch.testing.assert_close(output[0, :4, 0], values[:4, :2] * 0.5)
+    torch.testing.assert_close(output[:, 6:], torch.zeros_like(output[:, 6:]))
+    torch.testing.assert_close(state, torch.tensor([2.0 if mode == "mixed" else 1.0]))

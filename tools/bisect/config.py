@@ -32,6 +32,7 @@ SCENES = (SCENE_SINGLE, SCENE_MULTI)
 #          Treated like ``git bisect skip`` and excluded from the search.
 Verdict = Literal["PASS", "FAIL", "SKIP"]
 
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -40,8 +41,8 @@ Verdict = Literal["PASS", "FAIL", "SKIP"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Nightly launch entries we reuse instead of re-implementing.
-SINGLE_NODE_TEST_PATH = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
-MULTI_NODE_RUN_SH = "tests/e2e/nightly/multi_node/scripts/run.sh"
+SINGLE_NODE_TEST_PATH = "tests/e2e/common/single_node/test_single_node.py"
+MULTI_NODE_RUN_SH = "tests/e2e/common/multi_node/run.sh"
 
 # The "good table" lives on a fixed nightly path (PVC / shared cache). It is a
 # plain CSV so it can be eyeballed and edited by hand. Override with
@@ -147,6 +148,7 @@ class BisectInput:
     scene: str  # SCENE_SINGLE | SCENE_MULTI
     config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
+    soc: str  # hardware generation, part of the good-table composite key
     name: str | None = None  # nightly case name, to match the good-table 'name'
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
@@ -163,6 +165,7 @@ class BisectOptions:
     """Tunables that change how the search runs (not what it searches)."""
 
     repo_dir: Path = REPO_ROOT
+    vllm_dir: Path = field(default_factory=lambda: Path("/vllm-workspace/vllm"))
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE
@@ -171,26 +174,24 @@ class BisectOptions:
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
     verify_good: bool = True
     verify_bad: bool = True
-    # Editable reinstall command pieces. --no-input avoids any interactive
-    # prompt that could hang the (silent, log-redirected) build step.
+    # Match the nightly install path when a candidate needs rebuilding.
     pip_install_cmd: list[str] = field(
         default_factory=lambda: [
+            "uv",
             "pip",
             "install",
             "-e",
             ".",
-            "--no-input",
-            "--disable-pip-version-check",
+            "--no-deps",
         ]
     )
     pip_requirements_cmd: list[str] = field(
         default_factory=lambda: [
+            "uv",
             "pip",
             "install",
             "-r",
             "requirements-dev.txt",
-            "--no-input",
-            "--disable-pip-version-check",
         ]
     )
     # The nightly container is already built+installed at its current HEAD (the
@@ -217,6 +218,8 @@ class BisectOptions:
     # worker also exits promptly once this file appears (run.sh touches its
     # ``done`` file on every leader exit path).
     release_file: str | None = None
+    # Only set when the caller guarantees a fresh directory for this run.
+    run_scoped_coord: bool = False
     # Per-trial pytest timeout (seconds).
     trial_timeout_s: float = 7200.0
 

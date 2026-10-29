@@ -44,6 +44,7 @@ const static int64_t X_INPUT_INDEX = 0;
 const static int64_t BIAS_INPUT_INDEX = 1;
 const static int64_t INPUT_IDS_INPUT_INDEX = 2;
 const static int64_t TID_TO_EID_INPUT_INDEX = 3;
+const static int64_t BIAS_VL_INPUT_INDEX = 4;
 const static int64_t Y_OUTPUT_INDEX = 0;
 const static int64_t EXPERT_IDX_OUTPUT_INDEX = 1;
 const static int64_t OUT_OUTPUT_INDEX = 2;
@@ -57,6 +58,8 @@ const static int64_t NORM_TYPE_ATTR_INDEX = 5;
 const static int64_t OUT_FLAG_ATTR_INDEX = 6;
 const static int64_t ROUTED_SCALING_FACTOR_ATTR_INDEX = 7;
 const static int64_t EPS_ATTR_INDEX = 8;
+const static int64_t IMAGE_SENTINEL_LO_ATTR_INDEX = 9;
+const static int64_t IMAGE_SENTINEL_COUNT_ATTR_INDEX = 10;
 const static int64_t DEFAULT_WORKSPACE_SIZE = static_cast<int64_t>(16 * 1024 * 1024); // 预留16M空间
 
 template <typename T>
@@ -117,14 +120,18 @@ private:
     const gert::Shape *outShape_ = nullptr;
     const gert::Shape *inputIdsShape_ = nullptr;
     const gert::Shape *tid2eidShape_ = nullptr;
+    const gert::Shape *biasVlShape_ = nullptr;
 
-    ge::DataType inputIdsDtype;
-    ge::DataType tid2eidDtype;
+    ge::DataType inputIdsDtype = ge::DT_INT32;
+    ge::DataType tid2eidDtype = ge::DT_INT32;
 
     uint64_t coreNum_ = 0;
     int64_t rows_ = 0;
     int64_t expertCount_ = 0;
     int64_t addBias_ = 0;
+    int64_t addBiasVl_ = 0;
+    int64_t imageSentinelLo_ = 129257;
+    int64_t imageSentinelCount_ = 5;
 
     int64_t k_ = 0;
     int64_t kGroup_ = 1;
@@ -174,13 +181,17 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckInputShape()
                     return ge::GRAPH_FAILED);
     }
     moeGatingTopKTilingData_.set_addBias(addBias_);
-
-    if (inputIdsShape_ != nullptr) {
+    if (biasVlShape_ != nullptr) {
+        addBiasVl_ = 1;
         OPS_ERR_IF(
-            tid2eidShape_ == nullptr,
-            OPS_LOG_E(context_, "The tid2eid should not be empty when inputIds has value."),
+            biasVlShape_->GetDimNum() != BIAS_INPUT_DIMS || biasVlShape_->GetDim(0) != expertCount_,
+            OPS_LOG_E(context_, "bias_vl must be a 1D tensor with expertCount elements."),
+            return ge::GRAPH_FAILED);
+        OPS_ERR_IF(inputIdsShape_ == nullptr,
+            OPS_LOG_E(context_, "input_ids is required when bias_vl is present."),
             return ge::GRAPH_FAILED);
     }
+    moeGatingTopKTilingData_.set_addBiasVl(addBiasVl_);
     if (tid2eidShape_ != nullptr) {
         OPS_ERR_IF(
             inputIdsShape_ == nullptr,
@@ -201,6 +212,12 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckInputShape()
 
 ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckAttr()
 {
+    OPS_ERR_IF(addBiasVl_ && groupCount_ != 1,
+                OPS_LOG_E(context_, "bias_vl routing currently requires groupCount=1, but got %ld.", groupCount_),
+                return ge::GRAPH_FAILED);
+    OPS_ERR_IF(addBiasVl_ && imageSentinelCount_ <= 0,
+                OPS_LOG_E(context_, "image_sentinel_count must be positive when bias_vl is present."),
+                return ge::GRAPH_FAILED);
     OPS_ERR_IF(k_ <= 0, OPS_LOG_E(context_, "k is: %ld, but should be greater than 0.", k_), return ge::GRAPH_FAILED);
     OPS_ERR_IF(kGroup_ <= 0, OPS_LOG_E(context_, "k_group is: %ld, but should be greater than 0.", kGroup_),
                 return ge::GRAPH_FAILED);
@@ -277,6 +294,8 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::GetShapeAttrsInfo()
     inputIdsShape_ = inputIdsShapePtr == nullptr ? nullptr : &inputIdsShapePtr->GetStorageShape();
     auto tid2eidShapePtr = context_->GetOptionalInputShape(TID_TO_EID_INPUT_INDEX);
     tid2eidShape_ = tid2eidShapePtr == nullptr ? nullptr : &tid2eidShapePtr->GetStorageShape();
+    auto biasVlShapePtr = context_->GetOptionalInputShape(BIAS_VL_INPUT_INDEX);
+    biasVlShape_ = biasVlShapePtr == nullptr ? nullptr : &biasVlShapePtr->GetStorageShape();
 
     // 获取输出shape
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);
@@ -305,6 +324,12 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::GetShapeAttrsInfo()
                     OPS_LOG_E(context_, "bias dtype %s not equal x dtype %s, please check.",
                          ge::TypeUtils::DataTypeToSerialString(biasDtype).c_str(),
                          ge::TypeUtils::DataTypeToSerialString(xDtype).c_str()),
+                    return ge::GRAPH_FAILED);
+    }
+    if (biasVlShapePtr != nullptr) {
+        auto biasVlDtype = context_->GetOptionalInputDesc(BIAS_VL_INPUT_INDEX)->GetDataType();
+        OPS_ERR_IF((biasVlDtype != xDtype),
+                    OPS_LOG_E(context_, "bias_vl dtype must match x dtype."),
                     return ge::GRAPH_FAILED);
     }
     if (inputIdsShapePtr != nullptr) {
@@ -402,6 +427,17 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::GetShapeAttrsInfo()
     }
     moeGatingTopKTilingData_.set_eps(eps_);
     OPS_LOG_I(context_, "Attr eps is: %f ", eps_);
+
+    const int64_t *imageSentinelLoPtr = attrs->GetAttrPointer<int64_t>(IMAGE_SENTINEL_LO_ATTR_INDEX);
+    if (imageSentinelLoPtr != nullptr) {
+        imageSentinelLo_ = *imageSentinelLoPtr;
+    }
+    moeGatingTopKTilingData_.set_imageSentinelLo(imageSentinelLo_);
+    const int64_t *imageSentinelCountPtr = attrs->GetAttrPointer<int64_t>(IMAGE_SENTINEL_COUNT_ATTR_INDEX);
+    if (imageSentinelCountPtr != nullptr) {
+        imageSentinelCount_ = *imageSentinelCountPtr;
+    }
+    moeGatingTopKTilingData_.set_imageSentinelCount(imageSentinelCount_);
 
     auto outDesc = context_->GetOutputDesc(OUT_OUTPUT_INDEX);
     if (outFlag_ && outDesc != nullptr) {

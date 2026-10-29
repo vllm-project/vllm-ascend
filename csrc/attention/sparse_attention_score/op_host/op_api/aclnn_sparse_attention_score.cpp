@@ -37,6 +37,9 @@ static aclnnStatus MakeContiguous(const aclTensor *&query,
                                   const aclTensor *&selectNumIdxOptional,
                                   const aclTensor *&actualSeqLengthsOptional,
                                   const aclTensor *&actualSeqLengthsKvOptional,
+                                  const aclTensor *&qDequantScaleOptional,
+                                  const aclTensor *&kDequantScaleOptional,
+                                  const aclTensor *&vDequantScaleOptional,
                                   aclOpExecutor *executor)
 {
     query = l0op::Contiguous(query, executor);
@@ -67,6 +70,21 @@ static aclnnStatus MakeContiguous(const aclTensor *&query,
     if (actualSeqLengthsKvOptional != nullptr) {
         actualSeqLengthsKvOptional = l0op::Contiguous(actualSeqLengthsKvOptional, executor);
         CHECK_RET(actualSeqLengthsKvOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    }
+
+    if (qDequantScaleOptional != nullptr) {
+        qDequantScaleOptional = l0op::Contiguous(qDequantScaleOptional, executor);
+        CHECK_RET(qDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    }
+
+    if (kDequantScaleOptional != nullptr) {
+        kDequantScaleOptional = l0op::Contiguous(kDequantScaleOptional, executor);
+        CHECK_RET(kDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    }
+
+    if (vDequantScaleOptional != nullptr) {
+        vDequantScaleOptional = l0op::Contiguous(vDequantScaleOptional, executor);
+        CHECK_RET(vDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
 
     return ACLNN_SUCCESS;
@@ -119,6 +137,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseAttentionScoreGetW
     aclnnStatus ret = MakeContiguous(query, key, value, selectIdx, blockTable,
                                      selectNumIdxOptional,
                                      actualSeqLengthsOptional, actualSeqLengthsKvOptional,
+                                     qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional,
                                      executorImpl);
     if (ret != ACLNN_SUCCESS) {
         return ret;
@@ -130,6 +149,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseAttentionScoreGetW
         actualSeqLengthsOptional, actualSeqLengthsKvOptional,
         qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional,
         numKeyValueHeads, scaleValue, blockSize, topK, innerPrecise,
+        attentionOut,
         executorImpl);
 
     if (outputs[0] == nullptr) {

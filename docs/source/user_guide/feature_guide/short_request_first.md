@@ -98,13 +98,15 @@ When this warning appears:
 - increase `short_request_first_config.threshold`
 - or disable `short_request_first_config.enabled`
 
-ShortRequestFirst also emits an aggregate stats log every 5 seconds so queue behavior is visible without adding extra configuration.
+ShortRequestFirst also emits an aggregate stats log every 5s so queue behavior is visible without adding extra configuration.
 
 ## Scheduler compatibility
 
-ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling. It is not supported with batch-job-aware scheduling, profiling-chunk scheduling, or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
+ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling, including in combination with profiling-chunk scheduling. It is not supported with batch-job-aware scheduling or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
 
-The `VLLM_ASCEND_BALANCE_SCHEDULING` setting keeps its existing behavior: it controls balance scheduling's cross-DP admission logic. ShortRequestFirst is installed independently of whether balance scheduling is enabled, so the balance-disabled path continues to delegate scheduling to vLLM while using the ShortRequestFirst waiting queue.
+The `additional_config.scheduler_config.enable_balance_scheduling` setting keeps its existing behavior: it controls balance scheduling's cross-DP admission logic. ShortRequestFirst is installed independently of whether balance scheduling is enabled, so the balance-disabled path continues to delegate scheduling to vLLM while using the ShortRequestFirst waiting queue.
+
+When combining ShortRequestFirst with CPP, set `scheduler_config.enable_balance_scheduling` to `false` because CPP and balance scheduling cannot be enabled at the same time.
 
 ## Minimal examples
 

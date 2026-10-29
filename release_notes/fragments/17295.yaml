@@ -1,0 +1,4 @@
+pr: 17295
+entries:
+  - category: feature
+    text: Added full-request pooling PrefixLM attention through model-runner V2, preserving bidirectional blocks and causal visibility between blocks.

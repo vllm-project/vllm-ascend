@@ -25,6 +25,7 @@ Decision rule (the compile-optimisation core):
   the editable install picks the change up live.
 """
 
+import contextlib
 import logging
 import shutil
 import subprocess
@@ -38,12 +39,17 @@ from tools.bisect.config import (
     REQUIREMENTS_GLOBS,
     BisectOptions,
 )
+from tools.bisect.git_ops import GitError
+from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
 # Build artifacts removed before a rebuild so stale ``.so`` files can never be
 # loaded against a new checkout.
-_STALE_ARTIFACTS = ("build", "*.egg-info", "dist")
+# The custom-op build script preserves csrc/build, including CMakeCache.txt.
+# That cache can point HI_PYTHON at a short-lived uv build-environment path,
+# so discard it before rebuilding a candidate in a new isolated environment.
+_STALE_ARTIFACTS = ("build", "csrc/build", "*.egg-info", "dist")
 
 
 @dataclass
@@ -120,9 +126,18 @@ class BuildManager:
     def prepare(self, target_commit: str, log_file: Path | None = None) -> BuildDecision:
         """Checkout ``target_commit`` and rebuild/reinstall as needed.
 
-        Raises ``BuildError`` on a failed install so the caller can record a
-        SKIP (rather than a misleading FAIL) for this commit.
+        The target is resolved first: on a multi-node worker (or any node whose
+        repo is a shallow clone, e.g. the nightly ``--depth 1`` container) the
+        commanded commit -- an ancestor in the bisect range -- is usually NOT
+        present locally, so it must be recovered from origin exactly like the
+        master's ``describe()`` does. When the commit is already local this is
+        a single no-op rev-parse.
+
+        Raises ``BuildError`` on a failed install and ``GitError`` when the
+        commit cannot be recovered, so the caller can record a SKIP (rather
+        than a misleading FAIL) for this commit.
         """
+        target_commit = git_ops.resolve_commit(self.repo, target_commit)
         decision = self.decide(target_commit)
         logger.info("[build] %s -> %s", target_commit[:12], decision.reason)
 
@@ -133,10 +148,10 @@ class BuildManager:
                 "[build] compiling/installing (this can take a while); follow progress with: tail -f %s", log_file
             )
         if decision.reinstall_reqs:
-            self._run(self.opt.pip_requirements_cmd, log_file, "pip install requirements")
+            self._run(self.opt.pip_requirements_cmd, log_file, "uv pip install requirements")
         if decision.rebuild:
             self._clean_artifacts()
-            self._run(self.opt.pip_install_cmd, log_file, "pip install -e .")
+            self._run(self.opt.pip_install_cmd, log_file, "uv pip install -e .")
 
         # Only advance the baseline once the binary actually matches the source.
         if decision.rebuild or self.last_built_commit is None:
@@ -160,14 +175,71 @@ class BuildManager:
         logger.info("[build] running: %s", " ".join(cmd))
         if log_file is not None:
             with open(log_file, "a", encoding="utf-8") as out:
+                out.write(self._cmake_python_diagnostics("before install"))
+                out.flush()
                 proc = subprocess.run(cmd, cwd=str(self.repo), stdout=out, stderr=subprocess.STDOUT, text=True)
             tail = "(see build log)"
+            if proc.returncode != 0:
+                with open(log_file, "a", encoding="utf-8") as out:
+                    out.write(self._cmake_python_diagnostics("after failed install"))
+                    out.write(self._cmake_failure_logs())
+                # Surface the tail of the build log in the job log: the log
+                # file lives in the runner container and is lost when the job
+                # ends, so "(see build log)" alone leaves nothing to debug.
+                with contextlib.suppress(OSError):
+                    tail = log_file.read_text(encoding="utf-8", errors="replace")[-4000:]
         else:
             proc = subprocess.run(cmd, cwd=str(self.repo), capture_output=True, text=True)
             tail = (proc.stdout or "")[-2000:]
         if proc.returncode != 0:
             raise BuildError(f"{label} failed (rc={proc.returncode}):\n{tail}")
 
+    def _cmake_python_diagnostics(self, phase: str) -> str:
+        """Report only the CMake Python paths, not the full potentially sensitive cache."""
+        cache = self.repo / "csrc" / "build" / "CMakeCache.txt"
+        lines = [f"\n[build] CMake diagnostics ({phase}): {cache}\n"]
+        if not cache.is_file():
+            lines.append("[build] CMakeCache.txt does not exist\n")
+            return "".join(lines)
+        try:
+            entries = cache.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            lines.append(f"[build] cannot read CMakeCache.txt: {exc}\n")
+            return "".join(lines)
+        for key in ("HI_PYTHON", "Python3_EXECUTABLE", "_Python3_EXECUTABLE"):
+            matches = [entry.partition("=")[2] for entry in entries if entry.startswith(f"{key}:")]
+            if not matches:
+                lines.append(f"[build] {key}: not cached\n")
+                continue
+            value = matches[-1]
+            lines.append(f"[build] {key}: {value} (exists={Path(value).is_file()})\n")
+        if phase == "after failed install":
+            lines.append("[build] uv may remove temporary build Python on exit; compare the before-install paths\n")
+        return "".join(lines)
+
+    def _cmake_failure_logs(self) -> str:
+        cmake_files = self.repo / "csrc" / "build" / "CMakeFiles"
+        lines = []
+        for name in ("CMakeConfigureLog.yaml", "CMakeError.log"):
+            path = cmake_files / name
+            if not path.is_file():
+                continue
+            try:
+                tail = path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            except OSError as exc:
+                lines.append(f"[build] cannot read {path}: {exc}\n")
+            else:
+                lines.append(f"\n[build] tail of {path}:\n{tail}\n")
+        return "".join(lines)
+
 
 class BuildError(RuntimeError):
     pass
+
+
+# Everything a deploy (resolve + checkout + build + version adaptation) can
+# raise that must surface as a per-round SKIP instead of killing the driving
+# agent. One shared tuple so every catch site (master runner, worker agent,
+# orchestrator trial loop) stays in lockstep -- a missed copy leaves the other
+# side waiting out the full barrier timeout on every remaining round.
+DEPLOY_ERRORS = (BuildError, GitError, VersionAdaptationError)

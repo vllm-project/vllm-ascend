@@ -20,9 +20,6 @@
 name: Weekly-A2
 
 on:
-  schedule:
-      # Run test at 10:00 Beijing time (UTC+8) every Sunday
-      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -47,6 +44,11 @@ on:
         type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
+        required: false
+        default: ''
+        type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
         required: false
         default: ''
         type: string
@@ -147,7 +149,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -172,10 +174,11 @@ jobs:
     with:
       target: a2
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '910b'
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   single-node-accuracy-tests:
     needs: [setup-vars, parse-trigger, build-image]
@@ -192,9 +195,10 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -204,6 +208,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -222,9 +227,10 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a2
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' &&
@@ -233,6 +239,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   clear-pre-logs:

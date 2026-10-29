@@ -6,6 +6,52 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _copy_temporal_state(
+    src_addr,
+    dst_addr,
+    copy_size,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    # Temporal states do not overlap. Use the same u64 transfer width as
+    # precopy, retaining byte handling for unusual offsets and trailing data.
+    BYTES_PER_UINT64: tl.constexpr = 8
+    offsets = tl.arange(0, COPY_BLOCK_SIZE)
+    if ((src_addr | dst_addr) & (BYTES_PER_UINT64 - 1)) == 0:
+        copy_size_u64 = copy_size // BYTES_PER_UINT64
+        per_tile = tl.cdiv(copy_size_u64, TEMPORAL_TILES)
+        per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        start = tile_idx.to(tl.int64) * per_tile
+        end = tl.minimum(start + per_tile, copy_size_u64)
+        src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
+        dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
+        for i in range(start, end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < end
+            data = tl.load(src_u64 + i + offsets, mask=mask)
+            tl.store(dst_u64 + i + offsets, data, mask=mask)
+        if tile_idx == 0:
+            tail_start = copy_size_u64 * BYTES_PER_UINT64
+            tail_offsets = tl.arange(0, BYTES_PER_UINT64)
+            tail_mask = tail_offsets < copy_size - tail_start
+            tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail = tl.load(tail_src + tail_offsets, mask=tail_mask)
+            tl.store(tail_dst + tail_offsets, tail, mask=tail_mask)
+    else:
+        per_tile = tl.cdiv(copy_size, TEMPORAL_TILES)
+        per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        start = tile_idx.to(tl.int64) * per_tile
+        end = tl.minimum(start + per_tile, copy_size)
+        src_u8 = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_u8 = dst_addr.to(tl.pointer_type(tl.uint8))
+        for i in range(start, end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < end
+            data = tl.load(src_u8 + i + offsets, mask=mask)
+            tl.store(dst_u8 + i + offsets, data, mask=mask)
+
+
+@triton.jit
 def postprocess_mamba_fused_kernel(
     # Decision inputs (per-request)
     num_accepted_tokens_ptr,
@@ -49,14 +95,20 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
     - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -64,13 +116,17 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
-    # Bounds check
+    # Bounds check: num_reqs is the number of active batch rows. With
+    # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
+    # must NOT be checked against num_reqs.
     if batch_idx >= num_reqs:
         return
 
     if HAS_IDX_MAPPING:
         req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        # -1 is the skip sentinel for inactive batch rows.
         if req_idx < 0:
             return
     else:
@@ -101,18 +157,6 @@ def postprocess_mamba_fused_kernel(
     accept_token_bias = aligned_new_computed - num_tokens_running_state
     dest_block_idx = aligned_new_computed // block_size - 1
 
-    # Update accepted-token count before early exits (per-request, so only
-    # state_idx == 0 writes). V2 updates in place; V1 writes the _out buffer.
-    if src_block_idx == dest_block_idx and state_idx == 0:
-        if HAS_IDX_MAPPING:
-            tl.store(num_accepted_tokens_ptr + req_idx, 1)
-        else:
-            tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
-
-    # Skip no-op self-copy.
-    if src_block_idx == dest_block_idx and accept_token_bias == 0:
-        return
-
     # Load state metadata for this layer/state_type
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -129,6 +173,7 @@ def postprocess_mamba_fused_kernel(
     # block table). Reinterpret as int32* since block ids are int32.
     group_base_addr = tl.load(block_table_ptrs_ptr + group_idx)
     block_table_typed = group_base_addr.to(tl.pointer_type(tl.int32))
+
     bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
     block_table_base = block_table_typed + bt_row_idx * block_table_stride_req
 
@@ -137,65 +182,74 @@ def postprocess_mamba_fused_kernel(
     # and Triton would otherwise do the multiply in int32 and wrap.
     src_block_id = tl.load(block_table_base + src_block_idx).to(tl.int64)
     dest_block_id = tl.load(block_table_base + dest_block_idx).to(tl.int64)
-    dst_addr = state_base_addr + dest_block_id * state_block_stride
 
-    # Compute source and destination addresses based on state type.
+    # Compute source and destination addresses based on state type
     # conv_width > 0 means this is a conv state (get_conv_copy_spec logic)
     # conv_width == 0 means this is a temporal state (get_temporal_copy_spec logic)
     is_conv_state = conv_width > 0
-    offsets = tl.arange(0, COPY_BLOCK_SIZE)
-
-    if CONV_STATE_DIM_FIRST and is_conv_state:
-        # DS conv layout: state_len is the slide axis; copy per dim row.
-        dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
-        row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
-        per_row_bytes = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
-        bias_bytes = accept_token_bias.to(tl.int64) * state_elem_size
-        src_block_addr = state_base_addr + src_block_id * state_block_stride
-        for d in range(0, dim_rows):
-            # Hoist the pointer-type cast out of the inner copy loop
-            # (triton-ascend PtrOffsetInfo::AxisInfo aborts on inside-loop
-            # `.to(pointer_type)`), same fix as batch_memcpy_kernel.
-            row_src_ptr = (src_block_addr + d * row_stride + bias_bytes).to(tl.pointer_type(tl.uint8))
-            row_dst_ptr = (dst_addr + d * row_stride).to(tl.pointer_type(tl.uint8))
-            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < per_row_bytes
-                data = tl.load(row_src_ptr + i + offsets, mask=mask)
-                tl.store(row_dst_ptr + i + offsets, data, mask=mask)
-        return
 
     if is_conv_state:
-        # SD conv state: copy
+        # Conv state: copy
         #   state[block_table[req_idx, src_block_idx],  accept_token_bias:]
         # to
         #   state[block_table[req_idx, dest_block_idx], :conv_width - accept_token_bias]
         src_offset = accept_token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        # Number of elements to copy:
-        # (conv_width - accept_token_bias) * inner_size
-        num_elems_to_copy = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size
-        copy_size = num_elems_to_copy * state_elem_size
+        dst_addr = state_base_addr + dest_block_id * state_block_stride
+        if CONV_STATE_DIM_FIRST:
+            copy_size = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
+        else:
+            num_elems_to_copy = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size
+            copy_size = num_elems_to_copy * state_elem_size
     else:
-        # Temporal state: copy
-        #   state[block_table[req_idx, src_block_idx + accept_token_bias]]
-        # to
-        #   state[block_table[req_idx, dest_block_idx]]
         actual_src_block_idx = src_block_idx + accept_token_bias
         actual_src_block_id = tl.load(block_table_base + actual_src_block_idx).to(tl.int64)
         src_addr = state_base_addr + actual_src_block_id * state_block_stride
-        # Use natural block data size (inner_size * elem_size), NOT
-        # state_block_stride which is the page stride and can exceed the
-        # actual data when the state tensor uses as_strided page padding.
+        dst_addr = state_base_addr + dest_block_id * state_block_stride
         copy_size = state_inner_size * state_elem_size
 
-    # Hoist the pointer-type cast out of the copy loop. triton-ascend's
-    # PtrOffsetInfo::AxisInfo analysis aborts on `(addr + i + offsets).to(...)`
-    # inside the loop (SmallVector assertion `idx < size()`); casting once
-    # here and doing plain pointer arithmetic inside the loop is the same fix
-    # vllm-ascend applies to batch_memcpy_kernel.
-    src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
-    dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
-    for i in range(0, copy_size, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < copy_size
-        data = tl.load(src_ptr + i + offsets, mask=mask)
-        tl.store(dst_ptr + i + offsets, data, mask=mask)
+    # Mirror postprocess_mamba's trailing
+    # Guard on tile_idx == 0 so tiles > 0 (when TEMPORAL_TILES > 1) do not
+    # duplicate the store. Note: triton-ascend rejects a chained `A and B and C`
+    # boolean expression, so the conditions are split into nested ifs.
+    if src_block_idx == dest_block_idx and state_idx == 0:
+        if tile_idx == 0:
+            if num_accepted_tokens_out_ptr is None:
+                tl.store(num_accepted_tokens_ptr + req_idx, 1)
+            else:
+                tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+
+    offsets = tl.arange(0, COPY_BLOCK_SIZE)
+    if CONV_STATE_DIM_FIRST and is_conv_state:
+        dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
+        dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+        for row in range(dim_row_count):
+            row_src = (src_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
+            row_dst = (dst_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
+            for i in range(0, copy_size, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < copy_size
+                data = tl.load(row_src + i + offsets, mask=mask)
+                tl.store(row_dst + i + offsets, data, mask=mask)
+    else:
+        # SD conv (single CTA) / temporal (tiled across TEMPORAL_TILES).
+        src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
+        if is_conv_state:
+            # SD conv is small; only tile 0 does the copy.
+            if tile_idx == 0:
+                for i in range(0, copy_size, COPY_BLOCK_SIZE):
+                    mask = (i + offsets) < copy_size
+                    data = tl.load(src_ptr + i + offsets, mask=mask)
+                    tl.store(dst_ptr + i + offsets, data, mask=mask)
+        else:
+            _copy_temporal_state(
+                src_addr,
+                dst_addr,
+                copy_size,
+                tile_idx,
+                COPY_BLOCK_SIZE,
+                TEMPORAL_TILES,
+            )

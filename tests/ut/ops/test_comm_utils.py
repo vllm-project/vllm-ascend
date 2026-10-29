@@ -20,7 +20,7 @@ import torch
 from pytest_mock import MockerFixture
 
 from tests.ut.base import PytestBase
-from vllm_ascend.ops.fused_moe.comm_utils import (
+from vllm_ascend.ops.fused_moe.moe_utils import (
     _gather_along_first_dim,
     async_all_to_all,
     gather_from_sequence_parallel_region,
@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.comm_utils import (
 class TestDistributedCommunication(PytestBase):
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
+        mocker.patch("vllm_ascend.ops.fused_moe.moe_utils.torch.npu.current_device", return_value="cpu")
         mocker.patch("torch.npu.current_device", return_value="cpu")
         mocker.patch("torch.distributed.get_world_size", return_value=4)
 

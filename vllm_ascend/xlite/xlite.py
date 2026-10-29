@@ -18,34 +18,43 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
-from typing import Any, TypeAlias, cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch_npu
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size, get_world_group
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import AttnMeta, AttnMHA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
+from xlite._C import AttnDSA, AttnMeta, AttnMHA, AttnMLA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 from vllm_ascend.xlite.utils import (
+    _DUMMY_TENSOR,
     AttnMetadataRouter,
     WeightGetterConfig,
     XModel,
     XModelConfig,
     get_dotted_attr,
     get_layer_weights,
+    set_dummy_tensor,
 )
 
-XliteInitResult: TypeAlias = tuple[XModel, torch.Tensor, int, torch.dtype]
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v1.xlite.xlite_model_runner import XliteModelRunner as XliteModelRunnerV1
+    from vllm_ascend.xlite.xlite_model_runner import XliteModelRunnerV2
+
+    XliteModelRunner: TypeAlias = XliteModelRunnerV1 | XliteModelRunnerV2
+
 XliteForwardResult: TypeAlias = torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]
 
 _architecture_strategy_map: dict[str, type[XliteModelBase]] = {}
@@ -59,15 +68,22 @@ class XliteModelBase(ABC):
     interface.
 
     Attributes:
-        runnable (nn.Module): The original runnable model used by vLLM. Used as the source of truth for weight
-            extraction for xlite model construction.
+        npu_runner (XliteModelRunner): The NPU model runner instance.
+        npu_runnable (nn.Module): The original runnable model used by vLLM-ascend. Used as the source of truth for
+            weight extraction for xlite model construction.
         vllm_config (VllmConfig): The configuration object provided by vLLM. Used to build xlite configuration at
             runtime.
+        device (torch.device): The device on which the model is loaded. Typically an Ascend NPU device.
+        dtype (torch.dtype): The data type used for model weights and computations. Derived from `vllm_config`.
+        rottary_embed (AscendRotaryEmbedding | None): The rotary embedding module extracted from the NPU runnable model.
         xlite_config (XModelConfig): Native xlite configuration object populated by subclasses.
         xlite_model (XModel): Native xlite model container populated by subclasses.
+        rope_cossin_cache (torch.Tensor): Precomputed RoPE frequency cache tensor for rotary positional embeddings.
     """
 
-    _attn_metadata_type: type | tuple[type, ...]
+    from vllm_ascend.attention.attention_v1 import AscendMetadata
+
+    _attn_metadata_type: type | tuple[type, ...] = AscendMetadata
     """The expected type of attention metadata in the forward context for this architecture. Used for runtime checks
     before forwarding. See :meth:`XliteWrapper.__call__` for usage."""
     _supported_architectures: Sequence[str] | str
@@ -96,37 +112,56 @@ class XliteModelBase(ABC):
             _architecture_strategy_map[arc] = cls
         super().__init_subclass__(**kwargs)
 
-    def __init__(self, runnable: nn.Module, vllm_config: VllmConfig) -> None:
+    def __init__(self, npu_runner: XliteModelRunner, vllm_config: VllmConfig) -> None:
         """Initialize the xlite model adapter.
 
         Args:
-            runnable (nn.Module): The original runnable model used by vLLM.
+            npu_runner (XliteModelRunner): The NPU model runner instance.
             vllm_config (VllmConfig): Runtime configuration used for model setup.
 
         Notes:
             The constructor stores the runnable model and vLLM config, and prepares empty xlite configuration and model
             containers for subclass-specific population.
         """
-        self.runnable = runnable
+        self.npu_runner: XliteModelRunner = npu_runner
+        self.npu_runnable: nn.Module = npu_runner.fallback_model
         self.vllm_config = vllm_config
+        self.device = self.npu_runner.device
+        self.dtype = vllm_config.model_config.dtype
+        self.rottary_embed: AscendRotaryEmbedding | None = self._get_rope()
+        if self.rottary_embed:
+            logger.info_once(
+                "xlite: found rotary embedding module `%s` in the NPU runnable.",
+                re.sub(r"\s+", " ", repr(self.rottary_embed).replace("\n", "").strip()),
+            )
+        else:
+            logger.warning_once("xlite: no rotary embedding module found in `%s`", self.npu_runnable)
 
         self.xlite_config = XModelConfig()
         self.xlite_model = XModel()
-
-    def initialize(self) -> XliteInitResult:
-        """Initialize an xlite model and precomputed RoPE cache.
-
-        Returns:
-            XliteInitResult: A tuple of `(xlite_model, freq_cis, hidden_size, dtype)` required by `XliteWrapper`.
-        """
         self._build_model_config()
         self._build_model()
+        self.xlite_model.init(self.xlite_config, torch.distributed.get_rank())
+        self.rope_cossin_cache = self._precompute_rope_cache()
 
-        rank = torch.distributed.get_rank()
-        self.xlite_model.init(self.xlite_config, rank)
+        if torch.distributed.get_rank() == 0:
+            logger.info_once("xlite: built model config: %s", self.xlite_config)
+            logger.info_once("xlite: built model weights: %s", self.xlite_model)
 
-        freq_cis = self._precompute_freqs_cis()
-        return (self.xlite_model, freq_cis, self.xlite_config.hidden_size, self.vllm_config.model_config.dtype)
+    def __del__(self) -> None:
+        self.npu_runner = None  # type: ignore[assignment]
+        self.npu_runnable = None  # type: ignore[assignment]
+
+    @abstractmethod
+    def extract_kv_cache(self, kv_caches: list[torch.Tensor], /) -> list[tuple[torch.Tensor, ...]]:
+        """Extract xlite-compatible KV cache from the vLLM-ascend KV cache.
+
+        Args:
+            kv_caches (list[torch.Tensor]): The KV cache from the upstream vLLM/vLLM-ascend.
+
+        Returns:
+            list[tuple[torch.Tensor, ...]]: The KV cache in the format expected by xlite model implementations.
+        """
 
     @abstractmethod
     def _build_model_config(self) -> None:
@@ -160,18 +195,33 @@ class XliteModelBase(ABC):
         Returns:
             tuple[Sequence[nn.Module], str]: A pair of `(layers, model_prefix)` for model traversal.
         """
-        if hasattr(self.runnable, "language_model"):
+        if hasattr(self.npu_runnable, "language_model"):
             layers = cast(
-                Sequence[nn.Module], get_dotted_attr(self.runnable.language_model, "model.layers", default=[])
+                Sequence[nn.Module], get_dotted_attr(self.npu_runnable.language_model, "model.layers", default=[])
             )
             prefix = "language_model."
         else:
-            layers = cast(Sequence[nn.Module], get_dotted_attr(self.runnable, "model.layers", default=[]))
+            layers = cast(Sequence[nn.Module], get_dotted_attr(self.npu_runnable, "model.layers", default=[]))
             prefix = ""
         return layers, prefix
 
-    @abstractmethod
-    def _precompute_freqs_cis(self) -> torch.Tensor:
+    def _get_rope(self, layer_idx: int = 0) -> AscendRotaryEmbedding | None:
+        """Extract the rotary embedding module from the NPU runnable model :data:`npu_runnable`.
+
+        Args:
+            layer_idx (int): The index of the transformer layer to extract the rotary embedding from. Defaults to 0.
+
+        Returns:
+            AscendRotaryEmbedding | None: The rotary embedding module found in the specified transformer layer, or None
+            if not found.
+        """
+        layers, _ = self._get_layers_and_model_prefix()
+        rottary_embed: AscendRotaryEmbedding | None = get_dotted_attr(layers, f"{layer_idx}.self_attn.rotary_emb")
+        if not rottary_embed:
+            logger.warning_once("xlite adapter: Rotary embedding not found in the model layers. RoPE will be disabled.")
+        return rottary_embed
+
+    def _precompute_rope_cache(self) -> torch.Tensor:
         """Precomputes frequency-based complex exponential values for rotary positional embeddings (RoPE).
 
         This method generates the RoPE frequency cache (cosine and sine values) required by the xlite attention
@@ -184,6 +234,12 @@ class XliteModelBase(ABC):
         Notes:
             :meth:`_build_model_config` should be called prior to this method.
         """
+        if not self.rottary_embed:
+            return torch.empty(2, dtype=torch.float32, device=self.device)
+        cossin_cache: torch.Tensor | None = getattr(self.rottary_embed, "cossin_cache", None)
+        if not isinstance(cossin_cache, torch.Tensor):
+            cossin_cache = self.rottary_embed._compute_cos_sin_cache()
+        return cossin_cache.to(dtype=torch.float32, device=self.device)
 
     @staticmethod
     def is_tensor_nz(t: torch.Tensor) -> bool:
@@ -229,6 +285,8 @@ class XliteModelBase(ABC):
         Returns:
             torch.Tensor: The repacked scale tensor for fixpipe computation.
         """
+        if deq_scale.dtype == torch.int64:
+            return deq_scale
         deq_scale_fp32 = deq_scale.to(torch.float32)
         scale = deq_scale_fp32.new_zeros(deq_scale.shape[0] * 2)
         scale[0::2] = deq_scale_fp32[0::1]
@@ -271,7 +329,6 @@ class StandardXliteModel(XliteModelBase):
     architecture has unique configuration needs.
     """
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = [
         "LlamaForCausalLM",
         "Qwen2ForCausalLM",
@@ -291,7 +348,7 @@ class StandardXliteModel(XliteModelBase):
             xlite_config.head_dim = hf_config.head_dim
         else:
             xlite_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
-        xlite_config.rope_head_dim = xlite_config.head_dim
+        xlite_config.rope_head_dim = self.rottary_embed.rotary_dim if self.rottary_embed else xlite_config.head_dim
         xlite_config.norm_eps = hf_config.rms_norm_eps
         if hasattr(hf_config, "rope_theta"):
             xlite_config.rope_theta = hf_config.rope_theta
@@ -300,7 +357,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.softmax_scale = xlite_config.head_dim**-0.5
         xlite_config.n_dense_layers = hf_config.num_hidden_layers
         xlite_config.intermediate_size = hf_config.intermediate_size
-        xlite_config.def_tp_size = get_tensor_model_parallel_world_size()
+        xlite_config.def_tp_size = tp_size = get_tensor_model_parallel_world_size()
         xlite_config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         try:
             ep_word_size = get_ep_group().world_size
@@ -313,11 +370,12 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.attn_type = AttnMHA
         xlite_config.scoring_func = ScoringFuncSoftmax
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
-        xlite_config.max_m = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-            if get_ascend_config().xlite_graph_config.full_mode
-            else vllm_config.scheduler_config.max_num_seqs
-        )
+        max_m = vllm_config.scheduler_config.max_num_batched_tokens
+        if not get_ascend_config().xlite_graph_config.full_mode:
+            # decode-sized token budget: max_num_seqs * (1 + num_speculative_tokens) instead of max_num_batched_tokens
+            n_spec_tokens = getattr(vllm_config.speculative_config, "num_speculative_tokens", 0)
+            max_m = min(max_m, vllm_config.scheduler_config.max_num_seqs * (n_spec_tokens + 1))
+        xlite_config.max_m = (max_m + tp_size - 1) // tp_size * tp_size  # round up to nearest multiple of tp_size
         xlite_config.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         xlite_config.max_seq_len = vllm_config.model_config.max_model_len
         xlite_config.block_size = vllm_config.cache_config.block_size
@@ -329,15 +387,15 @@ class StandardXliteModel(XliteModelBase):
         self.quantization = vllm_config.quant_config is not None
 
     def _build_model(self) -> None:
-        xlite_model, xlite_config, hf_config = self.xlite_model, self.xlite_config, self.hf_text_config
+        xlite_model, xlite_config = self.xlite_model, self.xlite_config
         layers, model_prefix = self._get_layers_and_model_prefix()
 
-        xlite_model.embed = get_dotted_attr(self.runnable, f"{model_prefix}model.embed_tokens.weight", raises=True)
-        xlite_model.norm = get_dotted_attr(self.runnable, f"{model_prefix}model.norm.weight", raises=True)
-        if hf_config.tie_word_embeddings:
+        xlite_model.embed = get_dotted_attr(self.npu_runnable, f"{model_prefix}model.embed_tokens.weight", raises=True)
+        xlite_model.norm = get_dotted_attr(self.npu_runnable, f"{model_prefix}model.norm.weight", raises=True)
+        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
-            xlite_model.head = get_dotted_attr(self.runnable, f"{model_prefix}lm_head.weight", raises=True)
+            xlite_model.head = get_dotted_attr(self.npu_runnable, f"{model_prefix}lm_head.weight", raises=True)
 
         xlite_model.attn_norm = get_layer_weights(layers, "input_layernorm.weight")
         self.init_matmul_weights(layers, "mha_qkv", "self_attn.qkv_proj")
@@ -356,6 +414,7 @@ class StandardXliteModel(XliteModelBase):
         # MoE-specific weights
         mlp_prefix = self._decoder_layer_mlp_module
         xlite_model.gate = get_layer_weights(layers, f"{mlp_prefix}.gate.weight")
+        xlite_config.gate_captured = self.is_tensor_nz(xlite_model.gate[0]) if xlite_model.gate else False
         xlite_model.gate_bias = get_layer_weights(
             layers,
             f"{mlp_prefix}.gate.e_score_correction_bias",
@@ -375,7 +434,7 @@ class StandardXliteModel(XliteModelBase):
         with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
             xlite_model.mha_qkv_bias = get_layer_weights(layers, "self_attn.qkv_proj.bias")
             xlite_config.qkv_bias = len(xlite_model.mha_qkv_bias) == xlite_config.n_layers
-            xlite_model.norm_bias = get_dotted_attr(self.runnable, f"{model_prefix}model.norm.bias", raises=True)
+            xlite_model.norm_bias = get_dotted_attr(self.npu_runnable, f"{model_prefix}model.norm.bias", raises=True)
             xlite_model.attn_norm_bias = get_layer_weights(layers, "input_layernorm.bias")
             xlite_model.mlp_norm_bias = get_layer_weights(layers, "post_attention_layernorm.bias")
             if xlite_config.qk_norm:
@@ -388,40 +447,21 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.quant_attn_weight_nz = bool(xlite_model.mha_qkv) and self.is_tensor_nz(xlite_model.mha_qkv[0])
         xlite_config.quant_attn_weight_transpose = bool(xlite_model.mha_qkv)
 
+        xlite_model.re_up_gate_scale_bias = get_layer_weights(layers, f"{re_prefix}.w13_scale_bias", **re_kwargs)
+        xlite_model.re_down_scale_bias = get_layer_weights(layers, f"{re_prefix}.w2_scale_bias", **re_kwargs)
+
         re_kwargs["post_processor"] = self._transform_deq_scale
         xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{re_prefix}.w13_weight_scale", **re_kwargs)
         xlite_model.re_down_scale = get_layer_weights(layers, f"{re_prefix}.w2_weight_scale", **re_kwargs)
 
-    def _precompute_freqs_cis(self) -> torch.Tensor:
-        """Precompute rotary cosine/sine cache on NPU.
-
-        Returns:
-            torch.Tensor: Concatenated cosine/sine RoPE cache on NPU.
-
-        Raises:
-            ValueError: If rope dimensions, sequence length, or theta are invalid.
-        """
-        base = self.xlite_config.rope_theta
-        rotary_dim = self.xlite_config.rope_head_dim
-        max_position_embeddings = self.xlite_config.max_seq_len
-        dtype = self.vllm_config.model_config.dtype
-
-        if rotary_dim <= 0 or max_position_embeddings <= 0 or base <= 0:
-            raise ValueError(
-                f"Invalid RoPE configuration: head_dim={rotary_dim}, max_seq_len={max_position_embeddings}, "
-                f"rope_theta={base}"
-            )
-
-        # Keep cache construction on CPU, then transfer once to NPU.
-        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device="cpu") / rotary_dim))
-        t = torch.arange(max_position_embeddings, dtype=torch.float32, device=inv_freq.device)
-        freqs = torch.outer(t, inv_freq).float()
-        cos_cache = freqs.cos().to(dtype)
-        sin_cache = freqs.sin().to(dtype)
-        freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
-        return freq_cis.to(device="npu")
-
-    def init_matmul_weights(self, layers: Sequence[torch.nn.Module], xlite_prefix: str, model_prefix: str) -> None:
+    def init_matmul_weights(
+        self,
+        layers: Sequence[torch.nn.Module],
+        xlite_prefix: str,
+        model_prefix: str,
+        *,
+        mask: Sequence[bool] | None = None,
+    ) -> None:
         """
         Initialize MatMul-related weights with quantization support.
 
@@ -429,32 +469,42 @@ class StandardXliteModel(XliteModelBase):
             layers (Sequence[torch.nn.Module]): The transformer layers to extract weights from.
             xlite_prefix (str): The prefix for the xlite model attributes to set.
             model_prefix (str): The prefix for the model attributes to look up in each layer.
+            mask (Sequence[bool] | None): Optional mask to select specific layers for weight extraction. See
+                :meth:`get_layer_weights` for details.
         """
         xlite_model = self.xlite_model
-        setattr(xlite_model, xlite_prefix, get_layer_weights(layers, f"{model_prefix}.weight"))
+        setattr(xlite_model, xlite_prefix, get_layer_weights(layers, f"{model_prefix}.weight", mask=mask))
         if not self.quantization:
             return
 
         def set_xlite_attr(xlite_attr: str, layer_attr: str) -> None:
-            setattr(xlite_model, xlite_attr, get_layer_weights(layers, layer_attr))
+            setattr(xlite_model, xlite_attr, get_layer_weights(layers, layer_attr, mask=mask))
 
-        deq_scale = get_layer_weights(layers, f"{model_prefix}.deq_scale", post_processor=self._transform_deq_scale)
+        wt_kwargs: WeightGetterConfig = {"mask": mask, "post_processor": self._transform_deq_scale}
+        deq_scale = get_layer_weights(layers, f"{model_prefix}.deq_scale", **wt_kwargs)
         if len(deq_scale) > 0:  # static quant
             setattr(xlite_model, f"{xlite_prefix}_deq_scale", deq_scale)
             set_xlite_attr(f"{xlite_prefix}_input_scale", f"{model_prefix}.aclnn_input_scale_reciprocal")
             set_xlite_attr(f"{xlite_prefix}_input_offset", f"{model_prefix}.aclnn_input_offset")
             set_xlite_attr(f"{xlite_prefix}_quant_bias", f"{model_prefix}.quant_bias")
         else:
-            weight_scale = get_layer_weights(
-                layers, f"{model_prefix}.weight_scale", post_processor=self._transform_deq_scale
-            )
+            weight_scale = get_layer_weights(layers, f"{model_prefix}.weight_scale", **wt_kwargs)
             setattr(xlite_model, f"{xlite_prefix}_deq_scale", weight_scale)
+
+    def _precompute_rope_cache(self) -> torch.Tensor:
+        # TODO: remove the type conversion once `xlite` accepts and defaults the cache in FP32 format
+        return super()._precompute_rope_cache().to(dtype=self.dtype, device=self.device)
+
+    def extract_kv_cache(self, kv_caches: list[torch.Tensor], /) -> list[tuple[torch.Tensor, ...]]:
+        kv_caches = kv_caches[: 2 * self.xlite_config.n_layers]
+        if wrong_dims := set(cache.shape[-1] for cache in kv_caches) - set([self.xlite_config.head_dim]):
+            raise ValueError(f"xlite: kv_cache dimension mismatch (wrong dims: {', '.join(map(str, wrong_dims))})")
+        return [(k_cache, v_cache) for k_cache, v_cache in zip(kv_caches[0::2], kv_caches[1::2])]
 
 
 class QwenMoeXliteModel(StandardXliteModel):
     """xlite adapter for Qwen MoE architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["Qwen3MoeForCausalLM", "Qwen3VLMoeForConditionalGeneration"]
 
     def _build_model_config(self) -> None:
@@ -472,18 +522,12 @@ class QwenMoeXliteModel(StandardXliteModel):
 class Glm4MoeXliteModel(StandardXliteModel):
     """xlite adapter for GLM4 MoE architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["Glm4MoeForCausalLM"]
 
     def _build_model_config(self) -> None:
         super()._build_model_config()
         xlite_config, hf_config = self.xlite_config, self.hf_text_config
 
-        if hasattr(hf_config, "partial_rotary_factor"):
-            partial_rotary_factor = hf_config.partial_rotary_factor
-        else:
-            partial_rotary_factor = getattr(hf_config, "rope_parameters", {}).get("partial_rotary_factor", 1.0)
-        xlite_config.rope_head_dim = int(xlite_config.head_dim * partial_rotary_factor)
         xlite_config.n_dense_layers = getattr(hf_config, "first_k_dense_replace", 0)
         xlite_config.n_routed_experts = hf_config.n_routed_experts
         xlite_config.n_shared_experts = hf_config.n_shared_experts
@@ -492,13 +536,149 @@ class Glm4MoeXliteModel(StandardXliteModel):
         xlite_config.norm_topk_prob = hf_config.norm_topk_prob
         xlite_config.scoring_func = ScoringFuncSigmoid
         xlite_config.route_scale = hf_config.routed_scaling_factor
-        xlite_config.gate_captured = False
+
+
+class DeepseekV3XliteModel(Glm4MoeXliteModel):
+    """xlite adapter for DeepseekV3 MoE architectures with MLA attention."""
+
+    from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+
+    _attn_metadata_type = AscendMLAMetadata  # type: ignore[assignment]
+    _supported_architectures = ["DeepseekV3ForCausalLM"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        # MLA attention type
+        xlite_config.attn_type = AttnMLA
+        xlite_config.n_kv_heads = 1  # MLA uses latent cache
+        xlite_config.head_dim = 0  # Ignored by MLA
+
+        # MLA dimensions (override Llama's head_dim-based rope_head_dim)
+        xlite_config.rope_head_dim = hf_config.qk_rope_head_dim
+        xlite_config.nope_head_dim = hf_config.qk_nope_head_dim
+        xlite_config.q_lora_rank = hf_config.q_lora_rank
+        xlite_config.kv_lora_rank = hf_config.kv_lora_rank
+        xlite_config.v_head_dim = hf_config.v_head_dim
+        xlite_config.softmax_scale = (hf_config.qk_rope_head_dim + hf_config.qk_nope_head_dim) ** -0.5
+        # correct softmax_scale for yarn-style RoPE if max_seq_len > original_max_position_embeddings
+        rope_params: dict[str, int | float | str] = getattr(hf_config, "rope_parameters", {})
+        original_max_len: int = rope_params.get("original_max_position_embeddings", hf_config.max_position_embeddings)  # type: ignore[assignment]
+        if xlite_config.max_seq_len > original_max_len and "mscale" in rope_params and "factor" in rope_params:
+            mscale: float = 1.0 + 0.1 * rope_params["mscale"] * math.log(rope_params["factor"])  # type: ignore[operator,arg-type]
+            xlite_config.softmax_scale *= mscale**2
+
+        # MoE configuration (from Glm4MoeXliteModel, adapted for DeepseekV3)
+        xlite_config.n_expert_groups = getattr(hf_config, "n_group", 1)
+        xlite_config.n_limited_groups = getattr(hf_config, "topk_group", 1)
+
+    def _build_model(self) -> None:
+        super()._build_model()
+        xlite_model, xlite_config = self.xlite_model, self.xlite_config
+        layers, _ = self._get_layers_and_model_prefix()
+
+        # MLA attention weights
+        self.init_matmul_weights(layers, "mla_qkv_a", "self_attn.fused_qkv_a_proj")
+        self.init_matmul_weights(layers, "mla_q_b", "self_attn.q_b_proj")
+        xlite_model.mla_q_norm = get_layer_weights(layers, "self_attn.q_a_layernorm.weight")
+        xlite_model.mla_kv_norm = get_layer_weights(layers, "self_attn.kv_a_layernorm.weight")
+        xlite_model.mla_wuv = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UV")
+        xlite_model.mla_wuk_t = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UK_T")
+        xlite_config.mla_wuv_weight_nz = bool(wuv_lst := xlite_model.mla_wuv) and self.is_tensor_nz(wuv_lst[0])
+        xlite_config.mla_wukt_weight_nz = bool(wuk_lst := xlite_model.mla_wuk_t) and self.is_tensor_nz(wuk_lst[0])
+
+        if not self.quantization:
+            return
+
+        self.xlite_config.quant_attn_weight_nz = bool(wt_lst := xlite_model.mla_qkv_a) and self.is_tensor_nz(wt_lst[0])
+        self.xlite_config.quant_attn_weight_transpose = True
+        with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
+            xlite_model.mla_q_norm_bias = get_layer_weights(layers, "self_attn.q_a_layernorm.bias")
+            xlite_model.mla_kv_norm_bias = get_layer_weights(layers, "self_attn.kv_a_layernorm.bias")
+
+    def _precompute_rope_cache(self) -> torch.Tensor:
+        # TODO: remove this method once `xlite` no longer requires complex64 format
+        cossin_cache = super(StandardXliteModel, self)._precompute_rope_cache()
+        if not self.rottary_embed:
+            return cossin_cache.to(dtype=torch.complex64, device=self.device)
+        # For MLA attention, we need to return the cache as a complex instead of separate cos/sin tensors
+        if not (isinstance(cossin_cache, torch.Tensor) and cossin_cache.ndim == 2 and cossin_cache.shape[1] % 2 == 0):
+            raise ValueError("RoPE cache must be a 2D tensor with even second dimension for MLA attention.")
+        sep = cossin_cache.shape[-1] // 2
+        return torch.complex(cossin_cache[:, :sep], cossin_cache[:, sep:]).to(dtype=torch.complex64, device=self.device)
+
+    def extract_kv_cache(self, kv_caches: list[torch.Tensor], /) -> list[tuple[torch.Tensor, ...]]:
+        if self.xlite_config.kv_lora_rank == self.xlite_config.rope_head_dim:
+            raise RuntimeError("xlite does not support `kv_lora_rank == rope_head_dim` for MLA attention.")
+        n_layers = self.xlite_config.n_layers
+        kv_nope_caches = list(filter(lambda x: x.shape[-1] == self.xlite_config.kv_lora_rank, kv_caches))[:n_layers]
+        k_rope_caches = list(filter(lambda x: x.shape[-1] == self.xlite_config.rope_head_dim, kv_caches))[:n_layers]
+        if (n_nope := len(kv_nope_caches)) != n_layers:
+            raise ValueError(f"xlite: failed to extract MLA KV nope caches ({n_nope} vs. {n_layers})")
+        if (n_rope := len(k_rope_caches)) != n_layers:
+            raise ValueError(f"xlite: failed to extract MLA K rope caches ({n_rope} vs. {n_layers})")
+        return [(k_nope, k_rope) for k_nope, k_rope in zip(kv_nope_caches, k_rope_caches)]
+
+
+class DeepseekV32XliteModel(DeepseekV3XliteModel):
+    """xlite adapter for Deepseek-V3.2/GLM-5.x architectures with Deepseek sparse attention (DSA)."""
+
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
+
+    _attn_metadata_type = AscendSFAMetadata  # type: ignore[assignment]
+    _supported_architectures = ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        xlite_config.attn_type = AttnDSA
+        xlite_config.index_head_dim = hf_config.index_head_dim
+        xlite_config.index_n_heads = hf_config.index_n_heads
+        xlite_config.index_topk = hf_config.index_topk
+        xlite_config.index_rope_interleaved = getattr(hf_config, "indexer_rope_interleave", False)
+        index_types: list[str] = list(map(lambda x: str(x).lower(), getattr(hf_config, "indexer_types", []) or []))
+        xlite_config.index_full_mask = list(map(lambda x: x.startswith("full"), index_types))[: xlite_config.n_layers]
+
+    def _build_model(self) -> None:
+        super()._build_model()
+        xlite_model = self.xlite_model
+        layers, _ = self._get_layers_and_model_prefix()
+
+        mask: list[bool] | None = getattr(self.xlite_config, "index_full_mask", None) or None
+        self.init_matmul_weights(layers, "index_q_b", f"{(prefix := 'self_attn.indexer')}.wq_b", mask=mask)
+        xlite_model.index_k_weights_proj = get_layer_weights(layers, f"{prefix}.wk_weights_proj.weight", mask=mask)
+        # xlite backend expects index_k_norm and index_k_norm_bias to have dtype=torch.float32 or the model dtype
+        xlite_model.index_k_norm = get_layer_weights(layers, f"{prefix}.k_norm.weight", mask=mask)
+        xlite_model.index_k_norm_bias = get_layer_weights(layers, f"{prefix}.k_norm.bias", mask=mask)
+
+    def extract_kv_cache(self, kv_caches: list[torch.Tensor], /) -> list[tuple[torch.Tensor, ...]]:
+        # For DSA, `kv_caches` is passed as [<index_k_cache (optional)>, kv_nope_cache, k_pe_cache, ..., <mtp_layer>].
+        # Under MRV2, all `index_k_cache` are passed first; under V1, they are interleaved with the kv caches.
+        # For xlite, the `kv_caches` is expected as [(kv_nope_cache, k_pe_cache, index_k_cache), ...] for each layer.
+        # TODO: consider the compatibility with `enable_sparse_sfa_c8` and `enable_sparse_li_c8`
+        xcfg = self.xlite_config
+        if xcfg.index_head_dim == xcfg.kv_lora_rank or xcfg.index_head_dim == xcfg.rope_head_dim:
+            raise RuntimeError("xlite does not support `index_head_dim == kv_lora_rank or rope_head_dim` for DSA.")
+        index_mask: list[bool] = (getattr(xcfg, "index_full_mask", None) or [True] * xcfg.n_layers)[: xcfg.n_layers]
+
+        mla_kv_caches: list[torch.Tensor] = list(filter(lambda x: x.shape[-1] != xcfg.index_head_dim, kv_caches))
+        mla_caches: list[tuple[torch.Tensor, ...]] = super().extract_kv_cache(mla_kv_caches)
+        index_caches: list[torch.Tensor] = list(filter(lambda x: x.shape[-1] == xcfg.index_head_dim, kv_caches))
+        if (n_index_layers := sum(index_mask)) != len(index_caches := index_caches[:n_index_layers]):
+            raise ValueError(f"xlite: index_k_cache count mismatch ({len(index_caches)} vs. {n_index_layers})")
+        if wrong_dims := set(cache.shape[-1] for cache in index_caches) - set([xcfg.index_head_dim]):
+            raise ValueError(f"xlite: index_k_cache dimension mismatch (wrong dims: {', '.join(map(str, wrong_dims))})")
+        for i, mask in enumerate(index_mask):
+            if not mask:
+                index_caches.insert(i, _DUMMY_TENSOR)
+        return [(mla_cache[0], mla_cache[1], i_cache) for mla_cache, i_cache in zip(mla_caches, index_caches)]
 
 
 class MiniMaxM2XliteModel(StandardXliteModel):
     """xlite adapter for MiniMax M2 architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["MiniMaxM2ForCausalLM"]
     _decoder_layer_mlp_module = "block_sparse_moe"
 
@@ -517,12 +697,12 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.scoring_func = ScoringFuncSigmoid
 
 
-def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> XliteModelBase:
+def get_adapter_xlite_model(npu_runner: XliteModelRunner, vllm_config: VllmConfig) -> XliteModelBase:
     """Look up and initialize the appropriate xlite model adapter based on the architecture specified in vLLM config and
     the runnable model.
 
     Args:
-        runnable (nn.Module): The runnable model instance.
+        npu_runner (XliteModelRunner): The NPU model runner instance.
         vllm_config (VllmConfig): Runtime configuration for model execution.
 
     Raises:
@@ -534,52 +714,68 @@ def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> Xli
     architecture = vllm_config.model_config.architectures[0]
     if not (strategy_class := _architecture_strategy_map.get(architecture)):
         raise ValueError(f"{architecture} not supported!")
-    return strategy_class(runnable, vllm_config)
+    return strategy_class(npu_runner, vllm_config)
 
 
 class XliteWrapper:
-    """A graph-based wrapper that dispatches between xlite and runnable paths."""
+    """A graph-based wrapper that dispatches between xlite and runnable paths.
 
-    def __init__(self, runnable: nn.Module, vllm_config: VllmConfig, device: torch.device) -> None:
+    Since v0.28.0, batches are routed by token count (max across DP ranks) instead of the batch attention state:
+    batches within the preallocated budget (:attr:`max_tokens`, sized by ``full_mode``) run on xlite, others fall
+    back to the native runnable.
+    """
+
+    def __init__(self, npu_runner: XliteModelRunner, vllm_config: VllmConfig, device: torch.device) -> None:
         """Initialize xlite runtime, model tensors, and hidden-state workspace.
 
         Args:
-            runnable (nn.Module): The runnable model implementation.
+            npu_runner (XliteModelRunner): The native NPU model runner.
             vllm_config (VllmConfig): Runtime configuration for execution.
             device (torch.device): The device to initialize the xlite model on.
 
         Raises:
             ValueError: If xlite runtime tensor-pool initialization fails.
         """
-        self.runnable = runnable
+        self.npu_runner: XliteModelRunner = npu_runner
+        self.npu_runnable: nn.Module = npu_runner.fallback_model
+        self.npu_update_stream: torch.npu.Stream | None = getattr(npu_runner, "update_stream", None)
         self.device = device
-        self.full_mode = get_ascend_config().xlite_graph_config.full_mode
-
-        rank = torch.distributed.get_rank()
-        local_rank = get_world_group().local_rank
+        # `full_mode` only sizes the token budget (see the comment in `StandardXliteModel._build_config`).
+        self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
+        self.speculative: bool = vllm_config.speculative_config is not None
 
-        self.adapter_xlite_model = get_adapter_xlite_model(runnable, vllm_config)
-        (self.xlite_model, self.freq_cis, hidden_size, dtype) = self.adapter_xlite_model.initialize()
+        set_dummy_tensor(torch.empty(1, device=device, dtype=vllm_config.model_config.dtype))
+        self.adapter_xlite_model = get_adapter_xlite_model(npu_runner, vllm_config)  # python adapter instance
+        self.xlite_model = self.adapter_xlite_model.xlite_model  # xlite C++ model instance
+        self.freq_cis = self.adapter_xlite_model.rope_cossin_cache
         xlite_config = self.adapter_xlite_model.xlite_config
         self.xlite_rt = Runtime(
-            devid=local_rank,
+            devid=device.index,
             size=0,
-            rank=rank,
+            rank=torch.distributed.get_rank(),
             tp_size=xlite_config.def_tp_size,
             dp_size=xlite_config.def_dp_size,
             moe_tp_size=xlite_config.moe_tp_size,
             moe_ep_size=xlite_config.moe_ep_size,
         )
+        # The xlite token budget: batches with more tokens (max across DP ranks) are routed to the native runnable.
+        self.max_tokens = xlite_config.max_m
+        self.hidden_states = torch.empty(
+            self.max_tokens, xlite_config.hidden_size, device=self.device, dtype=self.adapter_xlite_model.dtype
+        )
 
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
-        if rank == 0:
+        if torch.distributed.get_rank() == 0:
             logger.info("xlite runtime pool size: %s MB", rt_pool_size)
         if self.xlite_rt.init_tensor_pool(rt_pool_size) != 0:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
 
-        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.hidden_states = torch.empty(max_num_tokens, hidden_size, device=self.device, dtype=dtype)
+    def __del__(self) -> None:
+        self.npu_runner = None  # type: ignore[assignment]
+        self.npu_runnable = None  # type: ignore[assignment]
+        self.adapter_xlite_model.npu_runner = None  # type: ignore[assignment]
+        self.adapter_xlite_model.xlite_model = None  # type: ignore[assignment]
 
     def __getattr__(self, key: str) -> Any:
         """Proxy unknown attributes to the wrapped runnable model.
@@ -594,32 +790,21 @@ class XliteWrapper:
             Any: Attribute value resolved from the runnable.
         """
         try:
-            return getattr(self.runnable, key)
-        except Exception:  # runnable may raise various exceptions
-            raise AttributeError(f"{self.__class__.__name__} object has no attribute {key}") from None
+            return getattr(self.npu_runnable, key)
+        except Exception as e:  # runnable may raise various exceptions
+            raise AttributeError(f"{self.__class__.__name__} object has no attribute {key}") from e
 
-    def unwrap(self) -> Callable:
-        """Return the original runnable callable. See :meth:`ACLGraphWrapper.unwrap` for details.
-
-        Returns:
-            Callable: Original model runnable.
-        """
-        # in case we need to access the original runnable.
-        if isinstance(runnable := self.runnable, ACLGraphWrapper):
-            return runnable.unwrap()
-        return runnable
-
-    def register_kv_caches(self, kv_caches: Any) -> None:
+    def register_kv_caches(self, kv_caches: list[torch.Tensor]) -> None:
         """Register KV cache references used by xlite runtime.
 
         Args:
-            kv_caches (Any): Runtime KV cache handles or tensors.
+            kv_caches (list[torch.Tensor]): Runtime KV cache handles or tensors.
         """
-        self.kv_caches = kv_caches
+        self.kv_caches = self.adapter_xlite_model.extract_kv_cache(kv_caches)
 
     def __call__(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -628,7 +813,8 @@ class XliteWrapper:
         """Run one forward step through xlite graph or fallback runnable path.
 
         Args:
-            input_ids (torch.Tensor): Token IDs for current step.
+            input_ids (torch.Tensor | None): Token IDs for current step.
+
             positions (torch.Tensor): Position IDs used by attention.
             intermediate_tensors (IntermediateTensors | None): Optional intermediate tensors from pipeline stages.
             inputs_embeds (torch.Tensor | None): Optional external input embeddings (e.g. multimodal/deepstack
@@ -639,83 +825,91 @@ class XliteWrapper:
             XliteForwardResult: Forward outputs from xlite graph or the original runnable implementation.
         """
         forward_context = get_forward_context()
-        if getattr(forward_context, "in_profile_run", False):
-            if self.full_mode:
-                # In full mode, xlite handles both prefill and decode, and aclgraph runnable should not reserve memory.
-                # This is to avoid redundant memory allocation that reduces KV cache capacity and regresses performance.
-                # NOTE: returning a single hidden state tensor may break the vLLM pipeline if the runnable expects a
-                # tuple of outputs, e.g., (hidden_states, aux_hidden_states) under certain speculative scenarios
-                return self.hidden_states
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
-
         attn_metadata: Any = forward_context.attn_metadata
-        if attn_metadata is None:
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
-
         attn_metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
-        attn_metadata = next(iter(attn_metadata.values()), None)
-        if not isinstance(attn_metadata, self.adapter_xlite_model._attn_metadata_type):
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+        attn_metadata = attn_metadata.get("model.layers.0.self_attn.attn", next(iter(attn_metadata.values()), None))
+        # Since v0.28.0, batches are routed by token count (max across DP ranks) instead of the batch attention
+        # state: batches within the preallocated budget run on xlite, others fall back to the native acl runnable.
+        num_tokens: int
+        if (num_tokens := _EXTRA_CTX.max_tokens_across_dp) is None:
+            if (dp_metadata := forward_context.dp_metadata) is not None:
+                num_tokens = dp_metadata.num_tokens_across_dp_cpu.max().item()
+            else:
+                num_tokens = attn_metadata.num_actual_tokens
+        if num_tokens > self.max_tokens:
+            if self.full_mode:
+                logger.warning_once(
+                    "xlite: token number exceeded expected limit (%d >%d), consider opening an issue at %s",
+                    num_tokens,
+                    self.max_tokens,
+                    "https://atomgit.com/openeuler/GVirt",
+                )
+            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
-        with_prefill = attn_metadata.attn_state not in (
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        )
-
-        # Full: graph for prefill and decode
-        # Decode-Only: runnable for prefill, graph for decode
-        if not self.full_mode and self.data_parallel_size > 1:
-            num_tokens = forward_context.batch_descriptor.num_tokens
-            num_reqs = forward_context.batch_descriptor.num_reqs
-            use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
-        else:
-            use_xlite_graph = not with_prefill or self.full_mode
-
-        if not use_xlite_graph:
-            # fall back to runnable for prefill in decode-only mode
-            # or when the number of tokens exceeds the graph capacity in non-full mode
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+        # sync the device streams to avoid stale D2H copies in metadata preparation
+        curr_stream = torch.npu.current_stream()
+        if self.npu_update_stream is not None and self.npu_update_stream != curr_stream:
+            curr_stream.wait_stream(self.npu_update_stream)
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
+        num_actual_tokens = attn_metadata_router.num_actual_tokens
         seq_lens = attn_metadata_router.seq_lens
-        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :].to(device=seq_lens.device)
+        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :]
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))
-        cached_lens = torch.clamp(seq_lens - query_lens, min=0)
-
-        num_tokens = forward_context.batch_descriptor.num_tokens
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        xlite_attn_metadata = AttnMeta()
-        xlite_attn_metadata.lens = query_lens.tolist()
-        xlite_attn_metadata.cached_lens = cached_lens.tolist()
-        xlite_attn_metadata.block_tables_cpu = attn_metadata_router.block_tables.tolist()
-        if positions.ndim == 2:
-            xlite_attn_metadata.positions = positions[:, :num_actual_tokens].contiguous()
-            positions = positions[0]
+        if self.speculative:
+            # host-side `seq_lens` may be optimistic, rejected draft tokens still counted as cached,
+            # cf.gpu_model_runner._prepare_inputs; each request's first position is its true cached length, so cap by it
+            _pos = torch.atleast_2d(positions)[0, :num_actual_tokens].to(device=seq_lens.device)
+            req_starts = torch.cat([cum_query_lens.new_zeros(1), cum_query_lens[:-1]]).clamp(max=_pos.numel() - 1)
+            cached_lens = _pos[req_starts].to(dtype=seq_lens.dtype)
         else:
-            xlite_attn_metadata.positions = positions
+            cached_lens = torch.clamp(seq_lens - query_lens, min=0)
 
-        # Compatibility between DP and Non-DP scenarios
+        block_tables = attn_metadata_router.block_tables
+        num_reqs = max(1, (block_tables[:, 0] != 0).sum().item())  # number of non-empty requests
+
+        xlite_attn_metadata = AttnMeta()
+        xlite_attn_metadata.lens = query_lens[:num_reqs].tolist()
+        xlite_attn_metadata.cached_lens = cached_lens[:num_reqs].tolist()
+        xlite_attn_metadata.block_tables_cpu = block_tables[:num_reqs].tolist()
+        pos: torch.Tensor = torch.atleast_2d(positions)[:, :num_actual_tokens].contiguous()
+        xlite_attn_metadata.positions = pos.reshape(-1).reshape(pos.shape)  # rematerialize with correct stride
+
+        # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
-        stream = torch.npu.current_stream().npu_stream
-        if inputs_embeds is None:
+        input_ids = cast(torch.Tensor, input_ids)
+        if inputs_embeds is None or inputs_embeds.size(0) == 0:
             self.xlite_model.forward(
-                self.xlite_rt, input_ids, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
+                rt=self.xlite_rt,
+                input=input_ids[:num_actual_tokens],
+                attn_meta=xlite_attn_metadata,
+                kv_cache=self.kv_caches,
+                freqs_cis=self.freq_cis,
+                output=h,
+                curr_stream=curr_stream.npu_stream,
             )
         else:
-            deepstack_input_embeds = getattr(self.runnable, "deepstack_input_embeds", [])
+            inputs_embeds = inputs_embeds[:num_actual_tokens]
+            deepstack_input_embeds = getattr(self.npu_runnable, "deepstack_input_embeds", [])
             xlite_deepstack_input_embeds = [
                 deepstack_input[: inputs_embeds.size(0)] for deepstack_input in deepstack_input_embeds
             ]
             self.xlite_model.forward_with_inputs_embeds(
-                self.xlite_rt,
-                inputs_embeds,
-                xlite_attn_metadata,
-                self.kv_caches,
-                self.freq_cis,
-                h,
-                stream,
-                xlite_deepstack_input_embeds,
+                rt=self.xlite_rt,
+                input=inputs_embeds,
+                attn_meta=xlite_attn_metadata,
+                kv_cache=self.kv_caches,
+                freqs_cis=self.freq_cis,
+                output=h,
+                curr_stream=curr_stream.npu_stream,
+                deepstack_input=xlite_deepstack_input_embeds,
             )
-            if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
-                self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
+            if deepstack_input_embeds and callable(
+                _clear_stack := getattr(self.npu_runnable, "_clear_deepstack_input_embeds", None)
+            ):
+                _clear_stack(inputs_embeds.size(0))
         return h[:num_actual_tokens]
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | torch.nn.Module:
+        # TODO: consider implementing a custom logits computation path for xlite to avoid falling back to the native
+        return self.npu_runnable.compute_logits(hidden_states)  # type: ignore[attr-defined]

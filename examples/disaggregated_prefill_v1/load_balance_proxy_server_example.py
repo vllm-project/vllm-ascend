@@ -137,12 +137,6 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from vllm_ascend.patch.recompute_proxy import (
-    RECOMPUTE_TOKEN_IDS_KEY,
-    RecomputeContext,
-    iter_sse_events,
-)
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -168,6 +162,7 @@ class InstanceInfo:
     decoder_host: str
     decoder_port: int
     prefiller_cached_tokens: int | None = None
+    decoder_released: bool = False
 
 
 TAINT_PRIORITY = 1e15
@@ -177,7 +172,7 @@ def extract_cached_tokens(response_json: dict) -> int | None:
     usage = response_json.get("usage") or {}
     prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else None
+    return cached_tokens if isinstance(cached_tokens, int) else 0
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
@@ -192,6 +187,11 @@ def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -
     usage["prompt_tokens_details"] = prompt_tokens_details
     prompt_tokens_details["cached_tokens"] = cached_tokens
     return True
+
+
+def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
+    chunk = json.dumps(chunk_json, ensure_ascii=False).encode("utf-8")
+    return b"data: " + chunk + b"\n\n" if is_sse else chunk
 
 
 global_args: argparse.Namespace | None = None
@@ -818,7 +818,6 @@ def auth_headers(request_id: str) -> dict[str, str]:
 
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
-    recompute_token_ids = (req_data.get("kv_transfer_params") or {}).get(RECOMPUTE_TOKEN_IDS_KEY)
     payload["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -827,10 +826,7 @@ def build_prefill_request(req_data: dict) -> dict:
         "remote_host": None,
         "remote_port": None,
     }
-    if recompute_token_ids is not None:
-        payload["kv_transfer_params"][RECOMPUTE_TOKEN_IDS_KEY] = recompute_token_ids
     payload["stream"] = False
-    payload["return_token_ids"] = False
     payload["max_tokens"] = 1
     payload["min_tokens"] = 1
     if "max_completion_tokens" in payload:
@@ -876,11 +872,20 @@ async def stream_service_response(
 ):
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
+    req_data = req_data.copy()
+    if not req_data.get("stream", False):
+        req_data.pop("stream_options", None)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # Buffer the upstream error body so callers can forward the real
+                    # cause (e.g. vLLM's "maximum context length" message) instead of
+                    # dropping it into an empty 200. The body is unreadable once this
+                    # streaming context exits, so read it before raising.
+                    await response.aread()
+                    response.raise_for_status()
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
@@ -924,10 +929,18 @@ async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, releas
         "finish_request",
         info.prefiller_key,
         info.prefiller_score,
-        info.decoder_key,
+        None if info.decoder_released else info.decoder_key,
         info.decoder_score,
         release_prefill_kv,
     )
+    info.decoder_released = True
+
+
+async def _release_decoder_once(runtime: WorkerRuntime, info: InstanceInfo) -> None:
+    if info.decoder_released:
+        return
+    await runtime.schedule("release_decoder", info.decoder_key, info.decoder_score)
+    info.decoder_released = True
 
 
 async def assign_instances(
@@ -941,7 +954,7 @@ async def assign_instances(
     args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
-    request_id = next_req_id()
+    request_id = req_data.get("request_id") or next_req_id()
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
     prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
@@ -955,33 +968,34 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         raise
 
     response_json = response.json()
-    recompute_token_ids = (req_data.get("kv_transfer_params") or {}).get(RECOMPUTE_TOKEN_IDS_KEY)
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
-        if recompute_token_ids is not None:
-            kv_transfer_params[RECOMPUTE_TOKEN_IDS_KEY] = recompute_token_ids
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
 
+    decoder_key = None
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
+        decoder_key = decoder["key"]
+        prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder_key)
+    except (Exception, asyncio.CancelledError):
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        if decoder_key is not None:
+            await runtime.schedule("release_decoder", decoder_key, decoder_score)
         raise
 
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
     logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
     return InstanceInfo(
         request_id=request_id,
         prefiller_key=prefiller_key,
         prefiller_score=prefiller_score,
-        decoder_key=decoder["key"],
+        decoder_key=decoder_key,
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
@@ -994,11 +1008,28 @@ async def reassign_instances(
     req_data: Any,
     request_length: int,
     previous_instance: InstanceInfo,
+    *,
+    previous_prefiller_kv_released: bool,
 ) -> InstanceInfo:
     runtime = get_runtime()
-    await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
+    if not previous_prefiller_kv_released:
+        await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
+    await _release_decoder_once(runtime, previous_instance)
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
+
+
+async def _replay_first_chunk(first_chunk: bytes, gen: Any):
+    """Replay a pre-read first chunk, then stream the rest of ``gen``.
+
+    ``handle_completions_impl`` pre-reads the first chunk of the decode stream
+    before committing the ASGI response head so an initial decode error can be
+    returned with the real HTTP status; this replays that chunk so the client
+    still receives the full stream.
+    """
+    if first_chunk:
+        yield first_chunk
+    async for chunk in gen:
+        yield chunk
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1007,17 +1038,75 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
+        if request_id := request.headers.get("X-Request-Id"):
+            req_data["request_id"] = request_id
         req_body = await request.body()
         request_length = len(req_body)
-        recompute_context = RecomputeContext.from_request(req_data)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        stream_flag = recompute_context.stream
+        stream_flag = bool(req_data.get("stream", False))
+        chat_flag = "messages" in req_data
+
+        if "prompt" in req_data:
+            origin_prompt = req_data["prompt"]
+        elif chat_flag:
+            messages = req_data["messages"]
+            origin_prompt = messages[0].get("content", "")
+        else:
+            origin_prompt = ""
+        origin_max_tokens = req_data.get("max_tokens", 16)
+
+        # Pre-open the decode response BEFORE committing the ASGI 200 head so an
+        # initial decode 4xx/5xx/connection failure can be returned with the real
+        # HTTP status code instead of an empty 200. On success the opened stream
+        # (first chunk already read) is handed to generate_stream via these vars.
+        preopened_gen = None
+        preopened_first = b""
+        decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+        preopened_gen = stream_service_response(
+            decoder_client,
+            api,
+            req_data,
+            request_id=instance_info.request_id,
+            max_retries=args.max_retries,
+            base_delay=args.retry_delay,
+        )
+        try:
+            preopened_first = await preopened_gen.__anext__()
+        except asyncio.CancelledError:
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+            raise
+        except StopAsyncIteration:
+            preopened_first = b""
+        except httpx.HTTPStatusError as exc:
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+            return Response(
+                content=exc.response.content, status_code=exc.response.status_code, media_type="application/json"
+            )
+        except httpx.RequestError as exc:
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": f"Decode backend request to {api} failed: {exc}",
+                        "type": "upstream_error",
+                        "code": "decode_backend_unavailable",
+                    }
+                },
+            )
 
         async def generate_stream():
             nonlocal instance_info
             nonlocal request_released
+            nonlocal preopened_gen, preopened_first
+            generated_token = ""
             released_kv = False
+            retry_count = 0
             retry = True
+            completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
 
             async def release_prefill_kv_once() -> None:
@@ -1028,73 +1117,95 @@ async def handle_completions_impl(api: str, request: Request):
                     )
                     released_kv = True
 
-            async def response_chunks(decoder_client: httpx.AsyncClient):
-                async for chunk in stream_service_response(
-                    decoder_client,
-                    api,
-                    req_data,
-                    request_id=instance_info.request_id,
-                    max_retries=args.max_retries,
-                    base_delay=args.retry_delay,
-                ):
-                    if not released_kv and chunk:
-                        await release_prefill_kv_once()
-                    yield chunk
-
             try:
                 while retry:
                     retry = False
-                    decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                    chunks = response_chunks(decoder_client)
-                    if stream_flag:
-                        async for event in iter_sse_events(chunks):
-                            data_lines = [line[5:].lstrip() for line in event.splitlines() if line.startswith(b"data:")]
-                            if not data_lines:
-                                yield event
-                                continue
-                            data = b"\n".join(data_lines)
-                            if data == b"[DONE]":
-                                yield event
-                                continue
-                            try:
-                                payload = json.loads(data)
-                            except json.JSONDecodeError:
-                                logger.debug("Skipping SSE event: %s", event)
-                                yield event
-                                continue
-
-                            update_cached_tokens_in_chunk(payload, reported_prefiller_cached_tokens)
-
-                            if recompute_context.observe_response(payload):
-                                recompute_context.prepare_retry(req_data)
-                                request_length = len(json.dumps(req_data).encode("utf-8"))
-                                instance_info = await reassign_instances(api, req_data, request_length, instance_info)
-                                released_kv = False
-                                retry = True
-                                break
-
-                            client_payload = recompute_context.response_for_client(payload)
-                            if client_payload is not None:
-                                yield (
-                                    "data: "
-                                    + json.dumps(client_payload, ensure_ascii=False, separators=(",", ":"))
-                                    + "\n\n"
-                                ).encode("utf-8")
+                    if preopened_gen is not None:
+                        # First iteration: consume the decode stream pre-opened by the
+                        # caller so initial 4xx/5xx could be returned with the real status.
+                        gen = _replay_first_chunk(preopened_first, preopened_gen)
+                        preopened_gen = None
                     else:
-                        body = b"".join([chunk async for chunk in chunks])
-                        payload = json.loads(body)
-                        update_cached_tokens_in_chunk(payload, reported_prefiller_cached_tokens)
-                        if recompute_context.observe_response(payload):
-                            recompute_context.prepare_retry(req_data)
-                            request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, request_length, instance_info)
-                            released_kv = False
-                            retry = True
+                        decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+                        gen = stream_service_response(
+                            decoder_client,
+                            api,
+                            req_data,
+                            request_id=instance_info.request_id,
+                            max_retries=args.max_retries,
+                            base_delay=args.retry_delay,
+                        )
+                    async for chunk in gen:
+                        if not released_kv and chunk:
+                            await release_prefill_kv_once()
+                        try:
+                            chunk_str = chunk.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            logger.debug("Skipping chunk: %s", chunk)
+                            yield chunk
                             continue
+                        if not chunk_str:
+                            continue
+                        is_sse = chunk_str.startswith("data: ")
+                        if is_sse:
+                            chunk_str = chunk_str[len("data: ") :]
+                        try:
+                            chunk_json = json.loads(chunk_str)
+                        except json.JSONDecodeError:
+                            logger.debug("Skipping chunk: %s", chunk_str)
+                            yield chunk
+                            continue
+                        choices = chunk_json.get("choices", [])
+                        if not choices or not stream_flag:
+                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                                chunk = encode_response_chunk(chunk_json, is_sse)
+                                if not choices:
+                                    yield chunk
+                                    continue
 
-                        client_payload = recompute_context.response_for_client(payload)
-                        if client_payload is not None:
-                            yield json.dumps(client_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        message = choice.get("message") or {}
+                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
+                        generated_token += content
+
+                        stop_reason = choice.get("stop_reason")
+                        usage = chunk_json.get("usage", {})
+                        completion_tokens = (
+                            (completion_tokens + 1)
+                            if stream_flag
+                            else (completion_tokens + usage.get("completion_tokens", 0))
+                        )
+                        if stop_reason == "recomputed":
+                            retry = True
+                            retry_count += 1
+                            if chat_flag:
+                                messages[0]["content"] = (
+                                    origin_prompt
+                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                    if isinstance(origin_prompt, list)
+                                    else (origin_prompt or "") + generated_token
+                                )
+                            else:
+                                req_data["prompt"] = origin_prompt + generated_token
+                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                            instance_info = await reassign_instances(
+                                api,
+                                req_data,
+                                tmp_request_length,
+                                instance_info,
+                                previous_prefiller_kv_released=released_kv,
+                            )
+                            released_kv = False
+                            break
+                        if retry_count > 0 and not stream_flag:
+                            if chat_flag:
+                                choice["message"]["content"] = generated_token
+                            else:
+                                choice["text"] = generated_token
+                            chunk = encode_response_chunk(chunk_json, is_sse)
+                        yield chunk
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1118,7 +1229,7 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
-    except Exception:
+    except Exception as e:
         import traceback
 
         exc_info = sys.exc_info()
@@ -1127,6 +1238,12 @@ async def handle_completions_impl(api: str, request: Request):
         if not request_released and "instance_info" in locals():
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
+        if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
+            try:
+                err_body = e.response.json()
+            except Exception:
+                err_body = {"error": {"message": e.response.text or "upstream error"}}
+            return JSONResponse(err_body, status_code=e.response.status_code)
         raise
 
 
@@ -1185,6 +1302,42 @@ async def handle_completions(request: Request):
 @with_cancellation
 async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
+
+
+async def handle_models_impl():
+    runtime = get_runtime()
+    request_id = next_req_id()
+    await runtime.sync_clients()
+    snapshot = runtime.scheduler.get_snapshot()
+    candidates = [(ServerRole.PREFILL, s) for s in snapshot["prefill_instances"]] + [
+        (ServerRole.DECODE, s) for s in snapshot["decode_instances"]
+    ]
+    if not candidates:
+        return JSONResponse(status_code=503, content={"error": "No available backend instances"})
+    failures: list[str] = []
+    for role, server in candidates:
+        host, port = server["host"], server["port"]
+        key = server_key(host, port)
+        try:
+            client = await runtime.get_client(role, key)
+            response = await client.get("/models", headers=auth_headers(request_id), timeout=3.0)
+            response.raise_for_status()
+            return Response(content=response.content, media_type="application/json")
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.warning("GET /models from %s:%s failed: %s", host, port, exc)
+            failures.append(f"{host}:{port}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "All backend instances failed to serve /v1/models",
+            "failed": failures,
+        },
+    )
+
+
+@app.get("/v1/models")
+async def handle_models():
+    return await handle_models_impl()
 
 
 @app.post("/reset_prefix_cache")

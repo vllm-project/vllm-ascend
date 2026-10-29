@@ -24,18 +24,6 @@
 #include "../inc/kernel_utils.h"
 
 namespace SituMxQuant {
-// ==================== Type Traits ====================
-template <typename Tp, Tp v>
-struct IntegralConstant {
-    static constexpr Tp value = v;
-};
-using trueType = IntegralConstant<bool, true>;
-using falseType = IntegralConstant<bool, false>;
-template <typename, typename>
-struct IsSame : public falseType {};
-template <typename Tp>
-struct IsSame<Tp, Tp> : public trueType {};
-
 // ==================== Constants ====================
 constexpr uint16_t NAN_CUSTOMIZATION = 0x7f81;
 constexpr uint16_t MAX_EXP_FOR_BF16 = 0x7f80;

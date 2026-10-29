@@ -5,6 +5,8 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -21,9 +23,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
+        self._max_num_batched_tokens = max_num_batched_tokens
+        self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
+        self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
-        if ascend_device_type == AscendDeviceType._310P or (
+        self.ascend_device_type = ascend_device_type
+        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (
@@ -50,12 +56,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
         self._single_lora_slot = (
-            ascend_device_type == AscendDeviceType.A3
+            ascend_device_type in {AscendDeviceType.A2, AscendDeviceType.A3}
             and self.lora_config is not None
             and self.lora_config.max_loras == 1
             and not self.lora_config.fully_sharded_loras
         )
         self._single_lora_mask = None
+        self._wrapper_id = next(_LORA_WRAPPER_IDS)
+        _LORA_WRAPPERS[self._wrapper_id] = self
         if self._single_lora_slot:
             assert self.lora_config is not None
             lora_dtype = self.lora_config.lora_dtype
@@ -81,6 +89,25 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         token_count = self.indices_len[0]
         assert token_count is not None
         self._single_lora_mask[:token_count].copy_(self._token_lora_indices[:token_count].eq(0).unsqueeze(1))
+
+    def update_metadata(
+        self,
+        mapping,
+        lora_index_to_id,
+        max_loras,
+        vocab_size,
+        **kwargs,
+    ) -> None:
+        super().update_metadata(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            **kwargs,
+        )
+        # PunicaWrapperBase computes this only for prefill. Decode must also
+        # choose between the active-LoRA and base-only quantized MoE paths.
+        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
 
     def _shrink_prefill(
         self,
@@ -180,6 +207,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
+    def _in_graph_mode(self) -> bool:
+        try:
+            return torch.npu.is_current_stream_capturing()
+        except Exception:
+            return False
+
+    def _use_sgmv(self) -> bool:
+        if not self.is_prefill:
+            return False
+        return not (self.ascend_device_type == AscendDeviceType._310P and self._in_graph_mode())
+
     def _apply_expand(
         self,
         y: torch.Tensor,
@@ -195,7 +233,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
+        expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
@@ -209,7 +247,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = self._shrink_prefill if self.is_prefill else self._shrink_decode
+        shrink_fun: Callable = self._shrink_prefill if self._use_sgmv() else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
@@ -303,7 +341,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
+        expand_fun: Callable = self._expand_prefill if self._use_sgmv() else self._expand_decode
         x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
@@ -342,94 +380,99 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
         """
 
-        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-
-        if self._apply_single_lora_linear(
-            y,
-            x,
-            lora_a_stacked,
-            lora_b_stacked,
-            scale,
-            output_slices,
-            packed_lora_a=kwargs.get("packed_lora_a"),
-            add_inputs=kwargs.get("add_inputs", True),
-        ):
+        if self.no_lora:
             return
 
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
-            buffer = tuple(
-                torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices))
-            )
-        self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
-    def _apply_single_lora_linear(
+        if buffer is not None:
+            self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
+            self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+            return
+
+        lora_linear(
+            self._wrapper_id,
+            y,
+            x,
+            list(lora_a_stacked),
+            list(lora_b_stacked),
+            scale,
+            list(output_slices),
+            kwargs.get("packed_lora_a"),
+            kwargs.get("packed_lora_b"),
+            kwargs.get("add_inputs", True),
+        )
+
+    def _lora_linear_kernel(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: tuple[torch.Tensor, ...],
-        lora_b_stacked: tuple[torch.Tensor, ...],
+        lora_a_stacked: tuple[torch.Tensor, ...] | list[torch.Tensor],
+        lora_b_stacked: tuple[torch.Tensor, ...] | list[torch.Tensor],
         scale: float,
-        output_slices: tuple[int, ...],
-        *,
-        packed_lora_a: torch.Tensor | None = None,
-        add_inputs: bool,
-    ) -> bool:
-        if not self._single_lora_slot:
-            return False
+        output_slices: tuple[int, ...] | list[int],
+    ) -> None:
+        lora_a = tuple(lora_a_stacked)
+        lora_b = tuple(lora_b_stacked)
+        slices = tuple(output_slices)
 
+        r = lora_b[0].size(-1)
+        buffer = self._get_shrink_buffer(len(slices), x.size(0), r, x.device)
+        self.add_shrink(buffer, x, lora_a, scale)
+        self.add_expand(y, buffer, lora_b, slices, add_inputs=True)
+
+    def _get_shrink_buffer(
+        self,
+        n_slices: int,
+        num_tokens: int,
+        rank: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, ...]:
+        key = (n_slices, rank)
+        buf = self._lora_shrink_buffers.get(key)
+        if buf is None or buf.shape[1] < num_tokens:
+            alloc_rows = max(num_tokens, self._max_num_batched_tokens)
+            buf = torch.zeros(
+                (n_slices, alloc_rows, rank),
+                dtype=torch.float32,
+                device=device,
+            )
+            self._lora_shrink_buffers[key] = buf
+        return tuple(buf[i][:num_tokens] for i in range(n_slices))
+
+    def _lora_linear_matmul(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...] | list[torch.Tensor],
+        lora_b_stacked: tuple[torch.Tensor, ...] | list[torch.Tensor],
+        scale: float,
+        output_slices: tuple[int, ...] | list[int],
+        packed_lora_a: torch.Tensor | None,
+        packed_lora_b: torch.Tensor | None,
+        add_inputs: bool,
+    ) -> None:
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
         assert self._single_lora_mask is not None
         adapter_mask = self._single_lora_mask[: x.size(0)]
-        deltas = []
-        if packed_lora_a is not None and len(lora_a_stacked) > 1:
-            rank = lora_b_stacked[0].size(-1)
-            shrink = torch.matmul(x, packed_lora_a[0, 0].transpose(0, 1))
-            shrink.mul_(adapter_mask)
-            shrink_slices = tuple(
-                shrink.narrow(1, slice_index * rank, rank) for slice_index in range(len(lora_a_stacked))
-            )
+
+        if len(lora_b_stacked) == 1:
+            a_mat = lora_a_stacked[0][0, 0]
+            b_mat = lora_b_stacked[0][0, 0, : output_slices[0]].transpose(0, 1)
         else:
-            shrink_slices = tuple(
-                torch.matmul(x, lora_a[0, 0].transpose(0, 1)).mul_(adapter_mask) for lora_a in lora_a_stacked
-            )
+            assert packed_lora_a is not None and packed_lora_b is not None
+            a_mat = packed_lora_a[0, 0]
+            b_mat = packed_lora_b[0, 0]
 
-        for shrink, lora_b, output_size in zip(shrink_slices, lora_b_stacked, output_slices, strict=True):
-            b_weight = lora_b[0, 0, :output_size]
-            deltas.append(torch.matmul(shrink, b_weight.transpose(0, 1)))
-
-        if len(deltas) > 1 and sum(output_slices) == y.shape[1]:
-            delta = torch.cat(deltas, dim=1)
-            PunicaWrapperNPU._update_single_lora_output(y, delta, scale, add_inputs)
-            return True
-
-        offset = 0
-        for delta, output_size in zip(deltas, output_slices, strict=True):
-            y_slice = y.narrow(1, offset, output_size)
-            PunicaWrapperNPU._update_single_lora_output(y_slice, delta, scale, add_inputs)
-            offset += output_size
-        return True
-
-    @staticmethod
-    def _update_single_lora_output(
-        y: torch.Tensor,
-        delta: torch.Tensor,
-        scale: float,
-        add_inputs: bool,
-    ) -> None:
+        shrink = torch.matmul(x, a_mat.transpose(0, 1)).mul_(adapter_mask)
+        if scale != 1.0:
+            shrink.mul_(scale)
+        delta = torch.matmul(shrink, b_mat)
         if add_inputs:
-            if scale == 1.0:
-                y.add_(delta)
-            else:
-                y.add_(delta, alpha=scale)
-        elif scale == 1.0:
-            y.copy_(delta)
+            y.add_(delta)
         else:
-            torch.mul(delta, scale, out=y)
+            y.copy_(delta)
 
     def add_lora_fused_moe(
         self,
@@ -550,12 +593,80 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
 
+        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
+        if y.size(1) < r:
+            # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
+            # The sequence-classification LoRA head (#53555) can have
+            # num_labels < rank, so use the matmul fallback.
+            self._add_lora_logits_matmul(y, x, lora_a_stacked, lora_b_stacked, scale, indices)
+            y = y.view_as(y_org)
+            return
+
         if buffer is None:
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
-
         self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        if y.dtype in (torch.half, torch.bfloat16):
+            self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        else:
+            # Ascend bgmv_expand only writes half/bf16 outputs. Compute
+            # the LoRA delta into a workspace of the weight dtype (matching
+            # the kernel's output dtype) and merge it back, so fp32
+            # classification outputs (classifier LoRA, #53555) work on
+            # vLLM main without quantizing the base logits.
+            op_dtype = lora_b_stacked.dtype
+            delta = torch.zeros(y.shape, dtype=op_dtype, device=y.device)
+            self.bgmv_expand(buffer, lora_b_stacked, delta, indices, add_inputs=True)
+            y.add_(delta.to(y.dtype))
 
         y = y.view_as(y_org)
+
+    def _add_lora_logits_matmul(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale: float,
+        indices: torch.Tensor,
+    ) -> None:
+        """Per-adapter matmul fallback for add_lora_logits (see call site)."""
+        active = indices >= 0
+        idx = indices.clamp(min=0)
+        lora_a = lora_a_stacked[idx]
+        lora_b = lora_b_stacked[idx]
+        if lora_a.ndim == 4:
+            lora_a = lora_a[:, 0]
+        if lora_b.ndim == 4:
+            lora_b = lora_b[:, 0]
+
+        delta = torch.bmm(x.to(torch.float32).unsqueeze(1), lora_a.to(torch.float32).transpose(1, 2)).squeeze(1)
+        delta = torch.bmm(delta.unsqueeze(1), lora_b.to(torch.float32).transpose(1, 2)).squeeze(1)
+        delta.mul_(scale)
+        delta.masked_fill_(~active.unsqueeze(1), 0)
+        y.add_(delta.to(y.dtype))
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        """Apply request-routed full linear weights to selected rows.
+
+        Mirrors vLLM's CPU implementation (the stacked weight carries the full
+        linear weight, so rank == out_features). The Ascend BGMV shrink kernel
+        is intentionally avoided here: it requires half/bf16 inputs and
+        ``hidden_in > hidden_out``, neither of which holds for a classification
+        head, and it writes in the input dtype rather than fp32.
+        """
+        indices = self.sampler_indices
+        selected = weight_stacked[indices.clamp_min(0)]
+        if selected.dim() == 4:
+            selected = selected.squeeze(1)
+        adapter_y = torch.einsum("bi,boi->bo", x.to(torch.float32), selected.to(torch.float32))
+        result = self._select_full_linear_output(y, adapter_y, bias_stacked, module_enabled)
+        y.copy_(result)

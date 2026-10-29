@@ -13,9 +13,8 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-STEP3P5 = ROOT / "vllm_ascend" / "spec_decode" / "step3p5.py"
-BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
-PATCH_SPEC_CFG = ROOT / "vllm_ascend" / "patch" / "platform" / "patch_speculative_config.py"
+STEP3P5 = ROOT / "vllm_ascend" / "worker" / "v1" / "spec_decode" / "step3p5.py"
+BASE_PROPOSER = ROOT / "vllm_ascend" / "worker" / "v1" / "spec_decode" / "llm_base_proposer.py"
 WORKER_PATCH_INIT = ROOT / "vllm_ascend" / "patch" / "worker" / "__init__.py"
 LEGACY_STEP3P7_PATCH = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_step3p5_mtp.py"
 
@@ -92,17 +91,6 @@ def test_step3p5_draft_window_and_config_contracts() -> None:
     assert "sliding_attention" in ensure_layer_types
 
 
-def test_step3p7_uses_step3p5_mtp_override_without_legacy_runtime_patch() -> None:
-    override_src = _src(_func(PATCH_SPEC_CFG, "hf_config_override"))
-
-    assert "step3p7" in override_src
-    assert "Step3p7ForConditionalGeneration" in override_src
-    assert "step3p5_mtp" in override_src
-    assert "Step3p5MTP" in override_src
-    assert "patch_step3p5_mtp" not in WORKER_PATCH_INIT.read_text()
-    assert not LEGACY_STEP3P7_PATCH.exists()
-
-
 def test_pad_query_start_loc_for_fia_first_arg_is_query_start_loc() -> None:
     """No7: _propose must pass query_start_loc as the first arg.
 
@@ -115,7 +103,7 @@ def test_pad_query_start_loc_for_fia_first_arg_is_query_start_loc() -> None:
     num_reqs (int) and eventually triggering:
         TypeError: unsupported operand type(s) for *: 'CUDAGraphMode' and 'int'
 
-    See model_runner_v1.py:_pad_query_start_loc_for_fia and the correct call
+    See worker/v1/model_runner.py:_pad_query_start_loc_for_fia and the correct call
     pattern at llm_base_proposer.py:730–736.
     """
     propose = _method(STEP3P5, "AscendStep3p5MTPProposer", "_propose")

@@ -41,7 +41,8 @@ __aicore__ inline constexpr bool IsDataCopyPadSupport()
 }
 
 /**
- * Get the block size of unified buffer in bytes
+ * Get the UB data-movement alignment block size in bytes. The total UB
+ * capacity is queried by the host tiling code through GetCoreMemSize.
  */
 __aicore__ inline constexpr uint32_t GetUbBlockSize() { return 32U; }
 

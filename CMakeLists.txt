@@ -56,17 +56,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
-
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
@@ -88,12 +78,19 @@ else()
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 endif()
 
+# Sparse KV cache offloading is currently supported on Atlas A3 only.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  find_package(OpenMP REQUIRED)
+endif()
+
 include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
   ${TORCH_INCLUDE_DIRS}
-  ${TORCH_NPU_PATH}/include
+  # Prefer the selected CANN toolkit headers over the ACL snapshot bundled in
+  # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
+  ${TORCH_NPU_PATH}/include
 )
 
 set(
@@ -104,6 +101,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
+  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
@@ -115,6 +116,19 @@ include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
 set(CMAKE_REQUIRED_LIBRARIES ascendcl)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+# Keep builds on older CANN versions working; endpoint selection must fail
+# explicitly if the installed CANN lacks the user-to-physical conversion.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    int32_t physical_id = 0;
+    return aclrtGetPhyDevIdByUserDevId(0, &physical_id);
+  }
+" HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+if(HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_DEVICE_ID_MAPPING)
+endif()
 
 if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
   if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")
@@ -145,6 +159,27 @@ else()
   else()
     message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
   endif()
+endif()
+
+# ECCPUConnector stores encoder-cache data in a shared mmap. Newer CANN releases
+# expose aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED), which turns those mmap
+# pages into real page-locked host memory. Keep the custom op available on older
+# CANN releases as well, but make it fail with an actionable error at runtime
+# instead of silently claiming that pageable memory is pinned.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    void* ptr = nullptr;
+    (void)aclrtHostRegisterV2(ptr, 0, ACL_HOST_REG_PINNED);
+    (void)aclrtHostUnregister;
+    return 0;
+  }
+" HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+if(HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+  message(STATUS "aclrtHostRegisterV2: pinned host registration available")
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_HOST_REGISTER_V2_PINNED)
+else()
+  message(STATUS "aclrtHostRegisterV2: pinned host registration unavailable; ECCPUConnector will be rejected")
 endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*")

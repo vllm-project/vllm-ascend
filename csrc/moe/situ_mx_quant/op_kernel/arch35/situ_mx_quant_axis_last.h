@@ -151,10 +151,10 @@ __aicore__ inline void SituMxQuantAxisLast<T, U, hasLinearBeta>::Init(
     }
 
     outputScaleRowBytes_ = ((dimN_ + 64 - 1) / 64) * 2;
-    if constexpr (IsSame<U, fp8_e4m3fn_t>::value) {
+    if constexpr (ops::IsSame<U, fp8_e4m3fn_t>::value) {
         f8Emax_ = FP8_E4M3_MAX_EXP;
     }
-    if constexpr (IsSame<U, fp8_e5m2_t>::value) {
+    if constexpr (ops::IsSame<U, fp8_e5m2_t>::value) {
         f8Emax_ = FP8_E5M2_MAX_EXP;
     }
 }
