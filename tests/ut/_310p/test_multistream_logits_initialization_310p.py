@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from vllm_ascend._310p.worker.v2 import model_runner as model_runner_310p
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -29,7 +30,7 @@ def _runner(*, multistream=True, tp_size=4, full=True, graph_count=2):
 def test_logits_sync_skips_unaffected_paths(options):
     runner = _runner(**options)
     with (
-        patch("torch.npu.current_stream") as current_stream,
+        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
         patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
     ):
         runner._synchronize_multistream_moe_before_logits()
@@ -46,7 +47,7 @@ def test_logits_sync_skips_uninitialized_graph_manager(missing_attribute):
     else:
         runner.cudagraph_manager = None
     with (
-        patch("torch.npu.current_stream") as current_stream,
+        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
         patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
     ):
         runner._synchronize_multistream_moe_before_logits()
@@ -59,7 +60,7 @@ def test_logits_sync_drains_both_streams_only_before_first_real_sample():
     runner = _runner()
     calls = MagicMock()
     with (
-        patch("torch.npu.current_stream", return_value=calls.main),
+        patch.object(model_runner_310p.torch.npu, "current_stream", return_value=calls.main),
         patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream", return_value=calls.shared),
     ):
         for _ in range(10):
@@ -74,7 +75,7 @@ def test_logits_sync_drains_both_streams_only_before_first_real_sample():
 def test_logits_sync_failure_does_not_disable_protection():
     runner = _runner()
     with (
-        patch("torch.npu.current_stream") as current_stream,
+        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
         patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
     ):
         shared_stream.return_value.synchronize.side_effect = RuntimeError("stream failure")
@@ -106,7 +107,7 @@ def test_load_model_initializes_shared_stream_after_parent(multistream):
 def test_logits_sync_main_failure_is_retryable():
     runner = _runner()
     with (
-        patch("torch.npu.current_stream") as main,
+        patch.object(model_runner_310p.torch.npu, "current_stream") as main,
         patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared,
     ):
         main.return_value.synchronize.side_effect = RuntimeError("main failure")
