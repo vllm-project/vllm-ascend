@@ -1063,6 +1063,41 @@ class RuntimeConfig:
 
         set_metric_level(self.metrics_level())
 
+    def persist_metrics_level(self, level: Any) -> str:
+        """Store ``metrics.level`` in memory and in the JSON file when it exists.
+
+        The API command calls this once so a later file poll applies the same
+        name. Missing files stay missing: startup owns creating the file.
+        """
+        from vllm_ascend.observability.ms_metrics.level import canonical_metric_level
+
+        canonical = canonical_metric_level(level)
+        if not self.config_path.exists():
+            metrics = dict(self._data.get("metrics") or {})
+            metrics["level"] = canonical
+            self._data["metrics"] = metrics
+            return canonical
+
+        with self._lock_config():
+            loaded = self._read_json_object()
+            metrics_on_disk = loaded.get("metrics")
+            if not isinstance(metrics_on_disk, dict):
+                metrics_on_disk = {}
+            else:
+                metrics_on_disk = dict(metrics_on_disk)
+            metrics_on_disk["level"] = canonical
+            loaded["metrics"] = metrics_on_disk
+            self._write_data_unlocked(loaded)
+            raw = self.config_path.read_bytes()
+            mtime = self.config_path.stat().st_mtime
+        metrics = dict(self._data.get("metrics") or {})
+        metrics["level"] = canonical
+        self._data["metrics"] = metrics
+        self._mtime = mtime
+        self._version = mtime
+        self._content_digest = self._digest_bytes(raw)
+        return canonical
+
     def apply_ascend_log_level(self) -> None:
         """Apply live ``ascend_log`` (root default + per-module overrides)."""
         from vllm_ascend.logger import apply_ascend_log_level as _apply

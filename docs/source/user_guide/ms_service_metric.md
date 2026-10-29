@@ -47,6 +47,14 @@ Set it in `runtime_config.json`, the same file as `ascend_log`:
 
 `off`, `basic`, `detail`, `debug`, and `0` through `3` are accepted. The stored value is the name. With `runtime_config_hot_reload=true`, the next apply writes that name into the process-local level: startup, the API / EngineCore file poll, and the worker wave-head cascade. Each process keeps its own integer. An invalid level rejects that load and leaves the previous level in place.
 
+Change the level on a running server:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/set_metrics_level?level=detail"
+```
+
+The API server sends a utility RPC to every EngineCore, the same path as `POST /sleep`. Each EngineCore sets its own level (scheduler metrics run there) and broadcasts `set_metrics_level` to its workers, including pipeline stages that do not run the wave-head reload. The command also writes `metrics.level` into an existing `runtime_config.json`, so the next hot-reload keeps this value. A restart rebuilds that file from defaults and `additional_config.runtime_config`; put the level there when it should survive a restart. The response is `{"status": "ok", "level": "detail"}`. An unknown level returns HTTP 400.
+
 This level applies to handlers that record through `vllm_ascend.observability.ms_metrics.handlers.common`. Metrics emitted by `ms_service_metric.provider_handlers` (scheduler, model-runner phase, memory, and EPLB duration) follow the `ms-service-metric` on/off switch. Lowering the level stops new samples. Series already created in the Prometheus registry remain until the process exits.
 
 Declare `level` on a new expensive metric. The default is `1` (`basic`):

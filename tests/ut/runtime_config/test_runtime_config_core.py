@@ -276,6 +276,36 @@ def test_hot_reload_apply_metric_level(tmp_path: Path):
         set_metric_level("basic")
 
 
+def test_persist_metrics_level_updates_existing_file(tmp_path: Path):
+    cfg_path = tmp_path / "runtime_config.json"
+    _write(cfg_path, {"metrics": {"level": "basic"}, "ascend_log": {"level": "INFO"}})
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        hot_reload=True,
+    )
+    assert cfg.persist_metrics_level("2") == "detail"
+    assert cfg.metrics_level() == "detail"
+    on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert on_disk["metrics"]["level"] == "detail"
+    assert on_disk["ascend_log"]["level"] == "INFO"
+    # Digest matches the write, so the next poll does not treat it as a new edit.
+    assert cfg.reload(force=False) is False
+
+
+def test_persist_metrics_level_leaves_missing_file(tmp_path: Path):
+    cfg_path = tmp_path / "runtime_config.json"
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=False,
+    )
+    assert cfg.persist_metrics_level("debug") == "debug"
+    assert cfg.metrics_level() == "debug"
+    assert not cfg_path.exists()
+
+
 def test_ascend_log_enabled_unknown_key_rejected():
     from copy import deepcopy
 
