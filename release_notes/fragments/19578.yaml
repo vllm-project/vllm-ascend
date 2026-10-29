@@ -1,4 +1,0 @@
-pr: 19578
-entries:
-  - category: bugfix
-    text: Fixed preempt-offload KV block-span mapping for DCP-sharded caches and enabled preempt offload for supported MRV2 PCP/DCP configurations.
