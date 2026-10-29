@@ -31,7 +31,6 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
-| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
@@ -132,11 +131,8 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    # The A2 image depends on the model variant: the command below uses the
-    # DeepSeek-V4-Flash (MTP) image. For DeepSeek-V4-Flash-DSpark, set
-    # quay.io/ascend/vllm-ascend:nightly-main instead (see the
-    # "A2 series with dspark" tab in Section 5.1).
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    # Use the DSpark image for the A2 example in Section 5.1.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
 
     docker run --rm \
         --name vllm-ascend \
@@ -185,7 +181,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800I A3 (128GB × 8) or 1 Atlas 800I A2 (64GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized DSpark model `DeepSeek-V4-Flash-0731-w8a8` can be deployed on 1 Atlas 800I A3 (128GB × 8) or 1 Atlas 800I A2 (64GB × 8).
 
 === "950DT products with DSpark"
 
@@ -227,7 +223,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
     ```
 
-=== "A3 series with DSpark"
+=== "A3 series"
 
     Run the following script to execute online inference.
 
@@ -271,7 +267,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         }'
     ```
 
-=== "A2 series with DSpark"
+=== "A2 series"
 
     Run the following script to execute online inference.
 
@@ -284,7 +280,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     # Model from Section 3.1; replace the path with the directory recorded
     # during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+    vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
         --served-model-name dsv4 \
@@ -307,8 +303,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
 
-    TPS is more than 50, reaching 2X the speed of DeepSeek-V4-Flash with MTP.
-
 Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
@@ -320,7 +314,7 @@ Key Parameter Descriptions:
 - `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model.
 - `--kv-cache-dtype turboquant_4bit_nc` enables 4-bit TurboQuant quantization for DeepSeek-V4's Compress-4 attention KV cache to reduce memory usage. It is suited to ultra-long-context workloads such as AI coding, especially when KV cache memory limits concurrency. It is independent of weight and indexer cache quantization and requires compatible TurboQuant and fused attention operators. P/D disaggregated deployments are not currently supported.
-- `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
+- `--speculative-config` configures speculative decoding to accelerate inference. Use `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
 
@@ -681,7 +675,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     - `combine_quant_mode: 4` forces the MoE MC2 combine stage on Decode nodes to use FP8 (MXFP float8_e4m3) communication quantization.
 
-=== "A3 series with DSpark"
+=== "A3 series"
 
     #### A3 Series PD Separation Deployment with DSpark
 
@@ -967,7 +961,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
         1. Prefill node
 
-            For DSpark (`A3 series with DSpark`), use PCP8, DP2, and TP1:
+            For DSpark (`A3 series`), use PCP8, DP2, and TP1:
 
             ```shell
             # change ip to your own
@@ -985,7 +979,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
         Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
-=== "A2 series with DSpark"
+=== "A2 series"
 
     #### A2 Series PD Separation Deployment with DSpark (2P2D, 32 cards) {: #525-a2-series-pd-separation-deployment-with-dspark-2p2d-32-cards }
 
@@ -1495,7 +1489,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
     The deployment follows the same Memcache service setup as
     [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#531-prepare-the-memcache-services),
     while all non-pooling options and the parallel layout follow the
-    [A3 series with DSpark](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
+    [A3 series](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
     continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
@@ -1598,7 +1592,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         For additional parameters and capacity constraints, refer to
         [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-        Reuse `launch_online_dp.py` from [the A3 PD deployment example](#521-a3-series-pd-separation-deployment). Set `MEMCACHE_INSTALL_PATH` to
+        Reuse `launch_online_dp.py` from [the A3 PD deployment example](#a3-series-pd-separation-deployment-with-dspark). Set `MEMCACHE_INSTALL_PATH` to
         the `Location` reported by `pip show memcache_hybrid`, and set
         `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
         files above on both nodes. Use the same checkpoint on both nodes. Keep
@@ -1637,7 +1631,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
     2. <a id="532-start-the-prefill-node-with-pooling"></a>**Start the Prefill Node with Pooling**
 
         On the Prefill node, save the following script as `run_dp_template.sh` beside
-        `launch_online_dp.py` from [the A3 PD deployment example](#521-a3-series-pd-separation-deployment). Replace the network, model, and
+        `launch_online_dp.py` from [the A3 PD deployment example](#a3-series-pd-separation-deployment-with-dspark). Replace the network, model, and
         Memcache path placeholders for this node.
 
         ```shell
@@ -1744,7 +1738,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
     3. <a id="533-start-the-decode-node-with-pooling"></a>**Start the Decode Node with Pooling**
 
         On the Decode node, save the following script as `run_dp_template.sh` beside
-        `launch_online_dp.py` from [the A3 PD deployment example](#521-a3-series-pd-separation-deployment). Replace the network, model, and
+        `launch_online_dp.py` from [the A3 PD deployment example](#a3-series-pd-separation-deployment-with-dspark). Replace the network, model, and
         Memcache path placeholders for this node.
 
         ```shell
