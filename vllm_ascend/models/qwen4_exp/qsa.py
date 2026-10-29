@@ -39,7 +39,6 @@ from vllm.utils.torch_utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
@@ -50,6 +49,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .qsa_target_metadata import build_qsa_metadata_original_target_graph
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
@@ -506,12 +506,7 @@ qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
 
 # Keep the existing owner and its persistent graph buffers. Only the metadata
 # producer changes; stream/event ordering remains the runner's responsibility.
-if ascend_envs.VLLM_ASCEND_QWEN4_EXP_FUSED_METADATA:
-    from vllm_ascend.ops.triton.qwen4_exp.qsa_metadata import build_qsa_metadata_triton
-
-    qsa_cache.build_qsa_metadata = build_qsa_metadata_triton
-else:
-    qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
+qsa_cache.build_qsa_metadata = build_qsa_metadata_original_target_graph
 
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):

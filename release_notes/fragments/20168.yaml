@@ -1,4 +1,6 @@
 pr: 20168
 entries:
   - category: feature
-    text: Added opt-in Qwen3.8 Flash Next Model Runner V2 decode submission and QSA metadata optimizations. All new environment switches are disabled by default.
+    text: Added original Torch QSA metadata capture inside the existing Qwen3.8 Flash Next Model Runner V2 target FULL graph, without a fused metadata kernel or changes to vLLM source.
+  - category: config
+    text: Enabled FP32 stable-partition keys and eligible text and completed-multimodal decode submission by default. Each of the three environment switches accepts an explicit value of 0 to disable its behavior.

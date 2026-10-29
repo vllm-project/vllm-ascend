@@ -72,22 +72,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Experimental Qwen4Exp metadata fusion. Default 0; valid values 0/1.
-    # Non-sensitive. Replaces token-wise Torch metadata with fused Triton work.
-    "VLLM_ASCEND_QWEN4_EXP_FUSED_METADATA": lambda: bool(int(os.getenv("VLLM_ASCEND_QWEN4_EXP_FUSED_METADATA", "0"))),
-    # Experimental stable partition using FP32 boolean keys. Default 0;
+    # Experimental stable partition using FP32 boolean keys. Default 1;
     # valid values 0/1; non-sensitive. Sparse cache indices remain integer.
     "VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION", "0"))
+        int(os.getenv("VLLM_ASCEND_QWEN4_EXP_FP32_STABLE_PARTITION", "1"))
     ),
-    # Experimental MRV2 Qwen pure-decode CPU upper-bound path. Default 0;
+    # Experimental MRV2 Qwen pure-decode CPU upper-bound path. Default 1;
     # valid values 0/1; non-sensitive. Device state and D2H fences stay exact.
-    "VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE": lambda: bool(int(os.getenv("VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE", "0"))),
+    "VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE": lambda: bool(int(os.getenv("VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE", "1"))),
     # Experimental completed-prompt MM decode extension of EARLY_QUEUE.
-    # Default 0; valid values 0/1; non-sensitive. Requires an exact initial
+    # Default 1; valid values 0/1; non-sensitive. Requires an exact initial
     # prompt-completion certificate and preserves device/D2H dependencies.
     "VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE", "0"))
+        int(os.getenv("VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE", "1"))
     ),
 }
 
