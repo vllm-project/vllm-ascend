@@ -1,0 +1,4 @@
+pr: 20147
+entries:
+  - category: bugfix
+    text: M3.1-Flash text normalization now preserves FP32 weight offsets and rounds residual additions before normalization to match training arithmetic.
