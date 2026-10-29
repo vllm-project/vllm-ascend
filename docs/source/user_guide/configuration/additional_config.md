@@ -79,6 +79,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
+| `tokenizer_cache_gb`                 | int  | `0`     | Host-memory budget for segment tokenizer caching per API server process. Default off. If the vLLM core provides a native tokenizer cache, its positive native budget takes precedence; otherwise this option enables the compatibility path. See [Tokenizer caching](#tokenizer-caching) for supported tokenizers and memory accounting. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
@@ -344,6 +345,34 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+### Tokenizer caching
+
+Enable repeated-segment tokenization reuse with
+`--additional-config '{"tokenizer_cache_gb": 1}'`. This CPU frontend cache
+does not store KV tensors or allocate NPU memory. It can help when repeated
+prompt segments make tokenization a bottleneck; no benefit is guaranteed for
+unique prompts or inference-bound workloads.
+
+When the vLLM core exposes `ModelConfig.tokenizer_cache_gb`, use its native
+cache. A positive native budget wins when both options are positive. If the
+native budget is zero and the additional-config budget is positive, the latter
+is forwarded through a renderer-local configuration copy without modifying
+the caller's configuration. Set both budgets to zero to disable caching.
+
+On a core without that native field, the compatibility cache only activates
+for standard HF ByteLevel BPE encoding with stateless preprocessing and
+context-independent added tokens. Unsupported tokenizers retain ordinary
+encoding with a warning; startup probes are an additional check, not proof
+that arbitrary tokenizers are safe. Requests requiring offsets, truncation or
+special output formats use the regular path as needed. The HF cache attaches
+after thread-pool construction, and DeepSeek renderer return metadata is
+preserved.
+
+Each API server process maintains its own cache. In the compatibility path the
+budget accounts for cached token-ID values; keys, tokenizer copies and other
+Python overhead are additional memory. Treat this as a cache sizing parameter,
+not an RSS limit. Native-cache accounting follows the selected vLLM core.
 
 ### Example
 
