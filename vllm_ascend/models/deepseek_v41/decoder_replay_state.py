@@ -12,6 +12,7 @@ import torch.distributed as dist
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
@@ -96,6 +97,8 @@ class DecoderReplayState:
         if not (global_kept < global_lens).any():
             return None
         num_padded = int(global_kept.sum())
+        if self.layers.sequence_parallel:
+            num_padded = round_up(num_padded, self.config.parallel_config.tensor_parallel_size)
         if num_padded >= batch.num_tokens_after_padding:
             return None
 
@@ -283,9 +286,11 @@ class DecoderReplayState:
         if not requires_compaction:
             # Preserve collective width, including padding on empty PCP ranks and idle DP replicas.
             num_tokens = batch.num_tokens_after_padding
+            if self.layers.sequence_parallel:
+                num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
         else:
             num_tokens = int(kept_lens.sum())
-            if enable_dsa_cp():
+            if self.layers.sequence_parallel or enable_dsa_cp():
                 num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
 
         return _DecoderReplayPlan(
@@ -336,12 +341,19 @@ class DecoderReplayState:
             global_kept = np.where(global_trim, np.minimum(global_lens, self.layers.window), global_lens)
             # Update PCP's global batch and cross-rank restore indices to match the compact layout.
             self.replay_pcp_context = self._build_replay_pcp_context(inputs, global_kept)
+
+        if plan.uses_pcp_replay or (self.layers.sequence_parallel and not enable_dsa_cp()):
             self.layers.num_padded_rows = plan.num_tokens
 
         self.metadata = self._build_metadata(plan.replay_inputs, offsets)
-        # PCP selects valid rows and pads downstream; other paths may include padding row indices.
-        num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
+        # PCP and SP select valid rows and pad downstream; DSA-CP retains its padded index layout.
+        num_selected_rows = self.num_actual_tokens if self.layers.num_padded_rows is not None else plan.num_tokens
         self.layers.rows = self.rows[:num_selected_rows]
+        logger.info_once(
+            "Ascend MRV2 decoder bounded replay is active (sequence parallel=%s, PCP=%s).",
+            self.layers.sequence_parallel,
+            plan.uses_pcp_replay,
+        )
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context
 

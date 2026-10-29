@@ -20,6 +20,8 @@ from vllm_ascend.ops.triton.quantize_mxfp4_indexer import (
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
+MIXED_QUANT_QUERY_HEADS = 64
+
 
 def _common(query, weights, source_cache, source_metadata, compress_ratio, quantized_query, query_scale):
     op_metadata = source_metadata.qli_metadata
@@ -238,7 +240,7 @@ def build_smla_metadata(length_rows: torch.Tensor, cu_seqlens_q: torch.Tensor) -
         length_rows,
         length_rows,
         cu_seqlens_q=cu_seqlens_q,
-        num_heads_q=64,
+        num_heads_q=MIXED_QUANT_QUERY_HEADS,
         num_heads_kv=1,
         head_dim=512,
         quant_mode=1,
@@ -282,6 +284,15 @@ def qsmla(
         cmp_lengths = None
     task_metadata = metadata.swa.smla_metadata
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(task_metadata))
+    # The A5 DSL currently requires 64 query heads even when TP owns fewer.
+    # Attention heads are independent, so padding Q and sinks preserves the
+    # local heads without gathering queries or changing the shared KV cache.
+    num_heads = q.shape[1]
+    head_padding = MIXED_QUANT_QUERY_HEADS - num_heads
+    sinks = sinks.detach().float().contiguous()
+    if head_padding > 0:
+        q = torch.nn.functional.pad(q, (0, 0, 0, head_padding))
+        sinks = torch.nn.functional.pad(sinks, (0, head_padding))
     output, _ = ops.mixed_quant_sparse_flash_mla(
         q,
         ori_kv=ori_kv,
@@ -295,7 +306,7 @@ def qsmla(
         seqused_cmp_kv=metadata.attention.cache_seq_lens if has_cmp else None,
         ori_topk_length=ori_lengths,
         cmp_topk_length=cmp_lengths if has_cmp else None,
-        sinks=sinks.detach().float().contiguous(),
+        sinks=sinks,
         metadata=task_metadata,
         quant_mode=1,
         softmax_scale=softmax_scale,
@@ -303,7 +314,7 @@ def qsmla(
         layout_kv="PA_BBND",
         return_softmax_lse=False,
     )
-    return output
+    return output[:, :num_heads].contiguous() if head_padding > 0 else output
 
 
 def write_attention_cache(

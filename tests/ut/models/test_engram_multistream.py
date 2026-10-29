@@ -23,7 +23,7 @@ def runtime(monkeypatch):
     )
     aux = SimpleNamespace(name="aux", wait_stream=lambda stream: calls.append(("reuse", stream.name)))
     current = [main]
-    context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE, batch_descriptor="small")
+    context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE, batch_descriptor="small", is_padding=None)
 
     class Event:
         def record(self, stream):

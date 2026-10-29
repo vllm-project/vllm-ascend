@@ -9,17 +9,19 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
+from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
 @pytest.mark.parametrize("dp_size", [1, 2])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size, sequence_parallel):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
         decoder_replay_start=3,
-        use_sequence_parallel=False,
+        use_sequence_parallel=sequence_parallel,
         _run_replay_layers=lambda *states: states,
         topk_indices_buffer=torch.zeros(8, 2),
         candidate_indices_buffer=torch.zeros(8, 2),
@@ -41,6 +43,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     )
     replay = replay_mod.make_decoder_replay(model, config)
     assert replay is not None
+    assert replay.sequence_parallel is sequence_parallel
     assert model.decoder_replay_start == 1
 
 
@@ -197,3 +200,49 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     assert output[:, 0].tolist() == [0, 0, 4, 4]
     assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
     assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+
+
+@pytest.mark.parametrize("skip_padding", [False, True])
+def test_model_shards_supplied_padding_mask_even_without_moe_elision(monkeypatch, skip_padding):
+    padding = torch.tensor([False, True, False, False])
+    context = SimpleNamespace(is_padding=padding)
+    monkeypatch.setattr(model_mod.envs, "VLLM_MOE_SKIP_PADDING", skip_padding)
+    monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(model_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(model_mod, "sp_shard", lambda value: value[:2])
+    monkeypatch.setattr(model_mod, "sp_all_gather", lambda value: torch.cat((value, value)))
+    monkeypatch.setattr(model_mod, "sp_padding_mask", lambda mask, hidden: mask[:2])
+
+    class Layer:
+        layer_idx = 0
+        engram = None
+
+        def __call__(self, positions, hidden, mix, unused, input_ids):
+            assert torch.equal(context.is_padding, padding[:2])
+            assert context.is_padding.shape[0] == hidden.shape[0]
+            return hidden, mix
+
+        @staticmethod
+        def hc_collapse(hidden, mix):
+            return hidden.mean(dim=1)
+
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.hc_mult = 1
+    model.use_sequence_parallel = True
+    model._mtp_hidden_buffer = None
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model.layers = [Layer()]
+    model.norm = lambda hidden: hidden
+    model.aux_hidden_state_layers = ()
+    model.decoder_replay_layers = None
+    output = DeepseekV41Model.forward(
+        model,
+        torch.arange(4),
+        torch.arange(4),
+        None,
+        inputs_embeds=torch.ones(4, 1),
+        engram_lookups={},
+        engram_mask=torch.zeros(4, dtype=torch.bool),
+    )
+    assert output.shape == (4, 1)
