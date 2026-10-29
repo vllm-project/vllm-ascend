@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -99,6 +100,70 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     shares_pool = supports_shared and (model_type in ("step3p5", "step3p7") or (use_v2 and model_type == "gemma4_text"))
     expected = available if shares_pool else available // (sliding_groups + 1)
     assert worker._scale_kv_cache_memory_for_multi_group(available) == expected
+
+
+@pytest.mark.parametrize("budget_source", ["profiled", "explicit", "startup_plan"])
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize(
+    "model_type,sliding_groups",
+    [("gemma3_text", 5), ("gemma4_text", 5), ("step3p5", 5), ("step3p7", 5), ("gemma3_text", 0)],
+)
+def test_memory_budget_sources_preserve_physical_capacity(
+    monkeypatch, budget_source, use_v2, model_type, sliding_groups
+):
+    config = _config()
+    config.model_config.hf_text_config.model_type = model_type
+    cache = _cache_config(sliding_groups)
+    # Use the same physical headroom for all three sources, divisible by six.
+    available = 60 * cache.kv_cache_tensors[0].size
+    config.cache_config.kv_cache_memory_bytes = available if budget_source == "explicit" else None
+    worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker.vllm_config = config
+    worker.model_config = config.model_config
+    worker.cache_config = config.cache_config
+    worker.use_v2_model_runner = use_v2
+    worker.device = torch.device("cpu")
+    worker.init_snapshot = SimpleNamespace(free_memory=2 * available)
+    worker.requested_memory = available + 3
+    worker.get_kv_cache_spec = lambda: _specs(cache)
+    worker.model_runner = SimpleNamespace(
+        profile_run=Mock(),
+        model_memory_usage=1,
+        supports_standardized_shared_kv_backing=True,
+        use_sparse=False,
+        use_compress=False,
+    )
+    worker._kvpp_cache_allocation_plan = None
+    worker._apply_kv_offload_decode_memory_constraints = Mock(side_effect=lambda size: size)
+    profile = SimpleNamespace(
+        non_torch_increase=1,
+        weights_memory=1,
+        before_profile=SimpleNamespace(torch_peak=0),
+        after_profile=SimpleNamespace(free_memory=available),
+    )
+
+    def apply_startup_plan(target):
+        if budget_source == "startup_plan":
+            target.cache_config.kv_cache_memory_bytes = available
+
+    memory_profiling = Mock(side_effect=lambda *args, **kwargs: nullcontext(profile))
+    monkeypatch.setattr(worker_module, "maybe_apply_startup_plan", apply_startup_plan)
+    monkeypatch.setattr(worker_module, "memory_profiling", memory_profiling)
+    monkeypatch.setattr(worker_module, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(worker_module.envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
+    monkeypatch.setattr(worker_module.torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 1})
+    monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
+    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _: None)
+
+    result = worker.determine_available_memory()
+
+    shares_pool = model_type in ("step3p5", "step3p7") or (use_v2 and model_type == "gemma4_text")
+    expected = available if shares_pool else available // (sliding_groups + 1)
+    assert result == expected
+    assert worker.available_kv_cache_memory_bytes == expected
+    worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected)
+    worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
+    assert memory_profiling.call_count == (budget_source == "profiled")
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
