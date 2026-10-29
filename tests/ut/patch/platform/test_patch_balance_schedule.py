@@ -806,6 +806,22 @@ def test_balance_gather_all_gathers_when_enabled():
     mock_gather.assert_not_called()
 
 
+def test_balance_schedule_records_local_prefix_cache_stats():
+    scheduler = _make_balance_scheduler()
+    calls = []
+    original = scheduler.kv_cache_manager.record_prefix_cache_stats
+
+    def wrapped(request, num_hits):
+        calls.append((request.request_id, num_hits))
+        return original(request, num_hits)
+
+    scheduler.kv_cache_manager.record_prefix_cache_stats = wrapped
+    for req in _create_requests(2, num_tokens=32, max_tokens=8):
+        scheduler.add_request(req)
+    scheduler.schedule()
+    assert len(calls) == 2
+
+
 def test_balance_schedule_waiting_and_running_paths():
     scheduler = _make_balance_scheduler()
     for req in _create_requests(2, num_tokens=32, max_tokens=8):
