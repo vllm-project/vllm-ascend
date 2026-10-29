@@ -158,7 +158,7 @@ templates:
 benchmarks:
   perf:
     case_type: performance
-    dataset_path: xxxxxxx #1047500 prefix 100%
+    dataset_path: GSM8K_prefix100_in1047500_DeepSeek-V4_1_Flash_1017
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     temperature: 1.0
