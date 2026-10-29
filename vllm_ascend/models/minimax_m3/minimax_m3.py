@@ -54,7 +54,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -205,6 +204,38 @@ def _scatter_index_cache(
     )
 
 
+class MiniMaxM3RMSNorm(nn.Module):
+    """Gemma RMSNorm with the same rounding order as MiniMax training.
+
+    Keep the unit weight offset in FP32. For a residual connection, round the
+    sum to the activation dtype before normalization, as the training model
+    does. The fused add/RMSNorm kernel requires a low-precision gamma and
+    normalizes the unrounded sum, so it cannot preserve these semantics.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is not None:
+            residual = x + residual
+            x = residual
+        gamma = 1.0 + self.weight.float()
+        if x.device.type == "npu":
+            output = torch_npu.npu_rms_norm(x, gamma, self.variance_epsilon)[0]
+        else:
+            value = x.float()
+            variance = value.square().mean(dim=-1, keepdim=True)
+            output = (value * torch.rsqrt(variance + self.variance_epsilon) * gamma).to(x.dtype)
+        return output if residual is None else (output, residual)
+
+
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention with lightning indexer on Ascend."""
 
@@ -306,11 +337,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             rope_parameters=rope_parameters,
         )
 
-        self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
-        self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+        self.index_q_norm = MiniMaxM3RMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+        self.index_k_norm = MiniMaxM3RMSNorm(self.idx_head_dim, eps=rms_norm_eps)
 
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.q_norm = MiniMaxM3RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = MiniMaxM3RMSNorm(self.head_dim, eps=rms_norm_eps)
 
         vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
@@ -441,8 +472,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         else:
             q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=main_qkv.contiguous(),
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=1.0 + self.q_norm.weight.float(),
+                k_weight=1.0 + self.k_norm.weight.float(),
                 q_hidden_size=self.q_size,
                 kv_hidden_size=self.kv_size,
                 head_dim=self.head_dim,
@@ -519,6 +550,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_cache = self.indexer.index_cache.kv_cache
         if isinstance(index_cache, (tuple, list)):
             index_cache = index_cache[0]
+        # The fused kernel widens raw offsets before adding one and rounds
+        # normalized activations before RoPE, matching MiniMaxM3RMSNorm.
         query, index_query = minimax_qknorm_rope_cache(
             qkv,
             self.rotary_emb.cos_sin_cache,
@@ -915,8 +948,8 @@ class MiniMaxM3Attention(nn.Module):
             rope_parameters=rope_parameters,
         )
 
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.q_norm = MiniMaxM3RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = MiniMaxM3RMSNorm(self.head_dim, eps=rms_norm_eps)
 
         self.attn = Attention(
             self.num_heads,
@@ -1047,8 +1080,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 "MoE sp_size=%s, residual remains sharded across dense and MoE layers",
                 self.block_sparse_moe.experts.moe_config.sp_size,
             )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = MiniMaxM3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = MiniMaxM3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -1150,7 +1183,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = MiniMaxM3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
