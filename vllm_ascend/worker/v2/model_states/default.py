@@ -88,6 +88,8 @@ class AscendModelState(DefaultModelState):
         self._offload_token_to_req: CpuGpuBuffer | None = None
         self._offload_pool_slots: CpuGpuBuffer | None = None
         self._offload_pool_active: CpuGpuBuffer | None = None
+        self._offload_pool_generations: CpuGpuBuffer | None = None
+        self._offload_stable_prefixes: CpuGpuBuffer | None = None
         self._offload_request_states: CopySfaRequestStates | None = None
         self._offload_live_req_ids: Collection[str] = ()
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
@@ -114,6 +116,12 @@ class AscendModelState(DefaultModelState):
                 )
                 self._offload_pool_active = CpuGpuBuffer(
                     pool_capacity, dtype=torch.bool, device=device, pin_memory=pin_memory
+                )
+                self._offload_pool_generations = CpuGpuBuffer(
+                    pool_capacity, dtype=torch.int64, device=device, pin_memory=pin_memory
+                )
+                self._offload_stable_prefixes = CpuGpuBuffer(
+                    pool_capacity, dtype=torch.int32, device=device, pin_memory=pin_memory
                 )
                 self._offload_request_states = CopySfaRequestStates()
         self._initialize_decoder_replay()
@@ -502,6 +510,9 @@ class AscendModelState(DefaultModelState):
                 hot_tokens=get_ascend_config().sparse_kv_offload_config.topk_buffer_size,
                 dummy=offload_dummy,
                 lim_cache_histories=histories,
+                generations=self._offload_pool_generations.np
+                if self._offload_pool_generations is not None
+                else None,
             )
             if dense_fills:
                 get_sparse_kv_offload_manager().dense_fill_copy_sfa_rows(
@@ -509,6 +520,34 @@ class AscendModelState(DefaultModelState):
                     block_size=self.vllm_config.cache_config.block_size,
                     block_table=block_tables[0],
                 )
+            manager = get_sparse_kv_offload_manager()
+            if manager is not None and getattr(manager, "delayed_d2h", False):
+                # Newly bound rows adopt the manager's D2H ledger at their
+                # aligned computed frontier; every row then publishes its
+                # stable prefix for the metadata builder.
+                num_real_reqs = input_batch.num_reqs
+                if offload_dummy:
+                    self._offload_stable_prefixes.np[:num_reqs] = 0
+                else:
+                    active_slots = pool_slots.np[:num_real_reqs].astype(np.int64, copy=False)
+                    active_generations = self._offload_pool_generations.np[:num_real_reqs]
+                    owner_generations = manager.d2h_owner_generations_cpu[active_slots]
+                    newly_bound = owner_generations != active_generations
+                    if np.any(newly_bound):
+                        computed = input_batch.num_computed_tokens_np[:num_real_reqs]
+                        initial_prefixes = (
+                            computed[newly_bound]
+                            // self.vllm_config.cache_config.block_size
+                            * self.vllm_config.cache_config.block_size
+                        )
+                        manager.initialize_d2h_slots(
+                            active_slots[newly_bound],
+                            active_generations[newly_bound],
+                            initial_prefixes,
+                        )
+                    self._offload_stable_prefixes.np[:num_real_reqs] = manager.d2h_stable_prefixes_cpu[active_slots]
+                self._offload_pool_generations.copy_to_gpu(num_reqs)
+                self._offload_stable_prefixes.copy_to_gpu(num_reqs)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
@@ -558,6 +597,11 @@ class AscendModelState(DefaultModelState):
             offload_dummy=getattr(input_batch, "is_dummy", False),
             req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,
             req_topk_buffer_active=pool_active.cpu[:num_reqs] if pool_active is not None else None,
+            req_topk_buffer_stable_prefixes=(
+                self._offload_stable_prefixes.gpu[:num_reqs]
+                if self._offload_stable_prefixes is not None
+                else None
+            ),
             copy_sfa_restore_tails=restore_copy_sfa_tails,
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
             common_metadata_callback=(
@@ -573,4 +617,31 @@ class AscendModelState(DefaultModelState):
                 if getattr(metadata, "copy_sfa_copy_src_offsets", None) is not None:
                     manager.restore_copy_sfa_tails(metadata)
                     break
+        # Delayed D2H: freeze this step's full-block plan and launch the
+        # previous one right after metadata is built, so the async copy
+        # overlaps the upcoming forward. The manager getter raises on
+        # non-sparse nodes (e.g. the PD producer), so only query it when the
+        # fused copy-sfa request states were prepared for this batch.
+        if (
+            request_states is not None
+            and not getattr(input_batch, "is_dummy", False)
+            and self._offload_pool_generations is not None
+        ):
+            manager = get_sparse_kv_offload_manager()
+            if getattr(manager, "delayed_d2h", False):
+                num_real_reqs = input_batch.num_reqs
+                count = manager.plan_d2h_requests(
+                    input_batch.num_computed_tokens_np[:num_real_reqs],
+                    pool_slots.np[:num_real_reqs],
+                    self._offload_pool_generations.np[:num_real_reqs],
+                    # V2 keeps block ids device-only (no CPU mirror); one
+                    # small blocking D2H fetch is the planner's host input.
+                    block_tables[manager.d2h_host_kv_cache_group_id][:num_real_reqs].cpu().numpy(),
+                    np.ones(num_real_reqs, dtype=np.bool_),
+                )
+                if count:
+                    # All TP ranks freeze and launch the same host plan. Only
+                    # TP0 issues the physical copy; other ranks mark the batch
+                    # submitted to join the matching retire collective.
+                    manager.launch_d2h()
         return self.attn_metadata

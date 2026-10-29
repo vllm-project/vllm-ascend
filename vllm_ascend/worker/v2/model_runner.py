@@ -393,6 +393,10 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
+        if self.speculative_config is not None:
+            # MTP proposal (inside the upstream sample_tokens) is the last
+            # possible KV writer in this outer iteration.
+            self._d2h_record_source_ready()
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
@@ -589,6 +593,61 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_block_zeroer = zeroer.delegate
         super().shutdown()
 
+    # V1-layout aliases: the proposer and shared offload code read the pool
+    # buffers through the runner; in V2 they live on the model state.
+    @property
+    def _offload_pool_slots(self):
+        return getattr(self.model_state, "_offload_pool_slots", None)
+
+    @property
+    def _offload_pool_active(self):
+        return getattr(self.model_state, "_offload_pool_active", None)
+
+    @property
+    def _offload_pool_generations(self):
+        return getattr(self.model_state, "_offload_pool_generations", None)
+
+    @property
+    def _offload_stable_prefixes(self):
+        return getattr(self.model_state, "_offload_stable_prefixes", None)
+
+    @property
+    def _offload_req_ids_tensor(self):
+        return getattr(self.model_state, "_offload_req_ids", None)
+
+    @property
+    def _offload_token_to_req(self):
+        return getattr(self.model_state, "_offload_token_to_req", None)
+
+    # ===== Delayed D2H hooks =====
+
+    def _d2h_enabled(self) -> bool:
+        return (
+            self.ascend_config.sparse_kv_offload_config.delayed_d2h
+            and self.sparse_kv_offload_manager is not None
+            and getattr(self.model_state, "_offload_pool_generations", None) is not None
+        )
+
+    def _d2h_retire(self) -> int:
+        if not self._d2h_enabled():
+            return 0
+        return self.sparse_kv_offload_manager.retire_d2h()
+
+    def _d2h_reject_preemptions(self, preempted_req_ids) -> None:
+        """Fail before state reuse until D2H preemption has a restore protocol."""
+        if self._d2h_enabled() and preempted_req_ids:
+            preempted = ", ".join(sorted(preempted_req_ids))
+            raise RuntimeError(
+                "delayed D2H does not support scheduler preemption yet; "
+                "preemption resets num_computed_tokens and releases KV blocks "
+                f"without rebuilding resident tails (requests: {preempted})"
+            )
+
+    def _d2h_record_source_ready(self) -> bool:
+        if not self._d2h_enabled():
+            return False
+        return self.sparse_kv_offload_manager.record_d2h_source_ready()
+
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
         manager = self.sparse_kv_offload_manager
@@ -660,6 +719,11 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
+        # The only normal-path wait for the previous delayed D2H batch.
+        # Retire before states are updated and request slots can be reused.
+        self._d2h_retire()
+        self._d2h_reject_preemptions(getattr(scheduler_output, "preempted_req_ids", None))
+
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
         if has_kv_transfer_group():
@@ -714,6 +778,11 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
+        if self.speculative_config is None:
+            # Target forward is the final KV writer when speculative proposal
+            # does not run; MTP records the frontier in sample_tokens() after
+            # all draft steps instead.
+            self._d2h_record_source_ready()
 
         if dump_forward:
             if dummy_run:
