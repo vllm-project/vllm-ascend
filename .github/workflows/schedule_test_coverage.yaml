@@ -47,7 +47,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: linux-amd64-cpu-8-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       has_tests: ${{ steps.plan.outputs.has_tests }}
       targets: ${{ steps.plan.outputs.targets }}
@@ -76,7 +76,6 @@ jobs:
         run: |
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex pyyaml
           python3 - << 'PY'
           import importlib.util
           import json

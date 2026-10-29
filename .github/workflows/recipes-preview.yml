@@ -33,7 +33,7 @@ jobs:
       vars.RECIPES_PREVIEW_ENABLED == 'true'
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     timeout-minutes: 5
     environment:
       name: recipes-preview

@@ -277,6 +277,52 @@ establish whether a source build actually reused compiled work. See the
 [persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
 for the identity and failure contracts.
 
+### Lightweight CI images
+
+Use `quay.io/atlas-ci/vllm-ascend-ci:lite-tools`
+for test selection, csrc cache preparation, doctest planning and recipe preview
+dispatch. Its source is
+`.github/workflows/dockerfiles/dockerfile.tools`. It contains Python 3.12, Git,
+JSON and archive utilities, PyYAML and regex. Pre-commit (including mypy) and its
+cache builder use `lint-main` on main/development branches and a corresponding
+`lint-releases-v*` image on each release branch, as described in the
+[lint image guide](https://github.com/vllm-project/vllm-ascend/blob/main/.github/TEST_README.md#lint-images).
+Native builds, NPU tests and profiling parsers keep their dedicated runtime
+images. Kubernetes controllers and model download jobs continue to use their
+existing CPU images until separately validated.
+
+The recipe preview dispatcher installs GitHub CLI in its job; this dependency
+is not required by the other consumers and is not included in the shared image.
+
+The **Tools Image Build** workflow (`.github/workflows/tools_image_build.yaml`)
+uses QEMU and Buildx to build AMD64 and ARM64 images. Changes to its Dockerfile or
+workflow trigger build-only checks on pull requests and main. Manual runs accept
+a `tag` input, defaulting to `lite-tools`, and publish the multi-architecture image
+to `quay.io/atlas-ci/vllm-ascend-ci:<tag>`. Existing CI jobs continue to use
+`:lite-tools`; publishing a different tag does not change those jobs.
+
+Both this workflow and **Image build lint** use the repository variable
+`QUAY_ASCEND_CI_USERNAME` and secret `QUAY_ASCEND_CI_PASSWORD`. Configure an account with
+write access to `quay.io/atlas-ci/vllm-ascend-ci`.
+
+For the initial rollout, publish `lite-tools` before enabling the migrated jobs.
+The new workflow must first be available on the repository's default branch for
+manual dispatch; land the image definition and builder before the consumer
+changes, or publish the same definition from the CI maintenance repository.
+Run the affected jobs against the published image before merging their migration.
+
+Manual runs replace the selected tag; there is no separate release process.
+The Buildx action summary records the image digest and build details.
+Changing `dockerfile.tools` alone does not publish an updated image.
+
+New dependencies may first be installed in the job that needs them. Periodically
+move stable, useful dependencies into `dockerfile.tools` and document their consumers.
+PyYAML and regex follow the project's unpinned requirements and are resolved when
+the image is rebuilt. Remove redundant installation steps only when the job
+switches to a published image containing those dependencies. Keep low-frequency
+special dependencies in their jobs; do not install `requirements-dev.txt` into
+the common image.
+
 ### PR selective testing (CI)
 
 The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
