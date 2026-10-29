@@ -41,7 +41,14 @@ class WeightUpdateModelCase:
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
+    # Options for enumerating native HF state in checkpoint format.
+    trust_remote_code: bool = True
+    split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
+    # One representative model covers both backends and packing modes.
+    full_transfer_matrix: bool = False
+    # Additional unpacked HCCL coverage for models omitted from one-card CI.
+    hccl_unpacked: bool = False
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -146,10 +153,59 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
+def minimax_m3_checkpoint_name(name: str) -> str:
+    """Translate a native HF MiniMax-M3 name into its published checkpoint form.
+
+    The native Transformers model differs from the MiniMaxAI/MiniMax-M3
+    checkpoint in the following names:
+
+    * ``lm_head`` lives under ``language_model``;
+    * attention ``indexer.q_proj/k_proj/q_norm/k_norm`` become
+      ``index_q_proj/index_k_proj/index_q_norm/index_k_norm``;
+    * routed experts, shared experts and the router live under
+      ``block_sparse_moe`` (HF: ``mlp``), with the routing correction bias
+      directly under ``block_sparse_moe`` (HF: ``mlp.gate``);
+    * routed expert ``gate_proj/down_proj/up_proj`` become ``w1/w2/w3``;
+      dense and shared expert projections keep their original names.
+
+    This prepares checkpoint-style names for the existing vLLM loader, for
+    both startup weights and IPC/HCCL updates. Fused tensor expansion and the
+    ``language_model.model`` prefix are handled separately by the source.
+    """
+    m = re.match(r"^lm_head\.(.+)$", name)
+    if m:
+        return f"language_model.lm_head.{m.group(1)}"
+
+    m = re.match(r"^(.*\.self_attn)\.indexer\.(.+)$", name)
+    if m:
+        return f"{m.group(1)}.index_{m.group(2)}"
+
+    m = re.match(r"^(.*)\.mlp\.gate\.e_score_correction_bias$", name)
+    if m:
+        return f"{m.group(1)}.block_sparse_moe.e_score_correction_bias"
+
+    m = re.match(r"^(.*)\.(?:mlp|block_sparse_moe)\.experts\.(\d+)\.(gate_proj|down_proj|up_proj)\.weight$", name)
+    if m:
+        shard = {"gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"}[m.group(3)]
+        return f"{m.group(1)}.block_sparse_moe.experts.{m.group(2)}.{shard}.weight"
+
+    m = re.match(r"^(.*)\.mlp\.(experts|shared_experts|gate)\.(.+)$", name)
+    if m:
+        return f"{m.group(1)}.block_sparse_moe.{m.group(2)}.{m.group(3)}"
+    return name
+
+
+# The default 0.75 HBM budget leaves too little room for M3's 18.73-GiB FIA
+# graph workspace after KV-cache allocation. This four-layer, 1024-token test
+# only needs a small cache; keep startup and live-update servers identical.
+MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
+
+
 MODEL_CASES = (
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
         model="Qwen/Qwen3.5-35B-A3B",
+        full_transfer_matrix=True,
         hf_overrides={
             "architectures": ["Qwen3_5MoeForCausalLM"],
             "text_config": {
@@ -190,7 +246,8 @@ MODEL_CASES = (
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
-        model="zai-org/GLM-5.1",
+        model="ZhipuAI/GLM-5.1",
+        hccl_unpacked=True,
         hf_overrides={
             "num_hidden_layers": 4,
             # NPU IPC co-locates the trainer payload with the server on one
@@ -207,6 +264,34 @@ MODEL_CASES = (
         # by owning SFA/MLA runtime state as non-persistent buffers: the LI C8
         # Hadamard matrices, the DCP remap order/sentinel, the DeepSeek-V4 DSA RoPE
         # tables and the interleaved RoPE tables the MLA/SFA rope lookups read.
+    ),
+    WeightUpdateModelCase(
+        id="minimax-m3-sparse-moe-layout",
+        model="MiniMax/MiniMax-M3",
+        hf_overrides={
+            "architectures": ["MiniMaxM3SparseForCausalLM"],
+            "text_config": {
+                "num_hidden_layers": 4,
+                "num_local_experts": 8,
+                # Explicit schedules for the fixed four-layer test model;
+                # native config derives these before overrides are applied.
+                "layer_types": ["full_attention", "full_attention", "full_attention", "minimax_m3_sparse"],
+                "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
+            },
+        },
+        # The original layer schedules already make layers 0..2 dense and
+        # layer 3 sparse/MoE; preserve them and the sparse kernel settings.
+        meta_config_attribute="text_config",
+        checkpoint_model_prefix="language_model.model.",
+        checkpoint_name_map=minimax_m3_checkpoint_name,
+        # Disable the checkpoint's auto_map remote config and use Transformers'
+        # native MiniMaxM3VLConfig, whose text_config is MiniMaxM3VLTextConfig.
+        # AutoModelForCausalLM resolves that text config to MiniMaxM3VLForCausalLM
+        # for meta-model construction. The legacy remote config instead yields
+        # a generic text PreTrainedConfig that AutoModel cannot resolve.
+        trust_remote_code=False,
+        split_fused_mlp=True,
+        extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
     ),
 )
 
@@ -239,6 +324,17 @@ def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[
     return [(name, shape)]
 
 
+def split_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Split a fused dense/shared-expert gate-up projection."""
+    if name.endswith(".gate_up_proj.weight"):
+        fused_intermediate, hidden = shape
+        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
+        shard_shape = (fused_intermediate // 2, hidden)
+        prefix = name.removesuffix(".gate_up_proj.weight")
+        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
+    return [(name, shape)]
+
+
 def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
     """Force expert MLP tensors to the checkpoint's intermediate dimension.
 
@@ -260,11 +356,25 @@ def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: in
     return shape
 
 
-def pytest_model_cases() -> list[Any]:
-    """Return model params with per-checkpoint CI discovery markers."""
+def pytest_model_cases(backend: str) -> list[Any]:
+    """Select model lanes and full transport coverage on a representative."""
     import pytest
 
-    return [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in MODEL_CASES]
+    if backend not in ("npu_ipc", "hccl"):
+        raise ValueError(f"Unsupported weight transfer backend: {backend}")
+    return [
+        pytest.param(
+            case,
+            packed,
+            id=f"{'packed' if packed else 'unpacked'}-{case.id}",
+            marks=pytest.mark.e2e_model(case.model),
+        )
+        for packed in (False, True)
+        for case in MODEL_CASES
+        if (backend == "npu_ipc" and not packed)
+        or case.full_transfer_matrix
+        or (backend == "hccl" and not packed and case.hccl_unpacked)
+    ]
 
 
 # The packed lanes are disabled here because the packed HCCL transfer is flaky: a
@@ -342,46 +452,56 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
+        persistent_state_names = set(meta_model.state_dict())
 
-        # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
-        # to the raw meta-model name (once), then the checkpoint rename map runs
-        # on the *expanded* names, because the meta model exposes routed experts
-        # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
-        # after ``expand_fused_expert_params`` has split them.
+        # Apply the namespace prefix before expanding fused tensors, then map
+        # the resulting checkpoint names (including per-expert w1/w2/w3).
+        # Generate parameters in the test's BF16 model dtype, while buffers below
+        # retain their native dtype (including FP32 router correction bias).
+        # This models a BF16 checkpoint rather than preserving HF parameter dtypes.
         parameters = [
             (
-                self._apply_name_map(expanded_name, case),
+                mapped_name,
                 resize_expert_shape(expanded_name, expanded_shape, case.expert_intermediate_size),
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expanded_name, expanded_shape in expand_fused_expert_params(
+            for expert_name, expert_shape in expand_fused_expert_params(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
+            for expanded_name, expanded_shape in (
+                split_fused_mlp_params(expert_name, expert_shape)
+                if case.split_fused_mlp
+                else [(expert_name, expert_shape)]
+            )
+            for mapped_name in (self._apply_name_map(expanded_name, case),)
         ]
-        # Learned integer tables must travel with the payload too. Some
-        # architectures expose them as HF *buffers* while the served model keeps
-        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
-        # (vocab, topk) token -> expert table, and the real checkpoint ships it
-        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
-        # Omitting it leaves the table to be re-materialised with ``torch.empty``
-        # during a live update, and the router then indexes experts out of range.
+        # Preserve integer buffers such as token-to-expert tables regardless of
+        # persistence, and include persistent floating-point checkpoint state
+        # such as router correction bias. Non-persistent floating-point runtime
+        # buffers such as rotary tables remain excluded.
         parameters += [
             (
-                self._apply_name_map(self._checkpoint_name(name, case), case),
+                mapped_name,
                 tuple(buffer.shape),
                 buffer.dtype,
             )
             for name, buffer in meta_model.named_buffers()
-            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
+            for mapped_name in (self._apply_name_map(self._checkpoint_name(name, case), case),)
+            if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
-        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
+        self._num_experts = int(
+            getattr(meta_config, "n_routed_experts", 0)
+            or getattr(meta_config, "num_local_experts", 0)
+            or getattr(meta_config, "num_experts", 0)
+            or 0
+        )
         del meta_model
 
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
@@ -415,13 +535,13 @@ class FixedRandomWeightSource(WeightSource):
         torch.npu.manual_seed(seed)
         if not dtype.is_floating_point:
             # Token -> expert tables (DeepSeek-V4's hash router). Values must
-            # stay inside [0, n_routed_experts) *and* be unique within a row:
+            # stay inside [0, num_experts) *and* be unique within a row:
             # the MC2 dispatch/combine kernels assume a token never routes to
             # the same expert twice, which is also why the served model
             # initialises this table duplicate-free (#16485). Sampling top-k
             # over per-expert scores guarantees both invariants while still
             # differing from the model's own table.
-            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
+            assert self._num_experts > 0, f"{name}: integer table needs a positive expert count"
             assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)

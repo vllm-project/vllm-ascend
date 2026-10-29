@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Model-aware two-card HCCL live weight-update regression tests.
+"""Two-card HCCL live weight-update regression tests using Qwen3.5 and GLM-5.1.
 
 NPU 0 hosts the inference worker and NPU 1 deterministically generates every
 parameter of the layer-reduced model. Names and shapes come from a meta-device
@@ -77,8 +77,7 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     torch.npu.device_count() < 2,
     reason="HCCL weight transfer e2e test requires at least 2 NPUs.",
 )
-@pytest.mark.parametrize("case", pytest_model_cases())
-@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl"))
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
