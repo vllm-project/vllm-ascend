@@ -32,9 +32,7 @@ PROMPTS = [
     "The capital of France is",
     "用三句话解释什么是张量并行。",
     'def fibonacci(n):\n    """Return the n-th Fibonacci number."""\n',
-    "A long-context test: "
-    + "alpha beta gamma delta " * 240
-    + "\nSummarize the repeated pattern in one sentence.",
+    "A long-context test: " + "alpha beta gamma delta " * 240 + "\nSummarize the repeated pattern in one sentence.",
 ]
 
 
@@ -49,9 +47,7 @@ def _generate(
     enable_expert_parallel,
     gpu_memory_utilization,
 ):
-    sampling = SamplingParams(
-        max_tokens=max_tokens, temperature=0.0, logprobs=5, seed=1234
-    )
+    sampling = SamplingParams(max_tokens=max_tokens, temperature=0.0, logprobs=5, seed=1234)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("VLLM_USE_V2_MODEL_RUNNER", model_runner)
         mp.setenv("OMP_NUM_THREADS", "1")
@@ -65,9 +61,7 @@ def _generate(
             enable_expert_parallel=enable_expert_parallel,
             gpu_memory_utilization=gpu_memory_utilization,
         ) as runner:
-            runner.generate(
-                [WARMUP_PROMPT], SamplingParams(max_tokens=1, temperature=0.0)
-            )
+            runner.generate([WARMUP_PROMPT], SamplingParams(max_tokens=1, temperature=0.0))
             outputs = runner.generate_w_logprobs(prompts, sampling)
     cleanup_dist_env_and_memory()
     return {
@@ -92,18 +86,10 @@ def test_deepseek_v2_lite_mrv1_mrv2_parity(tp_size):
     mrv2 = _generate("1", **options)
     assert len(mrv1["tokens"]) == len(mrv2["tokens"]) == len(options["prompts"])
     assert mrv1["tokens"] == mrv2["tokens"], "MRV1/MRV2 greedy token outputs diverged"
-    for tokens, left_probs, right_probs in zip(
-        mrv1["tokens"], mrv1["logprobs"], mrv2["logprobs"], strict=True
-    ):
+    for tokens, left_probs, right_probs in zip(mrv1["tokens"], mrv1["logprobs"], mrv2["logprobs"], strict=True):
         assert tokens, "Model runner returned empty greedy output"
-        for token, left_pos, right_pos in zip(
-            tokens, left_probs, right_probs, strict=True
-        ):
-            assert token in left_pos and token in right_pos, (
-                f"Missing greedy logprob for token {token}"
-            )
+        for token, left_pos, right_pos in zip(tokens, left_probs, right_probs, strict=True):
+            assert token in left_pos and token in right_pos, f"Missing greedy logprob for token {token}"
             left = left_pos[token].logprob
             right = right_pos[token].logprob
-            assert left == pytest.approx(right, abs=1e-4, rel=0), (
-                "MRV1/MRV2 greedy logprobs diverged"
-            )
+            assert left == pytest.approx(right, abs=1e-4, rel=0), "MRV1/MRV2 greedy logprobs diverged"
