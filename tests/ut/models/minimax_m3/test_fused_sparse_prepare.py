@@ -17,6 +17,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 def make_layer():
     norm = SimpleNamespace(variance_epsilon=1e-6, weight=torch.zeros(128))
     return SimpleNamespace(
+        use_dspark=False,
         indexer_proj=None,
         head_dim=128,
         idx_head_dim=128,
@@ -30,7 +31,7 @@ def make_layer():
 
 @pytest.mark.parametrize(
     "unsupported",
-    [None, "dtype", "cpu", "positions", "heads", "rope", "eps", "triton", "large_batch", "cache_dtype"],
+    [None, "dtype", "cpu", "positions", "heads", "rope", "eps", "triton", "large_batch", "cache_dtype", "dspark"],
 )
 def test_fusion_guard(unsupported):
     layer = make_layer()
@@ -52,6 +53,8 @@ def test_fusion_guard(unsupported):
         hidden.shape = (262145, 128)
     elif unsupported == "cache_dtype":
         layer.kv_cache_torch_dtype = torch.float8_e5m2
+    elif unsupported == "dspark":
+        layer.use_dspark = True
     with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", unsupported != "triton"):
         assert MiniMaxM3SparseAttention._can_fuse_sparse_prepare(layer, positions, hidden) == (unsupported is None)
 

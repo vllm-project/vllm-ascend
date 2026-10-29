@@ -313,6 +313,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
 
         vllm_config = get_current_vllm_config()
+        self.use_dspark = bool(vllm_config.speculative_config and vllm_config.speculative_config.use_dspark())
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_layer_kv_cache_dtypes(
             cache_config,
@@ -485,7 +486,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # ahead of the separate prepare/cache chain through 256K-token prefill;
         # retain the fallback beyond the validated range.
         return (
-            HAS_TRITON
+            not self.use_dspark
+            and HAS_TRITON
             and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
