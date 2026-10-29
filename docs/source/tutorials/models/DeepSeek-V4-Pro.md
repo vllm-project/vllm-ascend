@@ -364,6 +364,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
@@ -425,6 +426,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
