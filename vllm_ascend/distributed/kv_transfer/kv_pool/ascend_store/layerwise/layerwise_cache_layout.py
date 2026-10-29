@@ -14,10 +14,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
@@ -306,16 +307,29 @@ def build_layerwise_reuse_layout(
                 prefetch_layer_map[layers_sharing_buffer[owner_index]] = layers_sharing_buffer[owner_index - 1]
 
     if prefetch_layer_map:
+        if any(not is_prefix_cacheable(item.main.spec) for item in layer_cache_specs.values()):
+            raise NotImplementedError("Private cache state must remain resident outside reusable main slots")
+        if any(is_prefix_cacheable(spec.spec) for item in layer_cache_specs.values() for spec in item.extra_main_specs):
+            raise NotImplementedError("Layerwise reuse does not support additional cacheable main components")
         unsupported_specs = [
             named_spec
-            for named_specs in named_specs_by_layer.values()
-            for named_spec in named_specs
+            for slot in buffer_slots
+            if len(slot) > 1
+            for layer in slot
+            for named_spec in named_specs_by_layer[layer]
             if not isinstance(named_spec.spec, AttentionSpec)
+            and is_prefix_cacheable(named_spec.spec)
+            and not (
+                isinstance(named_spec.spec, MambaSpec)
+                and named_spec.spec.mamba_cache_mode == "align"
+                and getattr(named_spec.spec, "num_prefill_checkpoint_blocks", 0) == 0
+            )
         ]
         if unsupported_specs:
             named_spec = unsupported_specs[0]
             raise NotImplementedError(
-                "Layerwise KV cache reuse supports attention cache specs only; "
+                "Layerwise KV cache reuse supports attention cache specs only unless recurrent state uses align mode "
+                "without extra prefill checkpoint blocks; "
                 f"{named_spec.layer_name} uses {type(named_spec.spec).__name__}."
             )
 
@@ -397,6 +411,18 @@ def apply_layerwise_kv_cache_plan(
     if seen_layers != set(layer_specs):
         raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
+    # A private component keeps its entire backing resident, including any
+    # indexer sharing that allocation. Preserve its original views and strides.
+    resident_tensors = [
+        tensor
+        for tensor in old_tensors
+        if any(not is_prefix_cacheable(layer_specs[name]) for name in get_kv_cache_tensor_layers(tensor))
+    ]
+    resident_names = {name for tensor in resident_tensors for name in get_kv_cache_tensor_layers(tensor)}
+    main_names = {item.main.layer_name for item in reuse_layout.layer_cache_specs.values()}
+    if resident_names & main_names:
+        raise ValueError("Resident private state must have separate descriptors from reusable main caches")
+
     def _merge_specs(named_specs: list[NamedKVCacheSpec], *, indexer: bool = False) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
         reference_spec = layer_specs[shared_by[0]]
@@ -427,14 +453,15 @@ def apply_layerwise_kv_cache_plan(
         indexer_specs: list[NamedKVCacheSpec] = []
         for layer in slot:
             indexer = reuse_layout.layer_cache_specs[layer].indexer
-            if indexer is not None:
+            if indexer is not None and indexer.layer_name not in resident_names:
                 indexer_specs.append(indexer)
         if indexer_specs:
             _merge_specs(indexer_specs, indexer=True)
+    new_tensors.extend(resident_tensors)
     # Draft KV survives between forwards, unlike a layerwise target scratch
     # slot. Give every resident draft layer its own persistent descriptor.
     for layer_name in layer_specs:
-        if layer_name in excluded_layer_names:
+        if layer_name in excluded_layer_names and layer_name not in resident_names:
             _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(

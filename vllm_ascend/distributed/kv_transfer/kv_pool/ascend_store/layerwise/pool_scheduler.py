@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -18,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    RequestTracker,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -26,6 +28,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(KVPoolScheduler):
+    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        if self.layerwise_offload and request_tracker.layerwise_request_id is None:
+            request_tracker.layerwise_request_id = uuid4().hex
+        return super()._build_req_meta(request_tracker, *args, **kwargs)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -98,6 +105,21 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                 ).has_layer_reuse
 
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if self.layerwise_offload:
+            load_spec = self.load_specs.get(request.request_id)
+            restored_tokens = load_spec.kvpool_cached_tokens if load_spec is not None else 0
+            # Local hashes survive scratch reuse; their payload does not.
+            # Never admit a local hit whose overwritten payload is unavailable.
+            if restored_tokens < num_computed_tokens:
+                raise RuntimeError("Layerwise reuse local prefix has no complete external restore point")
+            if load_spec is not None and self.num_speculative_blocks_by_group:
+                # Private tail reconstruction can shorten a full external hit.
+                # Restore recurrent state at that exact endpoint.
+                load_spec.kvpool_store_skip_tokens = restored_tokens
+        return result
+
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         if not self.use_layerwise:
             return super()._lookup_external_hit_tokens(request, num_computed_tokens)
@@ -127,6 +149,15 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Probe the endpoint we can actually resume from. Trimming a full
+            # hit afterwards could select an earlier recurrent checkpoint that was
+            # never produced by chunked prefill.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
@@ -295,6 +326,8 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         head_or_tp_ranks = (
             self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
         )
+        if group_id in self.num_speculative_blocks_by_group and self.use_layerwise_transfer:
+            head_or_tp_ranks *= self.pcp_size
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))
