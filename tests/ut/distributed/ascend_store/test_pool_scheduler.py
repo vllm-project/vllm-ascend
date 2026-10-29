@@ -41,6 +41,7 @@ from zmq.sugar.context import Context
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
@@ -49,7 +50,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     LookupKeyClient,
-    get_zmq_rpc_path_lookup,
 )
 
 
@@ -258,7 +258,7 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
 
     def test_independent_dp_lookup_servers_bind_distinct_paths(self):
         """Two dense engines with compute DP rank zero need separate RPC servers."""
-        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
         with tempfile.TemporaryDirectory(prefix="kv-dp-") as rpc_dir, ExitStack() as stack:
             stack.enter_context(patch(f"{module}.envs.VLLM_RPC_BASE_PATH", rpc_dir))
             context = stack.enter_context(Context())
@@ -1051,9 +1051,9 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
 
 class TestLookupKeyClient(unittest.TestCase):
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup(self, mock_encoder_cls, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1074,9 +1074,9 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertEqual(int.from_bytes(frames[3], "big"), 16)
         client.close()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup_zmq_error_returns_zero_and_closes_client(
         self, mock_encoder_cls, mock_context_cls, mock_make_socket
     ):
@@ -1096,8 +1096,8 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_socket_sets_receive_timeout(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1134,8 +1134,8 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertIs(scheduler.client, second_client)
         self.assertEqual(mock_client_cls.call_count, 2)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_close_is_idempotent_and_terminates_context(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1152,8 +1152,8 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
     def test_reset_ack(self, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1166,8 +1166,8 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertTrue(client.reset())
         mock_socket.send.assert_called_once_with(b"reset")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
     def test_reset_nack(self, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0

@@ -28,6 +28,23 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_kda_recoverssm.py:
+#   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
+#   Why: The upstream metadata builder imports its CUDA context directly.
+#   How: Replace only the context class on GLM workers with RecoverSSM enabled.
+#   Related PR: No upstream context-factory extension point exists yet.
+#   Future plan: Remove when upstream allows the backend to select the context.
+# --------------------------------
+# * platform/patch_replayssm_config.py:
+#   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
+#   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
+#        while Ascend also implements it for GLM-Next.
+#   How: Validate GLM's supported execution/cache/PD contract and derive
+#        use_kda_recoverssm from the existing use_replayssm flag. Other models
+#        and disabled configurations retain the upstream validator.
+#   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
+#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+# --------------------------------
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
@@ -284,6 +301,20 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder._get_pool_bytes_per_block`
+#    Why:
+#       The builder-based vLLM planner probes one block and requires every
+#       device tensor to share one backing size. Ascend's DSV4.1, DSV4, GLM5,
+#       and TurboQuant layouts can use several differently sized allocations.
+#    How:
+#       Return the aggregate per-block pool size from existing Ascend layout
+#       accounting for those cache types; leave other layouts on the upstream
+#       placement probe.
+#    Related PR (if no, explain why):
+#       No upstream PR currently handles Ascend's multi-allocation layouts.
+#    Future Plan:
+#       Move this override into an Ascend KVCacheConfigBuilder, or remove it
+#       once upstream provides a platform hook for multi-allocation accounting.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

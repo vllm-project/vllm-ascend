@@ -8,6 +8,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import Glm5NextTextConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -77,6 +78,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import pad_sequence_parallel_tokens
+
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
 from .multimodal import (
@@ -85,6 +88,7 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
+from .recoverssm_config import use_glm_recoverssm
 
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
@@ -480,7 +484,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         if self.is_sequence_parallel:
-            x = sp_reduce_scatter(x)
+            x = sp_reduce_scatter(pad_sequence_parallel_tokens(x))
 
         # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
         residual, post, comb, x = self.hc_post_pre(
@@ -572,6 +576,7 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
+@support_torch_compile
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -712,7 +717,7 @@ class Glm5NextModel(nn.Module):
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
-            hidden_states = sp_shard(hidden_states)
+            hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         for layer in self._active_layers:
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
@@ -862,6 +867,8 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+    supports_replayssm: ClassVar[Literal[True]] = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -901,11 +908,14 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -915,13 +925,18 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = get_kda_parallel_size(parallel_config)
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -947,6 +962,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerState, IsHybrid):
+    supports_replayssm: ClassVar[Literal[True]] = True
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
     # hybrid (auto-aligns mamba/attention block sizes, sizes the mamba state

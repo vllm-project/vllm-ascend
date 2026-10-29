@@ -27,8 +27,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  Weight Version | Hardware Requirements | Download Links |
 |-----------------|-----------------------|----------------|
 | `Kimi-K2.6-w4a8` (Quantized version for w4a8) | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8) |
-| `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6) |          | [Hugging Face](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3) |
-| `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block <br>diffusion model for parallel drafting) |          | [Hugging Face](https://huggingface.co/z-lab/Kimi-K2.5-DFlash) |
+| `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6) | 1 Atlas 800 A3 (64GB × 16) node | [Hugging Face](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3) |
+| `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block <br>diffusion model for parallel drafting) | 1 Atlas 800 A3 (64GB × 16) node | [Hugging Face](https://huggingface.co/z-lab/Kimi-K2.5-DFlash) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -167,7 +167,7 @@ vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
     --enable-expert-parallel \
     --port 8000 \
     --max-num-seqs 4 \
-    --max-model-len 34816 \
+    --max-model-len 15000 \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.87 \
     --seed 42 \
@@ -182,7 +182,7 @@ vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
 Key Parameter Descriptions:
 
 - Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios (Influx of long prompts, multimodal inputs (Kimi-K2.6 specific), and sudden surge of concurrent requests, etc.). Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `15000` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--allowed-local-media-path` allows multimodal requests to load local media files, such as images and videos, from `/data/media` and its subdirectories on the server. Place the media files in this directory, or change the path to the directory containing your media files.
 - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
@@ -192,7 +192,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](..
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+We recommend using Mooncake as a prerequisite for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -207,7 +207,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 
 This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
+Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes, with 1 Decode instance spanning 2 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
 
 - `Kimi-K2.6-w4a8 2P1D`: requires 4 Atlas 800 A3 (64GB × 16) nodes.
 
@@ -624,7 +624,7 @@ curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
 
 Expected Result:
 
-The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response:
+The proxy returns HTTP 200 OK. If not, it means that the PD separation service has not started successfully. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response:
 
 ```json
 {

@@ -35,7 +35,8 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.in_proj_qkvbfg_a = project
     layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
     layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
-    layer.o_norm = lambda x, gate: x
+    # The gated norm now runs inside the KDA custom op, which writes into `out`.
+    layer.o_norm = SimpleNamespace(forward_oot=lambda output, gate, *, out: out)
     layer.o_proj = lambda x: (x, None)
     seen = []
 
@@ -51,7 +52,11 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
         padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
     )
     metadata = SimpleNamespace(pcp_context=pcp_context)
-    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    monkeypatch.setattr(
+        model_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer": metadata}, no_compile_layers={"layer": layer}),
+    )
     gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
     pcp_group = SimpleNamespace(
         world_size=2,
@@ -62,6 +67,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.pcp_size = pcp_group.world_size
     layer.pcp_rank = pcp_group.rank_in_group
 
+    # The KDA custom op is registered against the NPU dispatch key, so a CPU
+    # runner cannot dispatch it. Call its implementation directly instead.
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
+
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
 
@@ -70,17 +79,52 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     assert output[:, 0].tolist() == expected
 
 
-@pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("recover", [False, True])
+def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.use_recoverssm = recover
+    layer.tp_size, layer.num_heads, layer.head_dim, layer.num_spec, layer.conv_size = 4, 8, 128, 5, 4
+    layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    cache = SimpleNamespace(
+        mamba_cache_dtype="auto",
+        mamba_ssm_cache_dtype="auto",
+        use_kda_recoverssm=recover,
+        use_replayssm=recover,
+        mamba_block_size=16,
+        mamba_page_size_padded=None,
+        mamba_cache_mode="none",
+    )
+    layer.cache_config = cache
+    spec = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
+    assert spec.num_speculative_blocks == (0 if recover else 5)
+    assert spec.shapes[1] == (2, 128, 128)
+    assert len(spec.shapes) == len(spec.dtypes) == (4 if recover else 2)
+    if recover:
+        assert spec.shapes[2:] == ((2, 6, 128), (2, 6, 256))
+        assert spec.dtypes == (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
+
+
+@pytest.mark.parametrize(
+    ("speculative", "spec_only", "recover"),
+    [(False, False, False), (True, False, False), (True, True, False), (True, False, True), (True, True, True)],
+)
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, dim_first, recover
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
     layer.local_num_heads = 1
     layer.head_dim = layer.local_projection_size = 128
     layer.kda_lower_bound = -4.0
+    layer.use_recoverssm = recover
+    layer.num_spec = 1
     state_shape = (8, 384, 6) if dim_first else (8, 6, 384)
     layer.kv_cache = (torch.zeros(state_shape, dtype=torch.bfloat16), torch.zeros(8, 1, 128, 128))
+    if recover:
+        layer.kv_cache += (torch.zeros(8, 1, 2, 128), torch.zeros(8, 1, 2, 256, dtype=torch.bfloat16))
     layer._conv_state_dim_first = dim_first
     layer._merged_conv_weight = None
     # Checkpoints retain FP32 convolution weights; AscendC needs the activation
@@ -127,6 +171,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
     if spec_only:
         values.update(num_prefills=0, non_spec_token_indx=None)
+        if recover:
+            values.update(spec_sequence_masks=None, spec_token_indx=None)
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -226,6 +272,13 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         assert kwargs.get("output_buffer") is None
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        assert state is layer.kv_cache[1]
+        expected_indices = metadata.spec_state_indices_tensor if speculative else metadata.non_spec_state_indices_tensor
+        assert indices is expected_indices
+        state_slots = indices[: starts.numel() - 1].reshape(-1)
+        state.index_fill_(0, state_slots, 2.0)
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
@@ -234,21 +287,62 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         assert q.shape[1] == 3
         assert chunk is metadata.non_spec_prefill_metadata.chunk
         torch.testing.assert_close(indices, metadata.prefill_state_indices)
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        assert state is layer.kv_cache[1]
+        state.index_fill_(0, indices, 3.0)
         return q * 3
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
+
+    def verify(q, k, v, gate, beta, a_log, bias, bound, state, correction, kg, starts, indices, capacity):
+        assert correction is layer.kv_cache[2] and kg is layer.kv_cache[3]
+        assert capacity == 2 and a_log.shape == (1,)
+        torch.testing.assert_close(indices, metadata.spec_state_indices_tensor[:, 0])
+        assert state is layer.kv_cache[1]
+        assert q.shape[1] == 2
+        torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        events.append("recover_verify")
+        calls.append("recover_verify")
+        # RecoverSSM verification records compact updates without mutating the
+        # persistent checkpoint. The accepted updates are committed later.
+        return q * 2
+
+    monkeypatch.setattr(model_kda, "kda_recoverssm_verify", verify)
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
-    qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
+    # Distinguish tokens, channels and Q/K/V so swaps and partial writes fail.
+    query = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None]
+    query = query + torch.arange(128, dtype=torch.bfloat16)[None, :] / 128
+    qkv = torch.cat((query, query + 8, query + 16), dim=-1)
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
     layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
-    expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
-    expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
-    torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
+    expected = query * 3
+    recurrent_tokens = 2 if speculative else 1
+    expected[:recurrent_tokens] = query[:recurrent_tokens] * 2
+    torch.testing.assert_close(out[:, :tokens], expected[None, :, None, :], rtol=0, atol=0)
     # Rows outside the scheduled token groups are left untouched.
     assert torch.isnan(out[:, tokens:]).all()
-    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    expected_state = torch.zeros_like(layer.kv_cache[1])
+    if not recover:
+        recurrent_slots = (
+            metadata.spec_state_indices_tensor.reshape(-1)
+            if speculative
+            else metadata.non_spec_state_indices_tensor[: metadata.num_decodes]
+        )
+        expected_state.index_fill_(0, recurrent_slots, 2.0)
+    if not spec_only:
+        expected_state.index_fill_(0, metadata.prefill_state_indices, 3.0)
+    torch.testing.assert_close(layer.kv_cache[1], expected_state, rtol=0, atol=0)
+    spec_call = "recover_verify" if recover else "recurrent"
+    assert calls == ([spec_call] if spec_only else [spec_call, "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
-    assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
+    spec_event = "recover_verify" if recover else "state_write"
+    expected_execution_events = [spec_event]
+    if not spec_only:
+        expected_execution_events.append("state_write")
+    assert events == [("load", "layer"), "compute", *expected_execution_events, "save"]
 
 
 @pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])
@@ -259,7 +353,8 @@ def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width,
     config = SimpleNamespace(linear_head_dim=128, linear_conv_kernel_dim=width)
     vllm_config = SimpleNamespace(
         quant_config=None,
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+        cache_config=SimpleNamespace(use_replayssm=False),
         speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
     )
     with pytest.raises(ValueError, match="causal-conv requires"):
@@ -291,6 +386,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     layer.local_num_heads = 1
     layer.head_dim = layer.local_projection_size = 128
     layer.kda_lower_bound = -4.0
+    layer.use_recoverssm = False
     layer._conv_state_dim_first = False
     layer.kv_cache = (torch.zeros(8, 3, 384), torch.zeros(8, 1, 128, 128))
     layer._merged_conv_weight = torch.ones(4, 384)
