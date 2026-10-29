@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate DeepSeek V2 Lite MRV1/V2 greedy parity with synchronous scheduling."""
+"""Validate DeepSeek V2 Lite MRV1/V2 greedy parity with matched prefill batches."""
 
 import os
 
@@ -56,18 +56,26 @@ def _generate(
             MODEL,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
-            async_scheduling=False,
+            async_scheduling=True,
             enforce_eager=True,
             tensor_parallel_size=tensor_parallel_size,
             enable_expert_parallel=enable_expert_parallel,
             gpu_memory_utilization=gpu_memory_utilization,
         ) as runner:
             runner.generate([WARMUP_PROMPT], SamplingParams(max_tokens=1, temperature=0.0))
-            outputs = runner.generate_w_logprobs(prompts, sampling)
+            # Rendering/enqueuing is incremental; keep it outside async execution
+            # so both runners start with the complete prefill batch.
+            core = runner.model.llm_engine.engine_core
+            core.call_utility("pause_scheduler", "keep", False)
+            try:
+                runner.model.enqueue(prompts, sampling_params=sampling, use_tqdm=False)
+            finally:
+                core.call_utility("resume_scheduler")
+            outputs = runner.model.wait_for_completion(use_tqdm=False)
     cleanup_dist_env_and_memory()
     return {
-        "tokens": [item[0] for item in outputs],
-        "logprobs": [item[2] for item in outputs],
+        "tokens": [list(item.outputs[0].token_ids) for item in outputs],
+        "logprobs": [item.outputs[0].logprobs for item in outputs],
     }
 
 
