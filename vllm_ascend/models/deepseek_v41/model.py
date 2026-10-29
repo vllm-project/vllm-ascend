@@ -1739,11 +1739,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
+        replay = self.model.decoder_replay_layers
+        # Keep replay's per-step row selection outside the compiled full-batch path.
+        model_forward = self.model.forward if replay is not None and replay.rows is not None else self.model
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count
             ) as graph_inputs:
-                return self.model(
+                return model_forward(
                     input_ids,
                     positions,
                     intermediate_tensors,
@@ -1751,7 +1754,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     lookback_token_ids=lookback_token_ids,
                     **graph_inputs,
                 )
-        return self.model(
+        return model_forward(
             input_ids,
             positions,
             intermediate_tensors,
