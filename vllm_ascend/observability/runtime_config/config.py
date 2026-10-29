@@ -246,7 +246,7 @@ def _normalize_ascend_log_section_into(ascend: dict[str, Any]) -> None:
 
 
 def _normalize_metrics_section_into(metrics: dict[str, Any]) -> None:
-    """Normalize ``metrics.level`` to ``off`` / ``basic`` / ``detail`` / ``debug``."""
+    """Normalize ``metrics.level`` to ``basic`` or ``detail``."""
     from vllm_ascend.observability.ms_metrics.level import canonical_metric_level
 
     if "level" not in metrics:
@@ -1054,7 +1054,7 @@ class RuntimeConfig:
         return self.detector_section(section).get(key, default)
 
     def metrics_level(self) -> str:
-        """Canonical ``metrics.level`` (``off``, ``basic``, ``detail``, or ``debug``)."""
+        """Canonical ``metrics.level`` (``basic`` or ``detail``)."""
         metrics = self._data.get("metrics") or {}
         level = metrics.get("level", "basic")
         return str(level)
