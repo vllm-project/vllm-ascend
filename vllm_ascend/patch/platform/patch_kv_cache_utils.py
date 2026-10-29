@@ -580,6 +580,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
 
+
 def _has_ascend_multi_allocation_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> bool:
