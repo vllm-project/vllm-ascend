@@ -589,7 +589,12 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.methods.kv_cache.turboquant.config import validate_turboquant
 
         validate_turboquant(vllm_config)
-        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
+        # cache_config / attention_config can be None in some deployment or testing scenarios
+        # (guarded elsewhere in this file, e.g. lines 832 / 920). Use getattr so a missing config
+        # skips the fp8 check instead of raising AttributeError at startup.
+        cache_dtype = getattr(vllm_config.cache_config, "cache_dtype", None)
+        indexer_kv_dtype = getattr(vllm_config.attention_config, "indexer_kv_dtype", None)
+        if cache_dtype == "fp8" or indexer_kv_dtype == "fp8":
             hardware_profile = get_current_hardware_profile()
             if not hardware_profile.supports(HardwareCapability.FP8_ATTENTION):
                 raise ValueError(

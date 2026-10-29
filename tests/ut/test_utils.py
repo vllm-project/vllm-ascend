@@ -188,18 +188,17 @@ class TestUtils(TestBase):
         """A CPU-only torch build has no ``torch.version.cann`` attribute at all.
         ``find_hccl_library`` must raise the friendly ValueError rather than an
         ``AttributeError`` from the bare ``torch.version.cann`` access."""
-        original = torch.version
-        try:
-            # Simulate a stock torch where ``cann`` is not defined.
-            class _VersionWithoutCann:
-                pass
+        # Patch torch.version with a spec that exposes no attributes, so accessing
+        # ``torch.version.cann`` raises AttributeError as on a CPU-only build. Using
+        # mock.patch avoids reassigning the global torch.version (which can leak into
+        # other tests if the test errors before restoring it).
+        class _VersionWithoutCann:
+            pass
 
-            torch.version = _VersionWithoutCann()
+        with mock.patch("torch.version", _VersionWithoutCann(), spec=_VersionWithoutCann):
             with self.assertRaises(ValueError) as ctx:
                 utils.find_hccl_library()
             self.assertIn("torch-npu", str(ctx.exception))
-        finally:
-            torch.version = original
 
     def test_current_stream(self):
         utils._CURRENT_STREAM = None
