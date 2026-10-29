@@ -41,17 +41,33 @@ def init_asecnd_model_state(
     encoder_cache: EncoderCache | None,
     device: torch.device,
 ):
+    cls = _resolve_ascend_model_state_cls(vllm_config, model)
+
+    # Upstream ``init_model_state`` rejects this combination, but this function
+    # replaces it wholesale on Ascend, so the guard has to be repeated here.
+    if getattr(vllm_config.model_config, "enable_prompt_embeds", False) and not cls.supports_prompt_embeds:
+        raise ValueError(f"--enable-prompt-embeds not supported with {cls.__name__}.")
+
+    return cls(vllm_config, model, encoder_cache, device)
+
+
+def _resolve_ascend_model_state_cls(
+    vllm_config: VllmConfig,
+    model: nn.Module,
+):
+    """Pick the Ascend model state class; mirrors upstream ``resolve_model_state_cls``."""
     # Keep model-provided state overrides ahead of the platform defaults.
     if hasattr(model, "get_model_state_cls"):
-        cls = model.get_model_state_cls()
-        return cls(vllm_config, model, encoder_cache, device)
+        return model.get_model_state_cls()
 
     # 310P uses Triton-free states under ``vllm_ascend._310p.worker.v2.model_state``.
     if vllm_config.model_config.is_hybrid:
         if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+            # Hybrid models that also declare ENCODER_ONLY layers are not
+            # adapted on 310P; that combination is owned by the 310P team.
             from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState
 
-            return Ascend310PMambaHybridModelState(vllm_config, model, encoder_cache, device)
+            return Ascend310PMambaHybridModelState
 
         # Hybrid models that also declare bidirectional, KV-cache-less layers
         # (ColQwen3.5: GDN layers + ENCODER_ONLY full attention) need both
@@ -62,23 +78,13 @@ def init_asecnd_model_state(
                 AscendHybridEncoderModelState,
             )
 
-            return AscendHybridEncoderModelState(
-                vllm_config,
-                model,
-                encoder_cache,
-                device,
-            )
+            return AscendHybridEncoderModelState
 
         from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
             AscendMambaHybridModelState,
         )
 
-        return AscendMambaHybridModelState(
-            vllm_config,
-            model,
-            encoder_cache,
-            device,
-        )
+        return AscendMambaHybridModelState
 
     if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
         from vllm_ascend._310p.worker.v2.model_state import (
@@ -87,31 +93,16 @@ def init_asecnd_model_state(
         )
 
         if _has_encoder_only_layers(vllm_config):
-            return Ascend310PEncoderOnlyModelState(
-                vllm_config,
-                model,
-                encoder_cache,
-                device,
-            )
+            return Ascend310PEncoderOnlyModelState
 
-        return Ascend310PModelState(
-            vllm_config,
-            model,
-            encoder_cache,
-            device,
-        )
+        return Ascend310PModelState
 
     if any(isinstance(module, CrossAttention) for module in model.modules()):
         from vllm_ascend.worker.v2.model_states.encoder_decoder import (
             AscendEncoderDecoderModelState,
         )
 
-        return AscendEncoderDecoderModelState(
-            vllm_config,
-            model,
-            encoder_cache,
-            device,
-        )
+        return AscendEncoderDecoderModelState
 
     # Encoder-only attention (BERT/BGE) is non-causal and keeps no KV cache, so
     # it cannot use the KV-backed AscendModelState.
@@ -120,13 +111,8 @@ def init_asecnd_model_state(
             AscendEncoderOnlyModelState,
         )
 
-        return AscendEncoderOnlyModelState(
-            vllm_config,
-            model,
-            encoder_cache,
-            device,
-        )
+        return AscendEncoderOnlyModelState
 
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
-    return AscendModelState(vllm_config, model, encoder_cache, device)
+    return AscendModelState
