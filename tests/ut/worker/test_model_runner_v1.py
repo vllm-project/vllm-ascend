@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
-import pytest
 import torch
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
@@ -54,7 +53,10 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
 )
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -2467,12 +2469,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @pytest.mark.skipif(vllm_version_is("0.32.0"), reason="the pluggable KV cache builder is main-only")
+    @patch(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        side_effect=lambda _config, num_blocks: num_blocks,
+    )
     def test_dsv4_main_materializes_real_planner_geometry_once(
         self,
+        _mock_override,
     ):
-        from vllm_ascend.core.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
-
         small_name = "model.layers.0.self_attn.attn"
         large_name = "model.layers.1.self_attn.attn"
         aliased_large_name = "model.layers.2.self_attn.attn"
@@ -2518,13 +2522,17 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         num_blocks = 3
         tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
         available_memory = tuple_stride * 2
-        kv_cache_config = _get_kv_cache_config_deepseek_v4_main(
-            SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
+        planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
+            SimpleNamespace(),
             groups,
-            num_blocks,
+            available_memory,
         )
-        self.assertEqual(kv_cache_config.num_blocks, num_blocks)
-        descriptors = kv_cache_config.kv_cache_tensors
+        self.assertEqual(planned_num_blocks, num_blocks)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=planned_num_blocks,
+            kv_cache_tensors=descriptors,
+            kv_cache_groups=groups,
+        )
 
         runner = self._build_runner()
         runner.use_compress = True
