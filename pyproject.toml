@@ -30,7 +30,7 @@ requires = [
     "fastokens==0.2.0",
     "compressed_tensors>=0.11.0",
     "arctic-inference==0.1.1",
-    "triton-ascend==3.6.0"
+    "triton-ascend==3.6.0.post2"
 ]
 build-backend = "setuptools.build_meta"
 
