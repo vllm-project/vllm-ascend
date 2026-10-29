@@ -4760,13 +4760,6 @@ tool use or performance. The historical command used `--reasoning-parser glm45`;
 the shared commands now use `glm47` to align with GLM-5.3. That parser
 update has not been revalidated on NPU hardware in this documentation update.
 
-The recorded local Docker image ID is
-`sha256:cc0062c206978be60a1c4b729a9b4975eecdec498e5569f2406a09d6ab98841e`,
-with vLLM `0.30.0+empty` and vLLM-Ascend commit `a50eb57f1`. This is
-a local image ID, not a registry digest or a pullable image reference.
-The image selected in Section 4 must not be assumed to reproduce these
-historical records.
-
 | Model / local checkpoint | Startup and short requests | Dataset result |
 | --- | --- | --- |
 | GLM-5.2 W4A4C8/MXFP4 | Passed | No dataset score from this validation |
