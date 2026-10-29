@@ -275,3 +275,75 @@ def test_reference_moe_rejects_expert_parallelism():
         pytest.raises(NotImplementedError, match="expert parallelism"),
     ):
         muse_spark.AscendMuseSpark1xMoE(vllm_config, layer_idx=1)
+
+
+MOE_HIDDEN_SIZE = 16
+MOE_INTERMEDIATE_SIZE = 12
+NUM_LOCAL_EXPERTS = 4
+
+
+def _build_moe(monkeypatch):
+    """Build the MoE with the factory stubbed, and return it with the call."""
+    config = SimpleNamespace(
+        hidden_size=32,
+        moe_hidden_size=MOE_HIDDEN_SIZE,
+        moe_intermediate_size=MOE_INTERMEDIATE_SIZE,
+        num_local_experts=NUM_LOCAL_EXPERTS,
+        num_experts_per_tok=2,
+        num_shared_experts=0,
+        routed_scaling_factor=1.5,
+        output_multiplier=1.0,
+        rms_norm_eps=EPS,
+        post_norm_eps=EPS,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=config, dtype=torch.float32),
+        parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+    )
+
+    class _FakeRoutedExperts(nn.Module):
+        pass
+
+    class _FakeRunner(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.routed_experts = _FakeRoutedExperts()
+            self.routed_experts.quant_method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
+
+    factory = patch.object(muse_spark, "FusedMoEFactory", side_effect=lambda **kwargs: _FakeRunner())
+    monkeypatch.setattr(muse_spark, "GateLinear", lambda *args, **kwargs: nn.Linear(1, 1))
+    monkeypatch.setattr(muse_spark, "ReplicatedLinear", lambda *args, **kwargs: nn.Linear(1, 1))
+    monkeypatch.setattr(
+        muse_spark, "get_ep_group", lambda: SimpleNamespace(device_group=SimpleNamespace(size=lambda: 1))
+    )
+
+    with factory as fused_moe:
+        moe = muse_spark.AscendMuseSpark1xMoE(vllm_config, layer_idx=0, prefix="model.layers.0.mlp")
+    return moe, fused_moe.call_args.kwargs
+
+
+def test_moe_builds_the_experts_on_the_ascend_fused_path(monkeypatch):
+    """The runner is left to the pluggable dispatch; only the container differs."""
+    moe, kwargs = _build_moe(monkeypatch)
+
+    assert kwargs["routed_experts_cls"] is muse_spark.AscendMuseSparkRoutedExperts
+    # Passing runner_cls would bypass the Ascend runner and its combine.
+    assert "runner_cls" not in kwargs
+    assert "moe_config_cls" not in kwargs
+    assert kwargs["router"] is moe.moe_router
+
+
+def test_moe_sizes_the_experts_to_the_pooled_width(monkeypatch):
+    """The experts live after the pooler, so they take the latent width."""
+    _, kwargs = _build_moe(monkeypatch)
+
+    assert kwargs["hidden_size"] == MOE_HIDDEN_SIZE
+    assert kwargs["intermediate_size"] == MOE_INTERMEDIATE_SIZE
+    assert kwargs["num_experts"] == NUM_LOCAL_EXPERTS
+
+
+def test_moe_hands_its_post_expert_norm_to_the_quant_method(monkeypatch):
+    """Without this the MLP stage raises rather than skipping the norm."""
+    moe, _ = _build_moe(monkeypatch)
+
+    assert moe.experts.routed_experts.quant_method.post_expert_norm is moe.post_expert_norm
