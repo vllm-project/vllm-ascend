@@ -63,7 +63,8 @@ class GraphFusionPassManager:
 
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
-        if self.ascend_compilation_config.fuse_qknorm_rope:
+        use_dspark = bool(config.speculative_config and config.speculative_config.use_dspark())
+        if self.ascend_compilation_config.fuse_qknorm_rope and not use_dspark:
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
 
             self.passes.append(QKNormRopeFusionPass(config))
