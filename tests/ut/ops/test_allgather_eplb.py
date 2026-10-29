@@ -177,7 +177,7 @@ def test_source_mask_is_unused_outside_v2_a5_allgather(monkeypatch, use_v2, has_
         "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
     )
     prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
-    assert layer._make_eplb_token_mask(2, context, prepare) is None
+    assert layer._make_eplb_token_mask(2, prepare) is None
     prepare.all_gather_eplb_mask.assert_not_called()
 
 
@@ -197,6 +197,7 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
         is_padding=None if padding_source == "unpadded_count" else torch.tensor([False, True, True, False])
     )
     monkeypatch.setattr(routed_module, "use_allgather_eplb", lambda enabled: enabled)
+    monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(routed_module, "dbo_current_ubatch_id", lambda: 1)
     monkeypatch.setattr(routed_module, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(routed_module, "get_tensor_model_parallel_rank", lambda: 1)
@@ -210,11 +211,11 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
         (True, "context"): [False, True],
         (True, "unpadded_count"): [True, False],
     }[sequence_parallel, padding_source]
-    mask = layer._make_eplb_token_mask(2, context, prepare)
+    mask = layer._make_eplb_token_mask(2, prepare)
     assert mask is not None
     assert mask.tolist() == expected
     state.should_record_tensor.fill_(False)
-    mask = layer._make_eplb_token_mask(2, context, prepare)
+    mask = layer._make_eplb_token_mask(2, prepare)
     assert mask is not None
     assert mask.tolist() == [False, False]
     assert prepare.all_gather_eplb_mask.call_count == 2
@@ -305,6 +306,6 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
     monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))
-    assert events == ["prepare", "source_mask", "gather_mask", "route", "ffn", "record_load", "finalize"]
+    assert events == ["prepare", "route", "ffn", "source_mask", "gather_mask", "record_load", "finalize"]
     assert state.expert_load_view.item() == expected
     assert state.allgather_record_tensor.item() == int(expected > 0)

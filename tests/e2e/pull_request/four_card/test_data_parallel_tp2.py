@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.forward_context import create_forward_context, get_forward_context, override_forward_context
+from vllm.forward_context import create_forward_context, override_forward_context
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import wait_until_npu_memory_free
@@ -167,11 +167,18 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             layer.moe_config = SimpleNamespace(
                 is_sequence_parallel=False, ep_rank=rank, num_local_experts=EPLB_LOCAL_EXPERTS
             )
+            make_mask = layer._make_eplb_token_mask
+            mask = None
+
+            def capture_mask(num_source_tokens, prepare_finalize):
+                nonlocal mask
+                mask = make_mask(num_source_tokens, prepare_finalize)
+                return mask
+
+            layer._make_eplb_token_mask = capture_mask
 
             def forward():
                 prepared = prepare.prepare(hidden, logits)
-                mask = layer._make_eplb_token_mask(EPLB_ROWS, get_forward_context(), prepare)
-                assert mask is not None
                 physical = _ascend_apply_eplb_mapping(router, logical_ids)
                 dispatched = dispatcher.token_dispatch(
                     MoETokenDispatchInput(
@@ -191,8 +198,10 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                         group_list_type=dispatched.group_list_type,
                     ),
                     topk_ids=physical,
-                    token_mask=mask,
+                    num_source_tokens=EPLB_ROWS,
+                    prepare_finalize=prepare,
                 )
+                assert mask is not None
                 owners = ((physical >= start) & (physical < start + EPLB_LOCAL_EXPERTS)).to(torch.int32)
                 return output, owners, physical, mask, prepared.hidden_states
 

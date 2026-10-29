@@ -23,7 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import is_weak_contiguous
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -683,9 +683,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
-    def _make_eplb_token_mask(
-        self, num_tokens: int, forward_context: ForwardContext, prepare_finalize: PrepareAndFinalize
-    ) -> torch.Tensor | None:
+    def _make_eplb_token_mask(self, num_tokens: int, prepare_finalize: PrepareAndFinalize) -> torch.Tensor | None:
         """Build and gather eligibility after prepare, using the source row count."""
         eplb_state = self.router.eplb_state if self._use_v2_model_runner and self.router is not None else None
         if not use_allgather_eplb(eplb_state is not None):
@@ -696,7 +694,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         record_enabled = eplb_state.should_record_tensor
         is_padding = eplb_state.allgather_source_is_padding
         if is_padding is None:
-            is_padding = getattr(forward_context, "is_padding", None)
+            is_padding = getattr(get_forward_context(), "is_padding", None)
         token_mask = make_allgather_mask(
             num_tokens,
             num_unpadded_tokens,
@@ -713,9 +711,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         result: FusedExpertsResult,
         *,
         topk_ids: torch.Tensor,
-        token_mask: torch.Tensor | None,
+        num_source_tokens: int,
+        prepare_finalize: PrepareAndFinalize,
     ) -> None:
         """Record post-FFN load using the active runner's collection rules."""
+        token_mask = self._make_eplb_token_mask(num_source_tokens, prepare_finalize)
         eplb_state = self.router.eplb_state if self._use_v2_model_runner and self.router is not None else None
         local_load = None
         if token_mask is not None:
@@ -805,16 +805,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        num_source_tokens = hidden_states.shape[0]
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
-        )
-        # hidden_states still has the source row count until reassigned below.
-        token_mask = self._make_eplb_token_mask(
-            hidden_states.shape[0], forward_context, moe_comm_method.prepare_finalize
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -844,7 +841,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        self._record_eplb_load(fused_experts_results, topk_ids=topk_ids, token_mask=token_mask)
+        self._record_eplb_load(
+            fused_experts_results,
+            topk_ids=topk_ids,
+            num_source_tokens=num_source_tokens,
+            prepare_finalize=moe_comm_method.prepare_finalize,
+        )
 
         assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
