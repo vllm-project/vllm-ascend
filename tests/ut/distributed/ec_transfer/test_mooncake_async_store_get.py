@@ -5,6 +5,7 @@ import pytest
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
+    TensorSpec,
 )
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import scheduler as module
@@ -14,6 +15,17 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.async_store_get i
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.scheduler import (
     AscendECMooncakeScheduler,
 )
+
+
+@pytest.fixture(autouse=True)
+def encoder_output_spec():
+    """Test GET state transitions independently of upstream model configuration."""
+    with patch.object(
+        module.ECMooncakeScheduler,
+        "_encoder_output_spec",
+        return_value=TensorSpec((8, 4), str(torch.float32), 128),
+    ):
+        yield
 
 
 def _scheduler(max_bytes: int = 1024) -> AscendECMooncakeScheduler:
@@ -29,8 +41,6 @@ def _scheduler(max_bytes: int = 1024) -> AscendECMooncakeScheduler:
     scheduler._store_get_to_discard = set()
     scheduler._is_producer = True
     scheduler._local_cache = set()
-    scheduler._encoder_cache_hidden_dim = 4
-    scheduler._model_config = SimpleNamespace(dtype=torch.float32)
     return scheduler
 
 
