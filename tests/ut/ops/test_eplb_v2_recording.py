@@ -7,9 +7,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm_ascend.ops.fused_moe import routed_experts as routed_module
 from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
-from vllm_ascend.ops.fused_moe.routed_experts import _record_v2_eplb_load
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, _record_v2_eplb_load
 
 
 def _router(record_enabled: bool = True):
@@ -55,11 +56,77 @@ def test_record_v2_eplb_load_rejects_wrong_local_count():
 
 def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch):
     router = _router(record_enabled=False)
-    router.eplb_state.allgather_record_tensor = torch.tensor(1)
+    router.eplb_state.allgather_record_tensor = torch.tensor(-1, dtype=torch.int32)
+    record_pointer = router.eplb_state.allgather_record_tensor.data_ptr()
+    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    layer.router = router
+    layer._use_v2_model_runner = True
+    layer.dynamic_eplb = False
+    layer.moe_config = SimpleNamespace(ep_rank=2, num_local_experts=2)
     # Operator counts include communication/graph padding and ineligible sources.
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.tensor([9, 8]))
+    topk_ids = torch.tensor([[4, 5], [4, 0], [4, 5]])
+    mask = torch.tensor([True, True, False])
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
-    _record_v2_eplb_load(router, result, torch.tensor([2, 1]))
+    layer._record_eplb_load(result, topk_ids=topk_ids, token_mask=mask)
     torch.testing.assert_close(
         router.eplb_state.expert_load_view, torch.tensor([0, 0, 0, 0, 2, 1, 0, 0], dtype=torch.int32)
     )
+    assert router.eplb_state.allgather_record_tensor.item() == 1
+    # An ineligible later layer/draft must not clear the shared step decision.
+    layer._record_eplb_load(result, topk_ids=topk_ids, token_mask=torch.zeros_like(mask))
+    assert router.eplb_state.allgather_record_tensor.item() == 1
+    assert router.eplb_state.allgather_record_tensor.data_ptr() == record_pointer
+    torch.testing.assert_close(result.expert_tokens, torch.tensor([9, 8]))
+    torch.testing.assert_close(
+        router.eplb_state.expert_load_view, torch.tensor([0, 0, 0, 0, 2, 1, 0, 0], dtype=torch.int32)
+    )
+
+
+@pytest.mark.parametrize("group_list_type", [0, 1])
+@pytest.mark.parametrize("record_enabled", [False, True])
+def test_record_eplb_load_preserves_v2_operator_counts(monkeypatch, group_list_type, record_enabled):
+    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    layer.router = _router(record_enabled)
+    layer._use_v2_model_runner = True
+    layer.dynamic_eplb = False
+    result = FusedExpertsResult(
+        routed_out=torch.empty(0),
+        expert_tokens=torch.tensor([2, 5] if group_list_type == 0 else [2, 3]),
+        group_list_type=group_list_type,
+    )
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    layer._record_eplb_load(result, topk_ids=torch.empty(0, 1, dtype=torch.int32), token_mask=None)
+    expected = [0, 0, 0, 0, 2, 3, 0, 0] if record_enabled else [0] * 8
+    torch.testing.assert_close(layer.router.eplb_state.expert_load_view, torch.tensor(expected, dtype=torch.int32))
+
+
+@pytest.mark.parametrize("group_list_type", [0, 1])
+@pytest.mark.parametrize("multi_stage", [False, True])
+@pytest.mark.parametrize("dynamic_eplb,collect", [(True, True), (True, False), (False, True)])
+def test_record_eplb_load_preserves_legacy_collection(monkeypatch, group_list_type, multi_stage, dynamic_eplb, collect):
+    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    layer.router = None
+    layer._use_v2_model_runner = False
+    layer.dynamic_eplb = dynamic_eplb
+    layer.multi_stage = multi_stage
+    layer.num_iter = 3
+    layer.load_counter = torch.tensor(0, dtype=torch.int32)
+    layer.moe_load = torch.zeros((3, 2), dtype=torch.int32) if multi_stage else torch.zeros(2, dtype=torch.int64)
+    monkeypatch.setattr(routed_module, "_EXTRA_CTX", SimpleNamespace(eplb_heat_collection_status=collect))
+    for step in range(1, 5):
+        counts = torch.tensor([step, 3 * step] if group_list_type == 0 else [step, 2 * step])
+        layer._record_eplb_load(
+            FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=counts, group_list_type=group_list_type),
+            topk_ids=torch.empty(0, 1, dtype=torch.int32),
+            token_mask=None,
+        )
+    if not dynamic_eplb or not collect:
+        assert not layer.moe_load.any()
+        assert layer.load_counter.item() == 0
+    elif multi_stage:
+        torch.testing.assert_close(layer.moe_load, torch.tensor([[5, 10], [2, 4], [3, 6]], dtype=torch.int32))
+        assert layer.load_counter.item() == 4
+        assert layer.load_counter.dtype == torch.int32
+    else:
+        torch.testing.assert_close(layer.moe_load, torch.tensor([10, 20], dtype=torch.int64))

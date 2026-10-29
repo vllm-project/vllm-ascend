@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.forward_context import create_forward_context, override_forward_context
+from vllm.forward_context import create_forward_context, get_forward_context, override_forward_context
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import wait_until_npu_memory_free
@@ -28,10 +28,9 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState, refres
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
-from vllm_ascend.ops.fused_moe.eplb import count_allgather_tokens, make_allgather_mask
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
-from vllm_ascend.ops.fused_moe.routed_experts import _record_v2_eplb_load
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 from vllm_ascend.utils import is_950
@@ -159,17 +158,21 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             logical_ids = torch.ones((EPLB_ROWS * 2, 1), dtype=torch.int32, device=device)
             weights = torch.ones_like(logical_ids, dtype=torch.float32)
             num_tokens = torch.tensor(EPLB_ROWS, device=device)
+            state.num_unpadded_tokens_tensors = [num_tokens]
+            state.allgather_source_is_padding = padding
+            layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+            layer.router = router
+            layer._use_v2_model_runner = True
+            layer.dynamic_eplb = False
+            layer.moe_config = SimpleNamespace(
+                is_sequence_parallel=False, ep_rank=rank, num_local_experts=EPLB_LOCAL_EXPERTS
+            )
 
             def forward():
+                mask = layer._make_eplb_token_mask(EPLB_ROWS, get_forward_context())
+                assert mask is not None
                 prepared = prepare.prepare(hidden, logits)
-                mask = prepare.all_gather_eplb_mask(
-                    make_allgather_mask(
-                        EPLB_ROWS,
-                        num_tokens,
-                        state.should_record_tensor,
-                        is_padding=padding,
-                    )
-                )
+                mask = prepare.all_gather_eplb_mask(mask)
                 physical = _ascend_apply_eplb_mapping(router, logical_ids)
                 dispatched = dispatcher.token_dispatch(
                     MoETokenDispatchInput(
@@ -182,16 +185,14 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                 )
                 # Identity experts isolate dispatch/combine ownership from FFN numerics.
                 output = dispatcher.token_combine(dispatched.hidden_states, dispatched.combine_metadata)
-                local_load = count_allgather_tokens(physical, mask, start, EPLB_LOCAL_EXPERTS)
-                state.allgather_record_tensor.copy_(mask.any().to(torch.int32))
-                _record_v2_eplb_load(
-                    router,
+                layer._record_eplb_load(
                     FusedExpertsResult(
                         routed_out=output,
                         expert_tokens=dispatched.group_list,
                         group_list_type=dispatched.group_list_type,
                     ),
-                    local_load,
+                    topk_ids=physical,
+                    token_mask=mask,
                 )
                 owners = ((physical >= start) & (physical < start + EPLB_LOCAL_EXPERTS)).to(torch.int32)
                 return output, owners, physical, mask, prepared.hidden_states
@@ -205,11 +206,12 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                 with torch.npu.graph(graph):
                     result = forward()
 
-            for valid_rows, eligible in [((3, 2), (True, False)), ((0, 2), (False, True))]:
+            for valid_rows, eligible in [((3, 2), (True, False)), ((0, 2), (False, True)), ((0, 0), (False, False))]:
                 dp_rank = rank // 2
                 padding.fill_(True)
                 padding[: valid_rows[dp_rank]] = False
                 state.should_record_tensor.fill_(eligible[dp_rank])
+                state.allgather_record_tensor.fill_(-1)
                 loads.zero_()
                 if graph is None:
                     result = forward()
@@ -224,6 +226,7 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                     [row < valid_rows[dp] and eligible[dp] for dp in range(2) for row in range(EPLB_ROWS)]
                 )
                 torch.testing.assert_close(mask.cpu(), expected_mask)
+                assert state.allgather_record_tensor.item() == int(expected_mask.any())
                 slots = torch.where(placement == 1)[0]
                 expected_physical = slots[(torch.arange(EPLB_ROWS * 2) + 1) % slots.numel()][:, None]
                 torch.testing.assert_close(physical.cpu().long(), expected_physical)
