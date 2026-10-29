@@ -21,15 +21,15 @@ trainer handshake is mirrored from test_hccl_weight_transfer.py.
 """
 
 import json
-import math
 import os
-import threading
 from typing import Any
 
 import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -55,7 +55,6 @@ pytest.importorskip(
     reason="Weight Checker requires a paired vLLM with PR #51350 (>= v0.31.1rc0).",
 )
 
-INIT_TIMEOUT = 120
 # Matches the validated acceptance setup; leaves HBM headroom for the
 # co-located trainer in the same-chip transfer lanes.
 GPU_MEMORY_UTILIZATION = 0.25
@@ -208,9 +207,6 @@ def test_npu_ipc_transfer_restores_reset_weights(packed: bool):
         env_dict=env_dict,
         auto_port=False,
     ) as server:
-        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
-        from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
         register_engines_once()
@@ -293,80 +289,13 @@ def test_checksum_and_reset_cover_every_rank(parallel_args, expected_ranks):
         }
 
 
-class _BackgroundPost(threading.Thread):
-    """Run a blocking server-side HCCL RPC and surface its exception."""
-
-    def __init__(self, server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-        super().__init__(daemon=True)
-        self._server = server
-        self._route = route
-        self._json = json
-        self._timeout = timeout
-        self.error: BaseException | None = None
-
-    def run(self) -> None:
-        try:
-            post_route(self._server, self._route, json=self._json, timeout=self._timeout)
-        except BaseException as exc:  # noqa: BLE001 - re-raised by raise_if_failed
-            self.error = exc
-
-    def raise_if_failed(self) -> None:
-        if self.error is not None:
-            raise RuntimeError(f"server-side /{self._route} failed") from self.error
-
-
-def _collect_weight_metadata(source: FixedRandomWeightSource):
-    """Parameter metadata plus a packed buffer that fits the largest tensor."""
-    metadata = source.metadata()
-    max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
-    return (
-        [meta.name for meta in metadata],
-        [str(meta.dtype).split(".")[-1] for meta in metadata],
-        [list(meta.shape) for meta in metadata],
-        max(max_tensor_bytes + 128 * 2**20, 2**30),
-    )
-
-
-def _send_update(server, source, model_update_group, *, packed: bool) -> None:
-    """Run one START -> broadcast -> FINISH transaction over the server's RPCs."""
-    from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-        HCCLTrainerSendWeightsArgs,
-        HCCLWeightTransferEngine,
-    )
-
-    names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(source)
+def _send_update(server, engine) -> None:
+    """Let the trainer engine drive START -> broadcast -> FINISH while paused."""
     post_route(server, "pause")
-    post_route(server, "start_weight_update")
-
-    # update_weights blocks on the server while it waits for the HCCL broadcasts,
-    # so run it in a thread while the trainer produces the data.
-    update_thread = _BackgroundPost(
-        server,
-        "update_weights",
-        json={
-            "update_info": {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "packed": packed,
-                "packed_buffer_size_bytes": packed_buffer_size_bytes,
-            }
-        },
-        timeout=RELOAD_TIMEOUT,
-    )
-    update_thread.start()
-    HCCLWeightTransferEngine.trainer_send_weights(
-        iterator=iter(source),
-        trainer_args=HCCLTrainerSendWeightsArgs(
-            group=model_update_group,
-            packed=packed,
-            packed_buffer_size_bytes=packed_buffer_size_bytes,
-        ),
-    )
-    update_thread.join()
-    update_thread.raise_if_failed()
-    post_route(server, "finish_weight_update")
-    post_route(server, "resume")
+    try:
+        engine.send_weights()
+    finally:
+        post_route(server, "resume")
 
 
 @requires_two_npus
@@ -392,48 +321,35 @@ def test_hccl_transfer_restores_reset_weights(packed: bool):
         env_dict=_env_dict(INFERENCE_DEVICE_INDEX),
         auto_port=False,
     ) as server:
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
-        master_address = get_ip()
-        master_port = get_open_port()
-        # The trainer is HCCL rank 0; the single inference worker is rank 1.
-        world_size = 2
-        # The server side blocks until the trainer connects, so kick its init
-        # RPC off in a background thread while the trainer opens rank 0.
-        init_thread = _BackgroundPost(
-            server,
-            "init_weight_transfer_engine",
-            json={
-                "init_info": {
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": 1,
-                    "world_size": world_size,
-                }
-            },
-            timeout=INIT_TIMEOUT,
+        register_engines_once()
+        # The factory initializes both peers: trainer rank 0 and worker rank 1.
+        engine = WeightTransferTrainerFactory.trainer_init(
+            HCCLTrainerInitInfo(
+                rank=0,
+                master_address=get_ip(),
+                master_port=get_open_port(),
+                world_size=2,
+                packed=packed,
+                packed_buffer_size_bytes=packed_buffer_size_for(source),
+            ),
+            client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=RELOAD_TIMEOUT),
+            source=source,
         )
-        init_thread.start()
-        model_update_group = HCCLWeightTransferEngine.trainer_init(
-            {
-                "master_address": master_address,
-                "master_port": master_port,
-                "world_size": world_size,
+        try:
+            _send_update(server, engine)
+            baseline = checksums(server)
+
+            weight_checker(server, "reset").raise_for_status()
+            comparison = weight_checker(server, "compare", baseline).json()
+            assert comparison["match"] is False
+            assert ranks(comparison["mismatches"]) == ranks(baseline)
+
+            _send_update(server, engine)
+            assert weight_checker(server, "compare", baseline).json() == {
+                "match": True,
+                "mismatches": [],
             }
-        )
-        init_thread.join()
-        init_thread.raise_if_failed()
-
-        _send_update(server, source, model_update_group, packed=packed)
-        baseline = checksums(server)
-
-        weight_checker(server, "reset").raise_for_status()
-        comparison = weight_checker(server, "compare", baseline).json()
-        assert comparison["match"] is False
-        assert ranks(comparison["mismatches"]) == ranks(baseline)
-
-        _send_update(server, source, model_update_group, packed=packed)
-        assert weight_checker(server, "compare", baseline).json() == {
-            "match": True,
-            "mismatches": [],
-        }
+        finally:
+            engine.shutdown()
