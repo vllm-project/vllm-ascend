@@ -1194,6 +1194,27 @@ def test_hybrid_encoder_state_merges_encoder_attn_metadata():
     }
 
 
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+def test_prompt_embeds_rejected_for_encoder_only_state(_mock_has_encoder_only):
+    """``init_asecnd_model_state`` replaces upstream ``init_model_state``, so it
+    has to repeat the ``--enable-prompt-embeds`` guard."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.enable_prompt_embeds = True
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
+        pytest.raises(ValueError, match="--enable-prompt-embeds not supported with AscendEncoderOnlyModelState"),
+    ):
+        init_asecnd_model_state(vllm_config, torch.nn.Module(), None, torch.device("cpu"))
+
+
 def test_init_model_state_uses_override_then_default():
     vllm_config = MagicMock()
     vllm_config.model_config.is_hybrid = False

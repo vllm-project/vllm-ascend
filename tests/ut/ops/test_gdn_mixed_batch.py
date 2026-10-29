@@ -503,4 +503,3 @@ def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> N
         scatter_mock.assert_not_called()
         clear_mock.assert_called_once()
         torch.testing.assert_close(ssm_state[1], torch.full((1, head_dim, head_dim), 7.0))
-

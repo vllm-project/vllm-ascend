@@ -48,7 +48,6 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -695,10 +694,7 @@ def build_attn_state(
         kv_cache_groups = kv_cache_config.kv_cache_groups
         # Encoder-only models (e.g. BERT/BGE) keep no KV cache, so they produce
         # no kv cache groups and always run as uncached prefill.
-        if not kv_cache_groups or isinstance(
-            kv_cache_groups[0].kv_cache_spec,
-            EncoderOnlyAttentionSpec,
-        ):
+        if not kv_cache_groups:
             attn_state = AscendAttentionState.PrefillNoCache
         else:
             attn_state = AscendAttentionState.PrefillCacheHit

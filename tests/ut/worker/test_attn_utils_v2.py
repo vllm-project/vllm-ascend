@@ -2525,14 +2525,12 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
 
 
 def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
-    encoder_spec = attn_utils.EncoderOnlyAttentionSpec.__new__(attn_utils.EncoderOnlyAttentionSpec)
     pooling_encoder = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="pooling"),
     )
     pooling_other = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="pooling"),
     )
-    encoder_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=encoder_spec)])
     # Encoder-only models (BERT/BGE) build no KV cache groups at all.
     empty_kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     other_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())])
@@ -2560,17 +2558,6 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     ones = np.array([1, 1], dtype=np.int32)
     scheduled = np.array([2, 2], dtype=np.int32)
     state = attn_utils.AscendAttentionState
-    assert (
-        attn_utils.build_attn_state(
-            pooling_encoder,
-            seq,
-            2,
-            seq,
-            seq,
-            kv_cache_config=encoder_kv_cache_config,
-        )
-        is state.PrefillNoCache
-    )
     assert (
         attn_utils.build_attn_state(
             pooling_encoder,
