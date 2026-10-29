@@ -1,0 +1,4 @@
+pr: 20176
+entries:
+  - category: bugfix
+    text: Fixed explicit and startup-plan KV-cache budgets bypassing multi-group allocation scaling, which could allocate more cache memory than requested for configurations using private per-layer storage.
