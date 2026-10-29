@@ -272,6 +272,48 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
+#### 5.1.1 Experimental MRV2 Pipeline Parallelism
+
+DeepSeek V4.1 supports contiguous, nonempty PP layer partitions on Model Runner
+V2, including PCP. Each stage must fit device memory. The following text-only A3
+example uses PP2/TP8 and a `24,16` split:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_PP_LAYER_PARTITION=24,16
+export HCCL_OP_EXPANSION_MODE=AIV
+
+vllm serve "<YOUR_MODEL_PATH>" \
+    --pipeline-parallel-size 2 --tensor-parallel-size 8 \
+    --data-parallel-size 1 --enable-expert-parallel \
+    --tokenizer-mode deepseek_v41 \
+    --reasoning-parser deepseek_v41 --tool-call-parser deepseek_v41 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+    --max-model-len 16512 --max-num-batched-tokens 2048 --max-num-seqs 4 \
+    --block-size 128 --gpu-memory-utilization 0.85 \
+    --limit-mm-per-prompt '{"image":0}' \
+    --async-scheduling --enable-chunked-prefill --no-enable-prefix-caching \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[24]}' \
+    --additional-config '{"enable_flashcomm1":true,"multistream_engram_overlap":false,"multistream_dsv4_dsa_overlap":false,"multistream_overlap_shared_expert":false}'
+```
+
+The partition counts must sum to `num_hidden_layers` and match the PP size.
+For example, PP2 can use `25,15`; PP4 can use `10,10,10,10` with TP4.
+PP forwards the required incremental KV/index-cache rows, Top-K selections and
+candidate states through intervening stages. Receiving stages keep cache-only
+mirrors; source weights, compressor state, SWA and Engram remain stage-local.
+
+For PP2/TP4/PCP2 on the same 16 devices, change the tensor parallel size to
+`4` and add `--prefill-context-parallel-size 2`. Cache transfers use the global
+write slots of each replicated PCP cache, while activations and selection
+states retain the rank-local query layout. PCP requires DCP1.
+
+For DSpark, keep native asynchronous scheduling enabled. The target can use
+Decode ACL graphs while the draft runs eagerly. Decoder-layer bounded replay
+is disabled for PP greater than one. Multimodal inputs, A5 hardware and
+performance require separate qualification.
+
 ### 5.2 1P1D PD Disaggregated Deployment
 
 === "A3 series"

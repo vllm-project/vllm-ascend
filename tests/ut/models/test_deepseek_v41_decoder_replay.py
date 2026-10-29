@@ -9,11 +9,13 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
+from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
+@pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching):
+def test_decoder_replay_with_or_without_prefix_caching_is_disabled_for_pp(pp_size, pcp_size, prefix_caching):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -28,7 +30,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pp_size,
             prefill_context_parallel_size=pcp_size,
             data_parallel_size=1,
             decode_context_parallel_size=1,
@@ -39,8 +41,12 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
-    assert replay is not None
-    assert model.decoder_replay_start == 1
+    if pp_size == 1:
+        assert replay is not None
+        assert model.decoder_replay_start == 1
+    else:
+        assert replay is None
+        assert model.decoder_replay_start == model.end_layer
 
 
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
@@ -123,8 +129,10 @@ def test_replay_without_rows_keeps_inputs():
     assert replay(hidden, None) == (hidden, None)
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_v2_model_runner):
     monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     seen = []
 
     class Layer:
@@ -144,6 +152,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.hc_mult = 1
+    model._capture_aux_after_layer = use_v2_model_runner
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
@@ -170,5 +179,6 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     )
     assert seen == [(0, [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
     assert output[:, 0].tolist() == [0, 0, 4, 4]
-    assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    offset = int(use_v2_model_runner)
+    assert aux[0][:, 0].tolist() == [1 + offset] * 4
+    assert aux[1][:, 0].tolist() == [0, 0, 3 + offset, 3 + offset]
