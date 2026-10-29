@@ -23,23 +23,25 @@ from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend, mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerSendingThread,
-    KVTransferThread,
     LayerBatchBuilder,
     _build_range_debug_payload,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
+    LayerRangeReqMeta,
+    LayerTransferTask,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerBlockRange,
-    LayerRangeReqMeta,
-    LayerTransferTask,
     LoadSpec,
     ReqMeta,
 )

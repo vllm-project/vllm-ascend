@@ -133,7 +133,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
     # deepseek-v4-flash uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
 
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
@@ -219,7 +219,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --api-server-count 1 \
         --kv-cache-dtype fp8 \
         --attention_config.indexer_kv_dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -247,7 +246,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --max-num-batched-tokens 10240 \
         --served-model-name dsv4 \
         --gpu-memory-utilization 0.9 \
-        --api-server-count 1 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
         --tensor-parallel-size 4 \
@@ -361,7 +359,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "multistream_overlap_shared_expert": true}'
     ```
 
-=== "A2 series with dspark"
+=== "A2 series with DSpark"
 
     Run the following script to execute online inference.
 
@@ -395,7 +393,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
-    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
+
+    TPS is more than 50, reaching 2X the speed of DeepSeek-V4-Flash with MTP.
 
 Key Parameter Descriptions:
 
@@ -737,13 +736,15 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then deploy the P-D disaggregation proxy as described in [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
+        Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then deploy the P-D disaggregation proxy as described in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     Key Parameter Descriptions:
 
     - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 
     - `--enforce-eager` forces eager execution on Prefill nodes instead of graph compilation.
+
+    - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling work with model execution.
 
     - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
 
@@ -1067,7 +1068,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 === "A3 series with DSpark"
 
@@ -1353,7 +1354,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
         1. Prefill node
 
-            For DSpark (`A3 series with dspark`), use PCP8, DP2, and TP1:
+            For DSpark (`A3 series with DSpark`), use PCP8, DP2, and TP1:
 
             ```shell
             # change ip to your own
@@ -1369,7 +1370,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 === "A2 series"
 
@@ -1431,7 +1432,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 sys.exit(1)
 
             processes = []
-            num_cards = dp_size_local * tp_size
             for i in range(dp_size_local):
                 dp_rank = dp_rank_start + i
                 vllm_engine_port = vllm_start_port + i
@@ -1615,7 +1615,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
             ```
 
-            For each P instance, only the `--dp-address` parameter differs and must be configured as the IP address of the service within the same subnet as the other instances.
+            For each P instance, only the `--dp-address` parameter differs and must be configured as the node IP address in the same subnet as the other instances.
 
         2. Decode node
 
@@ -1628,7 +1628,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        The proxy is also implemented by referring to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
+        The proxy is also implemented by referring to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     Key Parameter Descriptions:
 
@@ -1647,7 +1647,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     Deployment Verification:
 
-    After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
+    After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
     Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -1677,8 +1677,8 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | Configuration | Workload / native window | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
     |---|---|---|---|---:|
     | `decode-4k-total` | 4K input / 2K output, pure D, total | 4096 / on | 2 / 85 | 4 |
-    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 1 / 128 | 4 |
-    | `decode-16k` | 16K / 1K, pure D | 4096 / on | 1 / 128 | 4 |
+    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 4 / 51 | 4 |
+    | `decode-16k` | 16K / 1K, pure D | 4096 / on | 4 / 51 | 4 |
     | `decode-long` | 64K / 1K or 128K / 1K, pure D | 4096 / on | 5 / 42 | 1 |
     | `cold-pd` | PC0 pure P or full PD | 8192 / off | 1 / 128 | 4 |
     | `pc90` | Distinct-suffix, multiple-prefix pooling; see [A2 KV Pooling](#526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration) | 8192 / on | 1 / 128 | 4 |
@@ -1696,7 +1696,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
     | `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
-    The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft1/mns128/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
+    The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft4/mns51/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
 
     The measured context budgets are intentionally asymmetric: `--max-model-len 150000` on P and `508576` on D. The larger D budget does not extend the prompt length that P can prefill. All ordinary-length workloads listed here fit within the P budget; do not advertise the D value as the end-to-end prompt limit. If a deployment requires equal P/D limits, change both to the chosen service limit and revalidate KV capacity and throughput before reusing these measurements.
 
@@ -1761,7 +1761,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
       --kv-transfer-config "$kv_config"
     ```
 
@@ -2554,7 +2554,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         role; Prefill and Decode use separate DP groups.
 
         After every Prefill engine is ready, start the proxy from
-        [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)
+        [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md)
         with both Prefill endpoints and all sixteen Decode endpoints:
 
         ```shell
@@ -2614,7 +2614,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     #### A2 KV Pooling: Mooncake SSD Profile and Memcache Integration {: #526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration }
 
-    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft1/mns128/GMU0.97.
+    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft4/mns51/GMU0.97.
 
     | Backend | Preparation | Validation scope |
     |---|---|---|
@@ -2779,7 +2779,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
           --kv-transfer-config "$kv_config"
         ```
 
@@ -2866,7 +2866,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
           --kv-transfer-config "$kv_config"
         ```
 
@@ -3071,7 +3071,7 @@ This section verifies basic inference functionality for all deployment modes. Fo
 
 Once your server is started, you can query the model with input prompts:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+Replace `<node0_ip>` and `<port>` with the IP address and port of the API server for the single-node deployment in Section 5.1. For the PD separation deployment in Section 5.2 or the KV Cache Pool deployment in Section 5.3, use the proxy's IP address and port, since requests are routed through the proxy to the Prefill and Decode instances.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \

@@ -55,41 +55,46 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cach
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
+    KVCacheStoreRecvingThread,
+    KVCacheStoreSendingThread,
+    KVTransferThread,
+    record_failed_blocks,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreLayerSendingThreadBase,
-    KVCacheStoreRecvingThread,
-    KVCacheStoreSendingThread,
-    KVTransferThread,
     LayerBatchBuilder,
     _circular_shift,
-    record_failed_blocks,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseReuseLayout,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
+    LayerLoadTask,
+    LayerMultiBlockReqMeta,
+    LayerTransferTask,
+    SharedBlockData,
+    get_partial_block_index,
+    masked_block_runs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerBlockRange,
-    LayerLoadTask,
-    LayerMultiBlockReqMeta,
-    LayerTransferTask,
     ReqMeta,
-    SharedBlockData,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
-    get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_dcp_mismatch_info,
@@ -97,7 +102,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_tp_mismatch_info,
     is_kv_save_role,
-    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (

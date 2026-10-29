@@ -34,16 +34,18 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, Mamb
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
-    LayerBatchBuilder,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
+    LayerTransferTask,
+    SharedBlockData,
+    get_partial_block_index,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
-    LayerBlockRange,
-    LayerTransferTask,
     LoadSpec,
     ReqMeta,
-    SharedBlockData,
-    get_partial_block_index,
 )
 
 
@@ -1455,7 +1457,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_handle_released_saves_skips_layerwise_thread(self):
         worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerSendingThread
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+            KVCacheStoreLayerSendingThread,
+        )
 
         # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
         # so a wrong dispatch would raise AttributeError here.
@@ -1827,7 +1831,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIs(worker.external_slot_release_waiter, waiter)
 
     def test_set_external_slot_release_waiter_updates_running_recv_thread(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
         )
 
@@ -2035,7 +2039,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerSendingThread,
         )
 
@@ -2146,7 +2150,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
 
     def test_shared_load_data_preserves_layer_specific_blocks(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
             LayerBatchBuilder,
         )
@@ -2232,7 +2236,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     )
 
     def test_shared_load_data_without_reuse_keeps_single_build_per_group(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
         )
 

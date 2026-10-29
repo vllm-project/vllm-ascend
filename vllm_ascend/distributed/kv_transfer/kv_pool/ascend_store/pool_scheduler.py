@@ -4,16 +4,9 @@ from collections.abc import Sequence
 from typing import Any
 
 import vllm.envs as envs
-import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
-    LOOKUP_MSG,
-    RESET_MSG,
-    RESP_OK,
-)
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -25,7 +18,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -36,12 +28,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -1238,88 +1231,3 @@ class KVPoolScheduler:
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
-
-
-class LookupKeyClient:
-    def __init__(self, vllm_config: "VllmConfig"):
-        self.encoder = MsgpackEncoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REQ,  # type: ignore[attr-defined]
-            bind=False,
-        )
-        self.socket.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
-        self._closed = False
-
-    def lookup(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int] | None = None,
-        hbm_hit_tokens: int = 0,
-    ) -> int:
-        if self._closed:
-            return 0
-
-        kv_cache_group_ids = kv_cache_group_ids or [0]
-        hash_strs = [h.hex() for h in block_hashes]
-        hash_frames = self.encoder.encode(hash_strs)
-        kv_group_frames = self.encoder.encode(kv_cache_group_ids)
-        all_frames = [
-            LOOKUP_MSG,
-            token_len.to_bytes(4, byteorder="big"),
-            *kv_group_frames,
-            hbm_hit_tokens.to_bytes(4, byteorder="big"),
-            *hash_frames,
-        ]
-        try:
-            self.socket.send_multipart(all_frames, copy=False)
-            resp = self.socket.recv()
-        except zmq.ZMQError:  # type: ignore[attr-defined]
-            logger.exception("KV pool lookup failed; reporting 0 hit tokens")
-            self.close()
-            return 0
-
-        return int.from_bytes(resp, "big")
-
-    def reset(self) -> bool:
-        """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
-        self.socket.send(RESET_MSG)
-        resp = self.socket.recv()
-        return bytes(resp) == RESP_OK
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self.socket.close(linger=0)
-        finally:
-            # Each client owns a private context. Close it too so repeated
-            # lookup failures do not leak ZeroMQ IO threads.
-            self.ctx.term()
-
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-
-def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
-    base_url = envs.VLLM_RPC_BASE_PATH
-    # Default to 0 if not configured
-    rpc_port = 0
-    if vllm_config is not None:
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if "lookup_rpc_port" in extra_config:
-            rpc_port = extra_config["lookup_rpc_port"]
-        elif "mooncake_rpc_port" in extra_config:
-            rpc_port = extra_config["mooncake_rpc_port"]
-            logger.warning(
-                "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
-            )
-    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
