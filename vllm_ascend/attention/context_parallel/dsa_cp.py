@@ -2708,7 +2708,10 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        metadata = next(iter(attn_metadata.values())) if attn_metadata is not None else None
+        metadata = None
+        if attn_metadata is not None:
+            assert self.swa_cache_layer is not None
+            metadata = attn_metadata[self.swa_cache_layer.prefix]
         pcp_metadata = metadata if isinstance(metadata, AscendDSAPCPMetadata) else None
         # Global prefill must select the same collectives on every rank;
         # a one-token prefill shard can look like DecodeOnly locally.
@@ -2958,7 +2961,8 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         attn_metadata: dsa_v1.DSAMetadataDict,
     ) -> bool:
         """Use ordinary decode updates or restore the global prefill batch."""
-        pcp_metadata = next(iter(attn_metadata.values()))
+        assert self.swa_cache_layer is not None
+        pcp_metadata = attn_metadata[self.swa_cache_layer.prefix]
         if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
             return super()._prepare_caches_before_attention(
                 layer_name,
@@ -2971,10 +2975,13 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             pcp_metadata,
         )
 
-        global_dsa_metadata_by_prefix = {}
-        for cache_prefix, metadata in attn_metadata.items():
-            assert isinstance(metadata, AscendDSAPCPMetadata)
-            global_dsa_metadata_by_prefix[cache_prefix] = metadata.global_dsa_metadata
+        # The shared metadata dictionary can also contain PCP=1 draft layers.
+        # Only the PCP entries belong to this target's global cache view.
+        global_dsa_metadata_by_prefix = {
+            cache_prefix: metadata.global_dsa_metadata
+            for cache_prefix, metadata in attn_metadata.items()
+            if isinstance(metadata, AscendDSAPCPMetadata)
+        }
         global_layer_metadata = self._get_layer_metadata(
             layer_name,
             global_dsa_metadata_by_prefix,
@@ -3020,7 +3027,8 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
     ) -> tuple[int, int, int]:
         if attn_metadata is None:
             return super()._get_o_proj_input_shape(attn_metadata)
-        pcp_metadata = next(iter(attn_metadata.values()))
+        assert self.swa_cache_layer is not None
+        pcp_metadata = attn_metadata[self.swa_cache_layer.prefix]
         if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
             return super()._get_o_proj_input_shape(attn_metadata)
         return (

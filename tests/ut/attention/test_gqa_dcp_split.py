@@ -317,7 +317,7 @@ def test_v2_draft_steps_update_history_and_current_independently(interleave):
         )
     )
     speculator.dcp_manager = SimpleNamespace(dcp_world_rank=1, prepare_dcp_local_seq_lens_cpu=prepare_local)
-    speculator.draft_vllm_config = SimpleNamespace(
+    speculator.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=interleave)
     )
     speculator._get_seq_lens_cpu = MagicMock(return_value=torch.tensor([10, 31, 0], dtype=torch.int32))
@@ -344,7 +344,7 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
     speculator.use_dcp = True
     speculator.attn_architecture = "GQA"
     speculator.dcp_manager = SimpleNamespace(dcp_world_rank=rank)
-    speculator.draft_vllm_config = SimpleNamespace(
+    speculator.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
             cp_kv_cache_interleave_size=interleave,

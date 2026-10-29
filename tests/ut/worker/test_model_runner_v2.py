@@ -23,6 +23,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionDCPBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -55,7 +56,7 @@ def _make_runner(need_timing: bool = True):
     runner._uses_flashmla = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
-    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={})
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
@@ -1312,7 +1313,16 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
 
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
-        self.attn_groups = []
+        self.attn_groups = [
+            [
+                SimpleNamespace(
+                    backend=AscendAttentionDCPBackend,
+                    layer_names=["target.attn"],
+                    metadata_builders=[],
+                    get_metadata_builder=lambda _: None,
+                )
+            ]
+        ]
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -1351,6 +1361,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
+    assert runner.speculator.pcp_manager is runner.pcp_manager
+    assert runner.use_fia
 
 
 def test_initialize_kv_cache_forwards_allocation_context():

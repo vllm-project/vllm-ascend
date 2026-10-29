@@ -27,7 +27,7 @@ def _model_uses_triton_q_rms(model_runner) -> bool:
 
     for groups in attn_groups:
         for group in groups:
-            if group.backend is AscendDSABackend:
+            if issubclass(group.backend, AscendDSABackend):
                 return True
     return False
 

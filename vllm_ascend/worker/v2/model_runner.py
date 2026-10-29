@@ -19,7 +19,7 @@
 
 import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -51,6 +51,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -142,6 +143,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    attn_groups: list[list[AttentionGroup]]
     kv_connector: KVConnector
     max_num_reqs: int
 
@@ -489,6 +491,10 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
+                if self.speculator is not None:
+                    self.speculator.pcp_manager = self.pcp_manager
+            self._exclude_replicated_draft_attn_groups()
+
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
@@ -536,7 +542,7 @@ class NPUModelRunner(GPUModelRunner):
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            issubclass(group.backend, (AscendAttentionBackend, AscendMLABackend))
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups
@@ -576,6 +582,25 @@ class NPUModelRunner(GPUModelRunner):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
         super().shutdown()
+
+    def _exclude_replicated_draft_attn_groups(self) -> None:
+        if self.speculator is None or not getattr(self.speculator, "replicated_pcp", False):
+            return
+        # PCP can split target requests into more rows than a PCP=1 draft
+        # builder can hold. Replicated drafts build their own global metadata;
+        # do not run their builders on the target's local segment batch.
+        draft_layers = self.speculator.draft_attn_layer_names
+        target_groups = []
+        for groups in self.attn_groups:
+            target_group = []
+            for group in groups:
+                layer_names = [name for name in group.layer_names if name not in draft_layers]
+                if layer_names:
+                    filtered = copy(group)
+                    filtered.layer_names = layer_names
+                    target_group.append(filtered)
+            target_groups.append(target_group)
+        self.attn_groups = target_groups
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

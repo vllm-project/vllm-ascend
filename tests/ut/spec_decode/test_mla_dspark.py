@@ -134,7 +134,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
-    draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
+    draft_groups = [[], [SimpleNamespace(backend=draft_backend, layer_names=["draft"])]]
 
     def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
         assert target_attn_groups is target_groups
@@ -143,11 +143,6 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(DSparkSpeculator, "set_attn", set_attn)
     monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
 
-    def get_layers(config, layer_type, layer_names):
-        assert layer_names == ["draft"]
-        return {"draft": SimpleNamespace(get_attn_backend=lambda: draft_backend)}
-
-    monkeypatch.setattr(shared, "get_layers_from_vllm_config", get_layers)
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])])
     spec.set_attn(None, cache_config, None, None, target_groups)
     assert spec._context_slot_mappings.dtype == torch.int32

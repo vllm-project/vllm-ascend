@@ -118,11 +118,6 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        use_dcp = is_dcp_enabled()
-        if use_dcp:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
-
-            return AscendMlaDCPMetadataBuilder
         return AscendMLAMetadataBuilder
 
     @staticmethod
@@ -137,16 +132,25 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        use_dcp = is_dcp_enabled()
-        if use_dcp:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-
-            return AscendMlaDCPImpl
         return AscendMLAImpl
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128]
+
+
+class AscendMLADCPBackend(AscendMLABackend):
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+
+        return AscendMlaDCPImpl
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+        return AscendMlaDCPMetadataBuilder
 
 
 class AscendMLAAttention(MLAAttention):
