@@ -1126,6 +1126,74 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
     )
 
 
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+@patch("vllm_ascend.worker.v2.model_states.hybrid_encoder.AscendHybridEncoderModelState")
+def test_hybrid_encoder_model_selects_combined_model_state(mock_state, _mock_has_encoder_only):
+    """A hybrid model with ENCODER_ONLY layers needs mamba + encoder metadata."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = True
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    with patch(
+        "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    ):
+        state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    assert state is mock_state.return_value
+    mock_state.assert_called_once_with(
+        vllm_config,
+        model,
+        encoder_cache,
+        device,
+    )
+
+
+def test_hybrid_encoder_state_merges_encoder_attn_metadata():
+    """Encoder-only layers must find their own metadata next to the mamba one."""
+    from vllm_ascend.worker.v2.model_states.hybrid_encoder import (
+        AscendHybridEncoderModelState,
+    )
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
+        AscendMambaHybridModelState,
+    )
+
+    state = object.__new__(AscendHybridEncoderModelState)
+    input_batch = SimpleNamespace()
+
+    with (
+        patch.object(
+            AscendMambaHybridModelState,
+            "prepare_attn",
+            return_value={"language_model.model.layers.2.linear_attn": "gdn"},
+        ),
+        patch.object(
+            AscendHybridEncoderModelState,
+            "_build_encoder_attn_metadata",
+            return_value={"language_model.model.layers.3.self_attn.attn": "encoder"},
+        ),
+    ):
+        attn_metadata = AscendHybridEncoderModelState.prepare_attn(
+            state,
+            input_batch,
+            CUDAGraphMode.PIECEWISE,
+            (),
+            None,
+            [],
+            MagicMock(),
+        )
+
+    assert attn_metadata == {
+        "language_model.model.layers.2.linear_attn": "gdn",
+        "language_model.model.layers.3.self_attn.attn": "encoder",
+    }
+
+
 def test_init_model_state_uses_override_then_default():
     vllm_config = MagicMock()
     vllm_config.model_config.is_hybrid = False

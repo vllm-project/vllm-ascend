@@ -53,6 +53,22 @@ def init_asecnd_model_state(
 
             return Ascend310PMambaHybridModelState(vllm_config, model, encoder_cache, device)
 
+        # Hybrid models that also declare bidirectional, KV-cache-less layers
+        # (ColQwen3.5: GDN layers + ENCODER_ONLY full attention) need both
+        # mamba and encoder-only metadata, so the mamba state alone is not
+        # enough.
+        if _has_encoder_only_layers(vllm_config):
+            from vllm_ascend.worker.v2.model_states.hybrid_encoder import (
+                AscendHybridEncoderModelState,
+            )
+
+            return AscendHybridEncoderModelState(
+                vllm_config,
+                model,
+                encoder_cache,
+                device,
+            )
+
         from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
             AscendMambaHybridModelState,
         )
