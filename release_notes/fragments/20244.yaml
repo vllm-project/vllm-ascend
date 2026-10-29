@@ -1,0 +1,4 @@
+pr: 20244
+entries:
+  - category: bugfix
+    text: Fixed MRv2 startup profiling exceeding decode buffer capacity on pure decode nodes with recompute scheduling enabled, including MegaMoE with speculative decoding.
