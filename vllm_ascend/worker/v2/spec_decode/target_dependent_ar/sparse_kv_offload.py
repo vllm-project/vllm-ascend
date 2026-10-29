@@ -76,11 +76,17 @@ class SparseKVOffloadMetadata:
         )
         pool_slots = model_state._offload_pool_slots
         pool_active = model_state._offload_pool_active
+        stable_prefixes = getattr(model_state, "_offload_stable_prefixes", None)
         return {
             "req_ids_tensor": req_ids_buffer.gpu[:num_reqs_padded],
             "token_to_req": token_to_req_buffer.gpu[:num_tokens_padded],
             "req_topk_buffer_slots": pool_slots.cpu[:num_reqs_padded] if pool_slots is not None else None,
             "req_topk_buffer_active": pool_active.cpu[:num_reqs_padded] if pool_active is not None else None,
+            # Draft steps must share the target's stable prefixes; the delayed
+            # D2H builder rejects None ("requires runner-owned stable prefixes").
+            "req_topk_buffer_stable_prefixes": (
+                stable_prefixes.gpu[:num_reqs_padded] if stable_prefixes is not None else None
+            ),
             "copy_sfa_draft_index": step,
             "offload_dummy": getattr(input_batch, "is_dummy", False),
         }
