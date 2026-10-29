@@ -4,7 +4,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import regex as re
 import torch
@@ -12,17 +12,27 @@ import torch
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
+<<<<<<< HEAD
 from vllm_ascend import envs
+=======
+from vllm_ascend.ascend_config import get_ascend_config
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+<<<<<<< HEAD
     parse_qos_from_extra_config,
     require_aligned_batch_results,
+=======
+    BatchResultShapeError,
+    parse_qos_from_extra_config,
+    require_aligned_batch_results,
+    set_scheduler_device,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -44,7 +54,11 @@ _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
     try:
+<<<<<<< HEAD
         if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+=======
+        if not get_ascend_config().kv_pool_range_debug:
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             return
         payload = {
             "event": "whole_key",
@@ -73,6 +87,126 @@ def _mooncake_setup_supports_ssd_offload() -> bool:
         return "enable_ssd_offload" in doc
 
 
+@functools.lru_cache(maxsize=1)
+def _mooncake_exist_options_class() -> type | None:
+    """Return ``ExistOptions`` when the installed Mooncake exposes it."""
+    try:
+        from mooncake.store import ExistOptions  # type: ignore
+
+        options = ExistOptions()
+        if hasattr(options, "prefetch_to_memory"):
+            return ExistOptions
+    except Exception:
+        pass
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _mooncake_supports_exist_prefetch() -> bool:
+    """True when is_exist / batch_is_exist accept ``ExistOptions`` (RFC #2213, kvcache-ai/Mooncake#4272)."""
+    return _mooncake_exist_options_class() is not None
+
+
+@functools.lru_cache(maxsize=1)
+def _mooncake_setup_has_config_dict() -> bool:
+    """True when ``setup()`` has the config-dict overload that takes the prefetch keys (kvcache-ai/Mooncake#4272)."""
+    try:
+        from mooncake.store import MooncakeDistributedStore  # type: ignore
+
+        doc = MooncakeDistributedStore.setup.__doc__ or ""
+    except Exception:
+        return False
+    if not isinstance(doc, str):
+        return False
+    return "Supported keys:" in doc and "enable_ssd_prefetch" in doc
+
+
+def _stringify_setup_cfg(cfg: dict[str, object]) -> dict[str, str]:
+    # pybind copies every value through py::str; TryParseBool wants true/false.
+    out: dict[str, str] = {}
+    for key, val in cfg.items():
+        if val is True:
+            out[key] = "true"
+        elif val is False:
+            out[key] = "false"
+        else:
+            out[key] = str(val)
+    return out
+
+
+class SsdPrefetchConf(NamedTuple):
+    """Resolved SSD-prefetch configuration, built once at store setup.
+
+    knobs carries only the throttle keys the user set; the master switch is
+    written separately on the config-dict path. use_dict_setup means setup
+    must take the config-dict overload, so the store owns its TransferEngine.
+    """
+
+    enabled: bool
+    options: Any | None
+    knobs: dict[str, object]
+    use_dict_setup: bool
+
+    @classmethod
+    def disabled(cls) -> "SsdPrefetchConf":
+        return cls(enabled=False, options=None, knobs={}, use_dict_setup=False)
+
+
+_SSD_PREFETCH_KNOB_KEYS = ("ssd_prefetch_cooldown_sec", "ssd_prefetch_dedup_ttl_sec")
+
+
+def _resolve_ssd_prefetch(config: "MooncakeStoreConfig", contribute_memory: bool) -> SsdPrefetchConf:
+    """Decide everything about SSD prefetch in one place; every gate warns and
+    disables instead of failing service startup."""
+    # A node that never prefetches may still run a promotion delegated by a
+    # remote peer, so the knobs go whenever this node contributes SSD.
+    knobs: dict[str, object] = {}
+    if contribute_memory and config.enable_ssd_offload and _mooncake_supports_exist_prefetch():
+        for key in _SSD_PREFETCH_KNOB_KEYS:
+            value = getattr(config, key, None)
+            if value is not None:
+                knobs[key] = value
+
+    enabled = contribute_memory and getattr(config, "enable_ssd_prefetch", False)
+    if enabled and not config.enable_ssd_offload:
+        logger.warning(
+            "enable_ssd_prefetch is true but SSD offload is disabled; prefetch has no effect without SSD offload."
+        )
+        enabled = False
+    elif enabled and not _mooncake_supports_exist_prefetch():
+        logger.warning(
+            "enable_ssd_prefetch is true, but the installed Mooncake does not support ExistOptions on "
+            "batch_is_exist / is_exist (kvcache-ai/Mooncake#4272; concept from RFC #2213). Upgrade Mooncake "
+            "to a version that implements this feature. Prefetch will be disabled."
+        )
+        enabled = False
+    elif enabled and not _mooncake_setup_has_config_dict():
+        logger.warning(
+            "enable_ssd_prefetch is true, but the installed Mooncake setup() has no config-dict overload "
+            "to receive it (kvcache-ai/Mooncake#4272). Prefetch will be disabled."
+        )
+        enabled = False
+
+    # The keyword overload takes neither the knobs nor the master switch;
+    # anything undeliverable is dropped rather than crashing setup().
+    use_dict_setup = bool(knobs or enabled) and _mooncake_setup_has_config_dict()
+    if knobs and not use_dict_setup:
+        logger.warning(
+            "SSD prefetch knobs are set, but the installed Mooncake setup() has no config-dict overload "
+            "to receive them (kvcache-ai/Mooncake#4272). The knobs will be ignored."
+        )
+        knobs = {}
+
+    options = None
+    if enabled:
+        logger.info("Mooncake SSD prefetch on exist enabled.")
+        options_cls = _mooncake_exist_options_class()
+        assert options_cls is not None  # guaranteed by the gates above
+        options = options_cls()
+        options.prefetch_to_memory = True
+    return SsdPrefetchConf(enabled=enabled, options=options, knobs=knobs, use_dict_setup=use_dict_setup)
+
+
 def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
     """Keyword args for store.setup(); empty on old Mooncake or when SSD is off."""
     if not config.enable_ssd_offload:
@@ -85,10 +219,11 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
             "later (see Mooncake ssd-offload.md Step 3A), or set "
             "enable_ssd_offload to false."
         )
-    return {
+    kwargs: dict[str, object] = {
         "enable_ssd_offload": config.enable_ssd_offload,
         "ssd_offload_path": config.ssd_offload_path,
     }
+    return kwargs
 
 
 def _validate_store_qos() -> None:
@@ -194,6 +329,7 @@ class MooncakeBackend(Backend):
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _inject_store_qos(extra_config)
         _validate_store_qos()
+        self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
@@ -206,6 +342,7 @@ class MooncakeBackend(Backend):
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
+        self._prefetch_conf = SsdPrefetchConf.disabled()
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -233,14 +370,19 @@ class MooncakeBackend(Backend):
                 "to run vLLM with MooncakeConnector."
             ) from e
 
+        self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # Resolve prefetch once; everything below reads self._prefetch_conf.
+        self._prefetch_conf = _resolve_ssd_prefetch(self.config, self._contribute_memory)
+        # Scheduler-only clients must not register SSD storage with Mooncake,
+        # which would inflate the active client count and reported SSD usage.
+        ssd_kwargs = _ssd_setup_kwargs(self.config) if self._contribute_memory else {}
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
@@ -248,39 +390,12 @@ class MooncakeBackend(Backend):
             except OSError as e:
                 raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
             ssd_kwargs["ssd_offload_path"] = rank_path
-        setup_kwargs = dict(ssd_kwargs)
-        if self.config.tenant_id != DEFAULT_TENANT_ID:
-            setup_kwargs["tenant_id"] = self.config.tenant_id
-        # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
-        # and only can be used for 800 I/T A3 series.
-        # Required supporting hardware versions are as follows:
-        # ASCEND_GLOBAL_RESOURCE_CONFIG takes the same store-independent-TE setup path as fabric-mem.
-        if not self._use_fabric_mem and not self._use_store_independent_te:
-            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
-            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
-            ret = store.setup(
-                local_hostname=self.local_seg,
-                metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
-                protocol=self.config.protocol,
-                rdma_devices=self.config.device_name,
-                master_server_addr=self.config.master_server_address,
-                engine=transfer_engine.get_engine(),
-                **setup_kwargs,
-            )
+        # The config-dict overload (needed to forward knobs) cannot share the
+        # global TransferEngine; the keyword path keeps shared-TE mode.
+        if self._prefetch_conf.use_dict_setup:
+            ret = self._setup_store_config_dict(store, local_hostname, ssd_kwargs)
         else:
-            self.local_seg = local_hostname
-            ret = store.setup(
-                local_hostname=self.local_seg,
-                metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=0,
-                protocol=self.config.protocol,
-                rdma_devices=self.config.device_name,
-                master_server_addr=self.config.master_server_address,
-                **setup_kwargs,
-            )
+            ret = self._setup_store_kwargs(store, local_hostname, ssd_kwargs)
 
         if ret != 0:
             msg = "Initialize mooncake failed."
@@ -293,23 +408,99 @@ class MooncakeBackend(Backend):
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
-                self.config.ssd_offload_path,
+                ssd_kwargs["ssd_offload_path"],
             )
         logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
 
+    def _setup_store_config_dict(
+        self,
+        store: Any,
+        local_hostname: str,
+        ssd_kwargs: dict[str, object],
+    ) -> int:
+        """setup(config) path. The store owns its TransferEngine."""
+        self.local_seg = local_hostname
+        # Buffer sizing matches the keyword path: a local buffer only when this
+        # process contributes memory outside fabric-mem / store-independent-TE mode.
+        setup_cfg: dict[str, object] = {
+            "local_hostname": local_hostname,
+            "metadata_server": self.config.metadata_server,
+            "global_segment_size": self.config.global_segment_size if self._contribute_memory else 0,
+            "local_buffer_size": (
+                self.config.local_buffer_size
+                if self._contribute_memory and not self._use_fabric_mem and not self._use_store_independent_te
+                else 0
+            ),
+            "protocol": self.config.protocol,
+            "rdma_devices": self.config.device_name or "",
+            "master_server_addr": self.config.master_server_address,
+        }
+        if self.config.tenant_id != DEFAULT_TENANT_ID:
+            setup_cfg["tenant_id"] = self.config.tenant_id
+        if ssd_kwargs:
+            setup_cfg["enable_ssd_offload"] = True
+            setup_cfg["ssd_offload_path"] = ssd_kwargs["ssd_offload_path"]
+        setup_cfg.update(self._prefetch_conf.knobs)
+        if self._prefetch_conf.enabled:
+            setup_cfg["enable_ssd_prefetch"] = True
+        cfg_str = _stringify_setup_cfg(setup_cfg)
+        logger.info(
+            "Mooncake store.setup(config) enable_ssd_prefetch=%s",
+            cfg_str.get("enable_ssd_prefetch", "false"),
+        )
+        return store.setup(cfg_str)
+
+    def _setup_store_kwargs(
+        self,
+        store: Any,
+        local_hostname: str,
+        ssd_kwargs: dict[str, object],
+    ) -> int:
+        setup_kwargs = dict(ssd_kwargs)
+        setup_kwargs.update(self._prefetch_conf.knobs)
+        if self.config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = self.config.tenant_id
+        # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
+        # and only can be used for 800 I/T A3 series.
+        # Required supporting hardware versions are as follows:
+        # ASCEND_GLOBAL_RESOURCE_CONFIG takes the same store-independent-TE setup path as fabric-mem.
+        if not self._use_fabric_mem and not self._use_store_independent_te:
+            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
+            return store.setup(
+                local_hostname=self.local_seg,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
+                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
+                protocol=self.config.protocol,
+                rdma_devices=self.config.device_name,
+                master_server_addr=self.config.master_server_address,
+                engine=transfer_engine.get_engine(),
+                **setup_kwargs,
+            )
+        self.local_seg = local_hostname
+        return store.setup(
+            local_hostname=self.local_seg,
+            metadata_server=self.config.metadata_server,
+            global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
+            local_buffer_size=0,
+            protocol=self.config.protocol,
+            rdma_devices=self.config.device_name,
+            master_server_addr=self.config.master_server_address,
+            **setup_kwargs,
+        )
+
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
+        set_scheduler_device(parallel_config)
         return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
-        local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
-        torch.npu.set_device(device)
+        torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        if self._use_store_independent_te:
+        if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
                 ret = self.store.register_buffer(ptr, length)
@@ -333,8 +524,26 @@ class MooncakeBackend(Backend):
             )
             return [0] * len(keys)
         assert self.store is not None
+        if self._prefetch_conf.enabled and self._prefetch_conf.options is not None:
+            return self.store.batch_is_exist(keys, self._prefetch_conf.options)
         return self.store.batch_is_exist(keys)
 
+<<<<<<< HEAD
+=======
+    def remove_all(self) -> None:
+        """Delete every object on the Mooncake master. The client stays open."""
+        if not self._store_initialized or self.store is None:
+            return
+        self.store.remove_all(force=True)
+
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Map committed Mooncake objects to the common readability contract."""
+        states = require_aligned_batch_results("batch_is_exist", keys, self.batch_is_exist(keys))
+        if any(state not in (0, 1) for state in states):
+            raise BatchResultShapeError("batch_is_exist returned states other than 0 or 1")
+        return [state == 1 for state in states]
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def _build_replicate_config(self) -> ReplicateConfig:
         config = ReplicateConfig()
         if self.config.preferred_segment:
@@ -424,7 +633,11 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
+<<<<<<< HEAD
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+=======
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -444,6 +657,7 @@ class MooncakeBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) >= 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -455,6 +669,7 @@ class MooncakeBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
@@ -516,6 +731,11 @@ class MooncakeStoreConfig:
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
     tenant_id: str = DEFAULT_TENANT_ID
+    enable_ssd_prefetch: bool = False
+    # None means "not set in mooncake.json". Omit the knob from setup() so
+    # Mooncake keeps its own default (cooldown 5s, dedup 30s).
+    ssd_prefetch_cooldown_sec: int | None = None
+    ssd_prefetch_dedup_ttl_sec: int | None = None
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -551,6 +771,17 @@ class MooncakeStoreConfig:
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
             tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
+            enable_ssd_prefetch=bool(config.get("enable_ssd_prefetch", False)),
+            ssd_prefetch_cooldown_sec=(
+                int(config["ssd_prefetch_cooldown_sec"])
+                if config.get("ssd_prefetch_cooldown_sec") is not None
+                else None
+            ),
+            ssd_prefetch_dedup_ttl_sec=(
+                int(config["ssd_prefetch_dedup_ttl_sec"])
+                if config.get("ssd_prefetch_dedup_ttl_sec") is not None
+                else None
+            ),
         )
 
     @staticmethod

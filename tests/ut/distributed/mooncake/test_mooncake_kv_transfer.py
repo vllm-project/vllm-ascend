@@ -38,7 +38,7 @@ class _FakeStore:
 class TestKVTransferMissingKeyPut(unittest.TestCase):
     def test_sending_thread_only_puts_missing_keys(self):
         store = _FakeStore(exists_result=[1, 0, 1, 0])
-        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, 0)], [16], None)
+        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
         token_db.set_group_buffers({0: [1000]}, {0: [16]}, {0: [1]})
         thread = KVCacheStoreSendingThread(
             m_store=store,
@@ -60,7 +60,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
-        thread.add_stored_request("req-1")
+        thread.add_stored_request(req_meta)
         thread.request_queue.put(req_meta)
         thread._handle_request(req_meta)
 
@@ -69,6 +69,9 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
         self.assertEqual(len(put_keys), 2)
         self.assertEqual(put_addrs, [[1001], [1003]])
         self.assertEqual(put_sizes, [[16], [16]])
+        self.assertEqual(thread.get_saved_offset("req-1"), 64)
+        self.assertFalse(thread.is_stored_request("req-1"))
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

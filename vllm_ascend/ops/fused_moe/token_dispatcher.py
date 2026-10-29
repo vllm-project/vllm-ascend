@@ -122,7 +122,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
 
         # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
-        self.need_expert_scale = self.need_shared_expert_args or self.mc2_comm_alg == "hierarchy"
+        self.need_expert_scale = self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -138,7 +138,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
-        # use global_bs=0 (uniform mode) and pass mc2_mask to improve performance.
+        # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0

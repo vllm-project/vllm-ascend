@@ -21,69 +21,6 @@ def test_dyntra_lb_core_uses_native_request_status():
     assert dyntra_lb_core.RequestStatus is NativeRequestStatus
 
 
-def test_dyntra_lb_uses_main_upstream_engine_core_entrypoint():
-    assert dyntra_lb_core._UpstreamRunEngineCore is dyntra_lb_core._balance_patch._OriginalRunEngineCore
-
-
-def test_dyntra_lb_disabled_delegates_to_balance_wrapper(monkeypatch):
-    expected = object()
-    calls = []
-
-    def balance_wrapper(*args, **kwargs):
-        calls.append((args, kwargs))
-        return expected
-
-    monkeypatch.setattr(
-        dyntra_lb_core,
-        "_get_dyntra_lb_config",
-        lambda _config: MagicMock(enabled=False),
-    )
-    monkeypatch.setattr(dyntra_lb_core, "_PreviousRunEngineCore", balance_wrapper)
-
-    vllm_config = object()
-    result = dyntra_lb_core._dyntra_lb_run_engine_core(
-        "engine-arg",
-        vllm_config=vllm_config,
-        dp_rank=1,
-        local_dp_rank=2,
-    )
-
-    assert result is expected
-    assert calls == [
-        (
-            ("engine-arg",),
-            {
-                "vllm_config": vllm_config,
-                "dp_rank": 1,
-                "local_dp_rank": 2,
-            },
-        )
-    ]
-
-
-def test_dyntra_lb_enabled_bypasses_balance_wrapper(monkeypatch):
-    expected = object()
-    balance_wrapper = MagicMock(side_effect=AssertionError("balance wrapper must be bypassed"))
-
-    def upstream_entrypoint(*args, **kwargs):
-        assert dyntra_lb_core._engine_core_mod.DPEngineCoreProc is dyntra_lb_core.DyntraLBDPEngineCoreProc
-        return expected
-
-    monkeypatch.setattr(
-        dyntra_lb_core,
-        "_get_dyntra_lb_config",
-        lambda _config: MagicMock(enabled=True, enable_diagnostics=False),
-    )
-    monkeypatch.setattr(dyntra_lb_core, "_PreviousRunEngineCore", balance_wrapper)
-    monkeypatch.setattr(dyntra_lb_core, "_UpstreamRunEngineCore", upstream_entrypoint)
-
-    result = dyntra_lb_core._dyntra_lb_run_engine_core(vllm_config=object())
-
-    assert result is expected
-    balance_wrapper.assert_not_called()
-    assert dyntra_lb_core._engine_core_mod.DPEngineCoreProc is dyntra_lb_core._OriginalDPEngineCoreProc
-
-
 def test_dyntra_lb_enabled_reads_nested_scheduler_config(monkeypatch):
     monkeypatch.setattr(
         dyntra_lb_core,

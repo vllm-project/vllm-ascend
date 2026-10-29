@@ -28,6 +28,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+<<<<<<< HEAD
+=======
+    MooncakePCPTransferMetadata,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     MooncakePPTransferMetadata,
     MooncakeTPTransferMetadata,
     MooncakeTransferMetadata,
@@ -64,6 +68,10 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         pp_size: int,
         pcp_size: int,
         dcp_size: int,
+<<<<<<< HEAD
+=======
+        use_kv_pp: bool,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ready_event: threading.Event,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
@@ -75,7 +83,13 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_size = dcp_size
         self.engine_id = engine_id
+<<<<<<< HEAD
         self.use_kv_pp = False
+=======
+        self.use_kv_pp = use_kv_pp
+        if self.use_kv_pp and self.dcp_size != 1:
+            raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
@@ -104,10 +118,16 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             self.use_kv_pp,
         )
         self.ready_event = ready_event
+<<<<<<< HEAD
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.early_finished_requests: set[str] = set()
         self.finished_request_ids: set[str] = set()
+=======
+        self.stop_event = threading.Event()
+        self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         self.state_lock = threading.Lock()
 
     def _merge_metadata_by_pp_rank(
@@ -116,6 +136,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
     ) -> dict[int, MooncakePPTransferMetadata]:
         """Merge worker metadata into one PP-wide layer table.
 
+<<<<<<< HEAD
         LayerSplit may assign different layers to redundant TP ranks. Per-layer
         fields are therefore aligned by layer name instead of requiring every
         TP worker to expose the same layer list. TP-private address tables are
@@ -132,6 +153,28 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             else:
                 raise ValueError(
                     f"Mooncake handshake metadata key must be tp_rank or (pp_rank, tp_rank), got {metadata_key!r}"
+=======
+        LayerSplit may assign different layers to any PCP/TP worker. Per-layer
+        fields are therefore aligned by layer name instead of requiring every
+        worker to expose the same layer list. Worker-private address tables are
+        padded to the PP-union layer order, while ``layer_indices`` records the
+        entries physically owned by each PCP/TP worker.
+        """
+        # pp_rank -> pcp_rank -> tp_rank -> worker handshake metadata.
+        workers_by_pp_rank: dict[int, dict[int, dict[int, MooncakeTransferMetadata]]] = {}
+        for metadata_key, rank_metadata in metadata.items():
+            if isinstance(metadata_key, int):
+                pp_rank, pcp_rank, tp_rank = 0, 0, metadata_key
+            elif len(metadata_key) == 2:
+                pp_rank, tp_rank = metadata_key
+                pcp_rank = 0
+            elif len(metadata_key) == 3:
+                pp_rank, pcp_rank, tp_rank = metadata_key
+            else:
+                raise ValueError(
+                    "Mooncake handshake metadata key must be tp_rank, "
+                    f"(pp_rank, tp_rank), or (pp_rank, pcp_rank, tp_rank), got {metadata_key!r}"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 )
 
             if not isinstance(rank_metadata, MooncakeTransferMetadata):
@@ -145,9 +188,17 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     f"{self.engine_id!r}, got {rank_metadata.engine_id!r}"
                 )
 
+<<<<<<< HEAD
             workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {})
             if tp_rank in workers_by_tp_rank:
                 raise ValueError(f"Duplicate Mooncake metadata for PP rank {pp_rank}, TP rank {tp_rank}")
+=======
+            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {}).setdefault(pcp_rank, {})
+            if tp_rank in workers_by_tp_rank:
+                raise ValueError(
+                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, TP rank {tp_rank}"
+                )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             workers_by_tp_rank[tp_rank] = rank_metadata
 
         expected_pp_ranks = set(range(self.pp_size))
@@ -157,6 +208,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 f"{sorted(expected_pp_ranks)}, got {sorted(workers_by_pp_rank)}"
             )
 
+<<<<<<< HEAD
         expected_tp_ranks = set(range(self.tp_size))
         merged: dict[int, MooncakePPTransferMetadata] = {}
         for pp_rank, workers_by_tp_rank in sorted(workers_by_pp_rank.items()):
@@ -182,6 +234,43 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                         f"TP {tp_rank} mismatch in {mismatched_fields}"
                     )
 
+=======
+        expected_pcp_ranks = set(range(self.pcp_size))
+        expected_tp_ranks = set(range(self.tp_size))
+        merged: dict[int, MooncakePPTransferMetadata] = {}
+        for pp_rank, workers_by_pcp_rank in sorted(workers_by_pp_rank.items()):
+            if set(workers_by_pcp_rank) != expected_pcp_ranks:
+                raise ValueError(
+                    "Mooncake worker metadata has incomplete PCP ranks for "
+                    f"PP rank {pp_rank}: expected {sorted(expected_pcp_ranks)}, "
+                    f"got {sorted(workers_by_pcp_rank)}"
+                )
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                if set(workers_by_tp_rank) != expected_tp_ranks:
+                    raise ValueError(
+                        "Mooncake worker metadata has incomplete TP ranks for "
+                        f"PP rank {pp_rank}, PCP rank {pcp_rank}: "
+                        f"expected {sorted(expected_tp_ranks)}, got {sorted(workers_by_tp_rank)}"
+                    )
+
+            reference_pcp_rank = min(workers_by_pcp_rank)
+            reference_tp_rank = min(workers_by_pcp_rank[reference_pcp_rank])
+            reference = workers_by_pcp_rank[reference_pcp_rank][reference_tp_rank]
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                for tp_rank, worker_metadata in workers_by_tp_rank.items():
+                    mismatched_fields = [
+                        field_name
+                        for field_name in ("block_size", "num_blocks")
+                        if getattr(worker_metadata, field_name) != getattr(reference, field_name)
+                    ]
+                    if mismatched_fields:
+                        raise ValueError(
+                            "Mooncake worker metadata differs across PCP/TP ranks for "
+                            f"PP rank {pp_rank}: PCP/TP {reference_pcp_rank}/{reference_tp_rank} and "
+                            f"{pcp_rank}/{tp_rank} mismatch in {mismatched_fields}"
+                        )
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             # layer_name -> (first owning worker metadata, its local layer index).
             # The source supplies PP-shared fields after all duplicate owners
             # have been checked against the corresponding structural signature.
@@ -189,6 +278,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             # layer_name -> (group index, block size, strides, lengths, shapes,
             #                block-size scales).
             layer_signature_by_name: dict[str, tuple[object, ...]] = {}
+<<<<<<< HEAD
             tp_layer_names: list[set[str]] = []
             for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
                 if len(set(worker_metadata.layer_names)) != len(worker_metadata.layer_names):
@@ -236,6 +326,58 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             if has_layer_split and self.dcp_size != 1:
                 raise ValueError(f"Mooncake LayerSplit cannot be combined with DCP, got dcp_size={self.dcp_size}")
 
+=======
+            reference_layer_names: set[str] | None = None
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    worker_layer_names = set(worker_metadata.layer_names)
+                    if len(worker_layer_names) != len(worker_metadata.layer_names):
+                        raise ValueError(
+                            f"Mooncake worker metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, "
+                            f"TP rank {tp_rank} contains duplicate layers"
+                        )
+                    if reference_layer_names is None:
+                        reference_layer_names = worker_layer_names
+                    elif not self.use_kv_pp and worker_layer_names != reference_layer_names:
+                        raise ValueError(
+                            "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
+                            f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
+                        )
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_signature = (
+                            worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.layer_block_sizes[local_layer_index],
+                            worker_metadata.block_strides[local_layer_index],
+                            worker_metadata.block_lens[local_layer_index],
+                            worker_metadata.block_shapes[local_layer_index],
+                            worker_metadata.block_size_scales[local_layer_index],
+                        )
+                        previous_signature = layer_signature_by_name.get(layer_name)
+                        if previous_signature is not None and previous_signature != layer_signature:
+                            layer_field_names = (
+                                "group_indices",
+                                "layer_block_sizes",
+                                "block_strides",
+                                "block_lens",
+                                "block_shapes",
+                                "block_size_scales",
+                            )
+                            mismatched_layer_fields = [
+                                field_name
+                                for field_name, previous_value, value in zip(
+                                    layer_field_names, previous_signature, layer_signature
+                                )
+                                if previous_value != value
+                            ]
+                            raise ValueError(
+                                "Mooncake worker metadata differs across PCP/TP ranks for "
+                                f"PP rank {pp_rank}, layer {layer_name!r}: mismatch in {mismatched_layer_fields}"
+                            )
+                        if previous_signature is None:
+                            layer_source_by_name[layer_name] = (worker_metadata, local_layer_index)
+                            layer_signature_by_name[layer_name] = layer_signature
+            layer_names = sorted(layer_source_by_name)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             layer_block_sizes: list[int] = []
             group_indices: list[int] = []
             block_strides: list[list[int]] = []
@@ -252,6 +394,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
+<<<<<<< HEAD
             metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
             for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
                 layer_indices = sorted(layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names)
@@ -268,6 +411,29 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     local_ip=worker_metadata.local_ip,
                     handshake_port=worker_metadata.handshake_port,
                 )
+=======
+            metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    layer_indices = sorted(
+                        layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names
+                    )
+                    # PP-union layer index -> this worker's per-cache-tensor
+                    # addresses; unowned entries remain empty.
+                    aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_index = layer_index_by_name[layer_name]
+                        aligned_base_addrs[layer_index] = worker_metadata.kv_caches_base_addr[local_layer_index]
+                    metadata_by_tp_rank[tp_rank] = MooncakeTPTransferMetadata(
+                        te_rpc_port=worker_metadata.te_rpc_port,
+                        layer_indices=layer_indices,
+                        kv_caches_base_addr=aligned_base_addrs,
+                        local_ip=worker_metadata.local_ip,
+                        handshake_port=worker_metadata.handshake_port,
+                    )
+                metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
             merged[pp_rank] = MooncakePPTransferMetadata(
                 block_size=reference.block_size,
@@ -279,16 +445,23 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_lens=block_lens,
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
+<<<<<<< HEAD
                 metadata_by_tp_rank=metadata_by_tp_rank,
+=======
+                metadata_by_pcp_rank=metadata_by_pcp_rank,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             )
         return merged
 
     def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
         with self.state_lock:
             self.delayed_free_requests[request_id] = delay_start_time
+<<<<<<< HEAD
             if request_id in self.early_finished_requests:
                 self.early_finished_requests.remove(request_id)
                 self._mark_finished_locked(request_id)
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
@@ -300,11 +473,27 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             except queue.Empty:
                 return finished
 
+<<<<<<< HEAD
+=======
+    def shutdown(self) -> None:
+        self.stop_event.set()
+        if self.ident is not None:
+            self.join()
+        with self.state_lock:
+            self.delayed_free_requests.clear()
+        while not self.finished_requests.empty():
+            self.finished_requests.get_nowait()
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def run(self) -> None:
         path = make_zmq_path("tcp", self.host, self.port)
         try:
             logger.info("Mooncake scheduler sending thread listening on %s", path)
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore[attr-defined]
+<<<<<<< HEAD
+=======
+                sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
                 self.ready_event.set()
                 self._run_busy_loop(sock)
@@ -314,7 +503,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
+<<<<<<< HEAD
         while True:
+=======
+        while not self.stop_event.is_set():
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
@@ -340,6 +533,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
+<<<<<<< HEAD
             if request_id in self.finished_request_ids:
                 return
             if request_id in self.delayed_free_requests:
@@ -352,6 +546,21 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             return
         self.finished_request_ids.add(request_id)
         self.delayed_free_requests.pop(request_id, None)
+=======
+            self._mark_finished_locked(request_id)
+
+    def _mark_finished_locked(self, request_id: str) -> None:
+        # request_finished registers the request before exposing its transfer
+        # parameters to D. Unknown IDs are therefore stale or duplicate DONEs;
+        # the control loop still ACKs them so D can stop retrying.
+        if request_id not in self.delayed_free_requests:
+            logger.warning(
+                "Received Mooncake DONE for request %s with no pending delayed free; ignoring completion",
+                request_id,
+            )
+            return
+        del self.delayed_free_requests[request_id]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         self.finished_requests.put(request_id)
 
     def _retrieve_expired_requests_locked(self) -> None:
@@ -376,7 +585,12 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def __init__(self, ready_event: threading.Event) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerRecvingThread")
         self.ready_event = ready_event
+<<<<<<< HEAD
         self.request_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
+=======
+        self.stop_event = threading.Event()
+        self.request_queue: queue.Queue[tuple[str, int, str] | None] = queue.Queue()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         self.encoder = msgspec.msgpack.Encoder()
         self.remote_sockets: dict[str, deque[Any]] = defaultdict(deque)
         self.remote_sockets_lock = threading.Lock()
@@ -385,6 +599,7 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
         self.request_queue.put((remote_host, remote_port, request_id))
 
+<<<<<<< HEAD
     def run(self) -> None:
         self.ready_event.set()
         while True:
@@ -400,6 +615,57 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
                 self.request_queue.put(request)
             finally:
                 self.request_queue.task_done()
+=======
+    def shutdown(self) -> None:
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            self.request_queue.put(None)
+        if self.ident is not None:
+            self.join()
+        # Also handle shutdown before start and a sentinel enqueued while the
+        # thread was already completing its final cleanup.
+        self._clear_pending_requests()
+
+    def _clear_pending_requests(self) -> None:
+        while True:
+            try:
+                self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.request_queue.task_done()
+
+    def run(self) -> None:
+        self.ready_event.set()
+        try:
+            while not self.stop_event.is_set():
+                request = self.request_queue.get()
+                try:
+                    if request is None or self.stop_event.is_set():
+                        break
+                    self._send_done_recving(*request)
+                except Exception:
+                    # The socket helpers already retry. Let P's delayed-free
+                    # timeout reclaim blocks if this notification cannot arrive.
+                    logger.exception(
+                        "Failed to send Mooncake scheduler completion for request %s; "
+                        "producer cleanup will rely on its delayed-free timeout",
+                        request[2] if request is not None else None,
+                    )
+                finally:
+                    self.request_queue.task_done()
+        finally:
+            self.stop_event.set()
+            # Close sockets in their owning thread, after the last send ends.
+            with self.remote_sockets_lock:
+                for sockets in self.remote_sockets.values():
+                    for sock in sockets:
+                        sock.close(linger=0)
+                self.remote_sockets.clear()
+                if self.zmq_context is not None:
+                    self.zmq_context.destroy(linger=0)
+                    self.zmq_context = None
+            self._clear_pending_requests()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
@@ -470,6 +736,19 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._recving_thread.start()
             recving_ready_event.wait()
 
+<<<<<<< HEAD
+=======
+    def shutdown(self) -> None:
+        if self._sending_thread is not None:
+            self._sending_thread.shutdown()
+        if self._recving_thread is not None:
+            self._recving_thread.shutdown()
+        self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
+        self._reqs_in_batch.clear()
+        self._reqs_recv_info.clear()
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def set_xfer_handshake_metadata_from_workers(
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
@@ -487,6 +766,10 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.pp_size,
             self.pcp_size,
             self.dcp_size,
+<<<<<<< HEAD
+=======
+            self.ascend_config.kvpp_config.size > 1,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             ready_event,
         )
         self._sending_thread.start()
@@ -512,9 +795,12 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
+<<<<<<< HEAD
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         return 0, False
 
     def update_state_after_alloc(
@@ -523,6 +809,10 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
     ) -> None:
+<<<<<<< HEAD
+=======
+        self._log_mamba_request_allocation(request.request_id, blocks)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
@@ -643,9 +933,12 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "last_token_id": request.output_token_ids[-1],
         }
 
+<<<<<<< HEAD
     def on_new_request(self, request: "Request") -> None:
         pass
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def update_connector_output(
         self,
         connector_output: KVConnectorOutput,
@@ -658,6 +951,19 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 if self._recving_thread is None:
                     raise RuntimeError("Producer Mooncake scheduler received a receive-completion event")
                 self._recving_thread.add_request(*remote)
+<<<<<<< HEAD
+=======
+                if req_id in connector_output.failed_recving:
+                    logger.error(
+                        "Mooncake D receive failed after worker aggregation: request_id=%s, "
+                        "remote_request_id=%s, producer=%s:%s, failure_policy=%s; producer release notification queued",
+                        req_id,
+                        remote[2],
+                        remote[0],
+                        remote[1],
+                        self.kv_transfer_config.kv_load_failure_policy,
+                    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
         # P side: feed scheduler-received ACKs into vLLM's standard delayed
         # free path. Scheduler._update_from_kv_xfer_finished reads this same

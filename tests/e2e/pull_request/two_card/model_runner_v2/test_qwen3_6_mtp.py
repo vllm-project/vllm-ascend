@@ -3,9 +3,15 @@
 
 """Qwen3.6 BF16 MTP acceptance on MRV2 with fixed goldens on two NPUs.
 
+<<<<<<< HEAD
 Use the same 40 MT-Bench prompts, chat formatting, output limit and
 acceptance-length tolerance as vllm-ascend#13960. The fixed goldens use
 the supplied MRV2 measurements with greedy decoding (temperature 0).
+=======
+Use the same 40 MT-Bench prompts, chat formatting and output limit as
+vllm-ascend#13960, with a 10% acceptance-length tolerance. The fixed goldens
+use the supplied MRV2 measurements with greedy decoding (temperature 0).
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 Run with:
     pytest -sv tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
@@ -15,6 +21,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+<<<<<<< HEAD
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.inputs import TokensPrompt
@@ -22,17 +29,30 @@ from vllm.v1.metrics.reader import Counter, Metric, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import ACCEPTANCE_LENGTH_RTOL, SPEC_DECODE_PROMPTS
+=======
+from vllm.config import CompilationConfig
+from vllm.v1.metrics.reader import Counter, Metric
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 QWEN36_DENSE_MODEL = "Qwen/Qwen3.6-27B"
 QWEN36_MOE_EXPECTED_ACCEPTANCE_LENGTH = 3.141271769947347
+<<<<<<< HEAD
 QWEN36_MOE_EXPECTED_ACCEPTANCE_PER_POS = (0.8663426488456865, 0.7049817739975699, 0.5699473471040907)
 QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH = 3.1607901975493875
 QWEN36_DENSE_EXPECTED_ACCEPTANCE_PER_POS = (0.8668833875135451, 0.7126781695423856, 0.5812286404934567)
+=======
+QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH = 3.1607901975493875
+ACCEPTANCE_LENGTH_RTOL = 0.10
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 NUM_SPECULATIVE_TOKENS = 3
 MAX_TOKENS = 1024
 MAX_MODEL_LEN = 4096
 SEED = 42
+<<<<<<< HEAD
 TEMPERATURE = 0.0
 
 
@@ -40,6 +60,13 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int, list[int]]:
     num_drafts = 0
     num_accepted_tokens = 0
     accepted_per_pos = [0] * NUM_SPECULATIVE_TOKENS
+=======
+
+
+def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int]:
+    num_drafts = 0
+    num_accepted_tokens = 0
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -47,6 +74,7 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int, list[int]]:
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
             num_accepted_tokens += metric.value
+<<<<<<< HEAD
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
             assert len(metric.values) == NUM_SPECULATIVE_TOKENS, (
@@ -57,6 +85,52 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int, list[int]]:
     return num_drafts, num_accepted_tokens, accepted_per_pos
 
 
+=======
+    return num_drafts, num_accepted_tokens
+
+
+@pytest.mark.parametrize(
+    "model_name, is_moe, expected_acceptance_length",
+    [
+        pytest.param(
+            QWEN36_MOE_MODEL,
+            True,
+            QWEN36_MOE_EXPECTED_ACCEPTANCE_LENGTH,
+            id="qwen3_6_35b_a3b",
+            marks=[
+                pytest.mark.e2e_model(QWEN36_MOE_MODEL),
+                pytest.mark.e2e_coverage(
+                    arch="moe",
+                    feature="mtp,aclgraph",
+                    parallel="TP,EP",
+                    deploy="pd_mix",
+                    hardware="A3",
+                    quantization="BF16",
+                    graph_mode="full_decode_only",
+                ),
+            ],
+        ),
+        pytest.param(
+            QWEN36_DENSE_MODEL,
+            False,
+            QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH,
+            id="qwen3_6_27b",
+            marks=[
+                pytest.mark.e2e_model(QWEN36_DENSE_MODEL),
+                pytest.mark.e2e_coverage(
+                    arch="dense",
+                    feature="mtp,aclgraph",
+                    parallel="TP",
+                    deploy="pd_mix",
+                    hardware="A3",
+                    quantization="BF16",
+                    graph_mode="full_decode_only",
+                ),
+            ],
+        ),
+    ],
+)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 @patch.dict(
     os.environ,
     {
@@ -70,7 +144,11 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int, list[int]]:
     },
 )
 @wait_until_npu_memory_free()
+<<<<<<< HEAD
 def _run_qwen3_6_mtp(model_name: str, is_moe: bool) -> tuple[float, list[float]]:
+=======
+def test_qwen3_6_mtp_acceptance_tp2(model_name: str, is_moe: bool, expected_acceptance_length: float) -> None:
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     with VllmRunner(
         model_name,
         dtype="bfloat16",
@@ -94,6 +172,7 @@ def _run_qwen3_6_mtp(model_name: str, is_moe: bool) -> tuple[float, list[float]]
             cudagraph_capture_sizes=[4, 8, 16, 32, 64, 128, 160],
         ),
     ) as vllm_model:
+<<<<<<< HEAD
         assert vllm_model.model.llm_engine.vllm_config.use_v2_model_runner, f"Expected MRV2 for {model_name}"
         tokenizer = vllm_model.model.get_tokenizer()
         prompts = [
@@ -106,12 +185,24 @@ def _run_qwen3_6_mtp(model_name: str, is_moe: bool) -> tuple[float, list[float]]
                     ),
                     add_special_tokens=False,
                 )
+=======
+        tokenizer = vllm_model.model.get_tokenizer()
+        prompt_ids = [
+            tokenizer.encode(
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                ),
+                add_special_tokens=False,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             )
             for prompt in SPEC_DECODE_PROMPTS
         ]
         # Use deltas so other engines in this pytest process cannot
         # contaminate the fixed-golden comparison through old counters.
         before = _read_mtp_counters(vllm_model.model.get_metrics())
+<<<<<<< HEAD
         outputs = vllm_model.model.generate(
             prompts,
             sampling_params=SamplingParams(temperature=TEMPERATURE, max_tokens=MAX_TOKENS, seed=SEED),
@@ -206,4 +297,19 @@ def test_qwen3_6_27b_mtp_acceptance_tp2() -> None:
         is_moe=False,
         expected_acceptance_length=QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH,
         expected_acceptance_per_pos=QWEN36_DENSE_EXPECTED_ACCEPTANCE_PER_POS,
+=======
+        vllm_model.generate_greedy(prompt_ids, MAX_TOKENS)
+        after = _read_mtp_counters(vllm_model.model.get_metrics())
+
+    num_drafts = after[0] - before[0]
+    num_accepted_tokens = after[1] - before[1]
+    acceptance_length = 1 + num_accepted_tokens / num_drafts if num_drafts > 0 else 1
+    relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
+    assert relative_error <= ACCEPTANCE_LENGTH_RTOL, (
+        f"{model_name}, MRV2: acc_len does not match the fixed golden; "
+        f"expected={expected_acceptance_length:.6f}, actual={acceptance_length:.6f}, "
+        f"relative error={relative_error:.2%}, tolerance={ACCEPTANCE_LENGTH_RTOL:.0%}\n"
+        f"num_drafts={num_drafts}\n"
+        f"num_accepted_tokens={num_accepted_tokens}"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     )

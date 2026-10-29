@@ -85,8 +85,20 @@ class MooncakeTPTransferMetadata:
 
 
 @dataclass(frozen=True)
+<<<<<<< HEAD
 class MooncakePPTransferMetadata:
     """Metadata shared by all TP workers belonging to one PP rank."""
+=======
+class MooncakePCPTransferMetadata:
+    """Worker metadata for one PCP rank across its TP ranks."""
+
+    metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata]
+
+
+@dataclass(frozen=True)
+class MooncakePPTransferMetadata:
+    """Metadata shared by all PCP replicas belonging to one PP rank."""
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     block_size: int
     num_blocks: int
@@ -97,7 +109,11 @@ class MooncakePPTransferMetadata:
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+<<<<<<< HEAD
     metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata]
+=======
+    metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 @dataclass(frozen=True)
@@ -166,6 +182,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 __all__ = [
     "MooncakeConnectorMetadata",
+<<<<<<< HEAD
+=======
+    "MooncakePCPTransferMetadata",
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     "MooncakePPTransferMetadata",
     "MooncakeTPTransferMetadata",
     "MooncakeTransferMetadata",

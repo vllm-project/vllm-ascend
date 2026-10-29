@@ -8,7 +8,10 @@ import torch
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+<<<<<<< HEAD
     KVCacheTensor,
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -19,7 +22,54 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
+<<<<<<< HEAD
 from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
+=======
+from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
+
+
+@pytest.mark.parametrize(
+    ("pcp_rank", "tp_rank", "target_index"),
+    [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)],
+)
+def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, pcp_rank, tp_rank, target_index):
+    from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+    names = [layer_name(i) for i in (9, 10, 11, 12, 17)]
+    spec = make_full_spec()
+    caches = {name: torch.zeros((2, 16, 1, 8), dtype=torch.float16) for name in names}
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=4))
+    worker.pcp_rank, worker.pcp_size = pcp_rank, 2
+    worker.tp_rank, worker.tp_size = tp_rank, 2
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=cache.nbytes,
+                layers=[name],
+                layer_stride=cache.nbytes,
+                block_stride=cache.stride(0) * cache.element_size(),
+            )
+            for name, cache in caches.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+    )
+    worker.engine_id, worker.te_rpc_port = "producer", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 16, "127.0.0.1", 5000
+    monkeypatch.setattr(base_worker, "global_te", MagicMock())
+    regions = MagicMock(wraps=base_worker.collect_configured_register_regions)
+    monkeypatch.setattr(base_worker, "collect_configured_register_regions", regions)
+    worker.register_kv_caches(caches)
+    assert worker.xfer_handshake_metadata.layer_names == [names[target_index], names[4]]
+    assert worker.xfer_handshake_metadata.kv_caches_base_addr == [
+        [caches[names[target_index]].data_ptr()],
+        [caches[names[4]].data_ptr()],
+    ]
+    assert worker.kv_caches is caches
+    assert any(arg is caches for arg in regions.call_args.args)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
@@ -48,7 +98,11 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
+<<<<<<< HEAD
             KVCacheTensor(
+=======
+            make_kv_cache_tensor(
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 size=k_cache.nbytes + v_cache.nbytes,
                 layers=["layer.0"],
                 layer_stride=k_cache.nbytes + v_cache.nbytes,
@@ -58,6 +112,11 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+<<<<<<< HEAD
+=======
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -89,6 +148,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     transfer_engine.register_buffer.assert_called_once()
 
 
+<<<<<<< HEAD
 def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
     raw_cache = torch.empty(4 * 64, dtype=torch.float16)
@@ -102,11 +162,51 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
                 layers=["layer.0"],
                 layer_stride=raw_cache.nbytes,
                 block_stride=128,
+=======
+@pytest.mark.parametrize("spare", [0, 64, 256])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("page_stride", "k_offset", "scale_offset", "scale_len", "merged"),
+    [
+        pytest.param(40, 0, 32, 8, True, id="full-page"),
+        pytest.param(64, 0, 32, 8, False, id="trailing-padding"),
+        pytest.param(64, 16, 48, 8, False, id="shared-page-subregion"),
+        pytest.param(64, 0, 40, 24, False, id="interior-gap"),
+        pytest.param(64, 0, 16, 32, False, id="overlap-hides-gap"),
+        pytest.param(64, 0, 24, 40, True, id="overlapping-full-page"),
+    ],
+)
+def test_register_kv_caches_merges_only_full_pages(
+    monkeypatch, spare, reverse, page_stride, k_offset, scale_offset, scale_len, merged
+) -> None:
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
+    # The same tensor views must publish the same number of descriptors even
+    # when one peer's backing storage has spare capacity after the last block.
+    required = 3 * page_stride + max(k_offset + 32, scale_offset + scale_len)
+    raw_cache = torch.empty(required + spare, dtype=torch.float16)
+    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(page_stride, 1), storage_offset=k_offset)
+    scale_cache = torch.as_strided(raw_cache, size=(4, scale_len), stride=(page_stride, 1), storage_offset=scale_offset)
+    caches = [scale_cache, k_cache] if reverse else [k_cache, scale_cache]
+    page_bytes = page_stride * raw_cache.element_size()
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=raw_cache.nbytes,
+                layers=["layer.0"],
+                layer_stride=raw_cache.nbytes,
+                block_stride=page_bytes,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+<<<<<<< HEAD
+=======
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -125,17 +225,120 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
         MagicMock(),
     )
 
+<<<<<<< HEAD
     worker.register_kv_caches({"layer.0": [k_cache, scale_cache]})
+=======
+    worker.register_kv_caches({"layer.0": caches})
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    if merged:
+        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+        assert metadata.block_strides == [[page_bytes]]
+        assert metadata.block_lens == [[page_bytes]]
+        assert metadata.block_shapes == [[(max(32, scale_len),)]]
+        assert metadata.block_size_scales == [[1]]
+    else:
+        assert metadata.kv_caches_base_addr == [[cache.data_ptr() for cache in caches]]
+        assert metadata.block_strides == [[page_bytes, page_bytes]]
+        assert metadata.block_lens == [[cache[0].nbytes for cache in caches]]
+        assert metadata.block_shapes == [[tuple(cache.shape[1:]) for cache in caches]]
+        assert metadata.block_size_scales == [[1, 1]]
+
+
+def test_shared_page_rejects_noncontiguous_blocks() -> None:
+    raw_cache = torch.empty(4 * 64, dtype=torch.uint8)
+    caches = (
+        raw_cache.as_strided((4, 16), (64, 2)),
+        raw_cache.as_strided((4, 48), (64, 1), 16),
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.num_blocks = 4
+
+    assert worker._get_shared_page_metadata(caches) is None
+
+
+def test_shared_page_handles_mixed_dtype_views() -> None:
+    raw_cache = torch.empty(4 * 64, dtype=torch.uint8)
+    k_cache = raw_cache.as_strided((4, 48), (64, 1))
+    scale_cache = raw_cache.view(torch.float32).as_strided((4, 4), (16, 1), 12)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.num_blocks = 4
+
+    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
+
+
+def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
+    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
+    slot_elems = 128 * 576
+    nope_cache = torch.as_strided(
+        raw_cache,
+        size=(4, 128, 1, 512),
+        stride=(slot_elems, 512, 512, 1),
+        storage_offset=0,
+    )
+    rope_cache = torch.as_strided(
+        raw_cache,
+        size=(4, 128, 1, 64),
+        stride=(slot_elems, 64, 64, 1),
+        storage_offset=128 * 512,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=raw_cache.nbytes,
+                layers=["layer.0"],
+                layer_stride=raw_cache.nbytes,
+                block_stride=slot_elems * raw_cache.element_size(),
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = config
+    worker.engine_id = "engine-d"
+    worker.te_rpc_port = 9000
+    worker.block_size = 128
+    worker.side_channel_host = "10.0.0.1"
+    worker.handshake_port = 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+    monkeypatch.setattr(base_worker, "validate_register_region_count", MagicMock())
+
+    worker.register_kv_caches({"layer.0": [nope_cache, rope_cache]})
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
     assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+<<<<<<< HEAD
     assert metadata.block_strides == [[128]]
     assert metadata.block_lens == [[128]]
     assert metadata.block_shapes == [[(32,)]]
     assert metadata.block_size_scales == [[1]]
 
 
+=======
+    assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
+    assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
+    assert metadata.block_shapes == [[(slot_elems,)]]
+    assert metadata.block_size_scales == [[1]]
+
+
+def test_component_major_mla_binding_rejects_token_interleaved_parent() -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
+    parent = torch.empty(4, 128, 1, 576, dtype=torch.float16)
+    nope_cache = parent[..., :512]
+    rope_cache = parent[..., 512:]
+
+    assert not base_worker._is_component_major_mla_binding(spec, (nope_cache, rope_cache))
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
     raw_cache = torch.empty(4 * 64, dtype=torch.float16)
     k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(32, 1), storage_offset=0)
@@ -146,6 +349,7 @@ def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
     assert worker._get_shared_page_metadata((k_cache, v_cache)) is None
 
 
+<<<<<<< HEAD
 def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch) -> None:
     spec = make_sfa_indexer_spec(block_size=16, replication_size=2)
     cache = torch.empty((4, 16, 1, 8), dtype=torch.float16)
@@ -153,6 +357,19 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
         num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
+=======
+@pytest.mark.parametrize("replication_size", [1, 2])
+def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
+    monkeypatch,
+    replication_size: int,
+) -> None:
+    spec = make_sfa_indexer_spec(block_size=16, replication_size=replication_size)
+    cache = torch.empty((2 * replication_size, 16, 1, 8), dtype=torch.float16)
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 size=cache.nbytes,
                 layers=["layer.0.indexer"],
                 layer_stride=cache.nbytes,
@@ -162,6 +379,11 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+<<<<<<< HEAD
+=======
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -184,8 +406,13 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
+<<<<<<< HEAD
     assert metadata.layer_block_sizes == [32]
     assert metadata.block_size_scales == [[2]]
+=======
+    assert metadata.layer_block_sizes == [16 * replication_size]
+    assert metadata.block_size_scales == [[replication_size]]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert metadata.layer_block_sizes[0] // metadata.block_size_scales[0][0] == spec.block_size
 
 
@@ -194,7 +421,11 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
+<<<<<<< HEAD
             KVCacheTensor(
+=======
+            make_kv_cache_tensor(
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 size=64,
                 layers=["layer.0"],
                 layer_stride=64,
@@ -204,6 +435,11 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+<<<<<<< HEAD
+=======
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     worker.kv_cache_config = config
     worker.engine_id = "engine"
     worker.te_rpc_port = 9000
@@ -247,6 +483,10 @@ def make_worker_config(
             data_parallel_rank_local=local_dp_rank,
             data_parallel_size_local=3,
             data_parallel_rank=2,
+<<<<<<< HEAD
+=======
+            data_parallel_index=2,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
     )
 
@@ -285,6 +525,23 @@ def patch_worker_runtime(
     return global_te, tp_group
 
 
+<<<<<<< HEAD
+=======
+@pytest.mark.parametrize("independent_dp", [True, False], ids=["dense", "moe"])
+def test_dp_workers_publish_distinct_handshake_ports(monkeypatch, independent_dp):
+    patch_worker_runtime(monkeypatch)
+    ports = []
+    for dp_index in range(2):
+        config = make_worker_config(local_dp_rank=dp_index)
+        config.parallel_config.data_parallel_rank = 0 if independent_dp else dp_index
+        config.parallel_config.data_parallel_index = dp_index
+        config.parallel_config.data_parallel_size_local = 1 if independent_dp else 2
+        worker = MooncakeBaseConnectorWorker(config, f"engine-{dp_index}", SimpleNamespace(num_blocks=1))
+        ports.append(worker.handshake_port)
+    assert len(set(ports)) == 2
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def test_base_worker_initializes_parallel_ranks_and_handshake_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,12 +594,34 @@ def test_base_worker_requires_local_dp_rank(monkeypatch: pytest.MonkeyPatch) -> 
         MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
 
 
+<<<<<<< HEAD
 def test_base_worker_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
     config = make_worker_config()
     patch_worker_runtime(monkeypatch, pcp_size=2)
 
     with pytest.raises(AssertionError, match="prefill context parallel size 1"):
         MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+=======
+def test_base_worker_accepts_consumer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_worker_config()
+    patch_worker_runtime(monkeypatch, pcp_size=2)
+
+    worker = MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+    assert worker.pcp_size == 2
+
+
+def test_base_worker_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_worker_config(is_consumer=False, is_producer=True)
+    patch_worker_runtime(monkeypatch, pcp_size=2)
+
+    worker = MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+    assert worker.pcp_size == 2
+    assert worker.max_device_id == 48
+    assert worker.side_channel_port == 6032
+    assert worker.handshake_port == 6042
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 def test_base_worker_stats_are_returned_and_reset() -> None:

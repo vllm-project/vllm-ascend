@@ -21,16 +21,13 @@ msgstr ""
 msgid "# Kimi-K2.5"
 msgstr "# Kimi-K2.5"
 
-msgid "## 1 Introduction"
-msgstr "## 1 简介"
-
 msgid ""
-"Kimi K2.5 is an open-source, native multimodal agentic model built through "
-"continual pretraining on approximately 15 trillion mixed visual and text "
-"tokens atop Kimi-K2-Base. It seamlessly integrates vision and language "
-"understanding with advanced agentic capabilities, instant and thinking "
-"modes, as well as conversational and agentic paradigms."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2.5.html)."
 msgstr ""
+<<<<<<< HEAD
 "Kimi K2.5 是一个开源的、原生的多模态智能体模型，通过在 Kimi-K2-Base 基础上对约 15 万亿混合视觉和文本 token "
 "进行持续预训练构建而成。它无缝集成了视觉与语言理解能力，并具备高级智能体能力、即时与思考模式，以及对话与智能体范式。"
 
@@ -605,3 +602,7 @@ msgid ""
 "concurrency|"
 msgstr ""
 "|长上下文<br>(128k，高并发>4)|单节点混合|16 (A3)|kimi-k2.5-w4a8|dp2 tp8以优化内存带宽并支持更高并发|"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止支持，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2.5.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

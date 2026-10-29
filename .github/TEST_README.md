@@ -48,7 +48,8 @@ test_selector.py (coverage + AST) ──► recommended pytest targets
 |------|------|
 | `.github/workflows/scripts/test_selector.py` | Recommends tests from coverage data and the PR diff (AST based) |
 | `.github/workflows/scripts/select_tests.py` | Routes test targets to runners and emits the matrix |
-| `.github/workflows/scripts/test_config.yaml` | Routing metadata: curated suites, skip list, runner mapping, partitions, estimated times |
+| `.github/workflows/scripts/test_config.yaml` | Routing metadata: curated suites, skip list, runner mapping, partitions |
+| `.github/workflows/scripts/estimated_times.yaml` | Per-file estimated seconds for load-balanced partitioning |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
 
 `runner_mapping` maps test paths to default logical partitions such as
@@ -87,9 +88,12 @@ against both the verified vLLM main commit and the matched vLLM release tag.
 | `curated_tests` | Named test lists selected via `--curated <name>` |
 | `skip_tests` | Test files removed from any selection after scanning |
 | `runner_mapping` | Regex patterns mapping test paths to logical partitions |
-| `estimated_times` | Per-test estimated seconds for load-balanced partitioning |
 | `pinned_routes` | Files moved to dedicated partitions after selection |
 | `partition` | Logical partition → runner label + load-balanced group count |
+
+`estimated_times.yaml` holds per-test estimated seconds for load-balanced
+partitioning. It is a separate file so timing-only PRs do not trigger the
+full suite; changes to `test_config.yaml` still do.
 
 ## Runner Routing
 
@@ -110,7 +114,7 @@ No decorator is needed. UT runner routing is determined by path:
 
 ### E2E Routing
 
-All E2E tests run on NPU. E2E routing is determined by directory or `_310p` filename suffix:
+All E2E tests run on NPU. E2E routing is determined by directory:
 
 | Pattern | Runner |
 |---------|--------|
@@ -118,8 +122,9 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 | `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
 | `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
 | `tests/e2e/pull_request/eight_card/` | A3 NPU x8 |
-| `*_310p.py` under one/two-card paths | 310P NPU x1 |
-| `*_310p.py` under four-card paths | 310P NPU x4 |
+| `tests/e2e/pull_request/one_card/_310p/` | 310P NPU x1 |
+| `tests/e2e/pull_request/two_card/_310p/` | 310P NPU x2 |
+| `tests/e2e/pull_request/four_card/_310p/` | 310P NPU x4 |
 
 ## Adding a New UT Test
 

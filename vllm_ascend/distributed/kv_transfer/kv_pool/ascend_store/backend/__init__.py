@@ -23,15 +23,12 @@ backend_map: dict[str, dict[str, Any]] = {
     "mooncake": {
         "name": "MooncakeBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
+        "layerwise_protocol": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise",
     },
     "memcache": {
         "name": "MemcacheBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-        # The backend module opts into the layerwise transfer protocol:
-        # it exposes make_full_key / make_partial_key / make_hit_check_keys /
-        # extract_layout_config at module level. Generic layers resolve the
-        # module through get_layerwise_protocol() and never import it by name.
-        "layerwise_protocol": True,
+        "layerwise_protocol": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
     },
     "yuanrong": {
         "name": "YuanrongBackend",
@@ -41,17 +38,36 @@ backend_map: dict[str, dict[str, Any]] = {
 
 
 def get_layerwise_protocol(backend_name: str):
-    """Return the backend module carrying the layerwise transfer protocol
-    registered under ``backend_name`` (None when the backend opts out).
-
-    The protocol functions live in the backend module itself, so resolving
-    reuses the registered ``path``: no second module path to drift, and
-    backends without the marker (e.g. mooncake, whose module pulls heavy
-    third-party imports at top level) are never imported here."""
+    """Return a backend's lightweight layerwise protocol module, if any."""
     normalized_name = backend_name.strip().lower()
     backend = backend_map.get(normalized_name, {})
-    if not backend.get("layerwise_protocol"):
+    protocol_path = backend.get("layerwise_protocol")
+    if not protocol_path:
         return None
     import importlib
 
-    return importlib.import_module(backend["path"])
+    return importlib.import_module(protocol_path)
+
+
+def get_layerwise_data_plane(protocol: Any) -> str | None:
+    """Return the protocol's common data-plane capability."""
+    data_plane = getattr(protocol, "LAYERWISE_DATA_PLANE", None)
+    return data_plane if data_plane in ("block_key", "gva") else None
+
+
+def validate_layerwise_topology(protocol: Any, parallel_config: Any, use_layerwise: bool) -> None:
+    """Let a backend validate coordinates represented by its wire keys."""
+    if not use_layerwise or protocol is None:
+        return
+    validate = getattr(protocol, "validate_topology", None)
+    if callable(validate):
+        validate(parallel_config)
+
+
+def validate_layerwise_runtime(protocol: Any, **runtime: Any) -> None:
+    """Let a backend reject unsupported runtime layout combinations."""
+    if protocol is None:
+        return
+    validate = getattr(protocol, "validate_runtime", None)
+    if callable(validate):
+        validate(**runtime)

@@ -8,14 +8,26 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+<<<<<<< HEAD
 SPECULATOR_PATH = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/autoregressive/speculator.py"
+=======
+SPECULATOR_PATH = (
+    Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/target_dependent_ar/speculator.py"
+)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 def test_gqa_draft_block_table_matches_padded_batch():
     """Execute the production initializer without importing the NPU runtime."""
     tree = ast.parse(SPECULATOR_PATH.read_text(encoding="utf-8"))
     speculator_class = next(
+<<<<<<< HEAD
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendAutoRegressiveSpeculator"
+=======
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AscendTargetDependentARSpeculator"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     )
     method = next(
         node
@@ -26,6 +38,11 @@ def test_gqa_draft_block_table_matches_padded_batch():
         "Any": Any,
         "copy": copy,
         "AscendAttentionState": SimpleNamespace(DecodeOnly="decode_only"),
+<<<<<<< HEAD
+=======
+        "BatchExecutionDescriptor": lambda **kwargs: SimpleNamespace(**kwargs),
+        "CUDAGraphMode": SimpleNamespace(FULL="full"),
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     }
     module = ast.Module(body=[method], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(SPECULATOR_PATH), "exec"), namespace)
@@ -39,10 +56,20 @@ def test_gqa_draft_block_table_matches_padded_batch():
     )
     speculator = SimpleNamespace(
         attn_architecture="GQA",
+<<<<<<< HEAD
         input_batch=SimpleNamespace(num_reqs=num_reqs, seq_lens_cpu_upper_bound=[14]),
         input_buffers=SimpleNamespace(draft_seq_lens_cpus=[[0] * num_reqs_padded]),
         _build_draft_attn_metadata=lambda **kwargs: {
             "draft_layer": SimpleNamespace(block_tables=SimpleNamespace(shape=(kwargs["num_reqs_padded"], max_blocks)))
+=======
+        use_dcp=False,
+        input_batch=SimpleNamespace(num_reqs=num_reqs, seq_lens_cpu_upper_bound=[14]),
+        input_buffers=SimpleNamespace(draft_seq_lens_cpus=[[0] * num_reqs_padded]),
+        _build_uniform_attn_metadata=lambda **kwargs: {
+            "draft_layer": SimpleNamespace(
+                block_tables=SimpleNamespace(shape=(kwargs["batch_desc"].num_reqs, max_blocks))
+            )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         },
     )
 

@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for GLM-Next cache grouping, physical layout, and capacity accounting."""
 
+<<<<<<< HEAD
+=======
+from dataclasses import replace
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +20,11 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
+<<<<<<< HEAD
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolStateSpec
+=======
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -24,11 +32,54 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
+<<<<<<< HEAD
 from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+=======
+from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+@pytest.mark.parametrize("pool", [4, 16])
+@pytest.mark.parametrize("speculative_blocks", [0, 5])
+def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_blocks):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    if not hasattr(planning, "_pool_bytes_per_block_from_builder"):
+        pytest.skip("Requires the upstream builder pool-accounting hook")
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    from vllm_ascend.platform import NPUPlatform
+
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    specs = {
+        name: replace(spec, num_speculative_blocks=speculative_blocks) if isinstance(spec, MambaSpec) else spec
+        for name, spec in make_specs(pool).items()
+    }
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
+    assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
+    expected = sum(tensor.size for tensor in physical.kv_cache_tensors)
+    builder = resolve_obj_by_qualname(NPUPlatform.get_kv_cache_config_builder_cls(config))()
+    config.cache_config.num_gpu_blocks_override = 7
+    assert planning._pool_bytes_per_block_from_builder(builder, config, groups) == expected
+    assert config.cache_config.num_gpu_blocks_override == 7
+
+
+def test_platform_builder_preserves_default_non_glm_accounting():
+    pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
+    groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
+    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    return {"tokens_per_state": ratio}
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 def make_config():
@@ -65,11 +116,20 @@ def make_specs(pool: int = 16):
             model_version="glm5_next",
             **_ratio_kwargs(pool),
         ),
+<<<<<<< HEAD
         "model.layers.3.indexer.state_cache": AscendIndexerKPoolStateSpec(
             block_size=pool,
             sliding_window=pool,
             num_kv_heads=1,
             head_size=256,
+=======
+        "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
+            block_size=pool,
+            sliding_window=pool,
+            compress_ratio=pool,
+            num_kv_heads=1,
+            head_size=128,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -114,6 +174,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         20 * layout.main_page_size,
         20 * layout.small_page_size,
     }
+<<<<<<< HEAD
     if vllm_version_is("0.28.0"):
         assert all(tensor.block_stride == 0 for tensor in plan.kv_cache_tensors)
     else:
@@ -121,13 +182,23 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
             tensor.offset == 0 and tensor.layer_stride == 0 and tensor.block_stride == tensor.size // plan.num_blocks
             for tensor in plan.kv_cache_tensors
         )
+=======
+    assert all(
+        tensor.offset == 0 and tensor.layer_stride == 0 and tensor.block_stride == tensor.size // plan.num_blocks
+        for tensor in plan.kv_cache_tensors
+    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     placements = {
         layer_name: tensor for tensor in plan.kv_cache_tensors for layer_name in get_kv_cache_tensor_layers(tensor)
     }
     main = placements[layout.mla_names[0]]
     indexer = placements[layout.indexer_names[0]]
+<<<<<<< HEAD
     state = placements[layout.state_names[0]]
+=======
+    state = placements[layout.tail_names[0]]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert main.offset == 0
     assert indexer.offset == 0
     assert state is indexer
@@ -137,7 +208,11 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
     assert set(get_kv_cache_tensor_layers(indexer)) == {
         layout.indexer_names[0],
+<<<<<<< HEAD
         layout.state_names[0],
+=======
+        layout.tail_names[0],
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     }
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
@@ -173,7 +248,11 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
 
     layout = _get_glm5_next_cache_layout(projected_groups)
     assert layout is not None
+<<<<<<< HEAD
     assert layout.mla_names == layout.indexer_names == layout.state_names == ()
+=======
+    assert layout.mla_names == layout.indexer_names == layout.tail_names == ()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert layout.main_slot_count == 1
     assert layout.small_slot_count == 0
 
@@ -186,7 +265,11 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
 
 def test_missing_paired_cache_is_rejected():
     specs = make_specs()
+<<<<<<< HEAD
     del specs["model.layers.3.indexer.state_cache"]
+=======
+    del specs["model.layers.3.indexer.tail_cache"]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     with pytest.raises(ValueError, match="requires"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
 
@@ -195,8 +278,59 @@ def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(
         specs["model.layers.3.indexer.k_cache"],
+<<<<<<< HEAD
         "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state",
+=======
+        "tokens_per_state",
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         15,
     )
     with pytest.raises(ValueError, match="divisible"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+<<<<<<< HEAD
+=======
+
+
+@pytest.mark.parametrize("use_sparse", [False, True])
+@pytest.mark.parametrize("packed_main", [False, True])
+def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    config = make_config()
+    config.model_config.max_model_len = 1048576
+    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=16)
+    config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
+        is_layer_compact=True, is_block_compact=True
+    )
+    specs = make_specs()
+    if packed_main:
+        specs["model.layers.3.attn"] = AscendMLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=528,
+            dtype=torch.int8,
+            cache_sparse_sfa_c8=True,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    # Supply exactly enough physical memory for the configured context. The
+    # generic discount incorrectly makes this valid shared pool fail admission.
+    required = get_glm5_next_max_memory_usage(config, groups)
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.vllm_config = config
+    worker.model_config = config.model_config
+    worker.get_kv_cache_spec = lambda: specs
+    worker.model_runner = SimpleNamespace(
+        use_sparse=use_sparse,
+        use_compress=False,
+        supports_standardized_shared_kv_backing=True,
+    )
+    monkeypatch.setattr("vllm_ascend.worker.worker.get_kv_cache_groups", lambda *_args: groups)
+    budget = worker._scale_kv_cache_memory_for_multi_group(required)
+
+    assert budget == required
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

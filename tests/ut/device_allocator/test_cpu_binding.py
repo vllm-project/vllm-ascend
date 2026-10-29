@@ -1036,10 +1036,10 @@ class TestCpuBindingSupplemental(unittest.TestCase):
                 call("3000", [4], False),
             ],
         )
-        mock_bind_memory.assert_called_once_with("1000", 0)
+        mock_bind_memory.assert_not_called()
 
     @patch("vllm_ascend.cpu_binding.psutil.Process")
-    def test_bind_ascend_950_threads_binds_only_main_and_memory(self, mock_process):
+    def test_bind_ascend_950_threads_binds_only_main(self, mock_process):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.assign_main = {0: [1, 2, 3]}
@@ -1049,7 +1049,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             cpu_alloc.bind_ascend_950_threads()
 
         mock_bind.assert_called_once_with("1000", [1, 2, 3], True)
-        mock_bind_memory.assert_called_once_with("1000", 0)
+        mock_bind_memory.assert_not_called()
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
@@ -1260,11 +1260,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             patch.object(cpu_alloc, "allocate", side_effect=lambda: calls.append("allocate")),
             patch.object(cpu_alloc, "print_plan", side_effect=lambda: calls.append("print_plan")),
             patch.object(cpu_alloc, "bind_threads", side_effect=lambda: calls.append("bind_threads")),
+            patch.object(cpu_alloc, "bind_memory", side_effect=lambda *args: calls.append("bind_memory")),
             patch.object(cpu_alloc, "bind_npu_irq", side_effect=lambda: calls.append("bind_npu_irq")),
         ):
             cpu_alloc.run_all()
 
-        self.assertEqual(calls, ["build_cpu_pools", "allocate", "print_plan", "bind_threads", "bind_npu_irq"])
+        self.assertEqual(
+            calls, ["build_cpu_pools", "allocate", "print_plan", "bind_threads", "bind_memory", "bind_npu_irq"]
+        )
 
     def test_run_all_returns_when_cpu_pool_build_is_skipped(self):
         cpu_alloc = make_cpu_alloc()
@@ -1311,7 +1314,7 @@ class TestBindingSwitch(unittest.TestCase):
         bind_cpus(1, npu_id=3)
 
         mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
-        mock_cpu_alloc.return_value.run_all.assert_called_once_with()
+        mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
 
 
 if __name__ == "__main__":

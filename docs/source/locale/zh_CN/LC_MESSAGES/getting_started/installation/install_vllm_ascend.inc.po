@@ -18,6 +18,7 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
+<<<<<<< HEAD
 msgid "First, install the system dependencies and configure the pip mirror."
 msgstr "首先，安装系统依赖并配置 pip 镜像。"
 
@@ -26,6 +27,8 @@ msgid ""
 "development version, configure pip's `extra-index`:"
 msgstr "可选：如果您在 x86 机器上工作或使用 TorchNPU 开发版本，请配置 pip 的 `extra-index`："
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid ""
 "Choose one of the following methods to install `vllm` and `vllm-ascend`. "
 "PyTorch and TorchNPU are installed automatically as dependencies during this"
@@ -65,6 +68,7 @@ msgstr ""
 msgid "=== \"pip installation\""
 msgstr "=== \"pip 安装\""
 
+<<<<<<< HEAD
 msgid ""
 "This installation method currently supports only **A2** builds and does not "
 "automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For "
@@ -73,6 +77,8 @@ msgstr ""
 "此安装方法目前仅支持 **A2** 构建，不自动支持 A3、Atlas 300I DUO、Atlas 200I Pro 或 "
 "950DT。对于其他硬件，请使用预构建镜像、WheelNext 或源码安装。"
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid "??? tip \"If pip cannot verify the Huawei Cloud mirror certificate\""
 msgstr "??? tip \"如果 pip 无法验证华为云镜像证书\""
 
@@ -99,9 +105,12 @@ msgid ""
 " you trust the network and cannot fix the certificate configuration."
 msgstr "此选项告诉 pip 即使在 HTTPS 验证失败时也信任该主机，这会削弱对中间人攻击的保护。仅在您信任网络且无法修复证书配置时使用。"
 
+<<<<<<< HEAD
 msgid "Check the device build type:"
 msgstr "检查设备构建类型："
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid "=== \"uv installation\""
 msgstr "=== \"uv 安装\""
 
@@ -145,9 +154,12 @@ msgid ""
 "Finally, handle `triton` and `triton-ascend` according to the hardware:"
 msgstr "最后，根据硬件处理 `triton` 和 `triton-ascend`："
 
+<<<<<<< HEAD
 msgid "=== \"A2 / A3 / 950DT\""
 msgstr "=== \"A2 / A3 / 950DT\""
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid ""
 "To ensure that Triton Ascend matches the current vLLM Ascend version, remove"
 " any existing `triton` and `triton-ascend` packages before installing the "
@@ -203,3 +215,59 @@ msgid ""
 msgstr ""
 "Atlas 300I DUO 和 Atlas 200I Pro 不支持 `triton` 或 `triton-"
 "ascend`。如果环境中已安装任一软件包，请将其卸载，并且不要重新安装 `triton-ascend`："
+<<<<<<< HEAD
+=======
+
+msgid ""
+"First, install the system dependencies for the container operating system "
+"and configure the pip mirror."
+msgstr "首先，安装容器操作系统的系统依赖，并配置 pip 镜像源。"
+
+msgid "For Ubuntu:"
+msgstr "对于 Ubuntu："
+
+msgid "For openEuler:"
+msgstr "对于 openEuler："
+
+msgid ""
+"This installation method currently supports only **A2** builds and does not "
+"automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products."
+" For other hardware, use a prebuilt image, WheelNext, or a source "
+"installation."
+msgstr ""
+"此安装方式目前仅支持 **A2** 构建，不会自动支持 A3、Atlas 300I DUO、Atlas 200I Pro 或 Ascend "
+"950DT系列产品。对于其他硬件，请使用预构建镜像、WheelNext 或源码安装。"
+
+msgid "=== \"A2 / A3 / 950DT Products\""
+msgstr "=== \"A2 / A3 / Ascend 950DT系列产品\""
+
+msgid "??? tip \"Reinstalling after a CANN version change\""
+msgstr "??? tip \"CANN 版本变更后重新安装\""
+
+msgid ""
+"If you upgrade or downgrade CANN and encounter compatibility issues,\n"
+"        consider performing a clean rebuild of vLLM Ascend to avoid reusing\n"
+"        build artifacts or caches from the previous CANN environment."
+msgstr ""
+"如果您升级或降级 CANN 后遇到兼容性问题，\n"
+"        建议对 vLLM Ascend 进行全新重新构建，以避免复用\n"
+"        之前 CANN 环境中的构建产物或缓存。"
+
+msgid ""
+"Run the following commands from the vLLM Ascend repository root\n"
+"        after configuring the selected CANN environment:"
+msgstr ""
+"在配置好所选的 CANN 环境后，\n"
+"        请在 vLLM Ascend 仓库根目录下运行以下命令："
+
+msgid ""
+"**Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache\n"
+"        is stored in the specified directory instead of `csrc/build_cache`.\n"
+"        Clear the custom cache separately after verifying it is safe to\n"
+"        remove, especially if it is shared by other builds."
+msgstr ""
+"**注意：** 如果设置了 `VLLM_ASCEND_BUILD_CACHE_DIR`，构建缓存\n"
+"        将存储在指定的目录中，而不是 `csrc/build_cache`。\n"
+"        在确认可以安全删除后，请单独清理该自定义缓存，\n"
+"        尤其是当它被其他构建共享时。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

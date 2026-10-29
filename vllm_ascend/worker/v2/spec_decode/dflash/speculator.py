@@ -2,34 +2,155 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-    DFlashSpeculator,
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+
+<<<<<<< HEAD
+from vllm_ascend.utils import vllm_version_is
+=======
+from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
 )
 
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
-logger = logging.getLogger(__name__)
+def prepare_dflash_inputs_factory(
+    kv_cache_block_size: int,
+    block_tables: Any | None = None,
+) -> Callable[..., None]:
+    # vLLM main (#57169) dropped ``kernel_block_sizes`` from ``BlockTables``
+    # and the DFlash caller now forwards ``BlockTables.block_sizes`` (physical
+    # KV blocks) as ``block_size``, while ``AscendBlockTables`` keeps the block
+    # table kernel-block addressed (a physical block is re-expanded into
+    # ``blocks_per_kv_block`` kernel rows) and the Ascend prep indexes it at
+    # kernel granularity. DCP ownership still uses the physical size, so only
+    # ``block_size`` is restored, per group.
+    kernel_block_sizes = getattr(block_tables, "kernel_block_sizes", None)
+    input_block_tables = getattr(block_tables, "input_block_tables", None)
+    if block_tables is not None and (kernel_block_sizes is None or input_block_tables is None):
+        raise RuntimeError(
+            "DFlash on vLLM main needs AscendBlockTables.kernel_block_sizes and "
+            "input_block_tables to restore the kernel block size"
+        )
+    # The upstream caller passes ``input_block_tables[gid]`` verbatim, so the
+    # per-group kernel block size is looked up by tensor identity. Callers
+    # that do not supply Ascend block tables keep the physical size forwarded
+    # by the DFlash caller.
+    kernel_block_size_by_table = (
+        {id(table): int(size) for table, size in zip(input_block_tables, kernel_block_sizes)}
+        if kernel_block_sizes is not None and input_block_tables is not None
+        else {}
+    )
+
+    def prepare_with_block_size(
+        input_buffers: InputBuffers,
+        query_slot_mapping: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor,
+        sample_indices: torch.Tensor,
+        sample_pos: torch.Tensor,
+        sample_idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        input_temperature: torch.Tensor,
+        input_seeds: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        cp_rank: int,
+        cp_size: int,
+        cp_interleave: int,
+        parallel_drafting_token_id: int,
+        num_query_per_req: int,
+        num_speculative_steps: int,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        max_model_len: int,
+        sample_from_anchor: bool = False,
+        num_reqs_override: int | None = None,
+    ) -> None:
+        kernel_block_size = kernel_block_size_by_table.get(id(block_table))
+        if kernel_block_size is None:
+            if kernel_block_size_by_table:
+                raise RuntimeError("DFlash received a block table unknown to AscendBlockTables")
+            # No Ascend block tables were supplied; keep the caller's size.
+            kernel_block_size = block_size
+        prepare_dflash_inputs(
+            input_buffers,
+            query_slot_mapping,
+            context_positions,
+            context_slot_mapping,
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            temperature,
+            seeds,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            input_temperature,
+            input_seeds,
+            block_table,
+            kernel_block_size,
+            cp_rank,
+            cp_size,
+            cp_interleave,
+            parallel_drafting_token_id,
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            max_model_len,
+            sample_from_anchor,
+            num_reqs_override=num_reqs_override,
+            kv_cache_block_size=kv_cache_block_size,
+        )
+
+    return prepare_with_block_size
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            return super().load_draft_model(target_model, target_attn_layer_names)
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
-            attn_metadata = self._build_draft_attn_metadata(
+            # vLLM main (#56181) replaced _build_draft_attn_metadata with
+            # _build_uniform_attn_metadata (BatchExecutionDescriptor).
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
+                batch_desc=batch_desc,
+                num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
@@ -57,6 +178,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -104,6 +226,10 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
+            self.vllm_config.cache_config.block_size,
+            block_tables,
+        )
 
     def propose(
         self,
@@ -118,16 +244,26 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync_state: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
-        dp_sync: Any = None,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+<<<<<<< HEAD
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+=======
+        sync_state = dp_sync_state
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -146,9 +282,11 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                num_speculative_tokens=num_speculative_tokens,
             )
 
 
+<<<<<<< HEAD
 # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
 # ``temperature``/``seeds`` parameters and corresponding stores (see
 # vllm-project/vllm#50000). Ascend keeps its own kernel for NPU, matching
@@ -339,11 +477,70 @@ else:
         # Scalars
         parallel_drafting_token_id,
         block_size,
+=======
+def prepare_dflash_inputs(
+    input_buffers: InputBuffers,
+    query_slot_mapping: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    input_temperature: torch.Tensor,
+    input_seeds: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    cp_rank: int,
+    cp_size: int,
+    cp_interleave: int,
+    parallel_drafting_token_id: int,
+    num_query_per_req: int,
+    num_speculative_steps: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    sample_from_anchor: bool = False,
+    num_reqs_override: int | None = None,
+    *,
+    kv_cache_block_size: int,
+) -> None:
+    prepare_dflash_inputs_triton(
+        input_buffers,
+        query_slot_mapping,
+        context_positions,
+        context_slot_mapping,
+        sample_indices,
+        sample_pos,
+        sample_idx_mapping,
+        temperature,
+        seeds,
+        input_batch,
+        num_sampled,
+        num_rejected,
+        last_sampled,
+        next_prefill_tokens,
+        input_temperature,
+        input_seeds,
+        block_table,
+        block_size,
+        cp_rank,
+        cp_size,
+        cp_interleave,
+        parallel_drafting_token_id,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+<<<<<<< HEAD
         cp_rank,
         SAMPLE_FROM_ANCHOR: tl.constexpr,
         PAD_SLOT_ID: tl.constexpr,
@@ -455,3 +652,9 @@ else:
             q_pad_start = num_reqs * num_query_per_req
             for i in range(q_pad_start, max_num_tokens):
                 tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
+=======
+        sample_from_anchor,
+        num_reqs_override=num_reqs_override,
+        kv_cache_block_size=kv_cache_block_size,
+    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

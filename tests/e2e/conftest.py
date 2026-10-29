@@ -57,11 +57,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.multi_node.internal_dp.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from tests.e2e.coverage_taxonomy import (
     validate_coverage_marker,
 )
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -510,7 +510,9 @@ def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
         "--data-parallel-size-local" if "--data-parallel-size-local" in vllm_serve_args else "--data-parallel-size"
     )
     data_parallel_size = get_size(data_parallel_arg)
-    return tensor_parallel_size * data_parallel_size
+    pipeline_parallel_size = get_size("--pipeline-parallel-size")
+    prefill_context_parallel_size = get_size("--prefill-context-parallel-size")
+    return tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size
 
 
 class RemotePDServer(RemoteOpenAIServer):
@@ -547,6 +549,11 @@ class RemotePDServer(RemoteOpenAIServer):
             raise RuntimeError("vllm_serves_args must be a list")
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
+        visible_devices = self.env_dict.get(
+            "ASCEND_RT_VISIBLE_DEVICES",
+            os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+        )
+        available_device_ids = visible_devices.split(",") if visible_devices else None
 
         for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
             if "--port" not in vllm_serve_arg:
@@ -556,9 +563,17 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
-            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-                str(device_id) for device_id in range(start_device_id, start_device_id + required_devices)
-            )
+            end_device_id = start_device_id + required_devices
+            if available_device_ids is None:
+                assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
+            else:
+                assigned_device_ids = available_device_ids[start_device_id:end_device_id]
+                if len(assigned_device_ids) != required_devices:
+                    raise ValueError(
+                        f"PD servers require at least {end_device_id} visible devices, "
+                        f"but ASCEND_RT_VISIBLE_DEVICES={visible_devices!r}."
+                    )
+            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(assigned_device_ids)
             start_device_id += required_devices
 
             vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
@@ -902,13 +917,23 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         if not full_device_ids:
             full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
+        # Pass the full (un-sharded) device list for every backend. vLLM
+        # slices it per DP rank internally via assigned_physical_gpu_ids
+        # (see get_physical_gpu_ids_for_local_dp_rank).
+        llm_kwargs["device_ids"] = full_device_ids
+
+        # The Ray backend starts a node-local Ray instance per DP worker and
+        # binds its workers to the devices visible to that instance. Shard
+        # ASCEND_RT_VISIBLE_DEVICES per DP rank so each engine's Ray instance
+        # only sees its own slice; with the full list the independent Ray
+        # instances can bind workers of different DP ranks (or of several PP
+        # ranks) to the same physical NPU. The device_ids above stays the
+        # complete list, so vLLM's per-rank slicing does not rely on the env
+        # var.
         if llm_kwargs.get("distributed_executor_backend") == "ray":
-            devs = full_device_ids
-            chunk = max(len(devs) // dp_size, 1)
+            chunk = max(len(full_device_ids) // dp_size, 1)
             start = dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-        else:
-            llm_kwargs["device_ids"] = full_device_ids
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(full_device_ids[start : start + chunk])
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -1992,6 +2017,7 @@ PROMPT_CONFIGS = {
         "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
+<<<<<<< HEAD
         **(
             {
                 "skip": "HunyuanVL is not supported on vLLM main branch "
@@ -2000,6 +2026,10 @@ PROMPT_CONFIGS = {
             if not vllm_version_is("0.28.0")
             else {}
         ),
+=======
+        "skip": "HunyuanVL is not supported by the pinned vLLM versions "
+        "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL).",
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     },
 }
 

@@ -2,35 +2,68 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for GLM-Next model-runner pooled cache views."""
 
+<<<<<<< HEAD
 from types import SimpleNamespace
 from unittest.mock import patch
 
+=======
+from dataclasses import replace
+from itertools import permutations
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
+<<<<<<< HEAD
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
+=======
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    requires_padded_page_layout,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 )
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
+<<<<<<< HEAD
 from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
 STATE = "model.layers.1.indexer.state_cache"
+=======
+from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
+from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils
+
+MAIN = "model.layers.1.attn"
+INDEXER = "model.layers.1.indexer.k_cache"
+STATE = "model.layers.1.indexer.tail_cache"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 MAMBA = "model.layers.0.linear_attn"
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
+<<<<<<< HEAD
     return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+=======
+    return {"tokens_per_state": ratio}
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 class _AttentionBackend:
@@ -54,7 +87,11 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
+<<<<<<< HEAD
         return num_blocks, block_size, head_size
+=======
+        return num_blocks, block_size, 2 * head_size
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 def _make_config():
@@ -70,6 +107,13 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+<<<<<<< HEAD
+=======
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_layer_compact=True,
+                is_block_compact=True,
+            ),
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -95,11 +139,20 @@ def _make_specs(main_head_size=4):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         ),
+<<<<<<< HEAD
         STATE: AscendIndexerKPoolStateSpec(
             block_size=2,
             sliding_window=2,
             num_kv_heads=1,
             head_size=3,
+=======
+        STATE: AscendIndexerKPoolTailSpec(
+            block_size=2,
+            sliding_window=2,
+            compress_ratio=2,
+            num_kv_heads=1,
+            head_size=1,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -116,6 +169,14 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = config
+<<<<<<< HEAD
+=======
+    runner.dcp_size = config.parallel_config.decode_context_parallel_size
+    runner.ascend_config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     runner.compilation_config = config.compilation_config
     runner.runner_only_attn_layers = set()
     runner.shared_kv_cache_layers = {}
@@ -129,9 +190,16 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
     runner.tp_rank = 0
     runner.attn_backend = _AttentionBackend
+<<<<<<< HEAD
     # The runner must consume the descriptor/spec contract without inspecting
     # a model type.
     runner.model_config = SimpleNamespace()
+=======
+    runner.kernel_block_sizes = [[8], [2], [0]]
+    # The runner gates GLM-Next reshape views on the spec-carried
+    # model_version marker, not on model_config.
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next"))
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     specs = _make_specs()
     attn_groups = [
@@ -139,21 +207,37 @@ def _make_runner(config, main_cache_dims=(4, 0)):
             backend=_AttentionBackend,
             kv_cache_spec=specs[MAIN],
             layer_names=[MAIN],
+<<<<<<< HEAD
+=======
+            kv_cache_group_id=0,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
         SimpleNamespace(
             backend=_AttentionBackend,
             kv_cache_spec=specs[INDEXER],
             layer_names=[INDEXER],
+<<<<<<< HEAD
+=======
+            kv_cache_group_id=0,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
         SimpleNamespace(
             backend=_StateBackend,
             kv_cache_spec=specs[STATE],
             layer_names=[STATE],
+<<<<<<< HEAD
+=======
+            kv_cache_group_id=1,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
         SimpleNamespace(
             backend=None,
             kv_cache_spec=specs[MAMBA],
             layer_names=[MAMBA],
+<<<<<<< HEAD
+=======
+            kv_cache_group_id=2,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ),
     ]
     runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
@@ -165,7 +249,12 @@ def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
+<<<<<<< HEAD
     groups = get_glm5_next_kv_cache_groups(config, _make_specs(main_head_size))
+=======
+    specs = _make_specs(main_head_size)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
         config,
@@ -190,17 +279,26 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     }
     main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
+<<<<<<< HEAD
     (state_cache,) = caches[STATE]
+=======
+    (tail_cache,) = caches[STATE]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert main_cache.shape == (3, 8, 1, 4)
     assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
+<<<<<<< HEAD
     assert state_cache.shape == (3, 2, 3)
+=======
+    assert tail_cache.shape == (3, 2, 2)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),
     ]
 
+<<<<<<< HEAD
     for name, cache in ((INDEXER, indexer_cache), (STATE, state_cache)):
         page_size = descriptors[name].size // plan.num_blocks
         assert cache.stride(0) * cache.element_size() == page_size
@@ -208,15 +306,38 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert all(cache.is_contiguous() for cache in caches[MAMBA])
 
     mamba_second_offset = caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
+=======
+    assert indexer_cache.is_contiguous()
+    assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
+    assert tail_cache.data_ptr() == raw_caches[STATE].data_ptr()
+    slot = raw_caches[STATE]
+    page_bytes = descriptors[STATE].size // plan.num_blocks
+    slot_fp32 = slot.view(torch.float32)
+    page_els_fp32 = page_bytes // slot_fp32.element_size()
+    tail_block_els = tail_cache[0].numel()
+    for block_index in range(plan.num_blocks):
+        assert tail_cache[block_index].data_ptr() == slot.data_ptr() + block_index * page_bytes
+    tail_cache[2].fill_(7)
+    assert torch.all(slot_fp32[2 * page_els_fp32 : 2 * page_els_fp32 + tail_block_els] == 7)
+    assert torch.count_nonzero(slot_fp32[2 * page_els_fp32 + tail_block_els : 3 * page_els_fp32]) == 0
+    assert torch.count_nonzero(slot_fp32[: 2 * page_els_fp32]) == 0
+    for cache in caches[MAMBA]:
+        assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
+
+    mamba_second_offset = caches[MAMBA][0][0].numel() * caches[MAMBA][0].element_size()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
 
+<<<<<<< HEAD
     state_cache[2].fill_(7)
     state_payload_size = state_cache[0].numel() * state_cache.element_size()
     state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
     assert raw_caches[STATE][state_padding].item() == 0
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     config, _, plan = _make_plan(main_head_size=6)
@@ -266,3 +387,98 @@ def test_glm5_next_initialize_passes_all_pooled_views_to_cache_binding():
         runner.kv_caches,
         1,
     )
+<<<<<<< HEAD
+=======
+
+
+@pytest.mark.parametrize("offset", [0, 64])
+def test_glm_shared_mla_mamba_pages_preserve_other_block_ids(offset):
+    config, _, plan = _make_plan(num_blocks=4)
+    runner = _make_runner(config)
+    raw_tensors = runner._allocate_kv_cache_tensors(plan)
+    assert raw_tensors[MAIN] is raw_tensors[MAMBA]
+    page_bytes = raw_tensors[MAIN].numel() // plan.num_blocks
+    backing = torch.zeros(offset + raw_tensors[MAIN].numel() + 64, dtype=torch.int8)
+    raw = backing[offset : offset + plan.num_blocks * page_bytes]
+    raw_tensors[MAIN] = raw_tensors[MAMBA] = raw
+    caches = runner._reshape_kv_cache_tensors(plan, raw_tensors)
+    latent, _ = caches[MAIN]
+    conv, ssm = caches[MAMBA]
+    for state in (conv, ssm):
+        assert state.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+        assert state.stride(0) * state.element_size() == page_bytes
+    assert ssm.data_ptr() - conv.data_ptr() == conv[0].numel() * conv.element_size()
+    state_bytes = sum(state[0].numel() * state.element_size() for state in (conv, ssm))
+    for mla_id, state_id in permutations(range(plan.num_blocks), 2):
+        raw.zero_()
+        latent[mla_id].fill_(7)
+        conv[state_id].fill_(11)
+        ssm[state_id].fill_(13)
+        torch.testing.assert_close(latent[mla_id], torch.full_like(latent[mla_id], 7))
+        latent[mla_id].fill_(17)
+        torch.testing.assert_close(conv[state_id], torch.full_like(conv[state_id], 11))
+        torch.testing.assert_close(ssm[state_id], torch.full_like(ssm[state_id], 13))
+        assert torch.count_nonzero(raw.view(plan.num_blocks, page_bytes)[state_id, state_bytes:]) == 0
+    assert torch.count_nonzero(backing[:offset]) == 0
+    assert torch.count_nonzero(backing[offset + raw.numel() :]) == 0
+
+
+def test_padded_page_layout_detected_for_shared_state_pages():
+    # The pooled layout pads the state caches to the page size of the
+    # block-stride addressed MLA/indexer caches they share physical pages with.
+    # Probe the specs the runner itself derives from the KV cache config.
+    config, _, plan = _make_plan()
+    layer_specs = _make_runner(config)._get_layer_kv_cache_specs(plan)
+    assert requires_padded_page_layout(layer_specs.values())
+
+
+def test_padded_page_layout_rejected_without_tail_caches():
+    # A standalone MTP runner has the same attention specs but no recurrent
+    # state caches, so no state view needs the padded page stride.
+    specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
+    assert not requires_padded_page_layout(specs.values())
+
+
+def test_padded_page_layout_rejected_for_packed_hybrid_pool():
+    # Other hybrid models pad Mamba pages to the attention page size
+    # (``cache_config.mamba_page_size_padded``) but keep the packed contiguous
+    # state layout, so they must not take the shared padded page path.
+    specs = [
+        AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        ),
+        MambaSpec(
+            block_size=8,
+            shapes=((2, 2), (1, 2, 2)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=64,
+        ),
+    ]
+    assert not requires_padded_page_layout(specs)
+
+
+def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):
+    config, _, plan = _make_plan()
+    runner = _make_runner(config)
+    raw_caches = runner._allocate_kv_cache_tensors(plan)
+    spec = replace(_make_specs()[STATE], head_size=2)
+    plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
+    raw = raw_caches[STATE]
+    expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
+    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
+    assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
+    assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()
+    page_bytes = raw.numel() // plan.num_blocks
+    assert actual.stride(0) * actual.element_size() == page_bytes
+    expected[1, :, :2] = 5
+    expected[1, :, 2:] = 7
+    torch.testing.assert_close(actual[1], torch.tensor([[5, 5, 7, 7], [5, 5, 7, 7]], dtype=torch.float32))
+    torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
+    torch.testing.assert_close(actual[2], torch.zeros_like(actual[2]))
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

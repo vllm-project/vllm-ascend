@@ -1,5 +1,11 @@
 # Mooncake Layerwise Adaptation and Optimization Analysis
 
+<<<<<<< HEAD
+=======
+For the subsequent multi-group attention extension and its validation boundaries,
+see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid_attention.md).
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 ## 1. Adaptation Baseline and Conclusion
 
 - Baseline: `Eric-dot/vllm-ascend:mooncake` at local commit `0a023b094e9e88ffaca0b1fda02529cef6277f8e`.
@@ -140,11 +146,21 @@ Mooncake layerwise transfer checks all required session and range methods during
 startup fails immediately and reports that the client must include Mooncake PR #2881, instead of failing in an
 asynchronous thread on the first request.
 
+<<<<<<< HEAD
 The current key schema encodes only the model, block hash, and TP/head rank, so the implementation explicitly rejects:
 
 - Pipeline parallel size greater than 1.
 - Prefill or decode context parallel size greater than 1.
 - Hybrid or multi-group KV cache layouts.
+=======
+The initial single-group implementation used only model, block hash and TP/head rank.
+Hybrid attention and topology-matched PP are covered by the
+[hybrid guide](mooncake_hybrid_attention.md).
+The implementation still explicitly rejects:
+
+- Prefill or decode context parallel size greater than 1.
+- Recurrent Mamba state in hybrid layerwise mode, and PP stages with empty projected cache groups.
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 - TP mismatch with layerwise transfer.
 
 ### 4.5 Exceptions and Fallbacks
@@ -200,9 +216,17 @@ python -m vllm.entrypoints.openai.api_server \
 For the first hardware validation, start with TP=1, `layerwise_prefetch_layers=1`, and hybrid/CP/PP disabled. Then
 gradually increase the TP size, block count, and prefetch depth.
 
+<<<<<<< HEAD
 During integration testing, temporarily set `VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1` to emit JSON audit logs for whole-key
 operations, per-layer ranges, and commits. Keep the default value of `0` during normal operation to avoid per-layer
 logging overhead.
+=======
+During integration testing, temporarily set `additional_config.kv_pool_range_debug` (bool, default `false`) to `true`
+by adding `--additional-config '{"kv_pool_range_debug": true}'` to the command above to emit JSON audit logs for
+whole-key operations, per-layer ranges, and commits. For offline use, pass `additional_config={"kv_pool_range_debug": True}`
+to `LLM`. Use this configuration instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable.
+Keep the default value of `false` during normal operation to avoid per-layer logging overhead.
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 ## 6. Follow-up Optimization Recommendations
 
@@ -273,6 +297,12 @@ logging overhead.
 - `py_compile`: Passed for the core changed files.
 - Ruff lint and format checks: Passed.
 - Relevant CPU mock pytest suite: `285 passed, 106 subtests passed`.
+<<<<<<< HEAD
 - Strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed.
+=======
+- Historical strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed before migration.
+- Migration to `additional_config.kv_pool_range_debug` (bool, default `false`): Not runtime-tested; the historical
+  results above do not validate the migrated configuration.
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 - Not yet completed: Tests with real NPUs, a real Mooncake client and Master, multi-node networking, and performance
   benchmarks.

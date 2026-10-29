@@ -21,6 +21,7 @@ msgstr ""
 msgid "# Hy3-preview"
 msgstr "# Hy3-preview"
 
+<<<<<<< HEAD
 msgid "## Introduction"
 msgstr "## 简介"
 
@@ -150,13 +151,15 @@ msgstr "### 使用 vLLM Benchmark"
 msgid "### Lightweight Online Benchmark"
 msgstr "### 轻量级在线基准测试"
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid ""
-"The following numbers are from a real-weight smoke benchmark on one Atlas A3"
-" 16-NPU node, using TP16 + EP + MTP + ACLGraph. The benchmark used `vllm "
-"bench serve`, random prompts, output length 128, `--max-concurrency 1`, "
-"`--temperature 0`, and 4 requests per input length. These numbers are "
-"functional performance evidence, not tuned throughput limits."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Hy3-preview.html)."
 msgstr ""
+<<<<<<< HEAD
 "以下数据来自单个 Atlas A3 16-NPU 节点上的实际权重冒烟基准测试，使用了 TP16 + EP + MTP + "
 "ACLGraph。基准测试使用了 `vllm bench serve`、随机提示、输出长度 128、`--max-concurrency "
 "1`、`--temperature 0`，每个输入长度发送 4 个请求。这些数据是功能性能的证明，而非调优后的吞吐量上限。"
@@ -219,3 +222,7 @@ msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../getting_started/installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Hy3-preview.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

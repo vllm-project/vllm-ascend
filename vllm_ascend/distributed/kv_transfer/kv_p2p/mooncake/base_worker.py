@@ -12,6 +12,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+<<<<<<< HEAD
+=======
+    KVConnectorTransferResults,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.parallel_state import (
@@ -30,6 +34,10 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+<<<<<<< HEAD
+=======
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -53,11 +61,56 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+<<<<<<< HEAD
+=======
+from vllm_ascend.utils import get_kv_cache_tensor_layers
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+<<<<<<< HEAD
+=======
+def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
+    """Whether NoPE and RoPE are component-major views of one MLA slot.
+
+    The supported geometry is ``[all NoPE][all RoPE][padding]`` inside each
+    physical slot.  Both views share one storage and first-axis stride, while
+    each component remains internally contiguous.  This is deliberately
+    different from a token-interleaved parent page, where NoPE and RoPE are
+    sliced along the trailing dimension of every token.
+    """
+    # Require the two-view MLA cache contract.
+    if not isinstance(spec, MLAAttentionSpec) or len(caches) != 2:
+        return False
+
+    nope, rope = caches
+    if nope.dtype != rope.dtype:
+        return False
+    # Both views must share one storage.
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        return False
+    # Their first-axis layout must match.
+    if nope.shape[0] != rope.shape[0] or nope.stride(0) != rope.stride(0):
+        return False
+
+    # Component-major views are 4-D and internally contiguous apart from the
+    # first-axis page stride.  A generic packed K/scale page or a token-
+    # interleaved parent does not satisfy both component strides.
+    if nope.ndim != 4 or rope.ndim != 4:
+        return False
+    # All axes other than the first axis must be contiguous.
+    if nope.stride(1) != nope.shape[2] * nope.shape[3]:
+        return False
+    if rope.stride(1) != rope.shape[2] * rope.shape[3]:
+        return False
+
+    nope_block_elems = nope.shape[1] * nope.shape[2] * nope.shape[3]
+    return rope.storage_offset() - nope.storage_offset() == nope_block_elems
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 class MooncakeBaseConnectorWorker:
     """Worker implementation shared by Mooncake transfer modes."""
 
@@ -96,15 +149,25 @@ class MooncakeBaseConnectorWorker:
         pcp_group = get_pcp_group()
         self.pcp_rank = pcp_group.rank_in_group
         self.pcp_size = pcp_group.world_size
+<<<<<<< HEAD
         assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.side_channel_host = get_ip()
+<<<<<<< HEAD
         self.side_channel_port = (
             self.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank * self.tp_size * self.pp_size * self.pcp_size
+=======
+        # Use the serving index, which survives dense-engine DP rank reset.
+        self.side_channel_port = (
+            self.kv_transfer_config.kv_port
+            + vllm_config.parallel_config.data_parallel_index * self.tp_size * self.pp_size * self.pcp_size
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         )
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
@@ -163,6 +226,10 @@ class MooncakeBaseConnectorWorker:
         views can share one allocation while their first blocks are many pages
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
+<<<<<<< HEAD
+=======
+        Their contiguous block spans must cover that entire stride.
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         """
         if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
@@ -179,9 +246,28 @@ class MooncakeBaseConnectorWorker:
 
         page_base_addr = min(cache.data_ptr() for cache in caches)
         block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
+<<<<<<< HEAD
         if any(
             cache.data_ptr() - page_base_addr + block_len > page_stride for cache, block_len in zip(caches, block_lens)
         ):
+=======
+        # Storage capacity does not prove that this layer owns a whole page:
+        # its views may occupy only a subregion of a larger shared allocation.
+        # Merge only internally contiguous blocks whose union covers the full
+        # stride. Overlapping aliases are allowed, but holes and padding are not.
+        if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
+            return None
+        block_ranges = sorted(
+            (cache.data_ptr() - page_base_addr, cache.data_ptr() - page_base_addr + block_len)
+            for cache, block_len in zip(caches, block_lens)
+        )
+        covered_end = 0
+        for start, end in block_ranges:
+            if start > covered_end or end > page_stride:
+                return None
+            covered_end = max(covered_end, end)
+        if covered_end != page_stride:
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             return None
 
         storage = caches[0].untyped_storage()
@@ -210,6 +296,15 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
+<<<<<<< HEAD
+=======
+        owners = (
+            map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            if self.ascend_config.kvpp_config.size > 1
+            else {}
+        )
+        kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -221,7 +316,11 @@ class MooncakeBaseConnectorWorker:
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
+<<<<<<< HEAD
             for layer_name in tensor_config.layers:
+=======
+            for layer_name in get_kv_cache_tensor_layers(tensor_config):
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 if layer_name in configured_layer_names:
                     raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
                 if layer_name not in self.layer_name_to_group_index:
@@ -231,6 +330,16 @@ class MooncakeBaseConnectorWorker:
                 if cache_or_caches is None:
                     raise ValueError(f"No KV cache was registered for configured layer {layer_name!r}.")
 
+<<<<<<< HEAD
+=======
+                configured_layer_names.add(layer_name)
+                # Foreign target layers alias scratch. Publish persistent owners
+                # only; MTP caches are absent from owners and remain replicated.
+                owner = owners.get(layer_name)
+                if owner is not None and owner != kvpp_rank:
+                    continue
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 base_addrs: list[int] = []
                 block_strides: list[int] = []
                 block_lens: list[int] = []
@@ -245,6 +354,22 @@ class MooncakeBaseConnectorWorker:
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
+<<<<<<< HEAD
+=======
+                if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
+                    # MooncakeV2 is layout-agnostic: it only needs the raw
+                    # block's base address, length, and stride.  Publish the
+                    # complete physical slot as a flat byte descriptor instead
+                    # of the larger NoPE view's semantic shape.
+                    page_base_addr, page_stride, _, block_size_scale = shared_page_metadata
+                    element_size = caches[0].element_size()
+                    shared_page_metadata = (
+                        page_base_addr,
+                        page_stride,
+                        (page_stride // element_size,),
+                        block_size_scale,
+                    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                 if shared_page_metadata is not None:
                     page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
                     base_addrs.append(page_base_addr)
@@ -263,6 +388,7 @@ class MooncakeBaseConnectorWorker:
                         block_shapes.append(block_shape)
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
+<<<<<<< HEAD
                 configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
@@ -272,6 +398,15 @@ class MooncakeBaseConnectorWorker:
                     # replicated indexer blocks. Publish the virtual token span
                     # so dividing it by the tensor block scale recovers the
                     # physical kernel block size.
+=======
+                layer_names.append(layer_name)
+                layer_block_size = spec.block_size
+                if isinstance(spec, AscendSFAIndexerCacheSpec):
+                    # A replicated SFA indexer stores one physical kernel block
+                    # per DCP rank behind each scheduler block. Publish their
+                    # aggregate token span; replication size 1 deliberately
+                    # remains an ordinary DCP-sharded FA block.
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
                 layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
@@ -326,7 +461,16 @@ class MooncakeBaseConnectorWorker:
         )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+<<<<<<< HEAD
         """Return requests with completed receive and send operations."""
+=======
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Return completed transfers and receive failures together."""
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         raise NotImplementedError
 
     def get_block_ids_with_load_errors(self) -> set[int]:

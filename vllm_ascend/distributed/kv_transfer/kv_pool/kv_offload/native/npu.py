@@ -54,7 +54,7 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=self.num_chunks,
         )
 
 
@@ -82,16 +82,16 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             # physical device index into that replica's mmap slot range.
             rank = int(torch.npu.current_device()) % world_size
 
+        region_kwargs = dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
-            num_blocks=self.num_blocks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            **region_kwargs,
         )
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=self.num_chunks,
             mmap_region=worker_mmap,
         )

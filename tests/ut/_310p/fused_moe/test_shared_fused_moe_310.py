@@ -14,8 +14,12 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
+    PreparedSharedExpertInput,
+    RoutedMoEMilestones,
+)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -124,7 +128,12 @@ def test_runner_310_installs_specialized_comm():
         assert runner.ascend_shared_experts.multistream_overlap is False
         assert runner._forward_entry is upstream_forward_entry
         runner._select_forward.assert_called_once_with()
+<<<<<<< HEAD
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
+=======
+        key = fused_moe_310_module._moe_config_key(MoECommType.ALLGATHER, moe_config)
+        assert fused_moe_310_module._MoECommMethods[key] is comm_method
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         parent_init.assert_called_once()
 
 
@@ -239,20 +248,19 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    prepared_shared_input = PreparedSharedExpertInput(hidden_states)
     ascend_shared_experts = SimpleNamespace(
         multistream_overlap=False,
+<<<<<<< HEAD
         local_input_from_gathered=MagicMock(return_value=hidden_states),
+=======
+        prepare_input_before_routed=MagicMock(return_value=prepared_shared_input),
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         forward=MagicMock(return_value=shared_out),
     )
-    routed_events = FusedMoEEvents(
-        before_routed_experts=None,
-        after_routed_experts=None,
-        before_dispatch=None,
-        before_gmm2=None,
-        before_combine=None,
-    )
+    milestones = RoutedMoEMilestones()
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, milestones) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
@@ -264,6 +272,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     result = runner._forward_impl(hidden_states, router_logits, shared_experts_input=None)
 
     if has_shared_experts:
+        ascend_shared_experts.prepare_input_before_routed.assert_called_once_with(hidden_states)
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -271,7 +280,11 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        ascend_shared_experts.forward.assert_called_once()
+        ascend_shared_experts.forward.assert_called_once_with(
+            prepared_shared_input,
+            milestones,
+            defer_output_wait=False,
+        )
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,

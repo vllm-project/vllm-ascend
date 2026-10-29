@@ -32,6 +32,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
@@ -159,8 +160,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 )
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                hidden_states = _pad_tokens_with_cat(hidden_states, self.num_tokens + pad_size)
+                router_logits = _pad_tokens_with_cat(router_logits, self.num_tokens + pad_size)
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -293,8 +294,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             pad_size = target_pad_length - self.num_tokens
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                hidden_states = _pad_tokens_with_cat(hidden_states, target_pad_length)
+                router_logits = _pad_tokens_with_cat(router_logits, target_pad_length)
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
@@ -424,26 +425,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if pertoken_scale is not None:
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale)
 
-        if self.moe_config.pcp_size > 1:
-            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
-
-            self.num_tokens_pcp = hidden_states.shape[0]
-            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
-            if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
-                if pertoken_scale is not None:
-                    pertoken_scale = (
-                        nn.functional.pad(pertoken_scale, (0, pad_size))
-                        if pertoken_scale.dim() == 1
-                        else nn.functional.pad(pertoken_scale, (0, 0, 0, pad_size))
-                    )
-
-            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
-            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
-            if pertoken_scale is not None:
-                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
-
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -507,7 +488,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pertoken_scale=None,
         )
 
-    def all_gather_input_id_with_dp_group(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Align token ids with the rows produced by :meth:`prepare`.
+
+        Hash-based routing consumes ``input_ids`` alongside the gathered router
+        logits. Sequence-parallel inputs use the same EP gather-and-unpad path
+        as hidden states and router logits. Other inputs follow the DP-then-PCP
+        communication layout.
+        """
+        if self._use_ep_sequence_parallel():
+            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_ids)
+
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
             pad_size = max_tokens_across_dp - self.num_tokens
@@ -515,6 +506,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
 
             input_ids = self.moe_config.dp_group.all_gather(input_ids, 0)
+
+        if self.moe_config.pcp_size > 1:
+            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
+            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
+            if pad_size > 0:
+                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+
+            input_ids = get_pcp_group().all_gather(input_ids, 0)
+
         return input_ids
 
     def finalize(
@@ -545,10 +545,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         2 Reduce_results is True usually happens when model has no shared experts. We still do reduce scatter
         here, then skip allreudce in FusedMoe.
         """
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
-            hidden_states = hidden_states[: self.num_tokens_pcp]
-
         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
 
         return hidden_states

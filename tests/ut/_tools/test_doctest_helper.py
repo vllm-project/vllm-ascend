@@ -3,6 +3,10 @@
 
 import importlib.util
 import io
+<<<<<<< HEAD
+=======
+import subprocess
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from http.client import HTTPMessage
 from pathlib import Path
 from urllib.error import HTTPError
@@ -65,6 +69,27 @@ def test_mkdocs_helpers(helper):
 
 
 @pytest.mark.parametrize(
+<<<<<<< HEAD
+=======
+    "value, choices, expected",
+    [
+        ("", ("a2", "310p"), []),
+        ("  ", ("a2", "310p"), []),
+        ("a2, 310p", ("a2", "310p"), ["a2", "310p"]),
+        ("pip,pip,source", ("pip", "uv", "source"), ["pip", "source"]),
+    ],
+)
+def test_parse_manual_selection(helper, value, choices, expected):
+    assert helper.parse_manual_selection(value, choices, "selection") == expected
+
+
+def test_parse_manual_selection_rejects_unknown_value(helper):
+    with pytest.raises(helper.DoctestError, match="Invalid Quick Start device: a5"):
+        helper.parse_manual_selection("a2,a5", helper.QUICKSTART_DEVICES, "Quick Start device")
+
+
+@pytest.mark.parametrize(
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     "group_name, expected",
     [
         ("QUICKSTART_COMMON_MARKERS", {"quickstart": ["a2", "310p"], "installation": []}),
@@ -76,15 +101,36 @@ def test_mkdocs_helpers(helper):
         ("INSTALLATION_SOURCE_MARKERS", {"quickstart": [], "installation": ["source"]}),
     ],
 )
+<<<<<<< HEAD
 def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expected):
     changed_group = getattr(helper, group_name)
+=======
+@pytest.mark.parametrize("release_changed", [False, True])
+def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expected, release_changed):
+    changed_group = getattr(helper, group_name)
+    monkeypatch.setattr(helper, "get_merge_base", lambda base, head: "merge-base")
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     monkeypatch.setattr(helper, "get_changed_paths", lambda base, head: set())
     monkeypatch.setattr(
         helper,
         "any_doctest_blocks_changed",
         lambda base, head, markers, cache: markers == changed_group,
     )
+<<<<<<< HEAD
     monkeypatch.setattr(helper, "read_repo_text", lambda path, ref: "extra:\n  version: same\n")
+=======
+    monkeypatch.setattr(
+        helper,
+        "read_repo_text",
+        lambda path,
+        ref: f"extra:\n  release_vllm_ascend_version: {'new' if release_changed and ref == 'head' else 'old'}\n",
+    )
+    if release_changed:
+        expected = {
+            "quickstart": ["a2", "310p"],
+            "installation": list(dict.fromkeys(["source", *expected["installation"]])),
+        }
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     assert helper.select_doctests("base", "head") == expected
 
@@ -103,11 +149,29 @@ def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expect
             False,
             {"quickstart": ["a2", "310p"], "installation": ["pip"]},
         ),
+<<<<<<< HEAD
         (set(), True, {"quickstart": ["a2", "310p"], "installation": ["pip"]}),
+=======
+        (
+            {"tests/e2e/doctests/scripts/future_script.sh"},
+            False,
+            {"quickstart": ["a2", "310p"], "installation": ["pip"]},
+        ),
+        (set(), True, {"quickstart": ["a2", "310p"], "installation": ["source"]}),
+        (
+            {"tests/e2e/doctests/scripts/doctest_helper.py"},
+            True,
+            {"quickstart": ["a2", "310p"], "installation": ["source", "pip"]},
+        ),
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         ({"README.md"}, False, {"quickstart": [], "installation": []}),
     ],
 )
 def test_select_doctests_by_path_or_release(helper, monkeypatch, paths, release_changed, expected):
+<<<<<<< HEAD
+=======
+    monkeypatch.setattr(helper, "get_merge_base", lambda base, head: "merge-base")
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     monkeypatch.setattr(helper, "get_changed_paths", lambda base, head: paths)
     monkeypatch.setattr(helper, "any_doctest_blocks_changed", lambda *args: False)
     monkeypatch.setattr(
@@ -119,6 +183,63 @@ def test_select_doctests_by_path_or_release(helper, monkeypatch, paths, release_
     assert helper.select_doctests("base", "head") == expected
 
 
+<<<<<<< HEAD
+=======
+def test_pr_selection_excludes_quickstart_changes_only_on_base(helper, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "Doctest")
+    git("config", "user.email", "doctest@example.com")
+    docs = repo / "docs"
+    docs.mkdir()
+    quickstart = docs / "quickstart.md"
+    quickstart.write_text("<!-- doctest: quickstart -->\n```bash\necho common\n```\n", encoding="utf-8")
+    (repo / "mkdocs.yml").write_text("extra:\n  vllm_ascend_version: v1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "common")
+    common = git("rev-parse", "HEAD")
+
+    git("checkout", "-b", "head")
+    (repo / "pr-only.txt").write_text("head\n", encoding="utf-8")
+    git("add", "pr-only.txt")
+    git("commit", "-m", "head change")
+    head = git("rev-parse", "HEAD")
+
+    git("checkout", "-b", "base", common)
+    quickstart.write_text("<!-- doctest: quickstart -->\n```bash\necho base\n```\n", encoding="utf-8")
+    git("add", "docs/quickstart.md")
+    git("commit", "-m", "base quickstart change")
+    base = git("rev-parse", "HEAD")
+
+    monkeypatch.setattr(helper, "REPO_ROOT", repo)
+    monkeypatch.setattr(helper, "MKDOCS_PATH", "mkdocs.yml")
+    monkeypatch.setattr(helper, "DOCTEST_FILE_BY_MARKER", {"quickstart": "docs/quickstart.md"})
+    monkeypatch.setattr(helper, "QUICKSTART_COMMON_MARKERS", ("quickstart",))
+    monkeypatch.setattr(helper, "QUICKSTART_A2_MARKERS", ())
+    monkeypatch.setattr(helper, "QUICKSTART_310P_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_COMMON_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_PIP_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_UV_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_SOURCE_MARKERS", ())
+    monkeypatch.setattr(helper, "SHARED_DOCTEST_PATHS", set())
+
+    assert helper.get_merge_base(base, head) == common
+    assert helper.get_changed_paths(base, head) == {"pr-only.txt"}
+    assert helper.select_doctests(base, head) == {"quickstart": [], "installation": []}
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def test_build_doctest_plan(helper, monkeypatch):
     monkeypatch.setattr(
         helper,

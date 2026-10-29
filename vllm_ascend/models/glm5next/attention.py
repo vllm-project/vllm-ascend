@@ -3,6 +3,7 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -28,6 +29,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 
+<<<<<<< HEAD
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
@@ -35,6 +37,12 @@ from vllm_ascend.models.glm5next.kv_cache import (
 )
 from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import (
     SparseAttnIndexerKpool,
+=======
+from vllm_ascend.models.glm5next.kv_cache import (
+    Glm5NextIndexerCache,
+    Glm5NextTailCache,
+    get_kpool_tail_ring_capacity,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 )
 
 
@@ -42,7 +50,7 @@ class Indexer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         hidden_size: int,
         q_lora_rank: int,
         quant_config: QuantizationConfig | None,
@@ -57,7 +65,7 @@ class Indexer(nn.Module):
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         # Indexer is only constructed for v32 configs, where these sparse-indexer
         # fields are guaranteed populated; narrow away the `int | None` declared
-        # on Glm5NextConfig for the optional-indexer case.
+        # on Glm5NextTextConfig for the optional-indexer case.
         assert config.index_topk is not None
         assert config.index_n_heads is not None
         assert config.index_head_dim is not None
@@ -100,12 +108,15 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
+<<<<<<< HEAD
         # FP32 weight copies for the fp32 K/gate/weights projections. Cached
         # lazily after the checkpoint weights are loaded so the quantitative
         # work of the first forward matches the last.
         self._wk_weight_f32: torch.Tensor | None = None
         self._gate_weight_f32: torch.Tensor | None = None
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         # Completed pools store BF16 vectors without quantization scales.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
@@ -115,6 +126,7 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
         )
+<<<<<<< HEAD
         # Absolute-position FP32 K/gate pages retain the incomplete pool.
         self.state_cache = Glm5NextStateCache(
             state_dim=2 * self.head_dim,
@@ -122,11 +134,19 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.compressor.state_cache",
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
+=======
+        # Request-owned FP32 K/gate ring retains the incomplete pool.
+        self.tail_cache = Glm5NextTailCache(
+            head_dim=self.head_dim,
+            dtype=torch.float32,
+            prefix=f"{prefix}.tail_cache",
+            compress_ratio=self.index_kpool,
+            ring_capacity=get_kpool_tail_ring_capacity(vllm_config, self.index_kpool),
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         )
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
+<<<<<<< HEAD
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
         self.indexer_op = SparseAttnIndexerKpool(
             self.k_cache,
@@ -205,13 +225,33 @@ class Indexer(nn.Module):
             index_kpool=self.index_kpool,
             positions=positions,
         )
+=======
+    def get_ascend_indexer_backend_cls(self):
+        # Lazy import keeps the model module independent from the shared ops
+        # registry during process startup.
+        from vllm_ascend.attention.indexer_kpool import (
+            Glm5NextKPoolIndexerBackend,
+        )
+
+        return Glm5NextKPoolIndexerBackend
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        positions,
+        rotary_emb,
+    ) -> torch.Tensor:
+        del hidden_states, qr, positions, rotary_emb
+        raise RuntimeError("GLM-Next Indexer must run through IndexerWrapper's Ascend backend.")
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 class Glm5NextMLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -287,7 +327,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,  # kv_b_proj stays BF16 in the FP8 checkpoint
             prefix=f"{prefix}.kv_b_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -298,28 +338,25 @@ class Glm5NextMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # Transformers' NoPE config does not declare rope_parameters.
+        rope_parameters = getattr(config, "rope_parameters", None)
         if not skip_rope:
-            assert config.rope_parameters is not None
-            if config.rope_parameters["rope_type"] != "default":
-                config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+            assert rope_parameters is not None
+            if rope_parameters["rope_type"] != "default":
+                rope_parameters["rope_type"] = (
+                    "deepseek_yarn" if rope_parameters.get("apply_yarn_scaling", True) else "deepseek_llama_scaling"
                 )
 
             self.rotary_emb: RotaryEmbedding | None = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
+                rope_parameters=rope_parameters,
                 is_neox_style=False,
             )
 
-            if (
-                config.rope_parameters["rope_type"] != "default"
-                and config.rope_parameters["rope_type"] == "deepseek_yarn"
-            ):
-                mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
-                scaling_factor = config.rope_parameters["factor"]
+            if rope_parameters["rope_type"] != "default" and rope_parameters["rope_type"] == "deepseek_yarn":
+                mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
+                scaling_factor = rope_parameters["factor"]
                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                 self.scaling = self.scaling * mscale * mscale
         else:
@@ -331,7 +368,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
+                rope_parameters=rope_parameters,
                 is_neox_style=not config.indexer_rope_interleave,
             )
             # The sparse indexer projects from the MLA q-lora rank, which is

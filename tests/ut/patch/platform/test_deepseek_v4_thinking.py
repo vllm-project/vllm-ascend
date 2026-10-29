@@ -63,6 +63,7 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
     monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
 
+<<<<<<< HEAD
     if vllm_version_is("0.28.0"):
         cases = [
             ("none", "chat", None),
@@ -85,6 +86,19 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
             ("max", "thinking", "max"),
             ("unexpected", "thinking", "high"),
         ]
+=======
+    # v0.28.0 already uses the same effort mapping as main.
+    cases = [
+        ("none", "chat", None),
+        ("minimal", "thinking", "low"),
+        ("low", "thinking", "low"),
+        ("medium", "thinking", "low"),
+        ("high", "thinking", "high"),
+        ("xhigh", "thinking", "high"),
+        ("max", "thinking", "max"),
+        ("unexpected", "thinking", "high"),
+    ]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     for reasoning_effort, expected_mode, expected_effort in cases:
         tokenizer.apply_chat_template(
             [{"role": "user", "content": "hi"}],

@@ -9,12 +9,31 @@ import torch
 from vllm.v1.worker.gpu.sample import gumbel, sampler
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
+<<<<<<< HEAD
 
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 
 @pytest.mark.parametrize("consumer", [gumbel, sampler, base_speculator, dspark_speculator])
+=======
+from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
+
+from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
+from vllm_ascend.patch.worker.patch_v2 import patch_triton
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        gumbel,
+        sampler,
+        base_speculator,
+        dspark_speculator,
+        eagle_speculator,
+    ],
+)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
     # Simulate a consumer retaining its original `from ... import` binding.
     stale_gumbel = MagicMock()
@@ -22,7 +41,12 @@ def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
 
     importlib.reload(patch_triton)
 
+<<<<<<< HEAD
     assert consumer.gumbel_sample is gumbel_sample
+=======
+    # vLLM-Ascend replaces gumbel_sample with categorical_sample for NPU.
+    assert consumer.gumbel_sample is categorical_sample
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     stale_gumbel.assert_not_called()
 
 
@@ -37,14 +61,35 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
     speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
     speculator.use_fp64_gumbel = False
+<<<<<<< HEAD
+=======
+
+    # This fixture bypasses __init__, so provide defaults used by current main.
+    # They are harmless extra instance attributes on the v0.28-compatible lane.
+    speculator.acceptance_estimator = None
+    speculator.draft_watermarker = None
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 1.0]])
     idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
     sample_pos = torch.tensor([8, 12])
     sampled = torch.tensor([2, 1])
+<<<<<<< HEAD
     sample = create_autospec(gumbel_sample, return_value=sampled)
     monkeypatch.setattr(dspark_speculator, "gumbel_sample", sample)
 
     result = speculator._sample_logits(logits, idx_mapping, sample_pos, step=1)
+=======
+    sample = create_autospec(categorical_sample, return_value=sampled)
+    monkeypatch.setattr(dspark_speculator, "gumbel_sample", sample)
+
+    result = speculator._sample_logits(
+        logits,
+        idx_mapping,
+        sample_pos,
+        step=1,
+    )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     if probabilistic:
         assert result is sampled
@@ -54,9 +99,25 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         assert args[1] is idx_mapping
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
+<<<<<<< HEAD
         assert kwargs["logits_cache"] is speculator.draft_logits
         torch.testing.assert_close(kwargs["logits_cache_col"], speculator._step_cols[1])
         assert kwargs["use_fp64"] is False
     else:
         sample.assert_not_called()
         torch.testing.assert_close(result, logits.argmax(dim=-1) + 10)
+=======
+        assert kwargs["is_drafting"] is True
+        assert kwargs["logits_cache"] is speculator.draft_logits
+        torch.testing.assert_close(
+            kwargs["logits_cache_col"],
+            speculator._step_cols[1],
+        )
+        assert kwargs["use_fp64"] is False
+    else:
+        sample.assert_not_called()
+        torch.testing.assert_close(
+            result,
+            logits.argmax(dim=-1) + 10,
+        )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

@@ -21,6 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+<<<<<<< HEAD
+=======
+    KVConnectorTransferResults,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -64,6 +68,13 @@ if TYPE_CHECKING:
 class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Common facade for the Mooncake scheduler and worker implementations."""
 
+<<<<<<< HEAD
+=======
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -80,6 +91,13 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler: MooncakeBaseConnectorScheduler | None = None
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
 
+<<<<<<< HEAD
+=======
+    def shutdown(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """Use HND to avoid reformatting KV cache before D2D transfer."""
@@ -97,9 +115,17 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")
         return "HND"
 
+<<<<<<< HEAD
     ############################################################
     # Scheduler-side methods
     ############################################################
+=======
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # vLLM main's scheduler uses this for skip_zeroing_group_ids and for
+        # the DSV4.1 SWA replay-window check; a P/D transfer restores the
+        # request's own blocks, i.e. every transfer group.
+        return self._kv_cache_config.transfer_group_ids
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
@@ -171,6 +197,13 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+<<<<<<< HEAD
+=======
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return block IDs whose Mooncake KV load failed."""
         assert self.connector_worker is not None

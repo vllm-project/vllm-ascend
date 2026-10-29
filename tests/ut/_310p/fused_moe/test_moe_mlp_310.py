@@ -509,6 +509,10 @@ class TestAllGatherCommImpl310FusedExperts(TestBase):
 
         self.assertIs(result.routed_out, hidden_states)
         self.assertIs(result.before_gmm2_evt, before_gmm2_evt)
+<<<<<<< HEAD
+=======
+        self.assertIs(result.shared_activation_overlap_start_evt, before_gmm2_evt)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         mock_apply_mlp.assert_called_once()
         self.assertIs(mock_apply_mlp.call_args.args[1], quant_method)
         # The MLP compute input must carry the routed-expert layer so hooks can

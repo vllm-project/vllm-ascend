@@ -79,6 +79,7 @@ msgstr ""
 "}}-310p-openeuler24.03-py3.12` |"
 
 msgid ""
+<<<<<<< HEAD
 "            | Ascend 950DT series products | `quay.io/ascend/cann:{{ "
 "release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ "
 "release_cann_version }}-950-openeuler24.03-py3.12` |"
@@ -88,6 +89,8 @@ msgstr ""
 "release_cann_version }}-950-openeuler24.03-py3.12` |"
 
 msgid ""
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 "The CANN base image already includes the Toolkit, the operator package for "
 "the target hardware, and NNAL. You do not need to reinstall CANN in the "
 "container. For other operating systems and tags, see the [CANN Container "
@@ -173,3 +176,15 @@ msgstr ""
 "{% filter indent(4, true) %}{% include "
 "\"getting_started/installation/install_vllm_ascend.inc.md\" %}{% endfilter "
 "%}"
+<<<<<<< HEAD
+=======
+
+msgid ""
+"            | 950DT Products | `quay.io/ascend/cann:{{ release_cann_version "
+"}}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version "
+"}}-950-openeuler24.03-py3.12` |"
+msgstr ""
+"            | Ascend 950DT系列产品 | `quay.io/ascend/cann:{{ "
+"release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ "
+"release_cann_version }}-950-openeuler24.03-py3.12` |"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

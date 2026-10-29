@@ -1,0 +1,399 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+import vllm_ascend.models.glm5next.kda as model_kda
+
+
+def test_glm_kda_backend_declares_pcp_support() -> None:
+    backend = model_kda.Glm5NextLinearAttention.get_attn_backend(None)
+
+    assert backend.supports_pcp()
+    assert not model_kda.AscendGDNHostMetadataBackend.supports_pcp()
+    assert backend.get_builder_cls() is model_kda.AscendGDNHostMetadataBackend.get_builder_cls()
+
+
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank, has_prefill):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_projection_size = 2
+    layer.local_num_heads = 1
+    layer.head_dim = 2
+
+    def project(x):
+        projected = torch.zeros(x.shape[0], 11)
+        projected[:, 0] = x[:, 0]
+        return projected, None
+
+    layer.in_proj_qkvbfg_a = project
+    layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.o_norm = lambda x, gate: x
+    layer.o_proj = lambda x: (x, None)
+    seen = []
+
+    def run_kda(qkv_proj_states, g1, beta, core_attn_out):
+        seen.extend(qkv_proj_states[:, 0].tolist())
+        core_attn_out[0, :, 0, 0] = qkv_proj_states[:, 0]
+        core_attn_out[0, :, 0, 1].zero_()
+
+    layer._forward = run_kda
+    pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([has_prefill])),
+        hidden_restore_idx=torch.tensor([0, 1, 4, 5, 6, 7, 2]),
+        padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
+    )
+    metadata = SimpleNamespace(pcp_context=pcp_context)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
+    pcp_group = SimpleNamespace(
+        world_size=2,
+        rank_in_group=pcp_rank,
+        all_gather=lambda x, dim: gathered if has_prefill else pytest.fail("decode must not gather PCP tokens"),
+    )
+    layer.pcp_group = pcp_group
+    layer.pcp_size = pcp_group.world_size
+    layer.pcp_rank = pcp_group.rank_in_group
+
+    local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
+    output = layer(local_input, torch.arange(4))
+
+    assert seen == (list(range(7)) if has_prefill else local_input[:, 0].tolist())
+    expected = ([0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]) if has_prefill else seen
+    assert output[:, 0].tolist() == expected
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.use_recoverssm = recover
+    layer.tp_size, layer.num_heads, layer.head_dim, layer.num_spec, layer.conv_size = 4, 8, 128, 5, 4
+    layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    cache = SimpleNamespace(
+        mamba_cache_dtype="auto",
+        mamba_ssm_cache_dtype="auto",
+        use_kda_recoverssm=recover,
+        use_replayssm=recover,
+        mamba_block_size=16,
+        mamba_page_size_padded=None,
+        mamba_cache_mode="none",
+    )
+    layer.cache_config = cache
+    spec = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
+    assert spec.num_speculative_blocks == (0 if recover else 5)
+    assert spec.shapes[1] == (2, 128, 128)
+    assert len(spec.shapes) == len(spec.dtypes) == (4 if recover else 2)
+    if recover:
+        assert spec.shapes[2:] == ((2, 6, 128), (2, 6, 256))
+        assert spec.dtypes == (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
+
+
+@pytest.mark.parametrize(
+    ("speculative", "spec_only", "recover"),
+    [(False, False, False), (True, False, False), (True, True, False), (True, False, True), (True, True, True)],
+)
+@pytest.mark.parametrize("dim_first", [False, True])
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, dim_first, recover
+):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_num_heads = 1
+    layer.head_dim = layer.local_projection_size = 128
+    layer.kda_lower_bound = -4.0
+    layer.use_recoverssm = recover
+    layer.num_spec = 1
+    state_shape = (8, 384, 6) if dim_first else (8, 6, 384)
+    layer.kv_cache = (torch.zeros(state_shape, dtype=torch.bfloat16), torch.zeros(8, 1, 128, 128))
+    if recover:
+        layer.kv_cache += (torch.zeros(8, 1, 2, 128), torch.zeros(8, 1, 2, 256, dtype=torch.bfloat16))
+    layer._conv_state_dim_first = dim_first
+    layer._merged_conv_weight = None
+    # Checkpoints retain FP32 convolution weights; AscendC needs the activation
+    # dtype and [width, q|k|v] ordering in the cached packed weight.
+    for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
+        setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
+    layer.A_log = torch.zeros(1)
+    layer.dt_bias = torch.zeros(128)
+    tokens = 2 if spec_only else (5 if speculative else 4)
+    metadata = object.__new__(model_kda.GDNAttentionMetadata)
+    values = dict(
+        has_initial_state=torch.tensor([True, False]),
+        non_spec_query_start_loc=torch.tensor([0, 1, 4]),
+        non_spec_state_indices_tensor=torch.tensor([2, 5]),
+        num_actual_tokens=tokens,
+        spec_sequence_masks=None,
+        spec_query_start_loc=None,
+        spec_state_indices_tensor=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        num_accepted_tokens=None,
+        num_spec_decodes=0,
+        num_prefills=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        prefill_state_indices=torch.tensor([5]),
+        prefill_has_initial_state=torch.tensor([False]),
+        non_spec_prefill_metadata=SimpleNamespace(chunk=object()),
+    )
+    if speculative:
+        values.update(
+            has_initial_state=torch.tensor([False]),
+            non_spec_query_start_loc=torch.tensor([0, 3]),
+            non_spec_state_indices_tensor=torch.tensor([5]),
+            spec_sequence_masks=torch.tensor([True, False]),
+            spec_query_start_loc=torch.tensor([0, 2]),
+            spec_state_indices_tensor=torch.tensor([[2, 3]]),
+            spec_token_indx=torch.tensor([0, 1]),
+            non_spec_token_indx=torch.tensor([2, 3, 4]),
+            num_accepted_tokens=torch.tensor([1]),
+            num_spec_decodes=1,
+            num_decodes=0,
+            num_decode_tokens=0,
+        )
+    if spec_only:
+        values.update(num_prefills=0, non_spec_token_indx=None)
+        if recover:
+            values.update(spec_sequence_masks=None, spec_token_indx=None)
+    for name, value in values.items():
+        setattr(metadata, name, value)
+    prefill_conv = SimpleNamespace(
+        query_start_loc=metadata.non_spec_query_start_loc,
+        cache_indices=metadata.non_spec_state_indices_tensor[:, None],
+        initial_state_mode=metadata.has_initial_state,
+    )
+    metadata.non_spec_prefill_metadata.causal_conv1d = prefill_conv
+    if speculative:
+        metadata.spec_decode_metadata = SimpleNamespace(
+            spec_causal_conv1d=SimpleNamespace(
+                query_start_loc=metadata.spec_query_start_loc,
+                cache_indices=metadata.spec_state_indices_tensor,
+                num_accepted_tokens=metadata.num_accepted_tokens,
+                output_buffer=torch.zeros(tokens + 1, 384, dtype=torch.bfloat16),
+            )
+        )
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    events: list[object] = []
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append(("load", prefix)))
+    monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
+    conv_calls = []
+    conv_entry = model_kda.causal_conv1d
+
+    def cpu_conv_entry(x, weight, state, *args, **kwargs):
+        # This UT checks model dispatch and layout; the NPU tests exercise the
+        # non-contiguous state's device-side gather/scatter and original alias.
+        assert state.data_ptr() == layer.kv_cache[0].data_ptr()
+        assert state.shape == (8, 6, 384)
+        return conv_entry(x, weight, state.contiguous(), *args, **kwargs)
+
+    monkeypatch.setattr(model_kda, "causal_conv1d", cpu_conv_entry)
+
+    def conv(output, x, weight, **kwargs):
+        assert events[:2] == [("load", "layer"), "compute"]
+        assert "save" not in events
+        conv_calls.append(kwargs["run_mode"])
+        state = kwargs["conv_state"]
+        assert state.shape == (8, 6, 384)
+        assert weight.shape == (4, 384)
+        assert weight.dtype == x.dtype == state.dtype == torch.bfloat16
+        expected_weight = torch.arange(1, 4, dtype=torch.bfloat16).repeat_interleave(128).expand(4, 384)
+        torch.testing.assert_close(weight, expected_weight)
+        assert weight is layer._merged_conv_weight
+        if kwargs["run_mode"] == 0:
+            torch.testing.assert_close(kwargs["cache_indices_opt"], prefill_conv.cache_indices[:, 0])
+            assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
+            assert kwargs["num_accepted_tokens_opt"] is None
+        else:
+            spec_conv = metadata.spec_decode_metadata.spec_causal_conv1d
+            torch.testing.assert_close(kwargs["cache_indices_opt"], spec_conv.cache_indices[:, 0])
+            assert kwargs["cache_indices_opt"].is_contiguous()
+            assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
+            assert kwargs["initial_state_mode_opt"] is None
+        return x.clone()
+
+    def fla_fn(x, weight, bias=None, **kwargs):
+        return conv(
+            torch.zeros_like(x),
+            x,
+            weight,
+            run_mode=0,
+            conv_state=kwargs["conv_states"],
+            cache_indices_opt=kwargs["cache_indices"],
+            initial_state_mode_opt=kwargs["has_initial_state"],
+            num_accepted_tokens_opt=None,
+        )
+
+    def fla_update(x, conv_state, weight, bias=None, **kwargs):
+        expected_buffer = metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer
+        assert kwargs["out"].data_ptr() == expected_buffer.data_ptr()
+        return conv(
+            torch.zeros_like(x),
+            x,
+            weight,
+            run_mode=1,
+            conv_state=conv_state,
+            cache_indices_opt=kwargs["conv_state_indices"],
+            initial_state_mode_opt=None,
+            num_accepted_tokens_opt=kwargs["num_accepted_tokens"],
+        )
+
+    monkeypatch.setattr(
+        "vllm_ascend.models.glm5next.ops.causal_conv1d.causal_conv1d_fn",
+        fla_fn,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.models.glm5next.ops.causal_conv1d.causal_conv1d_update",
+        fla_update,
+    )
+    calls: list[str] = []
+
+    def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
+        events.append("state_write")
+        calls.append("recurrent")
+        assert kwargs.get("output_buffer") is None
+        assert q.shape[1] == (2 if speculative else 1)
+        torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        return q * 2
+
+    def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
+        events.append("state_write")
+        calls.append("prefill")
+        assert q.shape[1] == 3
+        assert chunk is metadata.non_spec_prefill_metadata.chunk
+        torch.testing.assert_close(indices, metadata.prefill_state_indices)
+        return q * 3
+
+    monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
+
+    def verify(q, k, v, gate, beta, a_log, bias, bound, state, correction, kg, starts, indices, capacity):
+        assert correction is layer.kv_cache[2] and kg is layer.kv_cache[3]
+        assert capacity == 2 and a_log.shape == (1,)
+        torch.testing.assert_close(indices, metadata.spec_state_indices_tensor[:, 0])
+        return recurrent(q, k, v, gate, beta, state, starts, indices)
+
+    monkeypatch.setattr(model_kda, "kda_recoverssm_verify", verify)
+    monkeypatch.setattr(model_kda, "chunk_kda", prefill)
+    qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
+    out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
+    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
+    expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
+    torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
+    # Rows outside the scheduled token groups are left untouched.
+    assert torch.isnan(out[:, tokens:]).all()
+    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
+    assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
+
+
+@pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])
+def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width, num_spec):
+    monkeypatch.setattr(
+        model_kda.GatedDeltaNetAttention, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self)
+    )
+    config = SimpleNamespace(linear_head_dim=128, linear_conv_kernel_dim=width)
+    vllm_config = SimpleNamespace(
+        quant_config=None,
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+        cache_config=SimpleNamespace(use_replayssm=False),
+        speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
+    )
+    with pytest.raises(ValueError, match="causal-conv requires"):
+        model_kda.Glm5NextLinearAttention(config, vllm_config)
+
+
+@pytest.mark.parametrize("metadata", [None, {}])
+def test_profile_does_not_touch_the_connector(monkeypatch, metadata):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
+
+    def unexpected(*args):
+        pytest.fail("Profiling must not advance the layerwise connector")
+
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", unexpected)
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", unexpected)
+    output = torch.ones(1)
+    layer._forward(None, None, None, output)
+    assert output.item() == 0
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_num_heads = 1
+    layer.head_dim = layer.local_projection_size = 128
+    layer.kda_lower_bound = -4.0
+    layer.use_recoverssm = False
+    layer._conv_state_dim_first = False
+    layer.kv_cache = (torch.zeros(8, 3, 384), torch.zeros(8, 1, 128, 128))
+    layer._merged_conv_weight = torch.ones(4, 384)
+    layer.A_log = torch.zeros(1)
+    layer.dt_bias = torch.zeros(128)
+    starts = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    ids = torch.tensor([2, 4, 6], dtype=torch.int32)
+    metadata = object.__new__(model_kda.GDNAttentionMetadata)
+    for key, value in dict(
+        non_spec_query_start_loc=starts,
+        non_spec_state_indices_tensor=ids,
+        num_actual_tokens=0 if empty else 4,
+        spec_sequence_masks=None,
+        spec_query_start_loc=None,
+        spec_state_indices_tensor=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        num_accepted_tokens=None,
+        num_spec_decodes=0,
+        num_prefills=0,
+        num_decodes=0 if empty else 3,
+        num_decode_tokens=3,
+        non_spec_decode_metadata=SimpleNamespace(
+            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None], output_buffer=None)
+        ),
+    ).items():
+        setattr(metadata, key, value)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    monkeypatch.setattr(model_kda, "causal_conv1d", lambda x, *args, **kwargs: x)
+    target = torch.full((1, 8, 1, 128), float("nan"))
+    calls = []
+    events = []
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append("load"))
+    monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
+
+    def recurrent(q, k, v, gate, beta, state, ends, slots, *args, output_buffer=None):
+        assert output_buffer is target
+        # The old zero/copy chain must not overwrite the direct destination.
+        assert torch.isnan(target).all()
+        assert ends.data_ptr() == starts.data_ptr()
+        assert slots is ids and state is layer.kv_cache[1]
+        target.zero_()
+        target[:, :3].copy_(q[:, :3] * 2)
+        calls.append(True)
+        events.append("state_write")
+        return target
+
+    monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
+    qkv = torch.arange(4 * 384, dtype=torch.float32).reshape(4, 384)
+    layer._forward(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
+    assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
+    if empty:
+        assert calls == []
+        assert torch.isnan(target).all()
+        return
+    assert calls == [True]
+    torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)
+    assert torch.count_nonzero(target[:, 3:]) == 0

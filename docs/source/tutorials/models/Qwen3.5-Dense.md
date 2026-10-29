@@ -20,11 +20,16 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
-| Qwen3.5-4B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
-| Qwen3.5-9B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
+| Qwen3.5-2B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
+| Qwen3.5-4B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
+| Qwen3.5-9B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
+| Qwen3.5-2B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-2B-W8A8-310P) |
+| Qwen3.5-4B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-4B-W8A8-310P) |
+| Qwen3.5-9B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-9B-W8A8-310P) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -183,6 +188,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-2B
 
     vllm serve $MODEL_PATH \
@@ -211,6 +217,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-4B
 
     vllm serve $MODEL_PATH \
@@ -239,6 +246,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-9B
 
     vllm serve $MODEL_PATH \
@@ -268,7 +276,7 @@ Key Parameter Descriptions:
 - `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.
 - `--compilation-config` contains configurations related to the aclgraph graph mode:
     - `"cudagraph_mode"`: `"FULL_DECODE_ONLY"` is recommended.
-    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
+    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
 - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on these platforms.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
@@ -320,7 +328,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -368,7 +376,7 @@ models = [
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 

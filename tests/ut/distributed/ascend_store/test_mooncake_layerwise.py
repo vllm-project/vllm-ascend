@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+<<<<<<< HEAD
 import threading
 import unittest
 from unittest.mock import MagicMock
@@ -39,13 +40,49 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
     MooncakeSessionTracker,
 )
+=======
+import json
+import threading
+import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+# isort: off
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
+    LayerwiseSessionTracker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreLayerSendingThread,
+    LayerBatchBuilder,
+    _build_range_debug_payload,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
+    LayerRangeReqMeta,
+    LayerTransferTask,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    ChunkedTokenDatabase,
+    KeyMetadata,
+    LoadSpec,
+    ReqMeta,
+)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 # isort: on
 
 
 def make_token_database() -> ChunkedTokenDatabase:
+<<<<<<< HEAD
     database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0, 0)], [16], None)
+=======
+    database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [16], None)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     database.set_group_buffers(
         {0: [1000, 2000, 3000]},
         {0: [10, 20, 30]},
@@ -56,6 +93,35 @@ def make_token_database() -> ChunkedTokenDatabase:
     return database
 
 
+<<<<<<< HEAD
+=======
+class TestKVPoolRangeDebug(unittest.TestCase):
+    def test_audit_events_follow_ascend_config(self):
+        cases = (
+            (kv_transfer, kv_transfer._emit_range_debug_event, ("save", 3, [[10]], [[0]], [10]), "range"),
+            (kv_transfer, kv_transfer._emit_commit_debug_event, (3, 1, [0]), "commit"),
+            (mooncake_backend, mooncake_backend._emit_whole_key_debug_event, ("get", 1), "whole_key"),
+        )
+        for module, emit, args, event in cases:
+            for enabled in (False, True):
+                with (
+                    self.subTest(event=event, enabled=enabled),
+                    patch.object(
+                        module, "get_ascend_config", return_value=SimpleNamespace(kv_pool_range_debug=enabled)
+                    ),
+                    patch.object(module.logger, "info") as log,
+                ):
+                    emit(*args)
+                    if enabled:
+                        log.assert_called_once()
+                        self.assertEqual(json.loads(log.call_args.args[2])["event"], event)
+                        log.side_effect = RuntimeError("logging failed")
+                        emit(*args)  # Audit failures must not abort transfers.
+                    else:
+                        log.assert_not_called()
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 class TestMooncakeLayerBatchBuilder(unittest.TestCase):
     def test_range_debug_payload_reports_per_key_bytes_and_offsets(self):
         payload = _build_range_debug_payload(
@@ -114,7 +180,11 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
         # Range APIs may return the positive number of bytes moved on success.
         store.batch_copy_put.return_value = [30]
         store.batch_commit.return_value = [0]
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.register_put_keys("r1", [("key", 0)])
         save_finished = [threading.Event(), threading.Event()]
         builder = LayerBatchBuilder(make_token_database(), page_size_bytes=60, num_layers=2)
@@ -166,6 +236,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker = KVPoolWorker.__new__(KVPoolWorker)
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
+<<<<<<< HEAD
         worker.tp_rank = 0
         worker.put_step = 1
         worker.block_size = 16
@@ -174,6 +245,30 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.model_name = "model"
         worker.head_or_tp_rank = 0
         worker.backend_name = "mooncake"
+=======
+        worker.dcp_size = 1
+        worker.tp_rank = 0
+        worker.pp_rank = 0
+        worker.put_step = 1
+        worker.dcp_size = 1
+        worker.group_uses_align_state = [False]
+        worker.block_size = 16
+        worker.grouped_block_size = [16]
+        worker.num_layers = 1
+        worker.hash_block_size = 16
+        worker.model_name = "model"
+        worker.head_or_tp_rank = 0
+        worker.metadata = [KeyMetadata("model", 0, 0, 0)]
+        worker.backend_name = "mooncake"
+        worker.layerwise_protocol = mooncake_layerwise
+        worker.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1)),
+            kv_cache_config=None,
+            model_name=worker.model_name,
+            use_hybrid=False,
+            grouped_block_size=worker.grouped_block_size,
+        )
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         worker.use_block_key_layerwise = True
         worker.layerwise_offload = False
         worker.independent_layers = []
@@ -183,7 +278,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.use_eagle = False
         worker._put_started_keys = set()
         worker._put_started_keys_lock = threading.Lock()
+<<<<<<< HEAD
         worker._mooncake_session_tracker = MooncakeSessionTracker()
+=======
+        worker._layerwise_session_tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         worker.m_store = MagicMock()
         return worker
 
@@ -201,7 +300,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 16, can_load=True),
         )
 
+<<<<<<< HEAD
         worker._prepare_mooncake_put_session(request)
+=======
+        worker._prepare_layerwise_put_session(request)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
@@ -216,7 +319,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 63, can_load=True, kvpool_store_skip_tokens=64),
         )
 
+<<<<<<< HEAD
         slots = worker._prepare_mooncake_get_session(request)
+=======
+        slots = worker._prepare_layerwise_get_session(request)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
         self.assertEqual(len(slots), 4)
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
@@ -224,11 +331,19 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
 
     def test_next_chunk_reloads_committed_prefix_without_new_load_spec(self):
         worker = self._make_worker()
+<<<<<<< HEAD
         worker._mooncake_session_tracker.register_put_keys(
             "r1",
             [("model@6830@0", 0)],
         )
         worker._mooncake_session_tracker.commit_put_keys(["model@6830@0"])
+=======
+        worker._layerwise_session_tracker.register_put_keys(
+            "r1",
+            [("model@6830@0", 0)],
+        )
+        worker._layerwise_session_tracker.commit_put_keys(["model@6830@0"])
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         request = ReqMeta(
             "r1",
             token_len_chunk=32,
@@ -238,7 +353,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             is_last_chunk=False,
         )
 
+<<<<<<< HEAD
         slots = worker._prepare_mooncake_get_session(request)
+=======
+        slots = worker._prepare_layerwise_get_session(request)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         worker.layer_load_tasks = [[]]
         worker._process_load_for_layer_batch([request], 0)
 
@@ -258,7 +377,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 32, can_load=True),
         )
 
+<<<<<<< HEAD
         slots = worker._prepare_mooncake_get_session(request)
+=======
+        slots = worker._prepare_layerwise_get_session(request)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
         self.assertEqual(
             request.load_block_keys,
@@ -268,9 +391,15 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         self.assertEqual(slots[-1], ("model@r1_lastblock@0", 11, 1))
 
 
+<<<<<<< HEAD
 class TestMooncakeSessionTracker(unittest.TestCase):
     def test_commit_promotes_shared_put_key_to_every_request_owner(self):
         tracker = MooncakeSessionTracker()
+=======
+class TestLayerwiseSessionTracker(unittest.TestCase):
+    def test_commit_promotes_shared_put_key_to_every_request_owner(self):
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.register_put_keys("r1", [("shared", 0)])
         tracker.register_put_keys("r2", [("shared", 1)])
 
@@ -280,7 +409,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         self.assertEqual(tracker.prepare_load_entries("r2", []), [("shared", 1)])
 
     def test_complete_key_replaces_partial_key_for_the_same_block(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.register_put_keys("r1", [("partial", 1)])
         tracker.commit_put_keys(["partial"])
         tracker.register_put_keys("r1", [("complete", 1)])
@@ -289,7 +422,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         self.assertEqual(tracker.prepare_load_entries("r1", []), [("complete", 1)])
 
     def test_shared_get_ends_only_after_the_last_owner_releases_it(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.prepare_load_entries("r1", [("shared", 0)])
         tracker.prepare_load_entries("r2", [("shared", 0)])
         tracker.record_get_result("shared", {"r1", "r2"}, succeeded=True)
@@ -299,7 +436,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         self.assertEqual(tracker.release_terminal({"r2"}), [])
 
     def test_failed_renewal_retains_desired_keys_for_retry(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.prepare_load_entries("r1", [("shared", 0)])
         tracker.register_put_keys("r1", [("pending", 1)])
         tracker.record_get_result("shared", {"r1"}, succeeded=True)
@@ -314,7 +455,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         )
 
     def test_failed_get_attempt_preserves_unrelated_shared_owner(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.prepare_load_entries("old-owner", [("shared", 0)])
         tracker.prepare_load_entries(
             "new-owner",
@@ -341,7 +486,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         )
 
     def test_terminal_request_loses_pending_put_ownership(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.register_put_keys("r1", [("pending", 0)])
 
         tracker.release_terminal({"r1"})
@@ -350,7 +499,11 @@ class TestMooncakeSessionTracker(unittest.TestCase):
         self.assertEqual(tracker.prepare_load_entries("r1", []), [])
 
     def test_chunk_commit_retry_and_terminal_cleanup(self):
+<<<<<<< HEAD
         tracker = MooncakeSessionTracker()
+=======
+        tracker = LayerwiseSessionTracker()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         tracker.register_put_keys("r1", [("k0", 0)])
         tracker.commit_put_keys(["k0"])
         self.assertEqual(tracker.prepare_load_entries("r1", []), [("k0", 0)])

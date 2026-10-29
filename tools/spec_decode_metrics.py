@@ -85,6 +85,7 @@ def validate_acceptance_rate(actual: float, baseline: float, tolerance: float = 
 
 def validate_acceptance_rates(
     actual_rates: list[float],
+<<<<<<< HEAD
     baseline_rates: list[float],
     tolerance: float = 0.05,
 ) -> None:
@@ -93,6 +94,22 @@ def validate_acceptance_rates(
         f"acceptance rate position count mismatch: actual={len(actual_rates)}, baseline={len(baseline_rates)}"
     )
     for position, (actual, baseline) in enumerate(zip(actual_rates, baseline_rates)):
+=======
+    baseline_rates: float | list[float],
+    tolerance: float = 0.05,
+) -> None:
+    """Check the minimum acceptance rate for each configured position."""
+    if isinstance(baseline_rates, (int, float)):
+        expected_rates = [float(baseline_rates)]
+    else:
+        expected_rates = [float(rate) for rate in baseline_rates]
+
+    assert expected_rates, "acceptance rate baseline must contain at least one position"
+    assert len(actual_rates) >= len(expected_rates), (
+        f"acceptance rate position count is insufficient: actual={len(actual_rates)}, baseline={len(expected_rates)}"
+    )
+    for position, (actual, baseline) in enumerate(zip(actual_rates, expected_rates)):
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         lower = baseline * (1 - tolerance)
         assert actual >= lower, (
             f"acceptance rate pos{position}: {actual:.4f} is below baseline {baseline:.4f} "

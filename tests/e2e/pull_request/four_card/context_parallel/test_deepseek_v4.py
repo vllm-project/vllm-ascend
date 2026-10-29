@@ -49,11 +49,19 @@ COMMON_ENV = {
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
 
+<<<<<<< HEAD
 MTP_EXPECTED_OUTPUT_PREFIXES = {
     "The president of the United States is": ("The president of the United States is the head of the executive branch"),
 }
 DSPARK_EXPECTED_OUTPUT_PREFIXES = {
     "The president of the United States is": ("The president of the United States is the head of the executive branch"),
+=======
+EXPECTED_OUTPUT_PREFIXES = {
+    "Hello, my name is": "Hello, my name is {name} and I am {age} years old.",
+    "The president of the United States is": "The president of the United States is the head of the executive branch",
+    "The capital of France is": "The capital of France is Paris",
+    "The future of AI is": "The future of AI is not just about technology;",
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
@@ -63,7 +71,11 @@ ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 def _run_test(
     model: str,
+<<<<<<< HEAD
     minimum_rates: list[float],
+=======
+    minimum_rates: list[float] | None,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     speculative_config: dict,
     compilation_config: dict,
     expected_output_prefixes: dict[str, str],
@@ -86,9 +98,18 @@ def _run_test(
         compilation_config=compilation_config,
         disable_log_stats=False,
         speculative_config=speculative_config,
+<<<<<<< HEAD
         additional_config={
             "enable_dsa_cp": False,
             "enable_prefill_mc2": True,
+=======
+        attention_config={"indexer_kv_dtype": "int8"},
+        additional_config={
+            "enable_dsa_cp": False,
+            "enable_prefill_mc2": True,
+            # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
+            "enable_pcp_o_proj_weight_sharding": False,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         },
     ) as runner:
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
@@ -112,6 +133,13 @@ def _run_test(
         Counter,
         Vector,
     )
+<<<<<<< HEAD
+=======
+    print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
+    if minimum_rates is None:
+        return
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     assert len(acceptance_rates) == len(minimum_rates), (
         f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
     )
@@ -138,7 +166,11 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     _run_test(
         MTP_MODEL,
         minimum_rates=MTP_MIN_ACCEPTANCE_RATES,
+<<<<<<< HEAD
         expected_output_prefixes=MTP_EXPECTED_OUTPUT_PREFIXES,
+=======
+        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         speculative_config={
             "num_speculative_tokens": MTP_NUM_SPECULATIVE_TOKENS,
             "method": "mtp",
@@ -167,7 +199,11 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
     _run_test(
         DSPARK_MODEL,
         minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
+<<<<<<< HEAD
         expected_output_prefixes=DSPARK_EXPECTED_OUTPUT_PREFIXES,
+=======
+        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         speculative_config={
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
             "method": "dspark",
@@ -176,8 +212,13 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
         },
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
+<<<<<<< HEAD
             # The target verifies N+1 tokens while the replicated DSpark draft executes N
             # query tokens per request. Include the 1-, 2-, and 4-request shapes for both.
             "cudagraph_capture_sizes": [5, 6, 10, 12, 20, 24],
+=======
+            # Capture multiples of 1 + num_speculative_tokens for 1 to 4 requests.
+            "cudagraph_capture_sizes": [6, 12, 18, 24],
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         },
     )

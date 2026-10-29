@@ -6,10 +6,27 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import torch
+<<<<<<< HEAD
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+=======
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheTensor,
+    MambaSpec,
+    SlidingWindowSpec,
+)
+
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendSFAIndexerCacheSpec,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    MooncakePCPTransferMetadata,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     MooncakePPTransferMetadata,
     MooncakeTPTransferMetadata,
     MooncakeTransferMetadata,
@@ -17,6 +34,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 
 
+<<<<<<< HEAD
+=======
+def make_kv_cache_tensor(
+    *, size: int, layers: list[str], layer_stride: int, block_stride: int, offset: int = 0
+) -> KVCacheTensor:
+    return KVCacheTensor(size=size, layers=layers, layer_stride=layer_stride, block_stride=block_stride, offset=offset)
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def make_full_spec(block_size: int = 16, num_kv_heads: int = 1) -> FullAttentionSpec:
     return FullAttentionSpec(
         block_size=block_size,
@@ -45,6 +71,30 @@ def make_mamba_spec(block_size: int = 16) -> MambaSpec:
     )
 
 
+<<<<<<< HEAD
+=======
+def make_circular_spec(block_size: int = 16) -> CircularBufferSpec:
+    return CircularBufferSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=0,
+        dtype=torch.float32,
+    )
+
+
+def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
+    return AscendIndexerKPoolTailSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        sliding_window=8,
+        compress_ratio=8,
+    )
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 def make_sfa_indexer_spec(
     block_size: int = 16,
     replication_size: int = 2,
@@ -102,11 +152,21 @@ def make_pp_metadata(
     block_lens: list[list[int]] | None = None,
     block_size_scales: list[list[int]] | None = None,
     tp_base_addrs: dict[int, list[list[int]]] | None = None,
+<<<<<<< HEAD
     tp_layer_indices: dict[int, list[int]] | None = None,
+=======
+    pcp_tp_base_addrs: dict[int, dict[int, list[list[int]]]] | None = None,
+    tp_layer_indices: dict[int, list[int]] | None = None,
+    pcp_tp_layer_indices: dict[int, dict[int, list[int]]] | None = None,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 ) -> MooncakePPTransferMetadata:
     layer_names = layer_names or ["model.layers.0.self_attn"]
     num_layers = len(layer_names)
     tp_base_addrs = tp_base_addrs or {0: [[5000 + index * 1000] for index in range(num_layers)]}
+<<<<<<< HEAD
+=======
+    pcp_tp_base_addrs = pcp_tp_base_addrs or {0: tp_base_addrs}
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     tp_layer_indices = tp_layer_indices or {}
     return MooncakePPTransferMetadata(
         block_size=16,
@@ -118,6 +178,7 @@ def make_pp_metadata(
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
+<<<<<<< HEAD
         metadata_by_tp_rank={
             tp_rank: MooncakeTPTransferMetadata(
                 te_rpc_port=9000 + tp_rank,
@@ -127,6 +188,26 @@ def make_pp_metadata(
                 handshake_port=5000 + tp_rank,
             )
             for tp_rank, base_addrs in tp_base_addrs.items()
+=======
+        metadata_by_pcp_rank={
+            pcp_rank: MooncakePCPTransferMetadata(
+                metadata_by_tp_rank={
+                    tp_rank: MooncakeTPTransferMetadata(
+                        te_rpc_port=9000 + pcp_rank * 100 + tp_rank,
+                        layer_indices=(
+                            pcp_tp_layer_indices.get(pcp_rank, {}).get(tp_rank, list(range(num_layers)))
+                            if pcp_tp_layer_indices is not None
+                            else tp_layer_indices.get(tp_rank, list(range(num_layers)))
+                        ),
+                        kv_caches_base_addr=base_addrs,
+                        local_ip=f"10.{pcp_rank}.0.{tp_rank + 1}",
+                        handshake_port=5000 + pcp_rank * 100 + tp_rank,
+                    )
+                    for tp_rank, base_addrs in per_tp_base_addrs.items()
+                }
+            )
+            for pcp_rank, per_tp_base_addrs in pcp_tp_base_addrs.items()
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         },
     )
 
@@ -135,6 +216,10 @@ def make_metadata_groups(
     *,
     engine_id: str = "engine-p",
     tp_size: int = 1,
+<<<<<<< HEAD
+=======
+    pcp_size: int = 1,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     use_kv_pp: bool = False,
     pp_metadata: MooncakePPTransferMetadata | None = None,
 ) -> MooncakeTransferMetadataGroups:
@@ -143,7 +228,11 @@ def make_metadata_groups(
         scheduler_host="10.0.0.10",
         scheduler_port=6000,
         pp_size=1,
+<<<<<<< HEAD
         pcp_size=1,
+=======
+        pcp_size=pcp_size,
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         dcp_size=1,
         tp_size=tp_size,
         use_kv_pp=use_kv_pp,

@@ -17,6 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from collections.abc import Callable
+
 import torch
 from vllm.triton_utils import tl, triton
 
@@ -105,6 +107,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
@@ -172,17 +175,22 @@ def _gumbel_sample_kernel(
         tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
-def gumbel_sample(
+def _gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
+<<<<<<< HEAD
     is_drafting: bool = False,  # The verified vLLM revision does not pass this yet.
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    *,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
@@ -229,6 +237,7 @@ def gumbel_sample(
         vocab_size,
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         IS_DRAFTING=is_drafting,
         PER_TOKEN_COL=per_token_col,
@@ -237,3 +246,35 @@ def gumbel_sample(
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
+
+
+gumbel_sample: Callable[..., torch.Tensor]
+
+
+def _gumbel_sample_main(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    return _gumbel_sample(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
+        apply_temperature,
+        logits_cache,
+        logits_cache_col,
+        use_fp64,
+        is_drafting=is_drafting,
+    )
+
+
+gumbel_sample = _gumbel_sample_main

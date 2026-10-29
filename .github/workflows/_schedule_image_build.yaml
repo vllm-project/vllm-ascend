@@ -30,12 +30,15 @@ on:
         description: 'The Dockerfile to use'
         required: false
         type: string
+<<<<<<< HEAD
       workflow_dispatch_tag:
         description: 'The tag to use for workflow dispatch'
         required: false
         type: string
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
       branch_ref:
-        description: 'Branch/ref to check out for non-workflow_dispatch events'
+        description: 'Branch/ref to check out. Leave empty to use the event ref (e.g. a pushed tag or a PR merge ref).'
         required: false
         type: string
         default: 'main'
@@ -49,6 +52,7 @@ on:
         required: false
         type: string
         default: 'digests'
+<<<<<<< HEAD
       vllm_commit:
         description: 'vLLM commit hash to checkout (used when set; mutually exclusive with tag/branch).'
         required: false
@@ -126,17 +130,34 @@ on:
         default: 'ubuntu22.04'
       triton_ascend_version:
         description: 'Triton Ascend version'
+=======
+      cann_swr_url:
+        description: 'SWR registry/repository for the CANN CI job container image'
         required: false
         type: string
-        default: ''
-      triton_ascend_package_version:
-        description: 'Triton Ascend package version'
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
+      cann_image_version:
+        description: 'CANN image version for the CI job container only. It is independent of the CANN version baked into the built image, which comes from the FROM line in the Dockerfile.'
         required: false
         type: string
-        default: '3.2.2'
-      build_args:
-        description: 'Additional build arguments for Docker build'
+        default: '9.1.0'
+      soc:
+        description: 'Ascend SoC type for the CANN base image (e.g. 910b, a3, 310p, 950)'
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         required: false
+        type: string
+        default: '910b'
+    secrets:
+      SWR_USERNAME:
+        description: 'SWR username for pushing images'
+        required: false
+      SWR_PASSWORD:
+        description: 'SWR password for pushing images'
+        required: false
+      SYNC_TOOLS_TOKEN:
+        description: 'GitHub token for dispatching quay.io sync workflow'
+        required: false
+<<<<<<< HEAD
         type: string
         default: ''
       aptmirror:
@@ -151,6 +172,8 @@ on:
       SWR_PASSWORD:
         description: 'SWR password for pushing images'
         required: false
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 defaults:
   run:
@@ -158,7 +181,10 @@ defaults:
 
 env:
   SWR_REPO: ${{ inputs.swr_repo }}
+<<<<<<< HEAD
   APTMIRROR: ${{ inputs.aptmirror }}
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 jobs:
   build-push-digest:
@@ -173,6 +199,7 @@ jobs:
       contents: read
 
     strategy:
+      fail-fast: false
       max-parallel: 2
       matrix:
         runner_info:
@@ -182,6 +209,7 @@ jobs:
     steps:
 
     - name: Install zstd
+<<<<<<< HEAD
       run: |
         if [ -n "$APTMIRROR" ]; then
           sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
@@ -191,92 +219,42 @@ jobs:
 
     - name: Validate inputs (workflow_dispatch only)
       if: ${{ github.event_name == 'workflow_dispatch' }}
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
       run: |
-        tag="${{ inputs.workflow_dispatch_tag }}"
-        branch="${{ inputs.branch_ref }}"
-        vllm_commit="${{ inputs.vllm_commit }}"
-        vllm_ascend_commit="${{ inputs.vllm_ascend_commit }}"
-
-        commit_mode="false"
-        if [[ -n "$vllm_commit" || -n "$vllm_ascend_commit" ]]; then
-          if [[ -z "$vllm_commit" || -z "$vllm_ascend_commit" ]]; then
-            echo "Error: 'vllm_commit' and 'vllm_ascend_commit' must be specified together."
-            exit 1
-          fi
-          for c in "$vllm_commit" "$vllm_ascend_commit"; do
-            if ! echo "$c" | grep -Eq '^[0-9a-f]{7,40}$'; then
-              echo "Error: invalid commit format: $c (expected 7-40 hex chars)."
-              exit 1
-            fi
-          done
-          commit_mode="true"
-        fi
-
-        if [[ "$commit_mode" == "true" ]]; then
-          if [[ -n "$tag" || -n "$branch" ]]; then
-            echo "Error: commit mode is mutually exclusive with 'tag'/'branch'."
-            exit 1
-          fi
-        else
-          if [[ -n "$tag" && -n "$branch" ]]; then
-            echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
-            exit 1
-          fi
-          if [[ -z "$tag" && -z "$branch" ]]; then
-            echo "Error: Either 'tag', 'branch', or (vllm_commit + vllm_ascend_commit) must be specified."
-            exit 1
-          fi
-        fi
+        apt-get update -y
+        apt-get install -y zstd
 
     - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
       with:
         submodules: recursive
         fetch-depth: 0
         persist-credentials: false
-        ref: ${{ inputs.vllm_ascend_commit }}
-
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name != 'workflow_dispatch' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.branch_ref }}
-
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.workflow_dispatch_tag }}
-
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
+        # Empty on tag pushes and PR events, so the default event ref is used.
         ref: ${{ inputs.branch_ref }}
 
     - name: Compute cache tag
       id: cache-tag
       run: |
         if [ -n "${{ inputs.suffix }}" ]; then
-          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}" >> "$GITHUB_OUTPUT"
         else
-          echo "value=buildcache-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ matrix.runner_info.tag }}" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Get Dockerfile base image tag
       id: get_base_image_tag
       run: |
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+<<<<<<< HEAD
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}' \
           | sed -e "s|\${CANN_VERSION}|${{ inputs.cann_image_version }}|g" \
                 -e "s|\${BASE_OS}|${{ inputs.base_os }}|g")
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
+=======
+        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+        echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     - name: Get csrc hash
       id: get_csrc_hash
@@ -329,6 +307,7 @@ jobs:
       id: tag_pattern
       run: |
         PATTERN="${{ inputs.schedule_tag_pattern }}"
+<<<<<<< HEAD
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
             PATTERN="${{ inputs.workflow_dispatch_tag }}"
@@ -338,6 +317,13 @@ jobs:
           fi
         fi
         echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
+=======
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.branch_ref }}" ]; then
+          PATTERN="${{ inputs.branch_ref }}"
+          PATTERN="${PATTERN//\//-}"
+        fi
+        echo "pattern=${PATTERN}" >> "$GITHUB_OUTPUT"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     - name: Build and push
       uses: docker/build-push-action@v7
@@ -352,6 +338,7 @@ jobs:
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
+<<<<<<< HEAD
           CANN_QUAY_URL=${{ inputs.cann_swr_url }}
           CANN_VERSION=${{ inputs.cann_image_version }}
           APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
@@ -363,18 +350,9 @@ jobs:
           PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
           ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
           GIT_PROXY=https://gh-proxy.test.osinfra.cn/
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
-          VLLM_COMMIT=${{ inputs.vllm_commit }}
-          BUILD_TYPE=${{ inputs.build_type || 'release' }}
-          MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-          MEMCACHE_DATE=${{ inputs.memcache_date || '20260811.14' }}
-          MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260811.7' }}
-          TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
-          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
-          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
-          ${{ inputs.build_args }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
@@ -391,6 +369,7 @@ jobs:
         if [ -n "${{ inputs.suffix }}" ]; then
           SUFFIX="-${{ inputs.suffix }}"
         fi
+<<<<<<< HEAD
         if [ "${{ inputs.temp_only }}" = "true" ]; then
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
@@ -402,6 +381,9 @@ jobs:
             TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
           fi
         fi
+=======
+        TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         echo "Creating temp tag: ${{ inputs.swr_temp_repo }}:$TAG"
 
         # Copy the digest to a temp tag to prevent GC. The build uses
@@ -429,7 +411,7 @@ jobs:
   merge-image:
     runs-on: linux-amd64-cpu-4
     needs: build-push-digest
-    if: ${{ inputs.should_push && !inputs.temp_only }}
+    if: ${{ inputs.should_push }}
     steps:
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
@@ -453,13 +435,14 @@ jobs:
           # resulting in tags like main-310p-openeuler).
           # Leave SUFFIX empty when no suffix is provided (plain tags like main).
           if [ -n "${{ inputs.suffix }}" ]; then
-            echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
+            echo "SUFFIX=-${{ inputs.suffix }}" >> "$GITHUB_ENV"
           else
-            echo "SUFFIX=" >> $GITHUB_ENV
+            echo "SUFFIX=" >> "$GITHUB_ENV"
           fi
 
       - name: Prepare tag pattern
         id: tag_pattern
+<<<<<<< HEAD
         run: |
           PATTERN="${{ inputs.schedule_tag_pattern }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -492,11 +475,15 @@ jobs:
             DAILY_TAG="nightly-${PATTERN}-${SUFFIX}-cann${CANN_VERSION}-${DATE}"
           else
             DAILY_TAG="nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
+=======
+        run: |
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.branch_ref }}" ]; then
+            PATTERN="${{ inputs.branch_ref }}"
+            PATTERN="${PATTERN//\//-}"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
           fi
-          
-          echo "Generated daily tag: $DAILY_TAG"
-          echo "daily_tag=$DAILY_TAG" >> $GITHUB_OUTPUT
-      # =========================================================
+          echo "pattern=${PATTERN}" >> "$GITHUB_OUTPUT"
 
       - name: Docker meta
         id: meta
@@ -515,13 +502,14 @@ jobs:
           #
           # 2. Schedule (on: schedule) → type=schedule,pattern=main
           #    Triggered by cron, always produces a fixed tag:
-          #    - (any schedule run) --> vllm-ascend:main[-suffix]
+          #    - (any schedule run) --> vllm-ascend:nightly-main[-suffix]
           #
-          # 3. Manual (on: workflow_dispatch) → type=raw,value=inputs.workflow_dispatch_tag
-          #    Tag is determined by the user-selected input at dispatch time:
-          #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
-          #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
+          # 3. Manual (on: workflow_dispatch) → type=raw,value=<branch>
+          #    Tag is determined by the selected branch:
+          #    - inputs.docker_ref=main              --> vllm-ascend:nightly-main[-suffix]
+          #    - inputs.docker_ref=releases/v0.30.0  --> vllm-ascend:nightly-releases-v0.30.0[-suffix]
           tags: |
+<<<<<<< HEAD
             # In daily mode, only the CANN-versioned daily tag is published; the pep440,
             # schedule and workflow_dispatch_tag rules would emit bare/plain tags
             # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
@@ -534,6 +522,11 @@ jobs:
             # ===== New: Daily scenario specific tags =====
             type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
             # =============================================
+=======
+            type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
+            type=schedule,pattern=${{ steps.tag_pattern.outputs.pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ steps.tag_pattern.outputs.pattern }},enable=${{ github.event_name == 'workflow_dispatch' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
           flavor:
             latest=false
 
@@ -552,6 +545,7 @@ jobs:
           # the quay.io repo; the sync tool then mirrors swr.cn-north-12 → quay.io).
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
           TAGS: ${{ steps.meta.outputs.tags }}
+<<<<<<< HEAD
           BUILD_TYPE: ${{ inputs.build_type }}
           SCHEDULE_TAG_PATTERN: ${{ steps.tag_pattern.outputs.pattern }}
           SUFFIX: ${{ env.SUFFIX }}
@@ -560,20 +554,26 @@ jobs:
 
           DIGEST_DIR="${{ runner.temp }}/digests"
 
+=======
+        run: |
+          set -euo pipefail
+
+          DIGEST_DIR="${{ runner.temp }}/digests"
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
           echo "Digests:"
           ls -la "$DIGEST_DIR"
           echo "Current tags:"
           echo "$TAGS"
 
-          # For daily builds, skip the plain schedule tag (e.g. nightly-main-310p-openeuler)
-          # because it's redundant with the daily tag that includes CANN version + date
-          UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
-
           for tag in $TAGS; do
+<<<<<<< HEAD
             if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
               echo "Skipping unwanted schedule tag: $tag"
               continue
             fi
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             echo "Creating tag $tag"
 
             # The build step outputs Docker v2 schema2 images (oci-mediatypes=false),
@@ -592,6 +592,7 @@ jobs:
               $DIGESTS
           done
 
+<<<<<<< HEAD
       - name: Clean up temp tags
         if: ${{ inputs.build_type == 'daily' }}
         run: |
@@ -733,3 +734,17 @@ jobs:
           else
             echo "skopeo not available, skip temp tag cleanup"
           fi
+=======
+      - name: Dispatch quay.io sync
+        if: ${{ inputs.should_push }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

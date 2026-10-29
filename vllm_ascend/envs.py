@@ -28,6 +28,7 @@ from typing import Any
 # begin-env-vars-definition
 
 
+<<<<<<< HEAD
 def _strict_binary_env(name: str, default: str = "0") -> bool:
     value = os.getenv(name, default)
     if value not in {"0", "1"}:
@@ -35,6 +36,8 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
     return value == "1"
 
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which

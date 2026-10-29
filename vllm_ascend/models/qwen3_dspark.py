@@ -1,8 +1,10 @@
-from collections.abc import Iterable
-from pathlib import Path
-
 import torch
 from vllm.config import VllmConfig
+<<<<<<< HEAD
+=======
+from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
@@ -27,11 +29,10 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
         f"Linear weight shape[1] must be a multiple of rotation weight shape[0],"
         f" but get {linear_weight.shape[1]=} and {rotation_weight.shape[0]=}"
     )
-    if rotation_weight.dtype != torch.float32:
-        rotation_weight = rotation_weight.to(torch.float32)
+    rotation_weight = rotation_weight.to(device=linear_weight.device, dtype=torch.float32)
     hidden_size = rotation_weight.shape[0]
     ori_dtype = linear_weight.dtype
-    processed_weight = torch.empty(linear_weight.shape, dtype=torch.float32)
+    processed_weight = torch.empty(linear_weight.shape, dtype=torch.float32, device=linear_weight.device)
     for start_pos in range(0, linear_weight.shape[1], hidden_size):
         linear_weight_chunked = linear_weight[:, start_pos : start_pos + hidden_size].to(torch.float32)
         processed_weight[:, start_pos : start_pos + hidden_size].copy_(
@@ -40,14 +41,55 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
+<<<<<<< HEAD
+=======
+@torch.no_grad()
+def align_draft_weights(model, projection, vllm_config):
+    """Align draft inputs with the rotated target without modifying shared weights."""
+    rotation_path = get_rotation_path(vllm_config)
+    if rotation_path is not None:
+        rotation = get_rotation_matrix(rotation_path).cpu()
+        weight = projection.weight
+        weight.copy_(process_weight(weight.cpu(), rotation).to(weight.device))
+    else:
+        if get_pp_group().world_size == 1:
+            return
+        # PP stages past the first cannot alias the target's stage-0
+        # embedding; load this rank's vocab shard from the target
+        # checkpoint unrotated so the draft owns its copy.
+        rotation = None
+        weight = projection.weight
+    target_config = vllm_config.model_config.hf_text_config
+    for owner, name, layer_cls, weight_names, own_flag in (
+        (model.model, "embed_tokens", VocabParallelEmbedding, TARGET_EMBED_WEIGHT_NAMES, "has_own_embed_tokens"),
+        (model, "lm_head", ParallelLMHead, TARGET_LM_HEAD_WEIGHT_NAMES, "has_own_lm_head"),
+    ):
+        if getattr(model, own_flag, False):
+            continue
+        if rotation is None and name != "embed_tokens":
+            # The target lm_head lives on the last PP stage and can still
+            # be aliased; only the embedding needs its own copy.
+            continue
+        with torch.device(weight.device):
+            layer = layer_cls(target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype)
+        load_quarot_target_layer(layer, vllm_config.model_config.model, weight_names, rotation, f"draft {name}.weight")
+        layer.quant_method.process_weights_after_loading(layer)
+        setattr(owner, name, layer)
+        setattr(model, own_flag, True)
+
+
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
+<<<<<<< HEAD
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
         self.target_model_path = Path(vllm_config.model_config.model)
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
@@ -56,6 +98,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
+<<<<<<< HEAD
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         all_weights = list(weights)
         includes_embed_tokens = any("embed_tokens" in name for name, _ in all_weights)
@@ -94,3 +137,17 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 self.has_own_lm_head = True
 
         return result
+=======
+    def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
+        """Select draft auxiliary inputs, without changing target Eager/Graph mode."""
+        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is not None:
+            set_capture_mode(True)
+
+    def post_process(self, vllm_config: VllmConfig) -> None:
+        align_draft_weights(self, self.model.fc, vllm_config)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

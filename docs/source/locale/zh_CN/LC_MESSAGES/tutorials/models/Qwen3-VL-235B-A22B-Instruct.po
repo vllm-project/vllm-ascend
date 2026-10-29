@@ -22,6 +22,7 @@ msgid "# Qwen3-VL-235B-A22B-Instruct"
 msgstr "# Qwen3-VL-235B-A22B-Instruct"
 
 msgid ""
+<<<<<<< HEAD
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
@@ -763,3 +764,12 @@ msgstr ""
 "**解决方案：** 首先验证多节点通信。确保 `HCCL_IF_IP`、`GLOO_SOCKET_IFNAME` 和 "
 "`HCCL_SOCKET_IFNAME` 与选定的网卡匹配。确保所有节点使用相同的 `--data-parallel-rpc-port`，非主节点使用 "
 "`--headless`，并且 `--data-parallel-start-rank` 不重叠。"
+=======
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-VL-235B-A22B-Instruct.html)."
+msgstr ""
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-VL-235B-A22B-Instruct.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

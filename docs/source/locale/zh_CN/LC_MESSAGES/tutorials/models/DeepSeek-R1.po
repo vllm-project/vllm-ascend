@@ -21,6 +21,7 @@ msgstr ""
 msgid "# DeepSeek-R1"
 msgstr "# DeepSeek-R1"
 
+<<<<<<< HEAD
 msgid "## 1 Introduction"
 msgstr "## 1 引言"
 
@@ -158,10 +159,15 @@ msgstr ""
 "1. 有关详细信息，请参阅[使用 "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid ""
-"2. After execution, you can get the result, here is the result of "
-"`DeepSeek-R1-W8A8` in `vllm-ascend:0.13.0` for reference only."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/DeepSeek-R1.html)."
 msgstr ""
+<<<<<<< HEAD
 "2. 执行后，您可以获得结果，以下是 `vllm-ascend:0.13.0` 中 `DeepSeek-R1-W8A8` 的结果，仅供参考。"
 
 msgid "### Using Language Model Evaluation Harness"
@@ -340,3 +346,7 @@ msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../getting_started/installation.md)."
 msgstr "- 从源码安装`vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/DeepSeek-R1.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

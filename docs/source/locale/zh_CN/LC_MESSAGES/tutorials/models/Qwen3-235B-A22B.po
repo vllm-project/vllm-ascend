@@ -21,6 +21,7 @@ msgstr ""
 msgid "# Qwen3-235B-A22B"
 msgstr "# Qwen3-235B-A22B"
 
+<<<<<<< HEAD
 msgid "## 1 Introduction"
 msgstr "## 1 引言"
 
@@ -576,11 +577,15 @@ msgid ""
 "in [Section 5.1](#51-single-node-online-deployment)."
 msgstr "> 有关其他参数的详细信息，请参阅 [第5.1节](#51-single-node-online-deployment) 中的部署示例。"
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid ""
-"For common environment, installation, and general parameter issues, please "
-"refer to the [Public FAQs](../../faqs.md). This section only covers issues "
-"specific to Qwen3-235B-A22B."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-235B-A22B.html)."
 msgstr ""
+<<<<<<< HEAD
 "对于常见的环境、安装和一般参数问题，请参阅 [公共常见问题解答](../../faqs.md)。本节仅涵盖 Qwen3-235B-A22B 特有的问题。"
 
 msgid ""
@@ -599,3 +604,7 @@ msgid ""
 msgstr ""
 "如果您希望从源码构建而不是使用Docker镜像，请按照[安装指南](../../getting_started/installation.md)安装vLLM-"
 "Ascend。"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-235B-A22B.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

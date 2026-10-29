@@ -25,16 +25,17 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, dispose_tensor
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -105,13 +106,30 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
-    def apply(
+    def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = vars(layer).get("mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round")
+
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, dynamic_scale = self._quantize_input(layer, x)
+        return PreparedLinearInput(quantized_x, dynamic_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+<<<<<<< HEAD
         # reshape x for Qwen VL models
         original_shape = x.shape
         if x.dim() > 2:
@@ -127,8 +145,22 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
             x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round"
         )
+=======
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            dynamic_scale = x.scale
+            original_shape = quantized_x.shape
+            output_dtype = x.output_dtype
+        else:
+            # reshape x for Qwen VL models
+            original_shape = x.shape
+            if x.dim() > 2:
+                x = x.view(-1, x.shape[-1])
+            quantized_x, dynamic_scale = self._quantize_input(layer, x)
+            output_dtype = x.dtype
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
         pertoken_scale = dynamic_scale
-        output_dtype = x.dtype
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
 
@@ -190,6 +222,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        # Keep packed MXFP4 weights in ND, even when weight_nz_mode is enabled.
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
@@ -270,6 +303,29 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             quant_method=self,
         )
 
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if _EXTRA_CTX.use_mega_moe:
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
+            return MoEWeights(
+                w1=layer.cann_mega_moe_w13_weight_list,
+                w2=layer.cann_mega_moe_w2_weight_list,
+                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        else:
+            return MoEWeights(
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
         return [
@@ -296,16 +352,61 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
             k_size += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
-        # transpose stride to interpret packed FP4 weights as logical K.
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
+        # (out, in) layout — weight1=(E, 2*inter, hidden//2), weight2=(E,
+        # hidden, inter//2) for packed FP4 — and the reshaped (not transposed)
+        # E8M0 scales. Capture per-expert lists before the non-mega path
+        # transposes everything below.
+        if use_cann_megamoe(get_current_vllm_config()):
+            # MegaMoe (FUSED_MC2) on A5 uses the packed FP4 weight format directly
+            layer.cann_mega_moe_w13_weight_list = [
+                torch_npu.npu_format_cast(weight.clone(), ACL_FORMAT_FRACTAL_NZ) for weight in layer.w13_weight.data
+            ]
+
+            layer.cann_mega_moe_w2_weight_list = [
+                torch_npu.npu_format_cast(
+                    weight.clone(),
+                    ACL_FORMAT_FRACTAL_NZ,
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                )
+                for weight in layer.w2_weight.data
+            ]
+            # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
+            layer.cann_mega_moe_w13_weight_scale_list = [
+                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_weight_scale_list = [
+                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            tensor_names = (
+                "w13_weight",
+                "w2_weight",
+                "w13_weight_scale",
+                "w2_weight_scale",
+            )
+            for tensor_name in tensor_names:
+                dispose_tensor(getattr(layer, tensor_name))
+
+        else:
+            # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
+            # transpose stride to interpret packed FP4 weights as logical K.
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        input_hidden_states = mlp_compute_input.hidden_states
+        requantized_input = mlp_compute_input.dynamic_scale is None
+        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
+        # Dynamic MXFP quantization produces a new FP4 activation tensor. The
+        # original BF16 input is no longer consumed by GMM1, so release it
+        # before launching GMM1 to avoid inflating the profile-run peak.
+        if requantized_input:
+            dispose_tensor(input_hidden_states)
         layer = mlp_compute_input.layer
         assert layer is not None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
@@ -323,12 +424,20 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             weight_scale_dtype=torch_npu.float8_e8m0fnu,
             x_scale_dtype=torch_npu.float8_e8m0fnu,
         )
-        dispose_tensor(mlp_compute_input.hidden_states)
+        # With a dispatcher-provided scale, GMM1 consumes the input directly.
+        if not requantized_input:
+            dispose_tensor(input_hidden_states)
         return out, maybe_normalize_mxfp_scale_layout(out_scale)
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        input_hidden_states = mlp_compute_input.hidden_states
+        requantized_input = mlp_compute_input.dynamic_scale is None
+        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
+        # Keep the same input lifetime as the pre-refactor quant_apply_mlp:
+        # once local dynamic quantization has produced a separate FP4 tensor,
+        # the BF16 source must not overlap with the GMM1 allocation.
+        if requantized_input:
+            dispose_tensor(input_hidden_states)
         layer = mlp_compute_input.layer
         assert layer is not None
         # Packed FP4 tensors use uint8 storage. Pass their logical dtype so the
@@ -348,7 +457,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             x_dtype=torch_npu.float4_e2m1fn_x2,
             weight_dtype=torch_npu.float4_e2m1fn_x2,
         )[0]
-        dispose_tensor(mlp_compute_input.hidden_states)
+        if not requantized_input:
+            dispose_tensor(input_hidden_states)
         return hidden_states
 
     def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):

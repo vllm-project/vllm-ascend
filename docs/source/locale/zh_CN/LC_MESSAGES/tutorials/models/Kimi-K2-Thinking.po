@@ -19,6 +19,7 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
+<<<<<<< HEAD
 msgid ""
 "Kimi-K2-Thinking is a large-scale Mixture-of-Experts (MoE) model developed "
 "by Moonshot AI. It features a hybrid thinking architecture that excels in "
@@ -154,99 +155,18 @@ msgstr ""
 "\"moonshotai/Kimi-K2-Thinking\"`，或使用`--served-model-name "
 "Kimi-K2-Thinking`启动服务器以启用短名称。"
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 msgid "# Kimi-K2-Thinking"
 msgstr "# Kimi-K2-Thinking"
 
-msgid "## 1 Introduction"
-msgstr "## 1 简介"
-
-msgid "## 2 Supported Features"
-msgstr "## 2 支持的特性"
-
-msgid "## 3 Prerequisites"
-msgstr "## 3 前提条件"
-
-msgid "### 3.1 Model Weight"
-msgstr "### 3.1 模型权重"
-
-msgid "## 4 Installation"
-msgstr "## 4 安装"
-
-msgid "### 4.1 Docker Image Installation"
-msgstr "### 4.1 Docker 镜像安装"
-
 msgid ""
-"- `IMAGE`: specifies the `vllm-ascend` image. The `-a3` suffix selects the Atlas A3 image.\n"
-"- `NAME`: specifies the container name.\n"
-"- `--net=host`: uses host networking, so the vLLM service port is exposed on the host directly.\n"
-"- `--shm-size=1g`: configures container shared memory.\n"
-"- `--device /dev/davinci[0-15]`: exposes 16 Ascend NPU devices to the container.\n"
-"- `--device /dev/davinci_manager`, `--device /dev/devmm_svm`, and `--device /dev/hisi_hdc`: expose required Ascend runtime device files.\n"
-"- `-v /usr/local/dcmi:/usr/local/dcmi`: mounts DCMI tools for device management.\n"
-"- `-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi`: mounts the NPU monitoring command.\n"
-"- `-v /usr/local/Ascend/driver/*`: mounts Ascend driver libraries and version files.\n"
-"- `-v /etc/ascend_install.info:/etc/ascend_install.info`: mounts Ascend installation metadata.\n"
-"- `-v /mnt/sfs_turbo/.cache:/home/cache`: mounts the shared model cache directory. Update it if you store model weights elsewhere."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2-Thinking.html)."
 msgstr ""
-"- `IMAGE`：指定 `vllm-ascend` 镜像。`-a3` 后缀选择 Atlas A3 镜像。\n"
-"- `NAME`：指定容器名称。\n"
-"- `--net=host`：使用主机网络，因此 vLLM 服务端口直接暴露在主机上。\n"
-"- `--shm-size=1g`：配置容器共享内存。\n"
-"- `--device /dev/davinci[0-15]`：向容器暴露 16 个 Ascend NPU 设备。\n"
-"- `--device /dev/davinci_manager`、`--device /dev/devmm_svm` 和 `--device /dev/hisi_hdc`：暴露所需的 Ascend 运行时设备文件。\n"
-"- `-v /usr/local/dcmi:/usr/local/dcmi`：挂载 DCMI 工具以进行设备管理。\n"
-"- `-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi`：挂载 NPU 监控命令。\n"
-"- `-v /usr/local/Ascend/driver/*`：挂载 Ascend 驱动库和版本文件。\n"
-"- `-v /etc/ascend_install.info:/etc/ascend_install.info`：挂载 Ascend 安装元数据。\n"
-"- `-v /mnt/sfs_turbo/.cache:/home/cache`：挂载共享模型缓存目录。如果模型权重存储在其他位置，请更新此路径。"
-
-msgid ""
-"- The container name is `vllm-ascend`.\n"
-"- The status is `Up ...`.\n"
-"- The container does not exit immediately."
-msgstr ""
-"- 容器名称为 `vllm-ascend`。\n"
-"- 状态为 `Up ...`。\n"
-"- 容器不会立即退出。"
-
-msgid ""
-"- The command exits successfully.\n"
-"- The output lists the expected NPU devices.\n"
-"- Device health status is normal."
-msgstr ""
-"- 命令成功退出。\n"
-"- 输出列出了预期的 NPU 设备。\n"
-"- 设备健康状态正常。"
-
-msgid "### 4.2 Source Code Installation"
-msgstr "### 4.2 源码安装"
-
-msgid ""
-"- The command exits successfully.\n"
-"- `vllm and vllm_ascend import ok` is printed."
-msgstr ""
-"- 命令成功退出。\n"
-"- 打印 `vllm and vllm_ascend import ok`。"
-
-msgid "### 5.1 Single-Node Online Deployment"
-msgstr "### 5.1 单节点在线部署"
-
-msgid ""
-"- The server process starts successfully.\n"
-"- No error logs related to HCCL or NPU initialization.\n"
-"- The container does not exit immediately."
-msgstr ""
-"- 服务器进程成功启动。\n"
-"- 没有与 HCCL 或 NPU 初始化相关的错误日志。\n"
-"- 容器不会立即退出。"
-
-msgid "## 6 Functional Verification"
-msgstr "## 6 功能验证"
-
-msgid ""
-"- The HTTP status code is `200`.\n"
-"- `choices[0].message.content` contains the generated assistant response."
-msgstr ""
+<<<<<<< HEAD
 "- HTTP 状态码为 `200`。\n"
 "- `choices[0].message.content` 包含生成的助手回复。"
 
@@ -613,3 +533,7 @@ msgstr ""
 "| 高吞吐量 | 单节点 | 16 (A3) | bfloat16 | 逐步增加`--max-num-"
 "seqs`，并以接近实际工作负载的请求速率进行基准测试。在第8章的1k/1k并发扫描中，并发数为8时输出吞吐量最佳；在生产环境中使用更高并发前，请验证尾部延迟。"
 " |"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止支持，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2-Thinking.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

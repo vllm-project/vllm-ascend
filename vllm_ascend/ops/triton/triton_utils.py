@@ -91,11 +91,14 @@ def init_device_properties_triton():
         if _UB_SIZE_BYTES <= 0:
             _UB_SIZE_BYTES = DEFAULT_UB_SIZE_BYTES
 
+<<<<<<< HEAD
         # Allow env var override for debugging or unsupported hardware.
         env_override = envs.VLLM_ASCEND_ROPE_UB_SIZE_KB
         if env_override > 0:
             _UB_SIZE_BYTES = env_override * 1024
 
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 def get_aicore_num():
     global _NUM_AICORE
@@ -115,7 +118,11 @@ def get_ub_size_bytes():
     Used by Triton kernels to dynamically size tiles so they fit within UB.
     The value is auto-detected from device properties during
     ``init_device_properties_triton()``, with a safe fallback of 192 KB
+<<<<<<< HEAD
     (covering Ascend 910B/A3). Override via ``VLLM_ASCEND_ROPE_UB_SIZE_KB``.
+=======
+    (covering Ascend 910B/A3).
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     """
     global _UB_SIZE_BYTES
     assert _UB_SIZE_BYTES > 0, "Device properties not initialized. Please call init_device_properties_triton() first."

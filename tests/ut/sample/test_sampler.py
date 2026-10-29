@@ -11,7 +11,10 @@ from vllm_ascend.sample.sampler import (
     AscendSampler,
     AscendTopKTopPSampler,
     _apply_top_k_top_p_pytorch,
+<<<<<<< HEAD
     _apply_top_k_top_p_torch_npu,
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
     random_sample,
 )
 
@@ -25,6 +28,7 @@ def _cpu_safe_npu_sample():
         patch.object(torch.Tensor, "record_stream", lambda self, _stream: None),
     ):
         yield
+<<<<<<< HEAD
 
 
 def _tp_group():
@@ -32,6 +36,8 @@ def _tp_group():
     group.rank_in_group = 0
     group.all_gather.side_effect = lambda tensor, dim=-1: tensor
     return group
+=======
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
 
 class TestAscendSampler(TestBase):
@@ -71,6 +77,7 @@ def test_penalties_greedy_prepare_and_random_sample():
         assert AscendSampler.apply_penalties(logits, penalty_meta, [[3], [4]]) is fallback_logits
         apply_penalties.assert_called_once()
 
+<<<<<<< HEAD
     cfg = MagicMock()
     cfg.enable_reduce_sample = False
     with patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg):
@@ -87,6 +94,10 @@ def test_penalties_greedy_prepare_and_random_sample():
     assert sampler.topk_topp_sampler.top_k == 3
     sampler.prepare_sampling(None)
     assert sampler.topk_topp_sampler.top_k is None
+=======
+    greedy = AscendSampler.greedy_sample(logits)
+    assert greedy.tolist() == [1, 2]
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
 
     probs = torch.tensor([[0.2, 0.8], [0.7, 0.3]], dtype=torch.float32)
     generators = {0: torch.Generator().manual_seed(0)}
@@ -113,6 +124,7 @@ def test_topk_topp_forward_and_apply_helpers():
         assert sampler.forward_native(logits, {}, k, p) == ("fallback", None)
         native.assert_called_once()
 
+<<<<<<< HEAD
     def reduce_apply(values, _k, _p, top_k=None):
         return values.clone(), torch.arange(values.shape[1]).expand(values.shape[0], -1).contiguous()
 
@@ -134,12 +146,23 @@ def test_topk_topp_forward_and_apply_helpers():
             sampler.apply_top_k_top_p = reduce_apply if reduce_sample else identity_apply
             with patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg):
                 tokens, processed = sampler.forward_native(logits, {}, k, p)
+=======
+    def identity_apply(values, _k, _p):
+        return values
+
+    sampler.apply_top_k_top_p = identity_apply
+    with _cpu_safe_npu_sample():
+        for mode in ("processed_logits", "processed_logprobs", "raw_logprobs"):
+            sampler.logprobs_mode = mode
+            tokens, processed = sampler.forward_native(logits, {}, k, p)
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274
             assert tokens.shape == (2,)
             if mode == "raw_logprobs":
                 assert processed is None
             else:
                 assert processed.shape == logits.shape
 
+<<<<<<< HEAD
     cfg.enable_reduce_sample = True
     with (
         patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
@@ -171,3 +194,12 @@ def test_topk_topp_forward_and_apply_helpers():
         assert unchanged.shape == logits.shape
         npu_masked = _apply_top_k_top_p_torch_npu(logits.clone(), k, p)
         assert npu_masked.shape == logits.shape
+=======
+    unchanged = _apply_top_k_top_p_pytorch(logits.clone(), None, None)
+    assert unchanged.shape == logits.shape
+    filtered = _apply_top_k_top_p_pytorch(logits.clone(), k, p)
+    assert filtered.shape == logits.shape
+    assert torch.isfinite(filtered).any()
+    top_k_only = _apply_top_k_top_p_pytorch(logits.clone(), torch.tensor([1, 1]), None)
+    assert top_k_only.shape == logits.shape
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

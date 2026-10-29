@@ -22,11 +22,12 @@ msgid "# DeepSeek-V3.2"
 msgstr "# DeepSeek-V3.2"
 
 msgid ""
-"DeepSeek-V3.2 is a sparse attention model. The main architecture is similar "
-"to DeepSeek-V3.1, but with a sparse attention mechanism, which is designed "
-"to explore and validate optimizations for training and inference efficiency "
-"in long-context scenarios."
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/DeepSeek-V3.2.html)."
 msgstr ""
+<<<<<<< HEAD
 "DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 "
 "类似，但引入了稀疏注意力机制，旨在探索和验证长上下文场景下训练与推理效率的优化方案。"
 
@@ -419,3 +420,7 @@ msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../getting_started/installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+=======
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/DeepSeek-V3.2.html)。"
+>>>>>>> ff37dbaab5c58d567daaecfbb0337447e7e90274

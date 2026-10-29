@@ -4,6 +4,8 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 MROPE_SECTION = [[32, 32, 32]]
@@ -111,6 +113,9 @@ def create_test_data(num_tokens, n_q_head, n_kv_head, rotary_dim, head_size, dev
     return q, k, cos, sin
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("mrope_section", MROPE_SECTION)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_q_heads", NUM_Q_HEADS)
@@ -150,7 +155,9 @@ def test_mrotary_embedding_triton_kernel(
 
     q_gold, k_gold = q_trt.clone(), k_trt.clone()
 
-    q_trt, k_trt = triton_mrope(q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, True)
+    q_trt, k_trt = triton_mrope(
+        q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, mrope_interleaved=True, is_neox_style=True
+    )
 
     q_gold, k_gold = pytorch_forward_native(q_gold, k_gold, cos, sin, mrope_section, head_size, rotary_dim, True)
     atol = DEFAULT_ATOL

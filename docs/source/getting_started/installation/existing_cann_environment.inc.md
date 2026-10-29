@@ -16,7 +16,7 @@
             | Ascend A3 series products | `quay.io/ascend/cann:{{ release_cann_version }}-a3-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-a3-openeuler24.03-py3.12` |
             | Atlas 300I DUO | `quay.io/ascend/cann:{{ release_cann_version }}-310p-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-310p-openeuler24.03-py3.12` |
             | Atlas 200I Pro | `quay.io/ascend/cann:{{ release_cann_version }}-310p-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-310p-openeuler24.03-py3.12` |
-            | Ascend 950DT series products | `quay.io/ascend/cann:{{ release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-950-openeuler24.03-py3.12` |
+            | 950DT Products | `quay.io/ascend/cann:{{ release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-950-openeuler24.03-py3.12` |
 
         The CANN base image already includes the Toolkit, the operator package for the target hardware, and NNAL. You do not need to reinstall CANN in the container. For other operating systems and tags, see the [CANN Container Images Overview](https://github.com/Ascend/cann-container-image/blob/main/OVERVIEW.md).
 

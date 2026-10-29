@@ -20,14 +20,19 @@
 Run `pytest tests/ops/test_fused_moe.py`.
 """
 
+import contextlib
 import gc
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
@@ -38,10 +43,24 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGat
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
 
-NUM_EXPERTS = [8, 64]
 EP_SIZE = [1]
-TOP_KS = [2, 6]
 DEVICE = ["npu"]
+
+
+@contextlib.contextmanager
+def moe_comm_type(comm_type: MoECommType):
+    """Stub the MoE comm type that `apply_moe_mlp` reads off the forward context.
+
+    The quant MLP path branches on ``_EXTRA_CTX.moe_comm_type``, which resolves
+    through vLLM's `get_forward_context()`. That context only exists inside a
+    model forward, so an op-level test has to supply the one attribute the
+    kernel path actually consumes.
+    """
+    with patch(
+        "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=comm_type),
+    ):
+        yield
 
 
 class SiluAndMul:
@@ -99,12 +118,15 @@ def torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map):
     return (out.view(B, -1, w2.shape[1]) * topk_weights.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
-@pytest.mark.parametrize("m", [1, 1024 * 128])
-@pytest.mark.parametrize("n", [128, 2048])
-@pytest.mark.parametrize("k", [128, 1024])
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize(
+    "m, n, k, e, topk",
+    [
+        pytest.param(1, 128, 128, 8, 2, id="typical-small"),
+        pytest.param(131072, 2048, 1024, 64, 6, id="typical-large"),
+        pytest.param(131072, 2048, 128, 8, 6, id="regression-wide-MLP-high-route"),
+        pytest.param(1, 128, 1024, 64, 2, id="regression-narrow-MLP-empty-experts"),
+    ],
+)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("device", DEVICE)
@@ -179,15 +201,22 @@ def test_token_dispatcher_with_all_gather(
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
-@pytest.mark.parametrize("m", [1, 33, 64])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 511, 1024])
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize(
+    "m, n, k, e, topk",
+    [
+        pytest.param(1, 128, 128, 8, 2, id="typical-small"),
+        pytest.param(64, 2048, 1024, 64, 6, id="typical-large"),
+        pytest.param(33, 2048, 511, 8, 6, id="regression-irregular-tokens-nonaligned-K-wide-activation"),
+        pytest.param(1, 1024, 511, 64, 2, id="regression-mid-N-nonaligned-K-empty-experts"),
+    ],
+)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("device", DEVICE)
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="BF16 W8A8 AllGather fallback UT is limited to A2/A3/A5",
+)
 def test_token_dispatcher_with_all_gather_quant(
     m: int,
     n: int,
@@ -259,7 +288,9 @@ def test_token_dispatcher_with_all_gather_quant(
     )
     quant_method = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
     quant_method.use_expert_weight_list = False
-    expert_output, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+    # TokenDispatcherWithAllGather is the AllGather comm path.
+    with moe_comm_type(MoECommType.ALLGATHER):
+        expert_output, _ = apply_moe_mlp(mlp_compute_input, quant_method)
     combined_output = dispatcher.token_combine(
         hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
     )

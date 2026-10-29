@@ -23,11 +23,18 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
 
 
 class _StubInfo:
+    def __init__(self):
+        self.tokenizer = _NonThreadSafeTokenizer()
+
+    @property
+    def ctx(self):
+        return SimpleNamespace(tokenizer=self.get_tokenizer())
+
     def get_data_parser(self):
         return MultiModalDataParser()
 
     def get_tokenizer(self):
-        return None
+        return self.tokenizer
 
 
 class _NonThreadSafeTokenizer:
