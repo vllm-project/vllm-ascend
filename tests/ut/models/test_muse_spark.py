@@ -105,6 +105,47 @@ def test_reference_experts_normalize_each_route_before_the_weighted_sum():
     assert not torch.allclose(output, norm_after_sum)
 
 
+def test_a_row_wise_norm_before_the_combine_is_the_per_route_norm():
+    """``npu_moe_token_unpermute`` weights and sums the routes in one op, so the
+    norm cannot sit inside the combine. It does not have to: the norm reads one
+    row at a time, so it commutes with the permutation the combine undoes, and
+    normalizing the grouped rows is the same function as normalizing per route.
+    """
+    torch.manual_seed(0)
+    top_k, hidden_size = 3, 8
+    norm = _post_expert_norm(hidden_size)
+    expert_rows = torch.randn(NUM_TOKENS, top_k, hidden_size)
+    topk_weights = torch.rand(NUM_TOKENS, top_k)
+
+    reference = (norm.forward_native(expert_rows, out_dtype=torch.float32) * topk_weights.unsqueeze(-1)).sum(dim=1)
+
+    # The dispatcher hands the experts their rows grouped by expert and the
+    # combine scatters them back; any permutation stands in for that round trip.
+    permutation = torch.randperm(NUM_TOKENS * top_k)
+    normalized = norm.forward_native(expert_rows.reshape(-1, hidden_size)[permutation], out_dtype=torch.float32)
+    restored = torch.empty_like(normalized)
+    restored[permutation] = normalized
+    combined = (restored.view(NUM_TOKENS, top_k, hidden_size) * topk_weights.unsqueeze(-1)).sum(dim=1)
+
+    torch.testing.assert_close(combined, reference)
+
+
+def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
+    """The norm is installed on the down-projection output, one row per route."""
+    torch.manual_seed(0)
+    hidden_size = 8
+    method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
+    method.post_expert_norm = _post_expert_norm(hidden_size)
+    routed_rows = torch.randn(NUM_TOKENS * 3, hidden_size)
+
+    with patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=routed_rows):
+        output = method.apply_gmm2(None, None, None)
+
+    expected = method.post_expert_norm.forward_native(routed_rows, out_dtype=routed_rows.dtype)
+    torch.testing.assert_close(output, expected)
+    assert output.dtype == routed_rows.dtype
+
+
 class _Container(nn.Module):
     def __init__(self) -> None:
         super().__init__()
