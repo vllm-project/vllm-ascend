@@ -42,6 +42,9 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.packed_cache_slot_mapping import (
+    build_packed_cache_slot_mapping as _fused_packed_slot_mapping,
+)
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -1048,6 +1051,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = cache_kind in {"long_kv", "index_k"}
+        # Physical cache plane addressed by one logical token group.
+        plane_ratio = ratio if compressed else 1
         if is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
             slots = self._slot_mapping[:num_input_tokens]
@@ -1063,9 +1068,13 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             prepared_flat_slots = shared.get(flat_slot_key)
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
-                if self._uses_a5_packed_cache and active_slots.device.type == "npu":
-                    assert self._device_backend is not None
-                    prepared_slots, prepared_flat_slots = self._device_backend.build_packed_cache_slot_mapping(
+                # The fused kernel writes the same persistent [T, 2] coordinates
+                # and flat slots as the eager chain below, so it is valid on
+                # every Ascend platform, not only the A5 packed-cache ABI.
+                # Ratio 2 reads positions in the kernel, so keep the eager
+                # fallback when the batch carries none.
+                if active_slots.device.type == "npu" and plane_ratio in (1, 2) and positions is not None:
+                    prepared_slots, prepared_flat_slots = _fused_packed_slot_mapping(
                         active_slots,
                         positions,
                         common.query_start_loc,
@@ -1073,7 +1082,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         num_actual_reqs,
                         num_actual_tokens,
                         storage_block_size,
-                        ratio if compressed else 1,
+                        plane_ratio,
                         skip_update=kwargs.get("skip_ring_state_update", False),
                         coordinates_output=self._slot_mapping_2d[:num_input_tokens],
                         flat_output=self._flat_slot_mapping[:num_input_tokens],
@@ -1108,7 +1117,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 shared[flat_slot_key] = prepared_flat_slots
             slots = prepared_slots
             flat_slots = prepared_flat_slots
-        plane_ratio = ratio if compressed else 1
         coordinates["cache_seq_lens"] = seq_lens
         cmp_residual_buffer = None
         if compressed and ratio == 2:
