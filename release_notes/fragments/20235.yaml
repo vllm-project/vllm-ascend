@@ -1,0 +1,4 @@
+pr: 20235
+entries:
+  - category: feature
+    text: Added an experimental Ascend port of retained-state FastEEP with HCCL child communicators, peer weight refill, and a serialized resize endpoint.
