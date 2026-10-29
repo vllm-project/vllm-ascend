@@ -9,9 +9,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import ParallelConfig
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import CircularBufferSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import KVConnectorOutput
+
+from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -27,6 +37,9 @@ for _module_name in _to_remove:
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload import (  # noqa: E402
+    manager as preempt_manager,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager import (  # noqa: E402
     PreemptedRequestState,
     PreemptOffloadScheduler,
@@ -1282,3 +1295,84 @@ def test_preempt_offload_dcp_partial_block_round_trip(dcp_size, sharded, compute
     state.load_start_tokens = computed_tokens - 1
     assert scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="dcp"), ([30, 31, 32],), 1)
     assert state.load_transfer_meta == TransferMeta([31], [102])
+
+
+@pytest.mark.parametrize(
+    "pcp,tp,pp,dcp",
+    [(1, 16, 1, 16), (2, 8, 1, 16), (4, 4, 1, 16), (2, 8, 1, 2), (2, 8, 1, 1), (2, 8, 2, 16)],
+)
+@pytest.mark.parametrize("sharded", [False, True])
+def test_pcp_offload_local_round_trip_waits_for_all_workers(pcp, tp, pp, dcp, sharded):
+    config = make_dyntra_test_config(block_size=384)
+    config.parallel_config = ParallelConfig(
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+        distributed_executor_backend="mp",
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=384,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                    dcp_sharded=sharded,
+                ),
+            )
+        ],
+    )
+    # Keep the real CPU coordinator and block pool; avoid host-capacity probing.
+    with (
+        patch.object(PreemptOffloadScheduler, "_derive_cpu_config", return_value=kv_config),
+        patch.object(
+            preempt_manager, "get_kv_cache_coordinator", wraps=preempt_manager.get_kv_cache_coordinator
+        ) as coordinator,
+    ):
+        scheduler = PreemptOffloadScheduler(
+            config, kv_config, cpu_capacity_bytes=1, enable_offload_prefix_caching=False
+        )
+    assert coordinator.call_args.kwargs["pcp_world_size"] == 1
+    assert coordinator.call_args.kwargs["dcp_world_size"] == dcp
+    assert scheduler._expected_worker_count == tp * pp * pcp
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={i: SimpleNamespace(block_id=i, block_hash=None) for i in (20, 21, 22, 30, 31, 32)},
+        touch=MagicMock(),
+    )
+    # PCP does not multiply the local block span. Keep two computed blocks,
+    # with one token in the second, and leave the speculative third block out.
+    computed = 384 * (dcp if sharded else 1) + 1
+    assert scheduler._create_preempt_state("pcp", ([20, 21, 22],), computed)
+    state = scheduler._preempted_req_states["pcp"]
+    assert state.store_transfer_meta.gpu_block_ids == [20, 21]
+    assert len(state.store_transfer_meta.cpu_block_ids) == 2
+    state.ready = True
+    state.load_start_tokens = computed - 1
+    assert scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="pcp"), ([30, 31, 32],), 1)
+    assert state.load_transfer_meta == TransferMeta([31], [state.store_transfer_meta.cpu_block_ids[1]])
+
+    scheduler._process_preempt_store_event = MagicMock()
+    partial = tp * pp if pcp > 1 else tp * pp - 1
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PreemptOffloadWorkerMetadata(
+                completed_store_events={5: partial},
+            )
+        )
+    )
+    scheduler._process_preempt_store_event.assert_not_called()
+    assert scheduler._store_event_pending_counts == {5: partial}
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PreemptOffloadWorkerMetadata(
+                completed_store_events={5: tp * pp * pcp - partial},
+            )
+        )
+    )
+    scheduler._process_preempt_store_event.assert_called_once_with(5)
+    assert scheduler._store_event_pending_counts == {}

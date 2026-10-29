@@ -100,8 +100,6 @@ class PreemptOffloadScheduler:
         )
 
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert pcp_world_size == 1
         self.dcp_world_size = dcp_world_size
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
@@ -112,7 +110,8 @@ class PreemptOffloadScheduler:
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
+            # PCP expands the workers, not each worker's local KV token span.
+            pcp_world_size=1,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
