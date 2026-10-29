@@ -5,7 +5,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NUM_REQS", "NUM_ROWS", "NUM_DECODES", "NUM_DECODE_TOKENS"])
 def _prepare_gdn_metadata_kernel(
     block_table,
     seq_lens,
@@ -26,11 +26,11 @@ def _prepare_gdn_metadata_kernel(
     initial_state,
     prefill_query,
     conv_output,
-    NUM_REQS: tl.constexpr,
-    NUM_ROWS: tl.constexpr,
-    NUM_SPEC: tl.constexpr,
-    NUM_DECODES: tl.constexpr,
-    NUM_DECODE_TOKENS: tl.constexpr,
+    NUM_REQS,
+    NUM_ROWS,
+    NUM_DECODES,
+    NUM_DECODE_TOKENS,
+    HAS_SPEC: tl.constexpr,
     HAS_PREFILL: tl.constexpr,
     SPEC_WIDTH: tl.constexpr,
     MIXED_SPEC: tl.constexpr,
@@ -51,6 +51,7 @@ def _prepare_gdn_metadata_kernel(
     use a CPU partition (signed group row, group token offset); homogeneous
     batches need no layout transfer. Each request writes its own token range;
     independent clear programs zero the shared output in the same launch.
+    Batch counts stay dynamic; phase flags specialize optional tensor accesses.
     """
     row = tl.program_id(0)
     if row < NUM_ROWS:
@@ -61,7 +62,7 @@ def _prepare_gdn_metadata_kernel(
         source_begin = begin
         seq_len = tl.load(seq_lens + row * SEQ_LEN_STRIDE, active, 0)
         start_block = tl.maximum((seq_len - 1) // BLOCK_SIZE, 0)
-        is_spec: tl.constexpr = NUM_SPEC > 0
+        is_spec: tl.constexpr = HAS_SPEC
         if MIXED_SPEC:
             group_row = tl.load(layout + row * 2)
             is_spec = group_row >= 0
@@ -69,7 +70,7 @@ def _prepare_gdn_metadata_kernel(
             begin = tl.load(layout + row * 2 + 1)
         else:
             dst = row
-        if NUM_SPEC:
+        if HAS_SPEC:
             tl.store(sequence_masks + row, active & is_spec)
         if is_spec:
             cols = tl.arange(0, STATE_BLOCK)
@@ -179,9 +180,9 @@ def prepare_gdn_metadata(
         conv_output,
         NUM_REQS=num_reqs,
         NUM_ROWS=rows,
-        NUM_SPEC=num_spec_decodes,
         NUM_DECODES=num_decodes,
         NUM_DECODE_TOKENS=num_decode_tokens,
+        HAS_SPEC=num_spec_decodes > 0,
         HAS_PREFILL=has_prefill,
         SPEC_WIDTH=spec_width,
         MIXED_SPEC=mixed_spec,

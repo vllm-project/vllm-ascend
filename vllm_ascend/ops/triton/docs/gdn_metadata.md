@@ -16,6 +16,8 @@
   programs in the same launch clear `conv_output`.
 - **Supported modes**: Ordinary/speculative decode, mixed prefill/decode and
   graph-padded buffers on Ascend NPU. Metadata preparation runs outside model graphs.
+- **Compilation**: Request and decode counts are runtime scalars. Phase flags
+  and tile sizes remain compile-time constants.
 
 ## Parameters
 
@@ -82,7 +84,8 @@ All arguments are required; pass `None` for disabled optional tensors.
 
 The NPU test compares complete metadata with the generic builder using
 `rtol=0, atol=0`. It covers variable speculative lengths, mixed batches,
-strided inputs, shrinking batches, graph padding and shared-output clearing.
+strided inputs, shrinking batches, graph padding, shared-output clearing and
+compiled-kernel reuse across changing batch counts.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_decode_metadata.py

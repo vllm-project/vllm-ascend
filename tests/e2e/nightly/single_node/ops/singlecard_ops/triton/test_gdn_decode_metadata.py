@@ -13,6 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
+from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import _prepare_gdn_metadata_kernel
 
 
 def _assert_metadata_equal(actual, expected):
@@ -127,3 +128,61 @@ def test_fused_decode_matches_generic_metadata(query_len, num_spec, projection_s
         if query_len == 1 and num_spec and graph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             assert not torch.any(builder.spec_actual_seq_lengths[: rows + 1])
             assert not torch.any(builder.num_accepted_tokens[:rows])
+
+
+@pytest.mark.parametrize("mode", ["decode", "spec", "prefill", "mixed"])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
+    device = torch.device("npu:0")
+    num_spec = 3 if mode in ("spec", "mixed") else 0
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=num_spec,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_spec,
+        cudagraph_mode=graph_mode,
+    )
+    builder.vllm_config.model_config.dtype = torch.bfloat16
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(
+            use_contiguous_conv_indices=True,
+            use_shared_conv_output=True,
+            local_projection_size=11,
+        )
+    }
+    compiled_kernels = []
+    run = _prepare_gdn_metadata_kernel.run
+
+    def record_kernel(*args, **kwargs):
+        compiled = run(*args, **kwargs)
+        compiled_kernels.append(compiled)
+        return compiled
+
+    # Include 1 and aligned counts to catch implicit integer specialization.
+    counts = (2, 3, 8, 16, 4) if mode == "mixed" else (1, 2, 3, 8, 16, 4)
+    for count in counts:
+        rows = 16 if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY and mode in ("decode", "spec") else count
+        if mode == "decode":
+            queries = [1] * rows
+        elif mode == "spec":
+            queries = [4] * rows
+        else:
+            # Vary both decode counts and the prefill boundary in the same phase.
+            queries = [4 if num_spec else 1] * (count // 2) + [17] * (count - count // 2)
+        common = create_common_attn_metadata(BatchSpec([max(q, 32) for q in queries], queries), 16, device)
+        common.num_actual_tokens = sum(queries[:count])
+        # Keep physical strides fixed so only batch counts and grid sizes vary.
+        common.block_table_tensor = torch.arange(rows * 32, dtype=torch.int32, device=device).view(rows, 32)
+        drafts = torch.tensor([3 if q == 4 else -1 for q in queries], dtype=torch.int32) if num_spec else None
+        accepted = torch.ones(rows, dtype=torch.int32, device=device) if num_spec else None
+        with patch.object(builder, "_build_fused_metadata", return_value=None):
+            expected = deepcopy(builder.build(0, common, accepted, drafts, num_actual_reqs=count))
+        with patch.object(_prepare_gdn_metadata_kernel, "run", side_effect=record_kernel):
+            actual = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
+        _assert_metadata_equal(actual, expected)
+
+    assert len(compiled_kernels) == len(counts)
+    assert compiled_kernels[0] is not None
+    assert all(kernel is compiled_kernels[0] for kernel in compiled_kernels)
