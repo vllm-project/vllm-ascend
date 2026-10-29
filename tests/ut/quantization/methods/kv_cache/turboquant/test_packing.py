@@ -31,8 +31,9 @@ def test_packed_pages_never_alias_other_block_ids(block_size, monkeypatch):
     # Isolate descriptor arithmetic from the installed vLLM version. The V2
     # integration test exercises the real upstream dataclass and allocator.
     monkeypatch.setattr(cache, "KVCacheTensor", SimpleNamespace)
+    config = SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=None))
     bytes_per_block = cache.pool_bytes_per_block(groups)
-    num_blocks, descriptors = cache.cache_config(groups, bytes_per_block * 3 + 17)
+    num_blocks, descriptors = cache.cache_config(config, groups, bytes_per_block * 3 + 17)
     assert num_blocks == 3
     assert {d.size for d in descriptors} == {bytes_per_block * 3}
     descriptors = {d.layers[0]: d for d in descriptors}

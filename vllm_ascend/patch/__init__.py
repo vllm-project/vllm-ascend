@@ -260,8 +260,7 @@
 #       together with entry 2 once upstream exposes the PD role.
 #   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
 #      v0.32.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
-#      #61183, where it is overridden by
-#      `vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder`),
+#      #61183),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
@@ -306,18 +305,18 @@
 #      `...get_kv_cache_config_from_groups`,
 #      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
-#       The v0.31.0 release lane has no pluggable `KVCacheConfigBuilder`, so
+#       The v0.32.0 release lane has no pluggable `KVCacheConfigBuilder`, so
 #       the Ascend DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and TurboQuant
 #       planning rules must stay module-level monkey patches there.
 #    How:
-#       Keep the pre-vLLM #53558 planning patches applied from this file. Main
-#       plans through `vllm_ascend.core.kv_cache_config_builder`, selected by
-#       `NPUPlatform.get_kv_cache_config_builder_cls`.
+#       Keep the planning patches applied from this file. Main resolves
+#       grouping through `vllm_ascend.core.kv_cache_config_builder`, selected
+#       by `NPUPlatform.get_kv_cache_config_builder_cls`; its default
+#       materialization delegates back to these patched functions.
 #    Related PR (if no, explain why):
-#       vLLM PR #53558 (pluggable KVCacheConfigBuilder).
+#       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Remove them when vllm-ascend stops supporting v0.31.0.
->>>>>>> 785c0c7a98 ([Refactor][KV Cache] Adapt Ascend KV cache planning to upstream KVCacheConfigBuilder)
+#       Remove them when vllm-ascend stops supporting v0.32.0.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

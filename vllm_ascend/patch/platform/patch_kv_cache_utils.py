@@ -567,13 +567,7 @@ def _get_kv_cache_config_deepseek_v4_main(
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
-        # v0.31.0 Core does not convert num_gpu_blocks_override into capacity,
-        # so the monolith planner still applies it here.
-        num_blocks = may_override_num_blocks(
-            vllm_config,
-            available_memory // tq_cache.pool_bytes_per_block(kv_cache_groups),
-        )
-        return tq_cache.cache_config(kv_cache_groups, num_blocks=num_blocks)
+        return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
     (
         page_sizes,
         bucketed,
@@ -826,19 +820,9 @@ def _ascend_get_kv_cache_config_from_groups(
     if qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
-        # Core on the v0.31.0 lane does not convert num_gpu_blocks_override into
-        # capacity, so the monolith planner still applies it here.
-        num_blocks = may_override_num_blocks(
-            vllm_config,
-            max(available_memory // get_deepseek_v41_pool_bytes_per_block(kv_cache_groups), 0),
-        )
-        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, num_blocks=num_blocks)
+        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        num_blocks = may_override_num_blocks(
-            vllm_config,
-            max(available_memory // get_glm5_next_pool_bytes_per_block(kv_cache_groups), 0),
-        )
-        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, num_blocks=num_blocks)
+        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif not _is_deepseek_v4_groups(kv_cache_groups):
         kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     else:

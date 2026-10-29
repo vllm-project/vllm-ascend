@@ -153,7 +153,7 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
     )
-    num_blocks, descriptors = cache.cache_config(groups, cache.pool_bytes_per_block(groups) * 3)
+    num_blocks, descriptors = cache.cache_config(runtime, groups, cache.pool_bytes_per_block(groups) * 3)
     config = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=descriptors, kv_cache_groups=groups)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     allocations = []
