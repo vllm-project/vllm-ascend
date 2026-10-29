@@ -173,7 +173,7 @@ against CPU Torch operations. The paired native benchmark still requires that
 op explicitly and fails early if unavailable:
 
 ```bash
-python -m tests.e2e.nightly.single_node.ops.singlecard_ops.benchmark_kda_state_copy_triton \
+python benchmarks/benchmark_kda_state_copy_triton.py \
   --output /tmp/kda-round-1.json --seed 41 --trials 100
 ```
 
