@@ -947,6 +947,13 @@ Model Runner V2. It reconstructs the accepted recurrent state after speculative
 decoding instead of keeping a recurrent checkpoint for every draft token.
 The default remains the native AscendC KDA path.
 
+Enable this path with upstream vLLM's `--use-replayssm` option, which defaults
+to disabled. See the [vLLM serving CLI reference](https://docs.vllm.ai/en/latest/cli/serve/)
+and [CacheConfig API reference](https://docs.vllm.ai/en/latest/api/vllm/config/cache/)
+for the upstream option. Upstream describes Mamba2 ReplaySSM under this flag;
+the GLM KDA behavior and requirements in this section are provided by the
+Ascend integration.
+
 Add the following options to your GLM serving command. Keep the parallelism,
 quantization, KV-cache dtype, and memory settings appropriate for your model
 and devices:
