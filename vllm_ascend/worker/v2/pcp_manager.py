@@ -584,18 +584,20 @@ class AscendPCPManager(PCPManager):
         last hidden states; replicated drafts (DSpark) consume them globally.
         """
         assert self._global_batch is not None
-        local_aux_hidden_states = aux_hidden_states
-        hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
-            hidden_states, None if self._is_draft_prefill_sharded else aux_hidden_states
-        )
+        if self._is_draft_prefill_sharded:
+            # Keep local aux states for the sharded draft; only sampling needs
+            # the main hidden states restored to the global layout.
+            hidden_states, _, global_batch = super().restore_for_sampling(hidden_states, None)
+        else:
+            hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
+                hidden_states, aux_hidden_states
+            )
         if self._restore_unpadded_global_batch():
             global_batch = self._expose_unpadded_global_batch(global_batch)
             num_tokens = global_batch.num_tokens
             hidden_states = hidden_states[:num_tokens]
-            if aux_hidden_states is not None:
+            if not self._is_draft_prefill_sharded and aux_hidden_states is not None:
                 aux_hidden_states = [states[:num_tokens] for states in aux_hidden_states]
-        if self._is_draft_prefill_sharded:
-            aux_hidden_states = local_aux_hidden_states
         self._sampling_global_batch = global_batch
         return hidden_states, aux_hidden_states, global_batch
 
