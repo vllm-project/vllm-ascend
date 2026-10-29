@@ -90,23 +90,3 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_deco
 
 Model accuracy and performance measurements are recorded in
 [PR #19954](https://github.com/vllm-project/vllm-ascend/pull/19954).
-
-## Example
-
-With buffers and batch counts prepared by the metadata builder:
-
-```python
-from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import prepare_gdn_metadata
-
-prepare_gdn_metadata(
-    block_table, seq_lens, query, accepted, layout,
-    spec_states, non_spec_states, conv_indices, sequence_masks,
-    spec_query, non_spec_query, spec_lengths, non_spec_lengths,
-    accepted_out, spec_tokens, non_spec_tokens,
-    initial_state, prefill_query, conv_output,
-    num_reqs=num_reqs, num_spec_decodes=num_spec_decodes,
-    num_decodes=num_decodes, num_decode_tokens=num_decode_tokens,
-    has_prefill=has_prefill, spec_width=spec_width,
-    mixed_spec=mixed_spec, block_size=block_size, pad_block_id=pad_block_id,
-)
-```
