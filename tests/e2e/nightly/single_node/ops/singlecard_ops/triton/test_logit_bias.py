@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""[Role] Validate the Ascend MRv2 bias override through upstream callers.
-[Invariants] Imported wrapper aliases stay valid; finite stop logits alone restore.
-[Timeouts & Locks] Run under the bounded NPU test runner; no new kernel barriers.
-[Side-Effect Policy] Allocates small test tensors on NPU0 and compares CPU results.
-"""
-
 import pytest
 import torch
 import torch_npu  # noqa: F401

@@ -16,12 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-"""[Role] Provide the MRv2 logit-bias kernel for Ascend workers.
-[Invariants] Preserve upstream masking and finite stop-token restore semantics.
-[Timeouts & Locks] No added Host sync; recovery uses a contiguous store mask.
-[Side-Effect Policy] Updates supplied logits on the caller's stream.
-"""
-
 from vllm.triton_utils import tl, triton
 
 

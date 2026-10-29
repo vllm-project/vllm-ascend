@@ -1,9 +1,3 @@
-"""[Role] Register Ascend Triton implementations for MRv2 workers.
-[Invariants] Preserve upstream caller aliases through module-global rebinding.
-[Timeouts & Locks] Worker initialization only; no additional synchronization.
-[Side-Effect Policy] Rebinds upstream operator symbols in Ascend workers.
-"""
-
 import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
