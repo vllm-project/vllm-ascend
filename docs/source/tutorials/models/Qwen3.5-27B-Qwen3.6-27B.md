@@ -364,7 +364,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
-            --host 127.0.0.1 \
+            --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.5 \
@@ -393,7 +393,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
-            --host 127.0.0.1 \
+            --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.6 \
