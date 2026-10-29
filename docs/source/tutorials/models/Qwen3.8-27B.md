@@ -493,7 +493,7 @@ After the service is started, the model can be invoked by sending a prompt. Two 
 **Completions API:**
 
 ```bash
-curl http://localhost:8000/v1/completions \
+curl http://127.0.0.1:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8",
@@ -506,7 +506,7 @@ curl http://localhost:8000/v1/completions \
 **Chat Completions API:**
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8",
