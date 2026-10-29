@@ -97,19 +97,20 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
+      image: quay.io/ascend/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
+        UV_FIND_LINKS: "http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi/triton-ascend"
         UV_INDEX_URL: >-
           ${{ matrix.group.npu_type == '310p' &&
-          'https://mirrors.huaweicloud.com/ascend/repos/pypi/' ||
+          'https://repo.huaweicloud.com/ascend/repos/pypi/' ||
           'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
         UV_EXTRA_INDEX_URL: >-
           ${{ matrix.group.npu_type == '310p' &&
-          'https://mirrors.huaweicloud.com/repository/pypi/simple' ||
+          'https://repo.huaweicloud.com/repository/pypi/simple' ||
           'https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/' }}
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
@@ -126,8 +127,8 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           if [ "${{ matrix.group.npu_type }}" = "310p" ]; then
-            pip config set global.index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/
-            pip config set global.extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple
+            pip config set global.index-url https://repo.huaweicloud.com/ascend/repos/pypi/
+            pip config set global.extra-index-url https://repo.huaweicloud.com/repository/pypi/simple
           else
             pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
