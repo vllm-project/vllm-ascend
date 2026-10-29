@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 _BLOCK_SIZE = 4096
+_BITS_PER_BYTE = tl.constexpr(8)
 
 
 @triton.jit
@@ -39,9 +40,11 @@ def _pack_sampling_mask_kernel_ascend(
 
     for start_idx in range(0, vocab_size, BLOCK_SIZE):
         offsets = start_idx + tl.arange(0, BLOCK_SIZE)
+        # Guard the load: inactive slots may have no source logits row.
+        load_mask = (offsets < vocab_size) & is_active
         logits = tl.load(
             logits_ptr + source_row * logits_row_stride + offsets * logits_col_stride,
-            mask=(offsets < vocab_size) & is_active,
+            mask=load_mask,
             other=-float("inf"),
         )
         keep = (logits > -float("inf")) & (logits < float("inf"))
@@ -50,14 +53,14 @@ def _pack_sampling_mask_kernel_ascend(
         # so counts contains the number of finite logits, not the tile count.
         count += tl.sum(keep_i32)
 
-        bits = tl.trans(tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)))
-        bit_weights = (1 << tl.arange(0, 8))[:, None]
+        bits = tl.trans(tl.reshape(keep_i32, (BLOCK_SIZE // _BITS_PER_BYTE, _BITS_PER_BYTE)))
+        bit_weights = (1 << tl.arange(0, _BITS_PER_BYTE))[:, None]
         packed = tl.sum(bits * bit_weights, axis=0).to(tl.uint8)
-        byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
+        byte_offsets = start_idx // _BITS_PER_BYTE + tl.arange(0, BLOCK_SIZE // _BITS_PER_BYTE)
         tl.store(
             packed_mask_ptr + output_row * packed_mask_row_stride + byte_offsets,
             packed,
-            mask=byte_offsets < tl.cdiv(vocab_size, 8),
+            mask=byte_offsets < tl.cdiv(vocab_size, _BITS_PER_BYTE),
         )
 
     tl.store(counts_ptr + output_row, count)
@@ -90,8 +93,9 @@ def sampling_mask_from_logits_npu(
 
     vocab_size = logits.shape[1]
     num_output_rows = num_reqs * rows_per_request
+    packed_width = triton.cdiv(vocab_size, _BITS_PER_BYTE.value)
     packed_mask = torch.empty(
-        (num_output_rows, (vocab_size + 7) // 8),
+        (num_output_rows, packed_width),
         dtype=torch.uint8,
         device=logits.device,
     )
