@@ -188,6 +188,10 @@ class NPUWorker(WorkerBase):
         sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
+        from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
+
+        patch_kda_recoverssm(vllm_config)
+
         # Register ops when worker init.
         from vllm_ascend import ops
 
