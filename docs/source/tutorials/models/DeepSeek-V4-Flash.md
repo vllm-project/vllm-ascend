@@ -1638,7 +1638,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
     - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
     - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
-    - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
     - `enable_fused_mc2` (inside `--additional-config`, e.g. `'{"enable_cpu_binding":true,"enable_fused_mc2":1}'`): Enables the fused MoE computation (MC2) optimization, which consolidates shared expert and routed expert computation into fused kernels to reduce launch overhead and improve MoE inference throughput. `0` disables the fused path, `1` selects dispatch-FFN-combine. `2` selects CANN MegaMoe; see [Additional Configuration](../../user_guide/configuration/additional_config.md) for the full enum.
     - `cudagraph_capture_sizes` (inside `--compilation-config`): Batch size tiers for ACL graph capture in Decode phase. vLLM pre-compiles graphs for these batch sizes to avoid runtime compilation overhead. In DSpark mode (`num_speculative_tokens=5`), each sequence processes 6 tokens per step (1 real + 5 speculative), so actual concurrency ≈ `batch_size / 6` (e.g., 360 → 60 concurrency). If unset, vLLM auto-captures on demand; set explicitly when concurrency patterns are predictable.
 
@@ -1853,7 +1852,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     Verify `/healthcheck` reports two P and sixteen D endpoints and inspect the proxy/worker file-descriptor limits. Use the same `ulimit -n 65536` on the benchmark client. Both P endpoints must receive requests; their separate APIs do not imply independent compute capacity, because expert/MC2 collectives can span both DP groups. Measure aggregate P throughput in one shared wall-clock window.
 
-    P explicitly selects `ASCEND_LOCAL_COMM_RES` version 1.3 in the measured image. Verify the actual transport engine on both roles when changing images; an environment variable alone is not proof of matching engines. The historical `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment variable was not read by that image and is omitted here. Check the resolved `--prefix-cache-retention-interval` before changing retention; zero does not disable all prefix reuse. D stays in graph mode for target and draft. Recheck dispatch capacity, KV residency and throughput together when adjusting budgets; a low KV usage gauge does not exclude other memory or compute bottlenecks.
+    P explicitly selects `ASCEND_LOCAL_COMM_RES` version 1.3 in the measured image. Verify the actual transport engine on both roles when changing images; an environment variable alone is not proof of matching engines. D stays in graph mode for target and draft. Recheck dispatch capacity, KV residency and throughput together when adjusting budgets; a low KV usage gauge does not exclude other memory or compute bottlenecks.
 
 ### 5.3 KV Cache Pool Deployment {: #53-memcache-kv-cache-pool-deployment }
 
@@ -2589,9 +2588,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           load pool entries unless `consumer_is_to_put` or `consumer_is_to_load` is
           explicitly enabled.
         - `PYTHONHASHSEED=0` must match across all engines. Prefill enables prefix
-          caching; Decode disables it. With `--block-size 32`, use
-          `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` on Prefill to retain hybrid
-          attention checkpoints for reusable long prefixes.
+          caching; Decode disables it.
         - Keep `--no-disable-hybrid-kv-cache-manager` on both roles and the top-level
           `kv_load_failure_policy` as `fail`; the `recompute` load-failure policy does
           not support DeepSeek-V4 hybrid attention.
