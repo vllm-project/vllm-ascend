@@ -62,7 +62,6 @@ def worker():
 def reset(w):
     w._step_load_keys = set()
     w._masked_runs_cache = {}
-    w._step_keyinfo_cache, w._step_lease_result, w._step_exist_cache = {}, {}, {}
     w.layer_save_tasks, w.layer_load_tasks = [[], []], [[], []]
 
 

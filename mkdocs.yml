@@ -89,6 +89,8 @@ hooks:
   # Sets per-page and per-section titles for the active language.
   # See docs/hooks/nav_titles.py for the title mapping.
   - docs/hooks/nav_titles.py
+  # Extend the TOC only on MiniMax-M3; other pages keep the site-wide depth.
+  - docs/hooks/minimax_m3_toc.py
 
 # ---- Markdown extensions ----
 markdown_extensions:
@@ -102,7 +104,9 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-      toc_depth: 5
+      # Site-wide TOC display depth: affects every model guide.
+      # Do not change this value to customize a single model's TOC.
+      toc_depth: 3
   # Python Markdown Extensions
   - pymdownx.arithmatex:
       generic: true
@@ -160,11 +164,11 @@ extra:
   # do not update it for main development. Git and container tags include the
   # leading "v" and are used across tutorials.
   vllm_version: v0.30.0
-  vllm_ascend_version: v0.30.0rc2
+  vllm_ascend_version: v0.30.0
   # Stable documentation target used by the developer-preview banner.
   stable_vllm_ascend_version: v0.23.0
   # PyPI versions omit the leading "v" and are used by installation commands/tests.
-  release_vllm_ascend_version: 0.30.0rc2
+  release_vllm_ascend_version: 0.30.0
   release_vllm_version: 0.30.0
   # The supported Python range and the Python version inside release images differ.
   release_python_version: ">= 3.10, < 3.13"
@@ -173,19 +177,19 @@ extra:
   release_cann_version: "9.2.0"
   release_pytorch_version: "2.10.0"
   release_torch_npu_version: "2.10.0.post7"
-  release_nnal_version: "9.1.0"
-  release_triton_ascend_version: "3.2.2"
+  release_nnal_version: "9.2.0"
+  release_triton_ascend_version: "3.6.0"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
   # Update this group when repository requirements or the verified main build image changes.
-  cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
+  cann_image_tag: 9.2.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.1.0"
+  main_cann_version: "9.2.0"
   main_pytorch_version: "2.10.0"
-  main_torch_npu_version: "2.10.0.post4"
+  main_torch_npu_version: "2.10.0.post7"
   main_torchvision_version: "0.25.0"
   main_torchaudio_version: "2.10.0"
-  main_triton_ascend_version: "3.2.2"
+  main_triton_ascend_version: "3.6.0"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
@@ -227,7 +231,6 @@ nav:
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
-        - tutorials/models/DeepSeek-V4-Flash-Vision.md
         - tutorials/models/DeepSeek-V4.1-Flash.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
@@ -261,7 +264,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
     - faqs.md

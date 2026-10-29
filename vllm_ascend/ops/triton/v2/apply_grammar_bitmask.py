@@ -74,10 +74,16 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        store_mask = position_is_active & (block_offset < vocab_size)
+        logits = tl.load(
+            logits_ptr + logits_idx * logits_stride + block_offset,
+            mask=store_mask,
+            other=0.0,
+        )
         tl.store(
             logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
+            tl.where(blocked, -float("inf"), logits),
+            mask=store_mask,
         )
 
 

@@ -5,6 +5,7 @@ from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.sample import (
     bad_words,
     gumbel,
+    logit_bias,
     logprob,
     output,
     penalties,
@@ -22,6 +23,7 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.ops.triton.v2.sample.logit_bias import _bias_kernel
 from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
@@ -49,6 +51,7 @@ bad_words.apply_bad_words = apply_bad_words
 gumbel.apply_temperature = apply_temperature
 states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
+logit_bias._bias_kernel = _bias_kernel
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
 # triton ops that filed in ops/triton

@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Installation Guide"
 msgstr "# 安装指南"
 
-msgid "This document describes how to install vllm-ascend manually."
-msgstr "本文档介绍如何手动安装 vllm-ascend。"
-
 msgid "## Requirements {: #installation-requirements }"
 msgstr "## 要求 {: #installation-requirements }"
 
@@ -406,13 +403,6 @@ msgstr ""
 "A2、A3 和 Ascend 950DT系列产品；不用于 Atlas 300I DUO 或 Atlas 200I Pro |"
 
 msgid ""
-"- **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.\n"
-"    - **Triton Ascend:** Installed only for A2, A3, and 950DT Products; it is not used on Atlas 300I DUO or Atlas 200I Pro."
-msgstr ""
-"- **PyTorch 和 TorchNPU：** 在 **安装 vLLM 和 vLLM Ascend** 步骤中作为依赖项安装；无需单独的安装步骤。\n"
-"    - **Triton Ascend：** 仅针对 A2、A3 和 Ascend 950DT系列产品安装；不用于 Atlas 300I DUO 或 Atlas 200I Pro。"
-
-msgid ""
 "- A2: `export SOC_VERSION=ascend910b1`\n"
 "    - A3: `export SOC_VERSION=ascend910_9391`\n"
 "    - Atlas 300I DUO / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`\n"
@@ -463,3 +453,12 @@ msgstr ""
 "v0.30.0rc2 目前仅支持 [官方 vLLM Ascend 镜像](#installation-prebuilt-image-selection)"
 " 或 [使用 `docker build` 构建镜像](#installation-prebuilt-image-build)。在 CANN "
 "镜像或手动准备的 CANN 环境中安装（包括 pip/uv wheel 和直接源码安装）在 rc2 中尚不支持。"
+
+msgid "This document describes how to install vLLM Ascend manually."
+msgstr "本文档介绍如何手动安装 vLLM Ascend。"
+
+msgid ""
+"**PyTorch and TorchNPU:** Installed as dependencies during the **Install "
+"vLLM and vLLM Ascend** step; no separate installation step is required."
+msgstr ""
+"**PyTorch 和 TorchNPU：** 在 **安装 vLLM 和 vLLM Ascend** 步骤中作为依赖项安装，无需单独安装。"

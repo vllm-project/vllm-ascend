@@ -151,7 +151,7 @@ The control flow is:
 2. pause generation;
 3. start the weight update;
 4. transfer one or more groups of weights;
-5. finish the weight update; and
+5. finish the weight update;
 6. resume generation.
 
 The repository contains runnable examples for both backends:
