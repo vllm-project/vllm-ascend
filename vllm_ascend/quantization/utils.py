@@ -43,8 +43,6 @@ def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
 
 
 class DynamicMXQuantScaleAlg(IntEnum):
-    """Scale algorithms accepted by DynamicMxQuantV3."""
-
     MAX_EXPONENT = 0
     CEIL = 1
 
