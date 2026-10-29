@@ -20,7 +20,9 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
+from vllm.models.qwen4_exp.amd.ops.sequence_parallel import sp_shard
 from vllm.sequence import IntermediateTensors
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
@@ -131,6 +133,9 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
             hidden_states = intermediate_tensors["hidden_states"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
+        full_num_tokens = positions.shape[-1]
+        if self.use_hc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -148,6 +153,11 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
+        if self.use_hc_sequence_parallel:
+            packed = sp_all_gather(torch.cat([sample_hidden_states, multi_hidden], dim=-1))[:full_num_tokens]
+            sample_hidden_states, multi_hidden = packed.split([hidden_size, hc_count * hidden_size], dim=-1)
+            sample_hidden_states = sample_hidden_states.contiguous()
+            multi_hidden = multi_hidden.contiguous()
         return sample_hidden_states, multi_hidden
 
 
