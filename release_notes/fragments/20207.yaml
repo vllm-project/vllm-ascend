@@ -1,0 +1,9 @@
+pr: 20207
+entries:
+  - category: bugfix
+    text: >-
+      Balanced scheduling now reports prefix-cache statistics. With
+      `scheduler_config.enable_balance_scheduling=true`, the
+      `vllm:prefix_cache_queries_total` and `vllm:prefix_cache_hits_total`
+      metrics no longer stay at zero, so the prefix-cache hit rate can be
+      measured on balanced deployments.
