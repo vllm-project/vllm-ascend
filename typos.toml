@@ -1,6 +1,12 @@
 [files]
 # these files may be written in non english words
-extend-exclude = [".pre-commit-config.yaml", "docs/source/community/contributors.md", "docs/source/locale/",]
+extend-exclude = [
+    ".pre-commit-config.yaml",
+    "docs/source/community/contributors.md",
+    "docs/source/locale/",
+    # Vendored rc4 rare_chars algorithm / tables config (Unicode category Nd, FPR notes).
+    "vllm_ascend/observability/runtime_guard/detector/rare/",
+]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
