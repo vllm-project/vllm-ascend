@@ -290,9 +290,10 @@ def test_init_speculator_routes_dflash2_draft_model():
         d2.assert_not_called()
 
 
-def test_eager_speculator_keeps_target_compilation_and_graph_config():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_dflash2_keeps_target_compilation_and_graph_config(enforce_eager):
     spec = _spec_config("DFlash2DraftModel")
-    spec.enforce_eager = True
+    spec.enforce_eager = enforce_eager
     config = SimpleNamespace(
         speculative_config=spec,
         compilation_config=SimpleNamespace(
@@ -309,25 +310,41 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
-def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
-    calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
+@pytest.mark.parametrize("mode", list(CUDAGraphMode))
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("supports_full", [True, False])
+def test_dflash2_graph_manager_matches_upstream_policy(monkeypatch, mode, enforce_eager, supports_full):
+    # Keep the real upstream policy and replace only device graph allocation.
+    # This covers every upstream mode and the attention capability fallback.
+    upstream = dflash_module.dflash_speculator
+    support = upstream.AttentionCGSupport
+    manager = SimpleNamespace()
+    create_manager = MagicMock(return_value=manager)
+    monkeypatch.setattr(upstream, "DFlashCudaGraphManager", create_manager)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
-
-    # Eager drafting forces the draft aclgraph manager to NONE.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
-    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
-
-    # Graph mode is rejected until the Ascend walk kernel is capturable, and
-    # must fail before delegating to the parent manager.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.vllm_config = object()
+    speculator.device = torch.device("cpu")
+    speculator.num_query_per_req = 6
+    speculator.attn_cg_support = SimpleNamespace(
+        min_cg_support=support.UNIFORM_BATCH if supports_full else support.NEVER,
+        min_cg_attn_backend="test_backend",
+    )
+    speculator.update_stream = object()
+    speculator.init_cudagraph_manager(mode)
+    expected = (
+        CUDAGraphMode.FULL_DECODE_ONLY
+        if not enforce_eager and supports_full and mode.decode_mode() == CUDAGraphMode.FULL
+        else CUDAGraphMode.NONE
+    )
+    create_manager.assert_called_once_with(
+        speculator.vllm_config,
+        speculator.device,
+        expected,
+        decode_query_len=6,
+    )
+    assert manager.speculator is speculator
+    assert manager.update_stream is speculator.update_stream
 
 
 def test_greedy_walk_contract_reference():
