@@ -7,10 +7,20 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.compilation.backends import set_model_tag
+from vllm.model_executor.layers.attention.attention import Attention
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.worker.v2 import attn_utils
+
+
+def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
+    from vllm_ascend.attention import attention_v1
+
+    monkeypatch.setattr(attention_v1, "is_minimax_m3_fp8_kv_cache", lambda _config: True)
+    assert attention_v1.AscendAttentionBackend.get_supported_kernel_block_sizes() == [64, 128]
+    assert AscendFlashAttentionBackend.get_supported_kernel_block_sizes() == [64, 128]
 
 
 @pytest.fixture
@@ -45,13 +55,69 @@ def select_flash_attn(monkeypatch):
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
 
-    def select(config, selector):
+    def select(config, selector, tag="dflash_head"):
         monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
-        with set_model_tag("dflash_head"):
+        with monkeypatch.context() as context:
+            context.setattr("vllm.compilation.backends.model_tag", tag)
             backend = platform.NPUPlatform.get_attn_backend_cls(None, selector)
         return backend == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
     return select, profile
+
+
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_minimax_m3_dspark_selects_flash_attn_for_eager_and_graph_drafts(
+    select_flash_attn, dflash2_config, architecture, enforce_eager
+):
+    select, _ = select_flash_attn
+    config = dflash2_config
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.enforce_eager = enforce_eager
+    spec.target_model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture]))
+    spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+
+    assert select(config, selector, "dspark_head")
+    assert not select(config, selector, "backbone")
+    assert not select(config, selector, "dflash_head")
+    assert not select(config, selector._replace(kv_cache_dtype="fp8"), "dspark_head")
+    spec.draft_model_config.architectures = ["DFlash2DraftModel"]
+    assert not select(config, selector, "dspark_head")
+    spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    spec.target_model_config.hf_config.architectures = ["OtherModel"]
+    assert not select(config, selector, "dspark_head")
+
+
+@pytest.mark.parametrize("draft_architecture", ["DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"])
+def test_native_minimax_dspark_flash_attn_retains_eager_topology_guards(
+    select_flash_attn, dflash2_config, draft_architecture
+):
+    select, _ = select_flash_attn
+    config = dflash2_config
+    config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.target_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForConditionalGeneration"])
+    )
+    spec.draft_model_config.architectures = [draft_architecture]
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(config, selector, "dspark_head")
+    assert not select(config, selector, "backbone")
+    assert not select(config, selector._replace(kv_cache_dtype="fp8"), "dspark_head")
+    spec.enforce_eager = False
+    assert not select(config, selector, "dspark_head")
+    spec.enforce_eager = True
+    for field in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size"):
+        setattr(config.parallel_config, field, 2)
+        assert not select(config, selector, "dspark_head")
+        setattr(config.parallel_config, field, 1)
+    spec.enable_adaptive_verification = True
+    assert not select(config, selector, "dspark_head")
 
 
 def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
@@ -280,3 +346,32 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
     assert ops.flash_attn_metadata.call_count == len(geometries)
     assert ops.flash_attn.call_count == 2 * len(geometries)
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+def test_flash_attn_draft_does_not_inherit_target_quantized_page_padding(monkeypatch, num_kv_heads):
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    layer.attn_type = AttentionType.DECODER
+    layer.attn_backend = AscendFlashAttentionBackend
+    layer.kv_cache_dtype = "bfloat16"
+    layer.kv_cache_torch_dtype = torch.bfloat16
+    layer.sliding_window = 1024
+    layer.num_kv_heads = num_kv_heads
+    layer.head_size = layer.head_size_v = 128
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=32768),
+    )
+    with pytest.raises(AssertionError):
+        _ = layer.get_kv_cache_spec(config).page_size_bytes
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+
+    assert spec.page_size_bytes == 128 * num_kv_heads * 128 * 2 * 2
+    assert spec.page_size_padded is None
+    assert config.cache_config.skip_page_size_padded == 32768
