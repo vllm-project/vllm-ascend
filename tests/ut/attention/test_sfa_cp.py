@@ -1433,6 +1433,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
     def fake_base_init(self, *args, **kwargs) -> None:
         self.dcp_size = 2
         self.kernel_block_size = 128
+        self.nope = False
 
     kv_cache_spec = SimpleNamespace(block_size=128)
     for pcp_size, expected_num_reqs in ((1, 5), (2, 9)):
@@ -1598,6 +1599,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
 
 def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.qk_rope_head_dim = 64
     impl.enable_sparse_sfa_turboquant = False
     impl.dcp_group = Mock()
     packed = torch.randn(2, 128, 1, 576)

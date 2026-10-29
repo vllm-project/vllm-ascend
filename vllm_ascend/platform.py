@@ -51,10 +51,10 @@ from vllm_ascend.utils import (
     get_dsv4_compress_ratio,
     bootstrap_custom_op_env,
     check_kv_extra_config,
+    enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
     model_uses_kpool_indexer,
-    model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
@@ -1584,10 +1584,9 @@ def _downgrade_swa_bounded_replay(vllm_config: VllmConfig, ascend_config) -> Non
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     cache_config = vllm_config.cache_config
-    model_config = vllm_config.model_config
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
-    use_sparse = model_uses_sfa_sparse(model_config)
+    use_sparse = enable_sfa(vllm_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size

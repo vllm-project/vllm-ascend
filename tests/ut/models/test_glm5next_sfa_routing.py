@@ -11,7 +11,7 @@ import vllm_ascend.attention.indexer_kpool as backend_module
 import vllm_ascend.platform as platform
 from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, DeviceAdaptorFamily
-from vllm_ascend.utils import enable_sfa, model_uses_sfa_sparse
+from vllm_ascend.utils import enable_sfa, enable_sfa_dcp_replicated_indexer, model_uses_sfa_sparse
 
 
 @pytest.mark.parametrize("kpool", [False, True])
@@ -48,12 +48,16 @@ def test_kpool_without_sparse_main_attention_is_not_sfa(has_index_topk, has_comp
         config.index_topk = 2048
     if has_compress_ratios:
         config.compress_ratios = [4]
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config))
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=config),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+    )
 
     assert not enable_sfa(vllm_config)
+    assert not enable_sfa_dcp_replicated_indexer(vllm_config)
 
 
-@pytest.mark.parametrize("mode", ["310p", "dcp", "pcp_dcp"])
+@pytest.mark.parametrize("mode", ["310p", "dsa_dcp"])
 def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     monkeypatch.setattr(
         backend_module,
@@ -67,12 +71,13 @@ def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=2 if mode == "pcp_dcp" else 1,
-                decode_context_parallel_size=2 if mode in {"dcp", "pcp_dcp"} else 1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=2 if mode == "dsa_dcp" else 1,
             )
         )
     )
-    with pytest.raises(NotImplementedError, match="requires Ascend|does not support DCP"):
+    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: mode == "dsa_dcp")
+    with pytest.raises(NotImplementedError, match="requires Ascend|does not yet support DSA-CP"):
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 

@@ -16,8 +16,8 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolSpec,
     AscendIndexerKPoolTailSpec,
-    AscendMLAAttentionSpec,
 )
 
 
@@ -103,9 +103,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         static_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
-        return AscendMLAAttentionSpec(
+        return AscendIndexerKPoolSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
@@ -113,6 +112,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
+            dcp_replication_size=vllm_config.parallel_config.decode_context_parallel_size,
             **ratio_kwargs,
         )
 

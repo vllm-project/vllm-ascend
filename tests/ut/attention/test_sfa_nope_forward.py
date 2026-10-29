@@ -24,6 +24,52 @@ def mock_scatter_nd_update(monkeypatch):
     monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
 
 
+@pytest.mark.parametrize("a5", [False, True])
+@pytest.mark.parametrize("return_lse", [False, True])
+def test_nope_attention_bounds_dummy_query_lengths_to_query_capacity(monkeypatch, a5, return_lse):
+    query = torch.zeros(6, 2, 128)
+    cache = torch.zeros(1, 128, 1, 128)
+    indices = torch.full((6, 1, 2051), -1, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        block_size=128,
+        block_table=torch.zeros(2, 1, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 6, 12], dtype=torch.int32),
+        seq_lens=torch.zeros(2, dtype=torch.int32),
+        smla_metadata=torch.zeros(1024, dtype=torch.int32) if a5 else None,
+        smla_topk_length=torch.zeros(6, 1, dtype=torch.int32),
+        smla_valid_mask=torch.ones(6, 1, dtype=torch.bool),
+        smla_sinks=torch.ones(2),
+    )
+    output = torch.full_like(query, torch.nan)
+    operator = MagicMock(
+        return_value=(output, torch.zeros(1, 6, 2)) if a5 else (output, torch.zeros(2, 6, 1), torch.ones(2, 6, 1))
+    )
+    plan = MagicMock()
+    monkeypatch.setattr(sparse_mla, "build_smla_metadata", plan)
+    if a5:
+        monkeypatch.setattr(sparse_mla, "sparse_flash_mla", operator)
+    else:
+        monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", operator, raising=False)
+    for query_ends in ([6, 12], [3, 12]):
+        metadata.query_start_loc[1:].copy_(torch.tensor(query_ends))
+        original_lengths = metadata.query_start_loc.clone()
+        result = sparse_mla.sparse_mla(query, cache, indices, metadata, 1.0, return_lse=return_lse, sparse_mode=0)
+        kwargs = operator.call_args.kwargs
+        expected = torch.tensor([query_ends[0], 6], dtype=torch.int32)
+        if a5:
+            torch.testing.assert_close(kwargs["cu_seqlens_q"], torch.cat((torch.zeros(1, dtype=torch.int32), expected)))
+            assert plan.call_args.args[-2] is kwargs["cu_seqlens_q"]
+        else:
+            torch.testing.assert_close(kwargs["actual_seq_lengths_query"], expected)
+        torch.testing.assert_close(metadata.query_start_loc, original_lengths)
+        if return_lse:
+            assert result[0].eq(0).all()
+            if a5:
+                torch.testing.assert_close(result[1], torch.ones(6, 2, 1))
+            else:
+                assert result[1].isneginf().all()
+
+
 @pytest.mark.parametrize("block_size", [128, 640])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])

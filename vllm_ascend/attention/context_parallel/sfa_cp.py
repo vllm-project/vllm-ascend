@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
@@ -32,12 +33,14 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.sfa_v1 import (
+    SMLA_DEFAULT_SINK_VALUE,
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     SFAForwardContext,
     SparseMLAMetadataState,
     needs_pcp_kv_gather,
+    sparse_mla,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -65,6 +68,23 @@ from vllm_ascend.weight_switch import (
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _get_sfa_indexer_output_width(vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor | None = None) -> int:
+    """Include the KPool tail and any padding in a shared MTP index buffer."""
+    for config in (
+        getattr(vllm_config.model_config, "hf_text_config", None),
+        getattr(vllm_config.model_config, "hf_config", None),
+    ):
+        index_topk = getattr(config, "index_topk", None)
+        if isinstance(index_topk, int) and index_topk > 0:
+            index_kpool = getattr(config, "index_kpool", 1)
+            output_padding = index_kpool - 1 if isinstance(index_kpool, int) and index_kpool > 1 else 0
+            output_width = index_topk + output_padding
+            if topk_indices_buffer is not None:
+                output_width = max(output_width, topk_indices_buffer.shape[-1])
+            return output_width
+    raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
 
 
 class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
@@ -443,6 +463,7 @@ class DCPContext:
     kv_gather_block_ids: torch.Tensor | None = None
     kv_gather_block_table: torch.Tensor | None = None
     gather_context: DCPGatherContext | None = None
+    smla_sinks: torch.Tensor | None = None
 
 
 @dataclass
@@ -928,6 +949,16 @@ class AscendSFADCPMetadataBuilder(
             supports_dcp_with_varlen,
         )
         self.use_dcp = is_dcp_enabled()
+        self.dcp_smla_sinks = None
+        if self.nope:
+            # Preserve the non-DCP sink mass when merging D shards. Allocate
+            # enough heads for TP query gathering; PCP-only DCP takes a slice.
+            self.dcp_smla_sinks = torch.full(
+                (self.model_config.hf_text_config.num_attention_heads,),
+                SMLA_DEFAULT_SINK_VALUE - math.log(self.dcp_size),
+                dtype=torch.float32,
+                device=device,
+            )
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -1100,6 +1131,14 @@ class AscendSFADCPMetadataBuilder(
             compact_block_table.unsqueeze(-1)
             + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
         ).reshape(dcp_block_table.shape[0], -1)
+        if getattr(self, "nope", False) and self.blocks_per_phys_block > 1:
+            # DCP interleaves whole scheduler pages, not their 128-token
+            # operator subpages. Keep each owner's subpages together.
+            remapped_block_table = (
+                remapped_block_table.view(dcp_block_table.shape[0], -1, self.blocks_per_phys_block, self.dcp_size)
+                .transpose(2, 3)
+                .reshape(dcp_block_table.shape[0], -1)
+            )
         return valid_block_ids, remapped_block_table.to(torch.int32)
 
     def _build_with_metadata_view(
@@ -1164,6 +1203,7 @@ class AscendSFADCPMetadataBuilder(
             seq_lens=local_seq_lens,
             kv_gather_block_ids=kv_gather_block_ids,
             kv_gather_block_table=kv_gather_block_table,
+            smla_sinks=getattr(self, "dcp_smla_sinks", None),
         )
         metadata.num_decodes = num_decodes
         metadata.num_decode_tokens = num_decode_tokens
@@ -1248,6 +1288,12 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             compact_block_table.unsqueeze(-1)
             + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
         ).reshape(dcp_block_table.shape[0], -1)
+        if getattr(self, "nope", False) and self.blocks_per_phys_block > 1:
+            remapped_block_table = (
+                remapped_block_table.view(dcp_block_table.shape[0], -1, self.blocks_per_phys_block, self.dcp_size)
+                .transpose(2, 3)
+                .reshape(dcp_block_table.shape[0], -1)
+            )
         return valid_block_ids, remapped_block_table.to(torch.int32)
 
     def _build_pcp_ordered_indexer_slot_mapping(
@@ -1384,17 +1430,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._dcp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
         if self._dcp_interleave_size <= 0:
             raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self._dcp_interleave_size}")
-        self._dcp_index_topk = 0
-        for config in (
-            getattr(self.vllm_config.model_config, "hf_text_config", None),
-            getattr(self.vllm_config.model_config, "hf_config", None),
-        ):
-            index_topk = getattr(config, "index_topk", None)
-            if isinstance(index_topk, int) and index_topk > 0:
-                self._dcp_index_topk = index_topk
-                break
-        if self._dcp_index_topk <= 0:
-            raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+        self._dcp_index_topk = _get_sfa_indexer_output_width(self.vllm_config, self.topk_indices_buffer)
         device = self.q_proj.weight.device
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
@@ -1454,7 +1490,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert valid_block_ids is not None and block_table is not None
         kv = _index_select_kv_blocks(kv_cache[0], valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.uses_packed_sfa_main_cache:
+        if self.uses_packed_sfa_main_cache or self.qk_rope_head_dim == 0:
             # Packed SFA formats store nope, rope, and quantization data in one
             # SFA KV cache. The remaining cache entries belong to the indexer
             # and must not participate in the DCP SFA KV all-gather.
@@ -1531,7 +1567,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         topk_count = topk_indices.shape[-1]
         if topk_count > self._dcp_index_topk:
             raise RuntimeError(
-                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
+                "topk_indices last dimension "
+                f"({topk_count}) exceeds the configured indexer output width ({self._dcp_index_topk})."
             )
         if topk_indices.numel() == 0:
             return topk_indices
@@ -1856,6 +1893,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # its local Q heads/tokens directly. In particular, DSA-CP keeps
             # its token shard local; no Q all-gather, sparse-index remap, LSE,
             # or output all-to-all merge is required.
+            if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+                return sparse_mla(
+                    ql_nope,
+                    gathered_kv_cache[0],
+                    topk_indices,
+                    replace(attn_metadata, block_table=block_table),
+                    self.scale,
+                )
             attn_output = DeviceOperator.execute_sparse_flash_attention_process(
                 self,
                 ql_nope,
@@ -1896,6 +1941,24 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             gather_context,
             keep_view=not enable_sfa_dcp_force_tmajor_restore(),
         )
+        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+            local_metadata = replace(
+                attn_metadata,
+                block_table=dcp_context.block_table,
+                seq_lens=dcp_context.seq_lens,
+            )
+            sinks = dcp_context.smla_sinks
+            sfa_output, softmax_lse = sparse_mla(
+                ql_nope,
+                kv_cache[0],
+                topk_indices,
+                local_metadata,
+                self.scale,
+                sparse_mode=0,
+                return_lse=True,
+                sinks=None if sinks is None else sinks[: ql_nope.shape[1]],
+            )
+            return self._merge_dcp_outputs(sfa_output, softmax_lse, dsa_cp_context).to(sfa_output.dtype)
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
