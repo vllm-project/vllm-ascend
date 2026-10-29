@@ -62,9 +62,12 @@
 #       Set --additional-config '{"enable_balance_scheduling": true}' or
 #       set environmental variable VLLM_ASCEND_BALANCE_SCHEDULING=1 (deprecated).
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/29721
+#       https://github.com/vllm-project/vllm/pull/29721 (auto-closed as stale;
+#       RFC https://github.com/vllm-project/vllm/issues/29722 closed as not planned)
 #    Future Plan:
-#       Remove this patch when vLLM merge the PR.
+#       Keep the patch while upstream declines the feature. Remove it if a new
+#       upstream balance-scheduling effort lands or vLLM exposes a scheduler
+#       extension point that makes copying `Scheduler.schedule()` unnecessary.
 #
 # ** 2. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
