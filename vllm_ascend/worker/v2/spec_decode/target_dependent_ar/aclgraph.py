@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
+from dataclasses import fields, replace
 from typing import Any
 
 import torch
@@ -17,9 +18,8 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import cudagraph_utils as speculator_graphs
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -42,6 +42,8 @@ from vllm_ascend.worker.v2.utils import communicator_switch
 
 class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     """ACL graph manager for autoregressive speculative decoding."""
+
+    _capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]]
 
     def __init__(
         self,
@@ -86,6 +88,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        specialize_spec_tokens: bool = False,
     ) -> None:
         """Capture ACL graphs for autoregressive speculative decoding."""
 
@@ -101,6 +104,36 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     progress_bar_desc=progress_bar_desc,
                 )
                 return
+
+            # Legacy graph-update pools are keyed only by token count. Capture
+            # their maximum-K graph and fall back to eager for other lengths.
+            if specialize_spec_tokens and use_updatable_graph(self.speculator.attn_backend):
+                speculative_config = self.vllm_config.speculative_config
+                assert speculative_config is not None
+                dense_schedule = speculator_graphs.build_dynamic_sd_schedule_lookup(
+                    speculative_config.num_speculative_tokens_per_batch_size,
+                    vllm_max_batch_size=self.max_num_reqs,
+                    vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+                )
+                draft_lengths = sorted(set(dense_schedule) - {0, 1}, reverse=True)
+                self._capture_descs = {
+                    mode: [
+                        speculator_graphs.SpeculatorBatchDescriptor(
+                            **{
+                                field.name: getattr(desc, field.name)
+                                for field in fields(desc)
+                                if field.name != "num_speculative_tokens"
+                            },
+                            num_speculative_tokens=k,
+                        )
+                        for desc in descs
+                        # clear_graphs() keeps capture descriptors for recapture.
+                        for k in (
+                            [desc.num_speculative_tokens] if hasattr(desc, "num_speculative_tokens") else draft_lengths
+                        )
+                    ]
+                    for mode, descs in self._capture_descs.items()
+                }
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
                 num_tokens = desc.num_tokens
@@ -119,23 +152,45 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
-                    # vLLM #58275 makes mixed FULL graphs capture prefill kernels
-                    # by bounding the dummy query length to the capture
-                    # descriptor.
                     max_query_len=desc.max_query_len or desc.uniform_token_count,
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
-                    BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
+                    replace(desc, cg_mode=cg_mode, num_reqs=num_reqs),
                     num_tokens_across_dp,
                     seq_lens_cpu_upper_bound,
-                    # vLLM #60335 added `num_speculative_steps` on main.
-                    *(self.speculator.num_speculative_steps,),
+                    num_speculative_steps=getattr(
+                        desc, "num_speculative_tokens", self.vllm_config.num_speculative_tokens
+                    ),
                 )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
+
+    def specialize_spec_tokens(
+        self, desc: BatchExecutionDescriptor, num_speculative_tokens: int
+    ) -> BatchExecutionDescriptor:
+        """Select an entire decode graph with the requested draft length."""
+        if desc.cg_mode != CUDAGraphMode.FULL:
+            return desc
+        if hasattr(desc, "num_speculative_tokens"):
+            specialized = replace(desc, num_speculative_tokens=num_speculative_tokens)
+        else:
+            specialized = speculator_graphs.SpeculatorBatchDescriptor(
+                **{field.name: getattr(desc, field.name) for field in fields(desc)},
+                num_speculative_tokens=num_speculative_tokens,
+            )
+        if specialized in self.graphs:
+            return specialized
+        # An unspecialized graph contains the configured maximum-K loop.
+        if (
+            not hasattr(desc, "num_speculative_tokens")
+            and desc in self.graphs
+            and num_speculative_tokens == self.vllm_config.num_speculative_tokens
+        ):
+            return desc
+        return replace(specialized, cg_mode=CUDAGraphMode.NONE)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
@@ -148,10 +203,14 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
 
         attn_backend = self.speculator.attn_backend
         draft_vllm_config = self.speculator.draft_vllm_config
+        runtime_kwargs = {}
+        if hasattr(desc, "num_speculative_tokens"):
+            runtime_kwargs["num_speculative_steps"] = desc.num_speculative_tokens
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
             self.is_draft_model_prefill,
+            **runtime_kwargs,
         )
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, draft_attn_metadatas)
@@ -202,12 +261,18 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         return ret
 
     def _updatable_graph_replay(self, desc, draft_attn_metadatas):
+        if not draft_attn_metadatas or not draft_attn_metadatas[0]:
+            raise RuntimeError("Draft attention metadata is required for ACL graph replay")
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
+        runtime_kwargs = {}
+        if hasattr(desc, "num_speculative_tokens"):
+            runtime_kwargs["num_speculative_steps"] = desc.num_speculative_tokens
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
             draft_attn_metadatas[0],
             self.is_draft_model_prefill,
+            **runtime_kwargs,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
         self.update_stream.wait_stream(torch.npu.current_stream())

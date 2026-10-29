@@ -628,6 +628,7 @@ def test_capture_multi_step_captures_decode():
     speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 3
+    speculator.speculative_config = SimpleNamespace(uses_dynamic_speculative_decoding=lambda: False)
     with (
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
