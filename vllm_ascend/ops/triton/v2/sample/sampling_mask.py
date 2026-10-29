@@ -80,14 +80,7 @@ def sampling_mask_from_logits_npu(
     with each count bounded by rows_per_request and its logits span.
     Compact IDs remain zero-width to use upstream's exact packed-mask fallback.
     """
-    if not isinstance(rows_per_request, int) or rows_per_request < 1:
-        raise ValueError("rows_per_request must be a positive integer")
-    if logits.ndim != 2 or num_sampled_tokens.ndim != 1:
-        raise ValueError("expected 2-D logits and 1-D num_sampled_tokens")
-
     num_reqs = num_sampled_tokens.shape[0]
-    if cu_num_logits.ndim != 1 or cu_num_logits.shape[0] < num_reqs + 1:
-        raise ValueError("cu_num_logits must contain a row offset per request plus end")
     if logits.stride(1) != 1:
         logits = logits.contiguous()
 

@@ -2,160 +2,162 @@
 
 ## Description
 
-This operator packs the finite support of processed logits into request-major
-sampling masks on Ascend. A request can commit multiple tokens during speculative
-decoding; each committed token needs its own source logits row and output mask.
-Unused output slots contain zero masks and counts.
-
+- **Function**: identifies finite logits for committed tokens, packs the boolean
+  keep mask into request-major output rows, and counts the kept vocabulary entries.
 - **Python entry point**: `sampling_mask_from_logits_npu` in
   `vllm_ascend/ops/triton/v2/sample/sampling_mask.py`.
 - **Triton kernel**: `_pack_sampling_mask_kernel_ascend`.
 - **Integration**: `vllm_ascend/patch/worker/patch_v2/patch_triton.py` binds the
-  wrapper as the class method `SamplingMaskTensors.from_logits` for Model Runner V2.
+  wrapper directly as `SamplingMaskTensors.from_logits`.
 
-For request `r`, reserved output slot `s`, and vocabulary index `i`:
+For request `r`, output slot `s` and vocabulary index `i`, the keep condition is:
 
 ```text
 output_row = r * rows_per_request + s
 source_row = cu_num_logits[r] + s
 is_active = s < num_sampled_tokens[r]
 keep[output_row, i] = is_active and isfinite(logits[source_row, i])
+```
 
+The output bit layout is:
+
+```text
 packed_mask[output_row, i // 8] bit (i % 8) = keep[output_row, i]
 counts[output_row] = sum_i keep[output_row, i]
 ```
 
-This is a logical definition: inactive slots do not read their computed source
-row. The load predicate combines the vocabulary bound with `is_active`; masked
-lanes receive negative infinity and fail the finite-value check. This protects
-inactive slots without corresponding logits rows, including empty trailing spans.
-
-Each byte packs eight consecutive vocabulary IDs in little-bit order. NaN,
-positive/negative infinity and vocabulary-tail lanes contribute no bits or counts.
-The operator does not truncate supports to exactly top-k: ties retained by
-upstream processing can produce more than k finite entries.
-
-## Parameters and outputs
-
-The class-method calling convention is:
-
-```python
-SamplingMaskTensors.from_logits(
-    logits,
-    cu_num_logits,
-    num_sampled_tokens,
-    max_num_kept,
-    rows_per_request=1,
-)
-```
-
-Let N be the request count, L the logits-row count, V the vocabulary size, and
-R = `rows_per_request`.
-
-| Name | Input/Output/Attribute | Shape | Data type | Description |
-| --- | --- | --- | --- | --- |
-| `logits` | Input | `[L, V]` | floating point | Processed logits; L need not equal N or N times R. |
-| `cu_num_logits` | Input | `[N + 1]` or longer | integer | Cumulative source-row offsets; chunk metadata can contain nonzero offsets into shared logits. |
-| `num_sampled_tokens` | Input | `[N]` | integer | Committed-token count per request, selecting active slots. |
-| `max_num_kept` | Attribute | scalar | Python int | Accepted for upstream API compatibility; compact IDs are not generated on this path. |
-| `rows_per_request` | Attribute | scalar | Python int | Positive reserved output slots per request; defaults to 1. |
-| `token_ids` | Output | `[N * R, 0]` | int32 | Zero-width compact-ID buffer selecting exact packed-mask decoding. |
-| `packed_mask` | Output | `[N * R, ceil(V / 8)]` | uint8 | Request-major supports, with zero inactive rows and padding bits. |
-| `counts` | Output | `[N * R]` | int32 | Finite candidates per active row; zero for inactive rows. |
-| `vocab_size` | Output metadata | scalar | Python int | Original vocabulary size for unpacking. |
-| `rows_per_request` | Output metadata | scalar | Python int | R, retained for request-major decoding, concatenation and slicing. |
-
-The returned structure has five fields:
-
-```text
-SamplingMaskTensors(token_ids, packed_mask, counts, vocab_size, rows_per_request)
-```
-
-With R=3 and committed counts `[1, 3, 0]`, nine output rows are reserved: one
-active plus two zero rows for request 0, three active rows for request 1, and
-three zero rows for request 2. Active slots read from their own cumulative offset.
-
-This revision targets the request-major API exercised with vLLM 0.32.0. It does
-not select older three-argument calls or three-/four-field return structures
-based on whether `max_num_kept` is supplied.
+An inactive slot has a zero mask and count. Its logits load is masked and
+filled with negative infinity, so slots without a source row are not read.
+Vocabulary tails that are not divisible by eight do not contribute bits or counts.
 
 ## Data flow
 
-The kernel runs one Triton program per reserved output row and scans
-the source vocabulary in 4096-element blocks:
+The kernel processes one reserved output row per Triton program and scans its vocabulary in
+4096-element blocks:
 
 ```text
-output row -> request and slot index
-    -> device-side committed count and cumulative logits offset
-    -> active-slot and vocabulary-bound load mask
-    -> logits tile [4096], masked lanes filled with -inf
-    -> finite mask -> int32 mask
-        -> sum -> output-row count
-        -> reshape [512, 8] -> transpose [8, 512]
-        -> multiply by bit weights [8, 1] -> reduce axis 0
-        -> packed bytes [512]
+logits tile [4096]
+    -> finite and active mask [4096]
+    -> int32 sum -> row count
+    -> reshape [512, 8]
+    -> transpose [8, 512]
+    -> multiply by bit weights [8, 1]
+    -> reduce axis 0
+    -> packed bytes [512]
 ```
 
 The transpose makes the eight bits for 512 output bytes the reduction axis.
-Compile-time bit weights replace the earlier variable-shift loop. Explicit int32
-conversion before reduction provides correct counts on affected Triton-Ascend
-versions, where boolean reduction does not produce the required integer sum.
+The bit weights are compile-time constants, so the packing lowers to vector
+transpose, multiply, and reduction operations instead of a tensor-wide loop of
+variable shifts.
 
-The implementation names the byte width `_BITS_PER_BYTE`, constructed as
-`tl.constexpr(8)` for JIT access. Host-side packed-width calculation uses its
-integer value.
+The 4096-element block size also limits temporary storage. The original
+8192-element implementation can exceed Ascend UB capacity for a large
+non-contiguous vocabulary input.
 
-## Compact-ID fallback and stride handling
+## Parameters and outputs
 
-Compact token-ID generation remains unsupported on this path because its
+`num_output_rows = num_reqs * rows_per_request`. Source logits may have a
+different row count, with each request starting at its cumulative offset.
+
+| Name | Input/Output/Attribute | Shape | Data type | Description |
+| --- | --- | --- | --- | --- |
+| `logits` | Input | `[num_logits, vocab_size]` | floating point | Processed logits. NaN, `+inf`, and `-inf` entries are excluded. |
+| `cu_num_logits` | Input | `[num_reqs + 1]` or longer | integer | Cumulative source-row offsets; chunk offsets may start above zero. |
+| `num_sampled_tokens` | Input | `[num_reqs]` | integer | Committed-token count per request; slots below this count are active. |
+| `max_num_kept` | Attribute | scalar | Python int | Accepted for upstream compatibility; compact IDs remain unsupported. |
+| `rows_per_request` | Attribute/Output metadata | scalar | Python int | Reserved slots per request; defaults to 1 and is retained for decoding. |
+| `token_ids` | Output | `[num_output_rows, 0]` | int32 | Zero-width buffer selecting exact packed-mask decoding. |
+| `packed_mask` | Output | `[num_output_rows, ceil(vocab_size / 8)]` | uint8 | Little-bit-order packed finite-logit mask. |
+| `counts` | Output | `[num_output_rows]` | int32 | Number of set bits in each row. |
+| `vocab_size` | Output metadata | scalar | Python int | Original vocabulary size used when unpacking the mask. |
+
+The wrapper follows the upstream request-major calling convention:
+
+```text
+SamplingMaskTensors.from_logits(
+    logits, cu_num_logits, num_sampled_tokens, max_num_kept, rows_per_request=1)
+```
+
+It returns the five-field
+`SamplingMaskTensors(token_ids, packed_mask, counts, vocab_size, rows_per_request)`
+with zero-width `token_ids`. The upstream `tolists()` method consequently uses
+exact packed-mask decoding for non-empty rows.
+
+Compact token-ID generation is temporarily unsupported on Ascend because its
 `tl.cumsum`-based dynamic scatter can hang with Triton-Ascend 3.2.2. The wrapper
-returns zero-width `token_ids` and logs the fallback once per process. Upstream
-uses the exact packed mask for non-empty rows; CPU decoding may cost more than
-the compact path, but the decoded support remains exact.
+logs this compatibility fallback once per process. Sampling results are
+unchanged, but CPU decoding may be slower than the upstream compact path.
 
-The kernel accepts explicit row/column strides. To avoid excessive UB allocation
-from strided vocabulary loads, the wrapper makes a contiguous local copy when
-`logits.stride(1) != 1`. It does not replace or mutate the caller's view, and
-contiguous inputs pass through without a copy. Kernel-only profiling excludes
-this wrapper-level copy.
+## Stride handling
 
-## Constraints and graph replay
+The Triton kernel accepts explicit row and column strides, but strided loads
+along the vocabulary dimension can cause excessive UB allocation in the
+Triton-Ascend compiler. The wrapper therefore creates a contiguous local copy
+only when:
 
-- `logits` must be rank 2, sampled counts rank 1, and cumulative offsets rank 1
-  with at least N+1 entries. R must be a positive integer.
-- The caller supplies valid device metadata: offsets describe valid logits
-  spans, and each committed count lies between zero and both R and its span
-  length. Shape checks do not validate device values or synchronize to read them.
-- Output storage reserves N times R rows even when fewer tokens are committed.
-  A zero-request batch returns empty outputs without launching the kernel.
-- Vocabulary tails need not align to a tile or byte; tail bits are zero.
-- Offsets and counts are loaded on the device, so graph replay reads updated
-  metadata. R and tensor layouts remain fixed for that captured graph.
-- The operator is inference-only, has no backward path, and does not consume RNG.
-
-## Tests
-
-Packing/layout regression tests remain in the operator directory:
-
-```bash
-python -m pytest -v \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
+```text
+logits.stride(1) != 1
 ```
 
-Their 28 parameterized cases cover finite-support sizes, exact counts/decoding,
-ragged offsets, R=1/2/4, inactive and empty requests, non-contiguous inputs,
-nonfinite values, invalid R, concatenation/slicing, processed top-k/top-p support,
-and graph replay with updated metadata.
+Rebinding the local Python variable does not mutate or replace the caller's
+tensor. The caller keeps the same storage, shape, and strides. Contiguous
+inputs are passed through without a copy.
 
-The rejection-sampling integration test belongs with speculative decoding:
+## Constraints
+
+- The caller supplies rank-2 `logits`, rank-1 sampled counts with one entry per
+  request, and rank-1 cumulative offsets with at least `num_reqs + 1` entries.
+- The caller ensures positive integer `rows_per_request`, valid logits spans,
+  and committed counts bounded by both the reserved slots and the span length.
+  The wrapper follows upstream without extra type, rank or offset-length checks.
+- The operator is inference-only and has no backward path.
+- The vocabulary size may be non-aligned to both 4096 elements and eight bits;
+  masked tail lanes are supported.
+- The finite-logit count is accumulated as int32. The boolean keep mask is
+  explicitly converted before reduction because boolean reduction does not
+  provide the required integer count on affected Triton-Ascend versions.
+- The wrapper-level contiguous copy is separate from the Triton kernel launch;
+  kernel-only profiling does not include that copy cost.
+- The upstream request-major API and five-field return structure are required;
+  legacy three-/four-field interface adapters are not provided.
+- Empty batches skip the kernel launch. Device-side offsets/counts can change
+  during graph replay while the captured layouts and `rows_per_request` stay fixed.
+
+## Origin and differences
+
+- **Origin**: adapts vLLM Model Runner V2
+  `SamplingMaskTensors.from_logits` and its sampling-mask packing kernel for
+  Ascend NPU.
+- **Correctness adaptation**: casts the keep mask to int32 before summation so
+  `counts` contains the number of finite logits.
+- **Memory adaptation**: uses 4096-element tiles and makes only a strided
+  vocabulary dimension contiguous before launch to avoid UB overflow.
+- **Performance adaptation**: replaces per-element variable shifts and a
+  scalar-heavy `[512, 8]` axis-1 reduction with an `[8, 512]` vector reduction
+  using compile-time bit weights.
+- The packed bit order, finite-support counts and final decoded token IDs are
+  unchanged. Request-major row mapping additionally supports multiple committed
+  tokens; the compact `token_ids` optimization remains an exact bitmask fallback.
+
+## Test cases
+
+The NPU regression test covers empty, single-token, compact-width boundary,
+over-2048, full-vocabulary, randomly sparse, and inactive rows with a vocabulary
+size not divisible by eight. It also mirrors vLLM v0.29.0's processed top-k and
+top-p support test, retains the large stride-2 UB-overflow regression, adds NaN
+and positive infinity exclusions, checks exact counts and decoded token IDs,
+and verifies that the caller's non-contiguous `logits` view is unchanged.
+Request-major cases also cover ragged offsets, inactive slots, empty batches,
+concatenation/slicing and graph replay with updated device metadata.
 
 ```bash
-python -m pytest -v \
-  tests/e2e/pull_request/one_card/spec_decode/test_sampling_mask_rejection.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
 ```
 
-Its eight parameter combinations cover chunked/single-chunk verification, two
-seed settings and two logprob settings. Each verifies immediate rejection,
-second-position rejection and full acceptance using real Ascend kernels. Mask
-replay on/off must preserve committed tokens, counts, logprobs, ranks and global
-NPU RNG state, while emitted masks match processed-logit supports.
+The rejection-sampling integration test covers mask replay on/off, rejection
+outcomes, logprobs and RNG preservation, and is kept outside the operator suite:
+
+```bash
+pytest -sv tests/e2e/pull_request/one_card/spec_decode/test_sampling_mask_rejection.py
+```

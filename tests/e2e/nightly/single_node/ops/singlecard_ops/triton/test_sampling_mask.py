@@ -227,20 +227,6 @@ def test_sampling_mask_graph_replay_updates_row_metadata():
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("rows_per_request", [0, -1, None])
-def test_sampling_mask_invalid_rows_per_request(rows_per_request):
-    with pytest.raises(ValueError, match="positive integer"):
-        _from_logits(
-            torch.empty((0, 9), device="npu"),
-            torch.empty(0, dtype=torch.int32, device="npu"),
-            rows_per_request=rows_per_request,
-        )
-
-
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Requires Ascend A2/A3/A5",
-)
 def test_sampling_mask_matches_processed_top_k_top_p_support():
     """Mirror the processed-logits integration case from vLLM v0.29.0."""
     init_device_properties_triton()
