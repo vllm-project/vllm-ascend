@@ -189,8 +189,22 @@ provide a client whose `start_weight_update()` calls `/start_draft_weight_update
 its initialization, chunk updates, and finish calls remain the same.
 
 These APIs require a loaded draft model. Token-based speculation, such as n-gram
-lookup, has no draft weights to update. When using level 2 sleep, reload both
-models' discarded weights before resuming generation.
+lookup, has no draft weights to update. Capability discovery and the draft start
+entry point reject Model Runner V1 even when it inherits a draft-model getter.
+Only draft update sessions install the worker's current-vLLM-config context;
+target update sessions retain the caller's existing context.
+
+Level 2 sleep saves registered buffers from both models, including nonpersistent
+draft metadata, and restores them in place when the `weights` allocation wakes.
+A `kv_cache`-only wake leaves those backups pending. Parameter retention patterns
+also accept `draft.<parameter_name>` (or `draft.*`); shared target/draft parameters
+are retained once under the target name. This prefix is for sleep retention only,
+not for checkpoint tensor names passed to `update_weights`.
+
+Reload both models' discarded parameters before resuming generation, except for
+parameters explicitly preserved with `sleep_preserve_parameter_names`. Model
+loaders remain responsible for rebuilding derived tensors that are not registered
+buffers. Saving draft buffers does not replace loading the model's checkpoint.
 
 ### Pause and resume generation
 

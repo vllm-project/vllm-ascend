@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, set_current_vllm_config
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -36,6 +36,7 @@ class _Model(torch.nn.Module):
 @pytest.fixture
 def worker():
     worker = object.__new__(NPUWorker)
+    worker.use_v2_model_runner = True
     target, draft = _Model(), _Model()
     worker.vllm_config = SimpleNamespace(model_config=object(), parallel_config=SimpleNamespace())
     worker.speculative_config = SimpleNamespace(draft_model_config=object())
@@ -67,11 +68,13 @@ def test_ipc_draft_then_target_session(worker, packed):
     initialized, finalized = [], []
 
     def initialize(model):
-        assert get_current_vllm_config() is worker.vllm_config
+        if model is draft:
+            assert get_current_vllm_config() is worker.vllm_config
         initialized.append(model)
 
     def finalize(model, config):
-        assert get_current_vllm_config() is worker.vllm_config
+        if model is draft:
+            assert get_current_vllm_config() is worker.vllm_config
         finalized.append((model, config))
 
     with (
@@ -104,6 +107,7 @@ def test_ipc_draft_then_target_session(worker, packed):
             assert engine.model is target
             assert engine.model_config is target_config
             assert not worker._weight_update_active
+            assert not worker._weight_update_is_draft
             assert (target.weight.data_ptr(), draft.weight.data_ptr()) == original_storage
 
             torch.testing.assert_close(draft.weight, torch.full((3,), value if is_draft else 2.0))
@@ -130,6 +134,7 @@ def test_failed_draft_session_restores_target(worker, stage):
             else:
                 worker.update_weights({})
         assert not worker._weight_update_active
+        assert not worker._weight_update_is_draft
         assert engine.model is target
         assert engine.model_config is worker.vllm_config.model_config
         worker.start_weight_update()
@@ -188,9 +193,11 @@ def test_failed_finish_can_be_retried_for_the_same_draft(worker):
         ):
             worker.finish_weight_update()
         assert worker._weight_update_active
+        assert worker._weight_update_is_draft
         assert engine.model is worker.get_draft_model()
         worker.finish_weight_update()
     assert not worker._weight_update_active
+    assert not worker._weight_update_is_draft
     assert engine.model is worker.model_runner.model
     worker.model_runner.reset_lora_state.assert_not_called()
 
@@ -220,3 +227,71 @@ def test_shared_draft_parameter_keeps_its_target_reference(worker):
     assert draft.weight is shared
     assert worker.model_runner.model.weight is shared
     torch.testing.assert_close(shared, torch.ones(3))
+
+
+def test_v1_draft_getter_cannot_enable_draft_updates(worker):
+    getter = MagicMock(return_value=_Model())
+    worker.use_v2_model_runner = False
+    worker.model_runner = SimpleNamespace(get_draft_model=getter)
+    assert worker.get_draft_model() is None
+    assert not worker.supports_draft_weight_updates()
+    with (
+        patch.object(worker.weight_transfer_engine, "start_weight_update") as start,
+        pytest.raises(RuntimeError, match="require Model Runner V2"),
+    ):
+        worker.start_draft_weight_update()
+    getter.assert_not_called()
+    start.assert_not_called()
+    assert not worker._weight_update_active
+    assert not worker._weight_update_is_draft
+
+
+@pytest.mark.parametrize("runner", [None, SimpleNamespace(), SimpleNamespace(get_draft_model=None)])
+def test_get_draft_model_handles_runners_without_a_getter(worker, runner):
+    worker.model_runner = runner
+    assert worker.get_draft_model() is None
+    assert not worker.supports_draft_weight_updates()
+
+
+def test_target_session_preserves_the_callers_configuration_context(worker):
+    outer_config = SimpleNamespace()
+    seen = []
+
+    def record(*args):
+        seen.append(get_current_vllm_config())
+
+    with (
+        set_current_vllm_config(outer_config),
+        patch.object(worker.weight_transfer_engine, "start_weight_update", side_effect=record),
+        patch.object(worker.weight_transfer_engine, "update_weights", side_effect=record),
+        patch.object(worker.weight_transfer_engine, "finish_weight_update", side_effect=record),
+    ):
+        worker.start_weight_update()
+        worker.update_weights({})
+        worker.finish_weight_update()
+    assert seen == [outer_config] * 3
+    assert not worker._weight_update_is_draft
+
+
+def test_draft_session_sets_worker_configuration_only_for_each_phase(worker):
+    outer_config = SimpleNamespace()
+    seen = []
+
+    def record(*args):
+        seen.append(get_current_vllm_config())
+        assert worker.weight_transfer_engine.model is worker.get_draft_model()
+
+    with (
+        set_current_vllm_config(outer_config),
+        patch.object(worker.weight_transfer_engine, "start_weight_update", side_effect=record),
+        patch.object(worker.weight_transfer_engine, "update_weights", side_effect=record),
+        patch.object(worker.weight_transfer_engine, "finish_weight_update", side_effect=record),
+    ):
+        worker.start_draft_weight_update()
+        assert get_current_vllm_config() is outer_config
+        worker.update_weights({})
+        assert get_current_vllm_config() is outer_config
+        worker.finish_weight_update()
+        assert get_current_vllm_config() is outer_config
+    assert seen == [worker.vllm_config] * 3
+    assert not worker._weight_update_is_draft

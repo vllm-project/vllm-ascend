@@ -6,7 +6,8 @@
 The target-model matrix below checks reload correctness against startup loading.
 The V2 draft test separately checks repeated draft sessions, a subsequent target
 update, parameter values and storage identity, and speculative generation in both
-packed and unpacked modes. It uses a small local Qwen3 configuration in eager mode.
+packed and unpacked modes, with and without level-2 sleep. It uses a small local
+Qwen3 configuration in eager mode.
 
 Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
@@ -76,6 +77,7 @@ CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.45
 WEIGHT_NAME = "model.norm.weight"
 HIDDEN_SIZE = 256
+SLEEP_BUFFER_NAME = "_ipc_draft_sleep_probe"
 # Card the inference server (and the co-located trainer) runs on, as an absolute
 # device index inside the container: the harness hands the server
 # `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
@@ -231,9 +233,26 @@ def _snapshot(worker):
     return result
 
 
+def _prepare_draft_sleep_probe(worker):
+    draft = worker.get_draft_model()
+    # Alias an existing weights-pool allocation so level 2 really discards it.
+    # Do not retain this draft parameter: only the draft-buffer restore can
+    # recover its first element before the next IPC update replaces the tensor.
+    draft.register_buffer(SLEEP_BUFFER_NAME, draft.get_parameter(WEIGHT_NAME).detach()[:1], persistent=False)
+    worker.model_config.sleep_preserve_parameter_names = [
+        name for name in worker._get_sleep_parameters(worker.get_model()) if name != f"draft.{WEIGHT_NAME}"
+    ]
+
+
+def _snapshot_draft_sleep_probe(worker):
+    buffer = worker.get_draft_model().get_buffer(SLEEP_BUFFER_NAME)
+    return buffer.detach().cpu(), buffer.data_ptr()
+
+
 @pytest.mark.skipif(torch.npu.device_count() < 1, reason="Requires one NPU for colocated IPC transfer.")
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
-def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed):
+@pytest.mark.parametrize("sleep_level", [None, 2], ids=["awake", "sleep-level-2"])
+def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed, sleep_level):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     # The trusted local RPCs carry a callable snapshot and IPC rebuild arguments.
@@ -259,6 +278,7 @@ def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed):
         skip_tokenizer_init=True,
         load_format="dummy",
         dtype="bfloat16",
+        enable_sleep_mode=sleep_level is not None,
         enforce_eager=True,
         max_model_len=64,
         max_num_seqs=2,
@@ -270,6 +290,8 @@ def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed):
     )
     trainer = None
     try:
+        if sleep_level is not None:
+            llm.collective_rpc(_prepare_draft_sleep_probe)
         before = llm.collective_rpc(_snapshot)[0]
         client = _LocalClient(llm)
         source = _NormWeightSource()
@@ -280,12 +302,21 @@ def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed):
         )
         # Repeated draft sessions must leave the target model unchanged.
         for value in (2.0, 3.0):
+            if sleep_level is not None:
+                saved_buffer, pointer = llm.collective_rpc(_snapshot_draft_sleep_probe)[0]
+                llm.sleep(level=sleep_level)
+                llm.wake_up(tags=["weights"])
+                restored_buffer, restored_pointer = llm.collective_rpc(_snapshot_draft_sleep_probe)[0]
+                torch.testing.assert_close(restored_buffer, saved_buffer, rtol=0, atol=0)
+                assert restored_pointer == pointer
             source.value = value
             trainer.send_weights()
             target, draft = llm.collective_rpc(_snapshot)[0]
             torch.testing.assert_close(target[0], before[0][0], rtol=0, atol=0)
             torch.testing.assert_close(draft[0], torch.full_like(draft[0], value), rtol=0, atol=0)
             assert (target[1], draft[1]) == (before[0][1], before[1][1])
+            if sleep_level is not None:
+                llm.wake_up(tags=["kv_cache"])
 
         client.is_draft = False
         source.value = 5.0
