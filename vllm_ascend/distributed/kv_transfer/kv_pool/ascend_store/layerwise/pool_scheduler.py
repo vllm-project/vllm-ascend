@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -16,8 +17,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
+    is_glm5_next_cache,
+    validate_glm5_next_layerwise_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    RequestTracker,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -26,6 +30,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(KVPoolScheduler):
+    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        if self.glm5_next_reuse and request_tracker.layerwise_request_id is None:
+            request_tracker.layerwise_request_id = uuid4().hex
+        return super()._build_req_meta(request_tracker, *args, **kwargs)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -78,6 +87,7 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
 
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> None:
         self.layerwise_offload = False
+        self.glm5_next_reuse = False
         if self.use_layerwise_transfer:
             extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
             if kv_cache_config is not None and extra_config is not None:
@@ -92,11 +102,30 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
                         max(reuse_layout.layer_cache_specs) + 1,
                     )
                 self.layerwise_offload = reuse_layout.has_layer_reuse
+                validate_glm5_next_layerwise_reuse(vllm_config, reuse_layout)
+                self.glm5_next_reuse = self.layerwise_offload and is_glm5_next_cache(
+                    get_layerwise_kv_cache_specs(kv_cache_config)
+                )
             else:
                 self.layerwise_offload = build_layerwise_cache_layout(
                     self.num_layers,
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                 ).has_layer_reuse
+
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if self.glm5_next_reuse:
+            load_spec = self.load_specs.get(request.request_id)
+            restored_tokens = load_spec.kvpool_cached_tokens if load_spec is not None else 0
+            # Local hashes survive scratch reuse; their payload does not.
+            # Never admit a local hit whose recurrent endpoint is unavailable.
+            if restored_tokens < num_computed_tokens:
+                raise RuntimeError("GLM-5.3-Flash local prefix has no complete Memcache restore point")
+            if load_spec is not None:
+                # Private tail reconstruction can shorten a full external hit.
+                # Restore KDA at that exact endpoint, not the longer raw hit.
+                load_spec.kvpool_store_skip_tokens = restored_tokens
+        return result
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         if not self.use_layerwise:
@@ -127,6 +156,13 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.glm5_next_reuse:
+            # Probe the endpoint we can actually resume from. Trimming a full
+            # hit afterwards could select an earlier KDA checkpoint that was
+            # never produced by chunked prefill.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens

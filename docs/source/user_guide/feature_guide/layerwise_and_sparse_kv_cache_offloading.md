@@ -23,6 +23,10 @@ model families:
 
 Other sparse-attention models have not been validated.
 
+An experimental [GLM-5.3-Flash Prefill Memcache reuse implementation](../../developer_guide/Design_Documents/glm53_prefill_memcache_reuse.md)
+is available for isolated validation. It does not support the combined P/D
+deployment or sparse Decode path described below.
+
 ## 1. Preparation
 
 ### Prefill Nodes
