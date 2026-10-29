@@ -371,9 +371,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         :meth:`~RequestGuardStore.mark_finished` runs here so the last stamp /
         detect / append still see the same state. Sidecars + clear happen in
         :meth:`_reap_finished_requests`.
+
+        Also flushes ``rare_chars`` look-ahead (rc4 decides the held-back last
+        token at stream end) before the Store finished bit is set.
         """
         if not finished_req_ids:
             return
+        ids = [str(r) for r in finished_req_ids if r]
+        if ids and bool(self.runtime_config.detector_get("rare_chars", "enabled", False)):
+            for alert in self.detectors.finish_rare_chars(ids):
+                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
 
     def _current_wave(self) -> int:
@@ -496,6 +503,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
         if result.input_batch is not None:
             self._last_input_batch = result.input_batch
+        # Hook 2b: rare_chars from Guard-stashed logits (no API
+        # SamplingParams.logprobs). Must run before logits reuse /
+        # async after-sample deferral.
+        self._soft_fail(
+            "check_rare_chars",
+            lambda: self.check_rare_chars_from_stash(
+                sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
+                req_ids=result.req_ids_output_copy,
+            ),
+        )
         # Hook 3: mark_finished
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
@@ -554,6 +571,81 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
         self._soft_fail("check_before_sample", _run)
+
+    def check_rare_chars_from_stash(
+        self,
+        *,
+        sampled_token_ids: Any,
+        req_ids: list[str] | None = None,
+    ) -> None:
+        """After-sample: ``rare_chars`` from stashed pre-sample logits.
+
+        Uses sampler-side v35 Triton narrow collect (``_v35_partials`` /
+        ``_v35_finish`` → ``(top1, chosen)`` only — no full logprob table, no
+        ranks, no ``SamplingParams.logprobs``). Soft-fail wrapper is applied by
+        the caller.
+        """
+        # Lazy import avoids hooks ↔ processor cycle (hooks imports SamplePhaseResult).
+        from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
+
+        want_rare = bool(self.runtime_config.detector_get("rare_chars", "enabled", False))
+        if not want_rare:
+            # Drop any stale stash so logits are not retained across steps.
+            take_pre_sample_logits(self.runner)
+            return
+
+        logits = take_pre_sample_logits(self.runner)
+        if logits is None:
+            return
+
+        top1_lp, chosen_lp = self._narrow_collect_top1_chosen(logits, sampled_token_ids)
+        for alert in self.detectors.check_rare_chars(
+            logits=logits,
+            sampled_token_ids=sampled_token_ids,
+            req_ids=req_ids,
+            top1_logprobs=top1_lp,
+            chosen_logprobs=chosen_lp,
+        ):
+            self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
+
+    def _narrow_collect_top1_chosen(
+        self,
+        logits: Any,
+        sampled_token_ids: Any,
+    ) -> tuple[Any, Any]:
+        """Sampler-side narrow collect: ``(top1, chosen)`` from raw logits.
+
+        Returns ``(None, None)`` on failure so ``rare_chars`` can fall back to
+        its own portable collect path.
+        """
+        try:
+            import torch
+
+            from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
+                _flatten_sampled_token_ids,
+                top1_and_chosen_logprobs,
+            )
+
+            if not isinstance(logits, torch.Tensor) or logits.numel() == 0:
+                return None, None
+            rows = _flatten_sampled_token_ids(sampled_token_ids)
+            n = min(len(rows), int(logits.shape[0]))
+            token_ids_for_rows: list[int] = []
+            row_to_req: list[int] = []
+            for i in range(n):
+                ids = rows[i]
+                if not ids:
+                    continue
+                token_ids_for_rows.append(int(ids[-1]))
+                row_to_req.append(i)
+            if not token_ids_for_rows:
+                return None, None
+            row_idx = torch.tensor(row_to_req, dtype=torch.long, device=logits.device)
+            logits_rows = logits.index_select(0, row_idx)
+            tid_t = torch.tensor(token_ids_for_rows, dtype=torch.long, device=logits.device)
+            return top1_and_chosen_logprobs(logits_rows, tid_t)
+        except Exception:
+            return None, None
 
     def check_after_sample(
         self,

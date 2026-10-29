@@ -53,6 +53,8 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = []
+# Vendored rc4 rare_chars algorithm (keep upstream formatting).
+extend-exclude = ["vllm_ascend/observability/runtime_guard/detector/rare"]
 
 [tool.ruff.lint]
 select = [
