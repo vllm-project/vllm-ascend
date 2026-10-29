@@ -82,7 +82,7 @@ class VllmEplbAdaptor:
         super().__init__(**args)
         if hasattr(model, "language_model"):
             self.model = model.language_model
-            self.config = model.config.text_config
+            self.config = model.config.get_text_config()
         else:
             self.model = model
             self.config = model.config
