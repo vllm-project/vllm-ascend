@@ -974,6 +974,15 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
+def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
+    """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
+    return (
+        vllm_config.use_v2_model_runner
+        and vllm_config.parallel_config.decode_context_parallel_size == 1
+        and lmhead_tp_enable()
+    )
+
+
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
     """Row capacity every rank of the lmhead-TP group must agree on;
     cross-rank drift desyncs the collectives and hangs."""

@@ -1,0 +1,10 @@
+pr: 18236
+entries:
+  - category: performance
+    text: >-
+      Reduced unnecessary target LMHead padding using synchronized DP token
+      buckets and MTP draft LMHead padding using synchronized request bounds
+      in Model Runner V2 when LMHead TP is enabled and DCP is one. Keep MC2
+      dispatch/combine masks aligned with this V2 synchronization policy,
+      excluding padding rows during eager execution
+      and graph replay. Model Runner V1 behavior is unchanged.

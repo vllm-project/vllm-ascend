@@ -55,6 +55,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
+    requires_lmhead_dp_sync,
     update_cudagraph_capture_sizes,
     enable_sp,
     vllm_version_is,
@@ -742,8 +743,24 @@ class NPUPlatform(Platform):
             reserved_mc2_mask = get_mc2_mask()
             if reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
-                mc2_mask[:num_actual_tokens] = True
-                mc2_mask[num_actual_tokens:] = False
+                query_start_loc = None
+                if requires_lmhead_dp_sync(vllm_config) and attn_metadata:
+                    metadata = next(iter(attn_metadata.values()))
+                    query_start_loc = getattr(metadata, "query_start_loc_gpu", None)
+                    if query_start_loc is None:
+                        query_start_loc = getattr(metadata, "query_start_loc", None)
+                if query_start_loc is not None:
+                    # num_tokens may include graph/DP padding. Read the live
+                    # device boundary so replay also excludes padding rows;
+                    # do not freeze a Python token count during capture.
+                    torch.lt(
+                        torch.arange(padded_num_tokens, device=mc2_mask.device),
+                        query_start_loc[-1],
+                        out=mc2_mask,
+                    )
+                else:
+                    mc2_mask[:num_actual_tokens] = True
+                    mc2_mask[num_actual_tokens:] = False
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
