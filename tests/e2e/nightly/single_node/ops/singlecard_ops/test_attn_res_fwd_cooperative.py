@@ -61,7 +61,7 @@ def require_cooperative_custom_operator():
 )
 @torch.inference_mode()
 def test_attn_res_fwd_cooperative(
-    tokens, valid, hidden, with_add, with_norm, save_materialized, padded_bank, write_bank
+    tokens, valid, hidden, with_add, with_norm, save_materialized, padded_bank, write_bank, record_property
 ):
     # Cover score-only workers, multiple tasks per core, odd H, and full-row
     # output ownership. Every launched core joins the one readiness barrier.
@@ -110,11 +110,18 @@ def test_attn_res_fwd_cooperative(
     )
     torch_npu.npu.synchronize()
     torch.testing.assert_close(raw.cpu(), raw_ref, rtol=0, atol=0)
-    for actual, expected in [(output, output_ref)] + ([(materialized, mixture)] if save_materialized else []):
+    comparisons = [("output", output, output_ref)]
+    if save_materialized:
+        comparisons.append(("materialized", materialized, mixture))
+    for name, actual, expected in comparisons:
         error = (actual.float().cpu() - expected.float()).abs()
+        matched_ratio = (error <= (1 + expected.float().abs()) / 64).float().mean().item()
+        max_abs_error = error.max().item()
+        record_property(f"{name}_matched_ratio", matched_ratio)
+        record_property(f"{name}_max_abs_error", max_abs_error)
         assert torch.isfinite(actual).all()
-        assert (error <= (1 + expected.float().abs()) / 64).float().mean() >= 0.99
-        assert error.max() <= 1
+        assert matched_ratio >= 0.99
+        assert max_abs_error <= 1
     if not save_materialized:
         assert materialized.data_ptr() == output.data_ptr()
     if not with_add:
@@ -242,3 +249,43 @@ def test_attn_res_fwd_accepts_empty_batch(with_add):
     )
     for output in outputs:
         assert output.shape == prefix.shape and output.numel() == 0
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 4, 16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.int32])
+@pytest.mark.parametrize("argument", ["all", "prefix", "bank", "projection", "norm", "addend", "output_norm"])
+@torch.inference_mode()
+def test_attn_res_fwd_rejects_unsupported_dtype(tokens, dtype, argument):
+    hidden, valid = 512, 2
+    inputs = {
+        "prefix": torch.ones(tokens, hidden, device="npu", dtype=torch.bfloat16),
+        "bank": torch.ones(tokens, valid + 1, hidden, device="npu", dtype=torch.bfloat16),
+        "projection": torch.ones(1, hidden, device="npu", dtype=torch.bfloat16),
+        "norm": torch.ones(hidden, device="npu", dtype=torch.bfloat16),
+        "addend": torch.ones(tokens, hidden, device="npu", dtype=torch.bfloat16),
+        "output_norm": torch.ones(hidden, device="npu", dtype=torch.bfloat16),
+    }
+    for name in inputs:
+        if argument in ("all", name):
+            inputs[name] = inputs[name].to(dtype)
+    bank_before = inputs["bank"].clone()
+    message = {
+        "addend": "invalid addend",
+        "output_norm": "invalid output norm",
+    }.get(argument, "inputs must be BF16")
+    with pytest.raises(RuntimeError, match=message):
+        torch.ops._C_ascend.attn_res_fwd(
+            inputs["prefix"],
+            inputs["addend"],
+            inputs["bank"],
+            inputs["projection"],
+            inputs["norm"],
+            1e-5,
+            valid,
+            inputs["output_norm"],
+            1e-4,
+            valid,
+            True,
+        )
+    torch_npu.npu.synchronize()
+    torch.testing.assert_close(inputs["bank"], bank_before, rtol=0, atol=0)
