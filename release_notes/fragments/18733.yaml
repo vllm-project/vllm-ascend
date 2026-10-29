@@ -1,0 +1,5 @@
+pr: 18733
+entries:
+  - category: performance
+    text: Improved MRV2 grammar bitmask kernel performance on Ascend A2 for structured output decoding.
+    hardware: [A2]
