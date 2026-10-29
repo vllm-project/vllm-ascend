@@ -351,7 +351,6 @@ Workflows with a native GitHub cron trigger:
 | `schedule_doc_translate.yaml` | `workflow_dispatch` |
 | `schedule_e2e_upstream_test.yaml` | - |
 | `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
-| `schedule_main2main.yaml` | `workflow_dispatch` |
 | `schedule_stale_manage.yaml` | `issue_comment` |
 
 Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
@@ -361,6 +360,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 | `schedule_doc_getting_started_test.yaml` | PR path filter |
 | `schedule_e2e_test.yaml` | - |
 | `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_main2main.yaml` | - |
 | `schedule_nightly_test_310p.yaml` | - |
 | `schedule_nightly_test_a2.yaml` | - |
 | `schedule_nightly_test_a3.yaml` | - |
