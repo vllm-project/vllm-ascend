@@ -67,7 +67,8 @@ def _prepare_gdn_metadata_kernel(
             dst = tl.where(is_spec, group_row, -group_row - 1)
             begin = tl.load(layout + row * 2 + 1)
         else:
-            is_spec: tl.constexpr = NUM_SPEC > 0
+            all_spec: tl.constexpr = NUM_SPEC > 0
+            is_spec = all_spec
             dst = row
         if NUM_SPEC:
             tl.store(sequence_masks + row, active & is_spec)
