@@ -61,14 +61,13 @@ def _prepare_gdn_metadata_kernel(
         source_begin = begin
         seq_len = tl.load(seq_lens + row * SEQ_LEN_STRIDE, active, 0)
         start_block = tl.maximum((seq_len - 1) // BLOCK_SIZE, 0)
+        is_spec: tl.constexpr = NUM_SPEC > 0
         if MIXED_SPEC:
             group_row = tl.load(layout + row * 2)
             is_spec = group_row >= 0
             dst = tl.where(is_spec, group_row, -group_row - 1)
             begin = tl.load(layout + row * 2 + 1)
         else:
-            all_spec: tl.constexpr = NUM_SPEC > 0
-            is_spec = all_spec
             dst = row
         if NUM_SPEC:
             tl.store(sequence_masks + row, active & is_spec)
