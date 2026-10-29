@@ -1,0 +1,9 @@
+pr: 20040
+entries:
+  - category: bugfix
+    text: >-
+      Treat a fine-grained TP size of 1 as disabled for the lmhead, embedding and
+      mlp knobs, matching the oproj convention and vLLM's ParallelConfig semantics
+      where tp_size=1 means no sharding. Previously these knobs used a threshold of
+      0, so a size of 1 silently created a size-1 TP group; now 0 and 1 both disable
+      the knob.
