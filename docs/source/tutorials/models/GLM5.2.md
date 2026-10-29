@@ -55,23 +55,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
-
-Replace `{tag}` with a published tag compatible with the selected hardware
-and scenario before running these commands. Use the same image on every
-node in the deployment.
-
-**Step 1:** Download the Docker image
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:{tag}
-```
-
-**Step 2:** Start Docker container
-
-Select the `docker run` command for your hardware platform:
-
-Use the same compatible image digest on all nodes.
+Select an image for your hardware and start a container on each node.
+Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
 For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL configuration at `/etc/hccl_rootinfo.json` and `/etc/hixlep/` before mounting it into the containers.
 
@@ -80,7 +65,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -118,7 +103,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -162,7 +147,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -200,7 +185,7 @@ Changing a checkpoint does not transfer accuracy or performance validation
 from one model to the other. Keep thinking enabled for GLM-5.3.
 
 For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
-image tag and container mounts from Section 4. Use the same image on every
+image and container mounts from Section 4. Use the same image on every
 node in a deployment.
 
 <a id="glm-common-parameters"></a>
