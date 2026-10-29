@@ -63,7 +63,6 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
-    python3 -m pip uninstall -y triton-ascend triton && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
@@ -117,8 +116,8 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-    echo "Install triton-ascend..." && \
-    python3 -m pip install "$TRITON_ASCEND_URL" && \
+    # echo "Install triton-ascend..." && \
+    # python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
