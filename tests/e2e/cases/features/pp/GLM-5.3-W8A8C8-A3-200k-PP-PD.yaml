@@ -343,8 +343,9 @@ benchmarks:
     max_out_len: 1024
     batch_size: 24
     request_rate: 1.4
-    baseline: 877.3186
-    threshold: 0.97
+    # Minimum warmed throughput from runs 40834022871 and 40859196273.
+    baseline: 1089.6467
+    threshold: 0.95
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
