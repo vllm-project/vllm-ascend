@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -69,6 +70,7 @@ class TestMoECommMethod(TestBase):
         comm_impl.token_dispatcher.ep_rank_id = 0
         comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value="symm_buffer")
         comm_impl.mega_moe_symm_buffer = None
+        comm_impl._mega_moe_is_draft = False
         return comm_impl
 
     def tearDown(self):
@@ -80,8 +82,7 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     def test_mega_moe_symm_buffer_uses_mega_moe_max_tokens(self, mock_warning_once, mock_get_mc2_group):
         self.mock_ascend_config.mega_moe_max_tokens = 512
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
+        mock_mc2_group = SimpleNamespace(device_group="mc2_group")
         mock_get_mc2_group.return_value = mock_mc2_group
         comm_impl = self._make_fused_mc2_comm_for_buffer_init()
 
@@ -100,8 +101,7 @@ class TestMoECommMethod(TestBase):
         # mega_moe_max_tokens (32768) exceeds the absolute safe upper bound
         # (1024), so the P-node buffer must be clamped to that bound.
         self.mock_ascend_config.mega_moe_max_tokens = 32768
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
+        mock_mc2_group = SimpleNamespace(device_group="mc2_group")
         mock_get_mc2_group.return_value = mock_mc2_group
         comm_impl = self._make_fused_mc2_comm_for_buffer_init()
 
@@ -117,8 +117,7 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     def test_mega_moe_symm_buffer_uses_safe_capacity_for_d_node(self, mock_get_mc2_group, mock_warning_once):
         self.mock_ascend_config.mega_moe_max_tokens = 32768
-        mock_mc2_group = MagicMock()
-        mock_mc2_group.device_group = "mc2_group"
+        mock_mc2_group = SimpleNamespace(device_group="mc2_group")
         mock_get_mc2_group.return_value = mock_mc2_group
         comm_impl = self._make_fused_mc2_comm_for_buffer_init()
 
@@ -221,6 +220,10 @@ class TestMoECommMethod(TestBase):
             patch.object(FusedMC2CommImpl, "_get_token_dispatcher"),
             patch.object(FusedMC2CommImpl, "_get_prepare_finalize"),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config",
+                return_value=SimpleNamespace(model_config=SimpleNamespace(runner_type="generate")),
+            ),
             patch("vllm_ascend.ops.fused_moe.moe_utils.load_cann_mega_moe_ops", return_value=(MagicMock(), op)),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros"),
         ):
