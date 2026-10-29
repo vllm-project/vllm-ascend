@@ -41,7 +41,8 @@ def test_stable_gumbel_matches_fp64_reference():
 @pytest.mark.parametrize("use_triton", [False, True])
 @pytest.mark.parametrize("is_neox_style", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype):
+@pytest.mark.parametrize("mrope", [False, True])
+def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype, mrope):
     """Both NPU RoPE backends must write rotated context K, including key-only calls."""
     import vllm_ascend.ops.rotary_embedding as rope_module
     from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
@@ -54,12 +55,24 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
     positions = torch.tensor([2, 4, 7], device="npu")
     angles = torch.outer(torch.arange(16).float(), 10000.0 ** (-torch.arange(0, head_dim, 2).float() / head_dim))
     cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(device="npu", dtype=dtype)
-    rope = SimpleNamespace(
-        head_size=head_dim, rotary_dim=head_dim, is_neox_style=is_neox_style, use_mtp=False, cos_sin_cache=cache
-    )
+    rope: rope_module.AscendMRotaryEmbedding | rope_module.AscendRotaryEmbedding
+    if mrope:
+        rope = rope_module.AscendMRotaryEmbedding.__new__(rope_module.AscendMRotaryEmbedding)
+    else:
+        rope = rope_module.AscendRotaryEmbedding.__new__(rope_module.AscendRotaryEmbedding)
+    torch.nn.Module.__init__(rope)
+    rope.head_size = head_dim
+    rope.rotary_dim = head_dim
+    rope.is_neox_style = is_neox_style
+    rope.cos_sin_cache = cache
+    if isinstance(rope, rope_module.AscendMRotaryEmbedding):
+        rope.mrope_section = [11, 11, 10]
+        rope.mrope_interleaved = True
+    else:
+        rope.use_mtp = False
 
     def rotate(pos, query, key):
-        return rope_module.AscendRotaryEmbedding.forward_oot(rope, pos, query, key)
+        return rope.forward_oot(pos, query, key)
 
     caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(layers)]
     model = SimpleNamespace(
