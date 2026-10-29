@@ -52,19 +52,16 @@ class DecoderReplayState:
         capacity = round_up(config.scheduler_config.max_num_batched_tokens, config.parallel_config.tensor_parallel_size)
         self.keeps_rows = np.zeros(num_reqs, dtype=np.bool_)
         self.skipped_tail_np = np.zeros(num_reqs, dtype=np.bool_)
-        self._kv_floor: CpuGpuBuffer | None = None
-        if (
-            config.parallel_config.prefill_context_parallel_size == 1
-            and not enable_dsa_cp()
-            and config.compilation_config.cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
-        ):
-            self._kv_floor = CpuGpuBuffer(num_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        self._one_row_enabled = not enable_dsa_cp() and config.compilation_config.cudagraph_mode in (
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        self._kv_floor = CpuGpuBuffer(local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.rows = torch.zeros(capacity, dtype=torch.int64, device=device)
         self.positions = torch.zeros_like(self.rows)
         self.offsets = torch.zeros(local_reqs + 1, dtype=torch.int32, device=device)
         self.dropped_before = CpuGpuBuffer(local_reqs + 1, dtype=torch.int32, device=device, pin_memory=False)
         self.replay_start = torch.zeros(local_reqs, dtype=torch.int32, device=device)
-        self._pcp_replay_start = CpuGpuBuffer(local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.slots: torch.Tensor | None = None
         self.builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
@@ -73,7 +70,9 @@ class DecoderReplayState:
         self.dp_tokens: torch.Tensor | None = None
         self.replay_pcp_context: AscendPCPAttentionContext | None = None
 
-    def _pcp_kept_lengths(self, inputs: DecoderReplayInputs) -> tuple[np.ndarray, int, torch.Tensor] | None:
+    def _pcp_kept_lengths(
+        self, inputs: DecoderReplayInputs, global_kept: np.ndarray, follows: np.ndarray | None
+    ) -> tuple[np.ndarray, int, torch.Tensor] | None:
         context = inputs.pcp_context
         if context is None:
             return None
@@ -81,33 +80,31 @@ class DecoderReplayState:
         global_batch = context.global_batch
         num_global_reqs = global_batch.num_reqs
         global_lens = np.diff(global_batch.query_start_loc_np[: num_global_reqs + 1])
-        trim = (
-            global_batch.is_prefilling_np[:num_global_reqs]
-            & ~self.keeps_rows[global_batch.idx_mapping_np[:num_global_reqs]]
-        )
-        global_kept = np.where(trim, np.minimum(global_lens, self.layers.window), global_lens)
-        if not (global_kept < global_lens).any():
+        # A following chunk needs its read floor even when replay saves no rows.
+        force_replay = follows is not None and bool(follows.any())
+        if not (global_kept < global_lens).any() and not force_replay:
             return None
         num_padded = int(global_kept.sum())
-        if num_padded >= batch.num_tokens_after_padding:
+        if self.layers.sequence_parallel:
+            num_padded = round_up(num_padded, self.config.parallel_config.tensor_parallel_size)
+        if num_padded >= batch.num_tokens_after_padding and not force_replay:
             return None
 
+        global_starts = np.where(global_kept < global_lens, global_batch.seq_lens_np[:num_global_reqs] - global_kept, 0)
+        if force_replay:
+            global_starts = np.where(
+                follows,
+                np.maximum(global_starts, global_batch.num_computed_prefill_tokens_np[:num_global_reqs]),
+                global_starts,
+            )
         starts = np.zeros(self.keeps_rows.size, dtype=np.int32)
-        starts[global_batch.idx_mapping_np[:num_global_reqs]] = np.where(
-            global_kept < global_lens,
-            global_batch.seq_lens_np[:num_global_reqs] - self.layers.window,
-            0,
-        )
+        starts[global_batch.idx_mapping_np[:num_global_reqs]] = global_starts
         local_starts = starts[batch.idx_mapping_np[: batch.num_reqs]]
         local_lens = np.diff(batch.query_start_loc_np[: batch.num_reqs + 1])
         kept_lens = np.clip(batch.seq_lens_np[: batch.num_reqs] - local_starts, 0, local_lens)
-        self._pcp_replay_start.np[: batch.num_reqs] = local_starts
-        self._pcp_replay_start.copy_to_gpu(batch.num_reqs)
-        replay_start = torch.maximum(
-            inputs.encoder_replay_start[: batch.num_reqs],
-            self._pcp_replay_start.gpu[: batch.num_reqs],
-        )
-        return kept_lens, num_padded, replay_start
+        self._kv_floor.np[: batch.num_reqs] = local_starts
+        self._kv_floor.copy_to_gpu(batch.num_reqs)
+        return kept_lens, num_padded, self._kv_floor.gpu[: batch.num_reqs]
 
     def _build_replay_pcp_context(
         self, inputs: DecoderReplayInputs, global_kept_lens: np.ndarray
@@ -178,7 +175,7 @@ class DecoderReplayState:
                         builder.prepare_source_rope()
                         self.builders.append((group_id, group.layer_names, builder))
         self._gather(inputs, warmup=True)
-        if self._kv_floor is not None:
+        if self._one_row_enabled or self.config.parallel_config.prefill_context_parallel_size > 1:
             self._gather(inputs, kv_floor=self._kv_floor.gpu, warmup=True)
 
     def _gather(
@@ -222,43 +219,55 @@ class DecoderReplayState:
             return
         batch = inputs.batch
         num_reqs = batch.num_reqs
-        query_lens = np.diff(batch.query_start_loc_np[: num_reqs + 1])
-        pcp_replay = self._pcp_kept_lengths(inputs)
+        policy_batch = batch if inputs.pcp_context is None else inputs.pcp_context.global_batch
+        policy_reqs = policy_batch.num_reqs
+        query_lens = np.diff(policy_batch.query_start_loc_np[: policy_reqs + 1])
+        idx_mapping = policy_batch.idx_mapping_np[:policy_reqs]
+        prefilling = policy_batch.is_prefilling_np[:policy_reqs]
+        trim_requests = prefilling & ~self.keeps_rows[idx_mapping]
+        if policy_batch.is_dummy:
+            trim_requests = np.zeros(policy_reqs, dtype=np.bool_)
+        kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
+        follows = None
+        if self._one_row_enabled and policy_batch.has_prefill and not policy_batch.is_dummy:
+            computed = policy_batch.num_computed_prefill_tokens_np[:policy_reqs]
+            seq_lens = computed + query_lens
+            tail_reach = self.config.scheduler_config.max_num_batched_tokens + self.layers.window
+            one_row = (
+                trim_requests & (query_lens > 1) & (policy_batch.prefill_len_np[:policy_reqs] - seq_lens >= tail_reach)
+            )
+            kept_lens = np.where(one_row, 1, kept_lens)
+            follows = trim_requests & self.skipped_tail_np[idx_mapping]
+            self.skipped_tail_np[idx_mapping[prefilling]] = one_row[prefilling]
+
         kv_floor = None
-        if pcp_replay is None:
-            trim_requests = batch.is_prefilling_np[:num_reqs] & ~self.keeps_rows[batch.idx_mapping_np[:num_reqs]]
-            if batch.is_dummy or inputs.pcp_context is not None:
-                trim_requests = np.zeros(num_reqs, dtype=np.bool_)
-            kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
+        pcp_replay = None
+        if inputs.pcp_context is None:
             trims = bool((kept_lens < query_lens).any())
-            replay_inputs = inputs
-            if self._kv_floor is not None and batch.has_prefill and not batch.is_dummy:
-                idx_mapping = batch.idx_mapping_np[:num_reqs]
-                prefilling = batch.is_prefilling_np[:num_reqs]
-                computed = batch.num_computed_prefill_tokens_np[:num_reqs]
-                seq_lens = computed + query_lens
-                tail_reach = self.config.scheduler_config.max_num_batched_tokens + self.layers.window
-                one_row = trim_requests & (query_lens > 1) & (batch.prefill_len_np[:num_reqs] - seq_lens >= tail_reach)
-                kept_lens = np.where(one_row, 1, kept_lens)
-                follows = trim_requests & self.skipped_tail_np[idx_mapping]
+            if follows is not None:
                 needs_floor = follows & (kept_lens == query_lens)
                 # Trimmed chunks already read only their retained rows.
                 needs_floor_batch = bool(needs_floor.any())
-                trims = trims or bool(one_row.any()) or needs_floor_batch
+                trims = trims or needs_floor_batch
                 if needs_floor_batch:
                     self._kv_floor.np[:num_reqs] = np.where(follows, computed, 0)
                     self._kv_floor.copy_to_gpu(num_reqs)
                     kv_floor = self._kv_floor.gpu[:num_reqs]
-                self.skipped_tail_np[idx_mapping[prefilling]] = one_row[prefilling]
         else:
-            kept_lens, num_padded, replay_start = pcp_replay
+            global_kept = kept_lens
+            pcp_replay = self._pcp_kept_lengths(inputs, global_kept, follows)
+            if pcp_replay is None:
+                if follows is not None:
+                    # Whole-batch execution writes every row, not a one-row tail.
+                    self.skipped_tail_np[idx_mapping[prefilling]] = False
+                return
+            kept_lens, num_padded, kv_floor = pcp_replay
             trims = True
-            replay_inputs = replace(inputs, encoder_replay_start=replay_start)
         self.num_actual_tokens = int(kept_lens.sum())
         self.num_tokens = self.num_actual_tokens
         if pcp_replay is not None:
             self.num_tokens = num_padded
-        elif enable_dsa_cp():
+        if self.layers.sequence_parallel or enable_dsa_cp():
             self.num_tokens = round_up(self.num_tokens, parallel.tensor_parallel_size)
         self.dp_tokens = None
         if parallel.data_parallel_size > 1:
@@ -275,20 +284,14 @@ class DecoderReplayState:
         dropped = batch.query_start_loc_np[: num_reqs + 1] - offsets
         self.dropped_before.np[: num_reqs + 1] = dropped
         self.dropped_before.copy_to_gpu(num_reqs + 1)
-        self._gather(replay_inputs, kv_floor=kv_floor)
+        self._gather(inputs, kv_floor=kv_floor)
         if pcp_replay is not None:
-            assert inputs.pcp_context is not None
-            global_batch = inputs.pcp_context.global_batch
-            global_lens = np.diff(global_batch.query_start_loc_np[: global_batch.num_reqs + 1])
-            global_trim = (
-                global_batch.is_prefilling_np[: global_batch.num_reqs]
-                & ~self.keeps_rows[global_batch.idx_mapping_np[: global_batch.num_reqs]]
-            )
-            global_kept = np.where(global_trim, np.minimum(global_lens, self.layers.window), global_lens)
             self.replay_pcp_context = self._build_replay_pcp_context(inputs, global_kept)
+        if pcp_replay is not None or self.layers.sequence_parallel:
             self.layers.num_padded_rows = self.num_tokens
-        self.metadata = self._build_metadata(replay_inputs, offsets)
-        self.layers.rows = self.rows[: self.num_actual_tokens if pcp_replay is not None else self.num_tokens]
+        self.metadata = self._build_metadata(inputs, offsets)
+        compact_states = pcp_replay is not None or (self.layers.sequence_parallel and not enable_dsa_cp())
+        self.layers.rows = self.rows[: self.num_actual_tokens if compact_states else self.num_tokens]
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context
 
@@ -380,6 +383,6 @@ class DecoderReplayState:
         is_prefilling: np.ndarray,
     ) -> bool:
         """Keep short chunks following a one-row replay out of decode graphs."""
-        if self._kv_floor is None:
+        if not self._one_row_enabled:
             return False
         return bool((is_prefilling & self.skipped_tail_np[idx_mapping]).any())
