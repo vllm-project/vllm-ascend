@@ -38,7 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import _prepare_gdn_metadata_kernel
+from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import prepare_gdn_metadata
 from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
@@ -1186,11 +1186,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             spec_tokens = m.seq_lens.new_empty(num_spec_tokens, dtype=torch.int64)
             non_spec_tokens = m.seq_lens.new_empty(num_prefill_tokens, dtype=torch.int64)
 
-        rows = max(m.num_reqs, spec_rows, non_spec_rows)
-        conv_numel = self._conv_output_buffer.numel() if self._conv_output_buffer is not None else 0
-        block = 256
-        clear_block = 1024
-        _prepare_gdn_metadata_kernel[(rows + (conv_numel + clear_block - 1) // clear_block,)](
+        prepare_gdn_metadata(
             m.block_table_tensor,
             m.seq_lens,
             m.query_start_loc,
@@ -1210,24 +1206,15 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             has_initial_state,
             prefill_query,
             self._conv_output_buffer,
-            NUM_REQS=m.num_reqs,
-            NUM_ROWS=rows,
-            NUM_SPEC=num_spec_decodes,
-            NUM_DECODES=num_decodes,
-            NUM_DECODE_TOKENS=num_decode_tokens,
-            HAS_PREFILL=num_prefills > 0,
-            SPEC_WIDTH=self.num_spec + 1,
-            MIXED_SPEC=mixed_spec,
-            BLOCK_SIZE=self.kv_cache_spec.block_size,
-            TABLE_ROW_STRIDE=m.block_table_tensor.stride(0),
-            TABLE_COL_STRIDE=m.block_table_tensor.stride(1),
-            SEQ_LEN_STRIDE=m.seq_lens.stride(0),
-            ACCEPTED_STRIDE=num_accepted_tokens.stride(0) if num_accepted_tokens is not None else 1,
-            PAD_BLOCK_ID=self._SPEC_GRAPH_PAD_SLOT_ID,
-            STATE_BLOCK=1 << self.num_spec.bit_length(),
-            CONV_NUMEL=conv_numel,
-            BLOCK=block,
-            CLEAR_BLOCK=clear_block,
+            num_reqs=m.num_reqs,
+            num_spec_decodes=num_spec_decodes,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            has_prefill=num_prefills > 0,
+            spec_width=self.num_spec + 1,
+            mixed_spec=mixed_spec,
+            block_size=self.kv_cache_spec.block_size,
+            pad_block_id=self._SPEC_GRAPH_PAD_SLOT_ID,
         )
         metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,

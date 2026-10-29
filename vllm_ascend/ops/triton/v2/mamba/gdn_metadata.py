@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import torch
 from vllm.triton_utils import tl, triton
 
 
@@ -113,3 +114,85 @@ def _prepare_gdn_metadata_kernel(
     elif CONV_NUMEL:
         offsets = (row - NUM_ROWS) * CLEAR_BLOCK + tl.arange(0, CLEAR_BLOCK)
         tl.store(conv_output + offsets, 0, offsets < CONV_NUMEL)
+
+
+def prepare_gdn_metadata(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query: torch.Tensor,
+    accepted: torch.Tensor | None,
+    layout: torch.Tensor | None,
+    spec_states: torch.Tensor,
+    non_spec_states: torch.Tensor,
+    conv_indices: torch.Tensor,
+    sequence_masks: torch.Tensor,
+    spec_query: torch.Tensor,
+    non_spec_query: torch.Tensor,
+    spec_lengths: torch.Tensor,
+    non_spec_lengths: torch.Tensor,
+    accepted_out: torch.Tensor,
+    spec_tokens: torch.Tensor,
+    non_spec_tokens: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    prefill_query: torch.Tensor | None,
+    conv_output: torch.Tensor | None,
+    *,
+    num_reqs: int,
+    num_spec_decodes: int,
+    num_decodes: int,
+    num_decode_tokens: int,
+    has_prefill: bool,
+    spec_width: int,
+    mixed_spec: bool,
+    block_size: int,
+    pad_block_id: int,
+) -> None:
+    """Populate GDN metadata buffers through a single Triton launch.
+
+    Output buffers may include graph-padding rows beyond the live requests.
+    Optional tensors can be None when their corresponding phase is disabled.
+    Launch sizing and tensor strides are internal to this entry point.
+    """
+    rows = max(num_reqs, spec_states.shape[0], non_spec_states.shape[0])
+    conv_numel = conv_output.numel() if conv_output is not None else 0
+    block = 256
+    clear_block = 1024
+    _prepare_gdn_metadata_kernel[(rows + (conv_numel + clear_block - 1) // clear_block,)](
+        block_table,
+        seq_lens,
+        query,
+        accepted,
+        layout,
+        spec_states,
+        non_spec_states,
+        conv_indices,
+        sequence_masks,
+        spec_query,
+        non_spec_query,
+        spec_lengths,
+        non_spec_lengths,
+        accepted_out,
+        spec_tokens,
+        non_spec_tokens,
+        initial_state,
+        prefill_query,
+        conv_output,
+        NUM_REQS=num_reqs,
+        NUM_ROWS=rows,
+        NUM_SPEC=num_spec_decodes,
+        NUM_DECODES=num_decodes,
+        NUM_DECODE_TOKENS=num_decode_tokens,
+        HAS_PREFILL=has_prefill,
+        SPEC_WIDTH=spec_width,
+        MIXED_SPEC=mixed_spec,
+        BLOCK_SIZE=block_size,
+        TABLE_ROW_STRIDE=block_table.stride(0),
+        TABLE_COL_STRIDE=block_table.stride(1),
+        SEQ_LEN_STRIDE=seq_lens.stride(0),
+        ACCEPTED_STRIDE=accepted.stride(0) if accepted is not None else 1,
+        PAD_BLOCK_ID=pad_block_id,
+        STATE_BLOCK=1 << (spec_width - 1).bit_length(),
+        CONV_NUMEL=conv_numel,
+        BLOCK=block,
+        CLEAR_BLOCK=clear_block,
+    )
