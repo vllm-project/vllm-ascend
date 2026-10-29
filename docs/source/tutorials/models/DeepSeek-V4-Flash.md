@@ -238,7 +238,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
@@ -281,7 +280,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -586,7 +584,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_BUFFSIZE=1024
             export TASK_QUEUE_ENABLE=1
             export HCCL_OP_EXPANSION_MODE=CCU_SCHED
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
             export VLLM_USE_FASTOKENS=1
 
             # With --pcp-size 4, the launcher passes 0,1,2,3 for this Prefill instance.
@@ -924,7 +921,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export TASK_QUEUE_ENABLE=1
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES=$1
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
             # Ensure the model path matches the directory recorded during download
             vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
@@ -1224,7 +1220,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES=$1
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
             # Ensure the model path matches the directory recorded during download
             vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -1943,7 +1938,6 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_BUFFSIZE=1024
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE=CCU_SCHED
-        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
         export VLLM_USE_FASTOKENS=1
 
         # With --pcp-size 4, the launcher passes 0,1,2,3 for this Prefill instance.
@@ -2338,7 +2332,6 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_USE_V2_MODEL_RUNNER=1
-        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Parameters required by the Memcache KV Cache Pool.
         MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
