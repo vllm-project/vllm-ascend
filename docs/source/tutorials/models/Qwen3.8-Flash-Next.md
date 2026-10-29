@@ -119,10 +119,6 @@ Before starting the service:
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
     export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
-    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
-    export VLLM_ASCEND_ENABLE_QSA_E3V=1
-    unset VLLM_ASCEND_FORCE_QSA_REFERENCE
-
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port 8088 \
@@ -150,8 +146,6 @@ Before starting the service:
 
     Key parameter descriptions:
 
-    - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
-    - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
