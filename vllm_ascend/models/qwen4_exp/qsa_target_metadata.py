@@ -27,8 +27,6 @@ _SCOPE: ContextVar[Any] = ContextVar("qsa_target_metadata_scope", default=None)
 _STATES: WeakSet = WeakSet()
 _OUTSIDE_FALLBACKS: Counter = Counter()
 _OUTSIDE_LOCATIONS: Counter = Counter()
-_MAX_TARGET_TOKENS = 32
-_TARGET_QUERY_LEN = 4
 
 
 def _tensor_signature(value):
@@ -80,6 +78,7 @@ class _Scope:
     for_capture: bool
     defer: bool
     plans: list
+    query_len: int
 
 
 def _state(model_state):
@@ -90,24 +89,34 @@ def _state(model_state):
     return state
 
 
+def _target_query_len(model_state):
+    speculative = model_state.vllm_config.speculative_config
+    draft_tokens = None if speculative is None else speculative.num_speculative_tokens
+    return draft_tokens + 1 if type(draft_tokens) is int and draft_tokens > 0 else 0
+
+
 def target_metadata_config_supported(model_state):
     config = model_state.vllm_config
     parallel = config.parallel_config
     speculative = config.speculative_config
     sizes = getattr(config.compilation_config, "cudagraph_capture_sizes", None)
+    query_len = _target_query_len(model_state)
+    if not query_len:
+        return False
     if not isinstance(sizes, (list, tuple)) or not sizes:
         return False
-    if any(type(size) is not int or not 0 < size <= _MAX_TARGET_TOKENS for size in sizes):
+    if any(type(size) is not int or size <= 0 for size in sizes):
         return False
-    target_sizes = sorted({((size + _TARGET_QUERY_LEN - 1) // _TARGET_QUERY_LEN) * _TARGET_QUERY_LEN for size in sizes})
-    # A sparse grid can pad a real K3 batch into a larger graph: its CPU mapped
+    target_sizes = sorted({((size + query_len - 1) // query_len) * query_len for size in sizes})
+    # A sparse grid can pad a real verification batch into a larger graph: its CPU mapped
     # total then differs from the capture specialization. Keep the original
     # producer for that whole configuration, rather than fail during replay.
-    if target_sizes != list(range(_TARGET_QUERY_LEN, target_sizes[-1] + 1, _TARGET_QUERY_LEN)):
+    if target_sizes != list(range(query_len, target_sizes[-1] + 1, query_len)):
         return False
+    # This producer uses rank-local token/cache metadata, not TP head geometry.
+    # Replay still verifies each rank's actual tensor addresses and layouts.
     return bool(
         config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        and parallel.tensor_parallel_size == 8
         and parallel.data_parallel_size == 1
         and parallel.pipeline_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
@@ -116,7 +125,6 @@ def target_metadata_config_supported(model_state):
         and getattr(config, "lora_config", None) is None
         and speculative is not None
         and speculative.method == "mtp"
-        and speculative.num_speculative_tokens == 3
         and not speculative.uses_dynamic_speculative_decoding()
         and not speculative.enable_adaptive_verification
         and not config.model_config.enforce_eager
@@ -133,7 +141,7 @@ def target_metadata_preparation(model_state, input_batch, cg_mode, for_capture):
     wants_full = actual_capture or cg_mode == CUDAGraphMode.FULL
     defer = wants_full and target_metadata_config_supported(model_state)
     key = (int(input_batch.num_tokens_after_padding), int(input_batch.num_reqs_after_padding))
-    scope = _Scope(state, key, actual_capture, defer, [])
+    scope = _Scope(state, key, actual_capture, defer, [], _target_query_len(model_state))
     state.pending = None
     token = _SCOPE.set(scope)
     try:
@@ -149,21 +157,31 @@ def target_metadata_preparation(model_state, input_batch, cg_mode, for_capture):
         _SCOPE.reset(token)
 
 
-def _make_plan(common, buffers, kwargs):
+def _make_plan(common, buffers, kwargs, query_len):
     n = int(common.num_actual_tokens)
     cpu_q = common.query_start_loc_cpu
     if str(cpu_q.device) != "cpu":
         raise RuntimeError("QSA CPU query boundaries must actually be on CPU")
     mapped = int(cpu_q[-1])
     r = int(common.query_start_loc.shape[0]) - 1
-    if not (0 < n <= _MAX_TARGET_TOKENS and 0 < mapped <= n and r > 0):
+    if not (n > 0 and 0 < mapped <= n and r > 0):
         raise RuntimeError("Unsupported QSA target FULL token geometry")
+    uses_common_slots = kwargs.get("circular_buffer_size", 0) == 0 and kwargs["compress_ratio"] == 1
+    slot_buffer = common.slot_mapping if uses_common_slots else buffers[3]
+    if (
+        any(buffer.shape[0] < n for buffer in (*buffers[:3], slot_buffer))
+        or common.slot_mapping.shape[0] < n
+        or common.seq_lens.shape[0] < r
+        or common.block_table_tensor.shape[0] < r
+        or not 2 <= len(cpu_q) <= r + 1
+    ):
+        raise RuntimeError("QSA target metadata exceeds its persistent buffer capacity")
     # The original producer specializes on the CPU *total*. Per-request device
     # boundaries may differ under adaptive verification and are never replaced
     # by this CPU layout. Padding may have zero CPU query lengths.
     query_lens = [int(cpu_q[i + 1]) - int(cpu_q[i]) for i in range(len(cpu_q) - 1)]
-    if any(q not in (0, _TARGET_QUERY_LEN) for q in query_lens):
-        raise RuntimeError("Only uniform K3 target decode is audited for metadata capture")
+    if any(q not in (0, query_len) for q in query_lens):
+        raise RuntimeError("QSA target query layout does not match the configured MTP verification length")
     if getattr(common, "_token_to_req_indices_cache", None) is not None:
         raise RuntimeError("Cached external token mapping cannot be deferred safely")
     normalized = replace(
@@ -190,6 +208,7 @@ def _make_plan(common, buffers, kwargs):
         tuple(_tensor_signature(t) for t in inputs),
         tuple(_tensor_signature(t) for t in buffers),
         tuple(sorted((k, _tensor_signature(v) if isinstance(v, torch.Tensor) else v) for k, v in kwargs.items())),
+        query_len,
     )
     return _Plan(common, normalized, buffers, kwargs, signature, outputs)
 
@@ -240,7 +259,7 @@ def build_qsa_metadata_original_target_graph(
         # This audited lane has one QSA owner per common cache-group metadata;
         # reject a new sharing pattern rather than silently change its aliases.
         raise RuntimeError("Multiple QSA builders sharing one Common metadata need an explicit alias plan")
-    plan = _make_plan(common_attn_metadata, buffers, kwargs)
+    plan = _make_plan(common_attn_metadata, buffers, kwargs, scope.query_len)
     scope.plans.append(plan)
     scope.state.stats["deferred_calls"] += 1
     return plan.outputs
@@ -292,7 +311,7 @@ def validate_target_metadata_replay(model_state, desc):
     try:
         if scope is None or scope.for_capture:
             raise RuntimeError("Target FULL replay has no current QSA producer plan")
-        expected_reqs = desc.num_reqs or desc.num_tokens // _TARGET_QUERY_LEN
+        expected_reqs = desc.num_reqs or desc.num_tokens // scope.query_len
         if scope.key != (int(desc.num_tokens), int(expected_reqs)):
             raise RuntimeError("QSA producer plan does not describe this target graph")
         captured = state.captured.get(scope.key)

@@ -7,6 +7,7 @@ import os
 import sys
 import unittest
 from contextlib import ExitStack
+from itertools import product
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -111,21 +112,34 @@ class NoFusionIntegrationTests(unittest.TestCase):
         self.assertEqual(scope.key, (8, 2))
         self.assertIsNone(self.helper._SCOPE.get())
 
+    def test_target_preparation_does_not_require_a_fixed_tp_size(self):
+        parallel = self.state.vllm_config.parallel_config
+        for tp_size in (1, 2, 4, 8, 16, 32):
+            with self.subTest(tp_size=tp_size), patch.object(parallel, "tensor_parallel_size", tp_size):
+                self.assertTrue(self.state._qsa_target_metadata_enabled)
+                self.assertIs(self.state.prepare_attn(self.batch, "FULL", marker=17), self.result)
+                self.assertTrue(self.calls[-1][-1].defer)
+                self.assertEqual(self.calls[-1][-1].key, (8, 2))
+                self.assertIsNone(self.helper._SCOPE.get())
+
     def test_each_unsupported_configuration_keeps_upstream_path(self):
         config = self.state.vllm_config
         changes = [
-            (config.parallel_config, "tensor_parallel_size", 4),
             (config.parallel_config, "data_parallel_size", 2),
             (config.parallel_config, "pipeline_parallel_size", 2),
             (config.parallel_config, "decode_context_parallel_size", 2),
             (config.parallel_config, "prefill_context_parallel_size", 2),
             (config.compilation_config, "cudagraph_mode", "NONE"),
             (config.model_config, "enforce_eager", True),
-            (config.speculative_config, "num_speculative_tokens", 2),
+            (config.speculative_config, "num_speculative_tokens", 0),
             (config, "speculative_config", None),
         ]
-        for obj, field, value in changes:
-            with self.subTest(field=field, value=value), patch.object(obj, field, value):
+        for tp_size, (obj, field, value) in product((1, 2, 4, 8, 16, 32), changes):
+            with (
+                self.subTest(tp_size=tp_size, field=field, value=value),
+                patch.object(config.parallel_config, "tensor_parallel_size", tp_size),
+                patch.object(obj, field, value),
+            ):
                 self.assertFalse(self.state._qsa_target_metadata_enabled)
                 self.assertIs(self.state.prepare_attn(self.batch, "FULL", marker=5), self.result)
                 self.assertIsNone(self.calls[-1][-1])
@@ -138,7 +152,7 @@ class NoFusionIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.state._qsa_target_metadata.pending)
         self.assertIsNone(self.helper._SCOPE.get())
 
-    def test_incomplete_or_out_of_range_grids_keep_original_preparation(self):
+    def test_invalid_or_sparse_grids_keep_original_preparation(self):
         config = self.state.vllm_config.compilation_config
         for sizes in (None, [], [8, 16, 32], [1, 2, 4, 8, 64], [0, 4], [4.0, 8], [True, 4]):
             with self.subTest(sizes=sizes), patch.object(config, "cudagraph_capture_sizes", sizes):
@@ -156,6 +170,29 @@ class NoFusionIntegrationTests(unittest.TestCase):
                 self.assertTrue(self.state._qsa_target_metadata_enabled)
                 self.state.prepare_attn(self.batch, "FULL")
                 self.assertTrue(self.calls[-1][-1].defer)
+
+    def test_configured_mtp_lengths_and_large_complete_grids_are_supported(self):
+        config = self.state.vllm_config
+        for k, requests in product((1, 2, 3, 4, 5, 8), (2, 16, 32)):
+            with self.subTest(k=k, requests=requests):
+                config.speculative_config.num_speculative_tokens = k
+                config.compilation_config.cudagraph_capture_sizes = list(range(k + 1, requests * (k + 1) + 1, k + 1))
+                self.batch.num_reqs_after_padding = requests
+                self.batch.num_tokens_after_padding = requests * (k + 1)
+                self.assertTrue(self.state._qsa_target_metadata_enabled)
+                self.state.prepare_attn(self.batch, "FULL")
+                scope = self.calls[-1][-1]
+                self.assertTrue(scope.defer)
+                self.assertEqual(scope.query_len, k + 1)
+                self.assertEqual(scope.key, (requests * (k + 1), requests))
+
+    def test_invalid_mtp_lengths_keep_original_preparation(self):
+        spec = self.state.vllm_config.speculative_config
+        for k in (None, 0, -1, True, 3.0):
+            with self.subTest(k=k), patch.object(spec, "num_speculative_tokens", k):
+                self.assertFalse(self.state._qsa_target_metadata_enabled)
+                self.assertIs(self.state.prepare_attn(self.batch, "FULL"), self.result)
+                self.assertIsNone(self.calls[-1][-1])
 
     def test_dynamic_mtp_adaptive_lora_and_dbo_keep_original_preparation(self):
         config = self.state.vllm_config

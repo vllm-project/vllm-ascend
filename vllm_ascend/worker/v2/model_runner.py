@@ -138,9 +138,6 @@ from vllm_ascend.worker.v2.utils import (
     torch_cuda_wrapper,
 )
 
-_QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS = 3
-_QWEN_MRV2_EARLY_QUEUE_TP_SIZE = 8
-
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
@@ -1620,34 +1617,37 @@ class NPUModelRunner(GPUModelRunner):
         )
         parallel = self.parallel_config
         spec = self.speculative_config
+        draft_tokens = self.num_speculative_steps
+        query_len = draft_tokens + 1
         checks = {
             "exact_qwen_model_state": type(self.model_state) is AscendQwen4ExpModelState,
             "exact_mtp_speculator": type(self.speculator) is AscendMTPSpeculator,
             "audited_backend_builder_pairs": self._qwen_mrv2_backend_proof,
-            "tp8_dp1_pp1_dcp1_pcp1": (
-                parallel.tensor_parallel_size == _QWEN_MRV2_EARLY_QUEUE_TP_SIZE
-                and parallel.data_parallel_size == 1
+            # TP changes model sharding, not this rank-local count snapshot.
+            # Keep the other parallelism guards: they change CPU consumers or
+            # token ownership and need separate dependency proofs.
+            "dp1_pp1_dcp1_pcp1": (
+                parallel.data_parallel_size == 1
                 and parallel.pipeline_parallel_size == 1
                 and parallel.decode_context_parallel_size == 1
                 and parallel.prefill_context_parallel_size == 1
             ),
-            "async_scheduling": self.scheduler_config.async_scheduling is True,
-            "fixed_k3": (
+            "fixed_mtp": (
                 spec is not None
                 and spec.method == "mtp"
-                and self.num_speculative_steps == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS
+                and type(draft_tokens) is int
+                and draft_tokens > 0
                 and not spec.uses_dynamic_speculative_decoding()
             ),
             "full_uniform_verification": (
                 batch_desc.cg_mode == CUDAGraphMode.FULL
-                and batch_desc.uniform_token_count == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS + 1
+                and batch_desc.uniform_token_count == query_len
                 and bool(req_ids)
-                and bool(np.all(scheduled == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS + 1))
+                and bool(np.all(scheduled == query_len))
                 and draft_counts is not None
-                and bool(np.all(draft_counts == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS))
+                and bool(np.all(draft_counts == draft_tokens))
                 and all(
-                    len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
-                    == _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS
+                    len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())) == draft_tokens
                     for req_id in req_ids
                 )
             ),
@@ -1670,14 +1670,12 @@ class NPUModelRunner(GPUModelRunner):
             "bounds_within_model_and_drafter": (
                 bool(np.all(computed_upper_bound >= 0))
                 and bool(np.all(upper_seq_lens <= self.max_model_len))
-                and bool(np.all(upper_seq_lens + _QWEN_MRV2_EARLY_QUEUE_DRAFT_TOKENS <= draft_limit))
+                and bool(np.all(upper_seq_lens + draft_tokens <= draft_limit))
             ),
-            "prefix_and_mamba_cache_disabled": (
-                self.cache_config.enable_prefix_caching is False
-                and self.cache_config.mamba_cache_mode == "none"
-                and not self.cache_config.kv_sharing_fast_prefill
-                and getattr(self.model_state, "decoder_replay", None) is None
-            ),
+            # Prefix restoration, cache copies and prefill are handled before
+            # stable decode. Mamba align also consumes exact device counts.
+            # Decoder replay is different: it has additional CPU row planning.
+            "no_decoder_replay": getattr(self.model_state, "decoder_replay", None) is None,
             "text_without_prompt_embeddings": (
                 (text_requests or certified_mm_decode)
                 and not self.model_config.enable_prompt_embeds

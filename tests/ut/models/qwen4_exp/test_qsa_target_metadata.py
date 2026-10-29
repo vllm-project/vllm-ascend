@@ -212,6 +212,31 @@ class TestTargetMetadata(unittest.TestCase):
         self.assertEqual(stats["validated_replay_batches"], 1)
         self.assertEqual(stats["successful_replay_batches"], 1)
 
+    def test_capture_and_replay_guards_do_not_require_a_fixed_tp_size(self):
+        config = self.model_state.vllm_config
+        for tp_size in (1, 2, 4, 8, 16, 32):
+            with self.subTest(tp_size=tp_size):
+                config.parallel_config.tensor_parallel_size = tp_size
+                self.model_state = types.SimpleNamespace(vllm_config=config)
+                self.common._token_to_req_indices_cache = None
+                before = len(self.calls)
+                outputs = self.capture()
+                self.assertEqual(len(self.calls), before + 1)
+                self.assertTrue(self.calls[-1]["capturing"])
+                with self.preparation():
+                    replay_outputs = self.build()
+                self.m.validate_target_metadata_replay(self.model_state, self.desc)
+                self.m.mark_target_metadata_replay_success(self.model_state)
+                self.assertEqual(len(self.calls), before + 1)
+                self.assertTrue(all(self.m._same_view(a, b) for a, b in zip(outputs, replay_outputs)))
+                self.assertEqual(self.model_state._qsa_target_metadata.stats["successful_replay_batches"], 1)
+                # Removing the TP gate must not weaken the captured-address proof.
+                self.common.seq_lens = Tensor([10000, 10000])
+                with self.preparation():
+                    self.build()
+                with self.assertRaisesRegex(RuntimeError, "inputs or static geometry changed"):
+                    self.m.validate_target_metadata_replay(self.model_state, self.desc)
+
     def test_pointer_mismatch_fails_before_replay(self):
         self.capture()
         self.common.seq_lens = Tensor([10000, 10000])
@@ -261,6 +286,56 @@ class TestTargetMetadata(unittest.TestCase):
                 self.capturing = False
         snapshot = self.m.target_metadata_snapshot()
         self.assertEqual({row["num_tokens"] for row in snapshot["captured_plans"]}, {4, 8, 12, 16, 20, 24, 28, 32})
+
+    def test_configured_mtp_lengths_and_large_owner_buffers_capture_and_replay(self):
+        config = self.model_state.vllm_config
+        for k in (1, 2, 3, 4, 5, 8):
+            for requests in (2, 16, 32):
+                with self.subTest(k=k, requests=requests):
+                    q, n = k + 1, (k + 1) * requests
+                    config.speculative_config.num_speculative_tokens = k
+                    config.compilation_config.cudagraph_capture_sizes = list(range(q, n + 1, q))
+                    self.model_state = types.SimpleNamespace(vllm_config=config)
+                    self.batch = types.SimpleNamespace(num_tokens_after_padding=n, num_reqs_after_padding=requests)
+                    self.common = Common(
+                        Tensor(list(range(0, n + 1, q))),
+                        Tensor(list(range(0, n + 1, q)), device="cpu"),
+                        Tensor([10000] * requests),
+                        n,
+                        Tensor(shape=(requests, 184)),
+                        Tensor(shape=(4096,)),
+                    )
+                    self.buffers = tuple(Tensor(shape=(4096,)) for _ in range(4))
+                    before = len(self.calls)
+                    self.capture()
+                    with self.preparation():
+                        self.build()
+                    # Exercise the descriptor without an explicit request count.
+                    self.m.validate_target_metadata_replay(
+                        self.model_state, types.SimpleNamespace(num_tokens=n, num_reqs=None)
+                    )
+                    self.m.mark_target_metadata_replay_success(self.model_state)
+                    self.assertEqual(len(self.calls), before + 1)
+                    self.assertEqual(self.model_state._qsa_target_metadata.stats["successful_replay_batches"], 1)
+
+    def test_owner_buffer_capacity_is_checked_before_deferred_capture(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                self.buffers = tuple(Tensor(shape=(7 if i == index else 4096,)) for i in range(4))
+                with self.assertRaisesRegex(RuntimeError, "persistent buffer capacity"), self.preparation():
+                    self.build()
+                self.assertEqual(self.calls, [])
+
+    def test_input_capacity_is_checked_before_deferred_capture(self):
+        for name, value in (
+            ("slot_mapping", Tensor(shape=(7,))),
+            ("seq_lens", Tensor(shape=(1,))),
+            ("block_table_tensor", Tensor(shape=(1, 184))),
+        ):
+            with self.subTest(name=name), patch.object(self.common, name, value):
+                with self.assertRaisesRegex(RuntimeError, "persistent buffer capacity"), self.preparation():
+                    self.build()
+                self.assertEqual(self.calls, [])
 
     def test_dcp_pcp_unsupported_config_stays_eager(self):
         for field in ("decode_context_parallel_size", "prefill_context_parallel_size"):
@@ -426,7 +501,7 @@ class TestTargetMetadata(unittest.TestCase):
 
     def test_unsupported_query_layout_is_rejected(self):
         self.common.query_start_loc_cpu.values[:] = [0, 3, 8]
-        with self.assertRaisesRegex(RuntimeError, "uniform K3"), self.preparation():
+        with self.assertRaisesRegex(RuntimeError, "configured MTP verification length"), self.preparation():
             self.build()
 
     def test_no_nested_context_leak_on_failure(self):

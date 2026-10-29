@@ -51,15 +51,17 @@ layers execute in the same graph with the existing buffer ABI. There is no separ
 metadata graph, extra graph replay, fused metadata kernel, or staging copy.
 
 This integration is automatic for the supported Qwen model state. Its configuration
-gate checks `FULL_DECODE_ONLY`, TP8, DP1, PP1, DCP1, PCP1, fixed MTP K3,
+gate checks `FULL_DECODE_ONLY`, DP1, PP1, DCP1, PCP1, a fixed positive MTP K,
 and a non-eager target. Dynamic or adaptive drafting, LoRA capture cases, and DBO
 retain the original immediate producer path.
-The audited target geometry has at most 32 padded tokens and query length four
-(zero-length padding is permitted). The tested requested capture sizes are
+The target query length follows the configured K+1; zero-length padding is
+permitted. There is no separate 32-token limit: input and output views must fit
+their existing persistent buffers, which are checked before capture.
+The historical requested capture sizes were
 `[1, 2, 4, 8, 12, 16, 20, 24, 28, 32]`; with K3 target query length four, the
 applicable target plans are `4, 8, 12, 16, 20, 24, 28, 32`. The effective target
-capture grid must contain every four-token bucket up to its configured maximum,
-which must not exceed 32. Missing, larger, or sparse grids disable this metadata
+capture grid must contain every K+1-token bucket up to its configured maximum.
+Missing, invalid, or sparse grids disable this metadata
 migration for the entire configuration, avoiding partial capture or mismatched
 rounded replay plans. Unsupported configurations and non-FULL calls
 retain the original immediate producer path. MTP retains its existing calls; this
@@ -91,12 +93,21 @@ positions, sequence lengths, KV slots, rejection state, and subsequent writes ke
 their dependencies. It does not change MTP graph capture or sampling.
 
 Admission is deliberately restricted to the audited Qwen model state, MTP speculator,
-and target/draft attention backend and builder pairs. It requires TP8, DP1, PP1, DCP1,
-PCP1, asynchronous scheduling, fixed MTP K3, and a uniform FULL decode batch. Prefix
-caching and Mamba caching must be disabled. Request arrival, resume, preemption,
+and target/draft attention backend and builder pairs. It requires DP1, PP1, DCP1,
+PCP1, fixed positive MTP K, and a uniform FULL decode batch. Both asynchronous and
+synchronous scheduling are admitted; synchronous scheduling may offer less overlap.
+Prefix caching, Mamba cache modes, and the global KV-sharing fast-prefill setting
+do not disable stable decode submission. Request arrival, resume, preemption,
 completion, active encoder work, prompt embeddings, sequence-parallel MoE, DBO,
 LoRA, weight offload, connectors, structured output, and unsupported configurations
 fall back to the synchronized path. Bounds must fit both target and draft model limits.
+
+Prefix-cache restoration and partial-hit block copies keep their original ordering.
+New or resumed requests, prefill steps, and batches with KV block copies still take
+the exact synchronized path. Only a subsequent stable decode batch can use the
+upper bound. Mamba block-boundary decisions, state copies, accepted counts, and
+postprocessing retain the exact device inputs. This does not add fast-prefill or
+cache-mode support beyond what the underlying model and runtime already support.
 
 For multimodal requests, scheduler flags alone cannot prove that the last image or
 video prompt token has been processed. The worker first consumes a synchronized,
@@ -105,6 +116,47 @@ incarnation, slot, prompt length, media objects and positions, model state, and 
 cache. Lifecycle changes invalidate the proof. Until a matching certificate exists,
 the worker uses the original synchronized path. Realtime inputs, embedding masks,
 prompt embeddings, and other unaudited media layouts are excluded.
+
+## Tensor parallelism and remaining limits
+
+Text early submission, certified multimodal early submission, and target metadata
+capture do not require a particular TP size. Model sharding must still be supported
+by the underlying model, attention operators, and runtime. These changes do not add
+support for a TP configuration that the underlying implementation cannot run.
+The queue dependency is a per-rank device-count snapshot; the metadata producer
+uses per-rank token and cache tensors rather than TP head geometry. Their device
+dependencies and replay-address checks are retained for every TP size.
+
+DP1, PP1, DCP1, and PCP1 remain required by both paths. Increasing one of these
+dimensions keeps the original synchronized queue and immediate metadata producer.
+DP can pad a local batch to another rank's graph shape, which needs a separate
+proof for the producer's CPU-specialized mapped-token total and idle batches.
+PP and context parallelism change token ownership or CPU consumers and require
+separate adaptations.
+Other remaining limits are:
+
+| Path | Conditions retained |
+| --- | --- |
+| Early submission | Exact Qwen model-state and MTP-speculator types; approved target/draft attention builder pairs; fixed positive K without dynamic drafting; a uniform FULL verification batch with K+1 tokens per request and K drafts. |
+| Early submission | Pure decode with no new, resumed, preempted, or finished requests; conservative lengths within both target and draft limits; no active decoder replay. |
+| Early submission | No prompt embeddings, MM prefix-LM, scheduled encoder work, sequence-parallel MoE, SP bypass, DBO, LoRA, weight offload, KV/EC transfer metadata, auxiliary connectors, adaptive verification, sparse-KV offload, KV block copies, or structured output. The exact snapshot must have been produced on the same stream. |
+| Multimodal extension | Both queue switches enabled, a valid exact prompt-completion certificate, stable request/slot/media identities, and non-realtime media layouts without embedding masks, MM pruning, encoder-decoder inputs, or active deepstack embeddings. |
+| Target metadata capture | `FULL_DECODE_ONLY`, non-eager target, fixed positive K, no dynamic/adaptive drafting, LoRA, or DBO; positive integer requested capture sizes whose rounded target grid contains every K+1-token bucket. Actual input/output views must fit the existing owner buffers. |
+| Target metadata replay | Query lengths zero or K+1, mapped-token count within the padded token count, uncached external token mapping, and one QSA producer per Common metadata object. Captured pointers, devices, dtypes, shapes, strides, static arguments, and query length must match before replay. |
+
+An ineligible queue batch takes the synchronized fallback. Unsupported metadata
+configurations and non-FULL calls use the immediate original producer. A violated
+metadata alias or geometry invariant after selecting the captured path raises
+before native replay; it is not silently bypassed.
+The CPU admission and plan-lifecycle tests exercise TP sizes 1, 2, 4, 8, 16, and 32.
+These CPU checks do not establish model execution, numerical correctness, or
+performance on those TP configurations. The TP4 hardware run below exercises one
+text-decode configuration; the other expanded configurations still need hardware
+validation.
+CPU tests also cover prefix-cache settings, Mamba modes `none`/`align`/`all`, both
+scheduling settings, static K values 1/2/3/4/5/8, and metadata batches larger than
+32 tokens. These checks establish control flow and buffer handling; the expanded
+configurations still require native NPU output/cache and performance validation.
 
 ## Validation before production use
 
@@ -125,6 +177,31 @@ comparisons differed, so the collection does not establish generation correctnes
 an isolated performance gain. No new hardware collection was performed for the
 source cleanup and default-on update.
 
-After refreshing the dependencies, repeat hardware output/cache correctness and
-performance validation with the new pinned vLLM and packed-cache implementation.
-Historical profiling from the previous cache layout does not validate this revision.
+With the refreshed dependency, a separate Ascend A3 run used pure-text input of
+900 tokens, output of 100 tokens, concurrency one, TP4/DP1/EP, prefix caching on,
+Mamba cache mode `align`, asynchronous scheduling, and MTP K3. All three switches
+were unset and resolved to their enabled defaults. The service used a 1024-token
+model limit, one sequence, a 128-token batching budget, a 512 MiB KV-cache budget,
+and FULL decode capture sizes `[1, 2, 4]`. The pinned vLLM revision remained
+`544f182d9f0c9bfe8bd7645525951d5e3692a542`, with matching CANN transformer operators.
+
+Two warmup requests, one unprofiled request, and one profiled request completed.
+The formal request reused 896 cached prompt tokens; all four outputs had identical
+hashes. Every rank recorded successful target and MTP native graph replays during
+warmup. Observation wrappers were removed before profiling, and target metadata
+replay and text early-submission counters continued increasing afterward, without
+capture or replay-guard failures. Profiling began after the first nonempty streamed
+text, and all four raw and independently parsed rank directories passed SHA256 and
+SQLite integrity checks. The formal request accepted 59 of 123 drafted tokens over
+41 drafts, giving an acceptance fraction of 47.97% and mean acceptance length of
+2.439. This is a workload result, not a model-accuracy evaluation.
+
+The TP0 trace contained 32 interior complete graph cycles after excluding three
+cycles at each end. The MTP-last-graph to next-target-graph interval had a median
+of 0.507330 ms and range of 0.488650–0.817716 ms. Graph roles were inferred from the
+repeated native graph structure. The interval includes intervening kernels and
+communication; it is not whole-device idle time or a matched-baseline speedup.
+No multimodal request or other TP size was exercised by this collection. Broader
+cache/output correctness and same-environment performance regression validation
+remain required. Historical profiling from the previous cache layout does not
+validate this revision.
