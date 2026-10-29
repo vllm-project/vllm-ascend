@@ -32,6 +32,16 @@ def test_gva_backend_mode_env_override(monkeypatch):
     assert not use_engram_gva(True)
 
 
+@pytest.mark.parametrize("mode", ["auto", "gva"])
+def test_gva_rejects_sparse_kv_offload(mode):
+    with pytest.raises(RuntimeError, match="cannot share the MemFabric Offload runtime"):
+        use_engram_gva(True, mode, sparse_kv_offload=True)
+
+
+def test_uva_mode_allows_sparse_kv_offload():
+    assert not use_engram_gva(True, "uva", sparse_kv_offload=True)
+
+
 @pytest.mark.parametrize(
     "eligible,mode,error",
     [

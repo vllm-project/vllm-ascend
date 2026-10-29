@@ -1081,7 +1081,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 and share_group.world_size > 1
                 and all(dtype == torch.float8_e4m3fn for dtype in storage_dtypes)
             )
-            if use_engram_gva(gva_eligible):
+            if use_engram_gva(
+                gva_eligible,
+                sparse_kv_offload=get_ascend_config().sparse_kv_offload_config.enabled,
+            ):
                 if config.engram_head_dim % 32:
                     raise ValueError("A5 Engram GVA requires an Engram head dimension divisible by 32")
                 local_gva_rows, local_gva_table_ids, local_gva_heads = make_engram_gva_local_tables(

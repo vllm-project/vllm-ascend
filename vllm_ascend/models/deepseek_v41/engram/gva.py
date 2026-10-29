@@ -19,7 +19,12 @@ _ENCODE_BLOCK_SIZE = 128
 _STORE_PORT_BASE = 8500
 
 
-def use_engram_gva(eligible: bool, mode: str | None = None) -> bool:
+def use_engram_gva(
+    eligible: bool,
+    mode: str | None = None,
+    *,
+    sparse_kv_offload: bool = False,
+) -> bool:
     """Select the A5 GVA backend, with a host-UVA comparison override.
 
     ``auto`` preserves capability-based selection. ``uva`` is useful for
@@ -31,7 +36,13 @@ def use_engram_gva(eligible: bool, mode: str | None = None) -> bool:
         raise ValueError(f"Engram GVA mode must be one of auto, gva, or uva; got {selected!r}")
     if selected == "gva" and not eligible:
         raise RuntimeError("GVA mode requested but A5 GVA prerequisites are not met")
-    return eligible and selected != "uva"
+    use_gva = eligible and selected != "uva"
+    if use_gva and sparse_kv_offload:
+        raise RuntimeError(
+            "A5 Engram GVA and sparse KV offload cannot share the MemFabric Offload runtime; "
+            "disable sparse KV offload or set VLLM_ASCEND_ENGRAM_GVA_MODE=uva"
+        )
+    return use_gva
 
 
 @dataclass(frozen=True)
