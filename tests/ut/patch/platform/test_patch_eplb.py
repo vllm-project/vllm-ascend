@@ -669,21 +669,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert result == "moved"
     refresh.assert_called_once_with(model_state, layer_idx)
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
-    if is_last_layer:
-        log_info.assert_called_once_with(
-            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d cross_node_transfers=%d",
-            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-            "model",
-            1.4,
-            1.1,
-            1.6,
-            1.2,
-            1,
-            2,
-            2,
-        )
-    else:
-        log_info.assert_not_called()
+    log_info.assert_not_called()
     assert call_order == ["move", "refresh", "ack"]
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
 

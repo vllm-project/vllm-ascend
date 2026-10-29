@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
@@ -117,8 +118,14 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     hash: the scheduler and every stage must derive the same namespace.
     """
     parallel = vllm_config.parallel_config
+    kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size if getattr(vllm_config, "additional_config", None) else 1
+    kvpp_namespace = (
+        f"kvpp-tp{parallel.tensor_parallel_size}-pcp{parallel.prefill_context_parallel_size}" if kvpp_size > 1 else ""
+    )
     if parallel.pipeline_parallel_size == 1:
-        return ""
+        # Owner-only objects have different sizes and layer offsets from the
+        # ordinary replicated layout, even with the same model and TP size.
+        return kvpp_namespace
     model = vllm_config.model_config
     partitions = []
     previous_end = 0
@@ -144,7 +151,7 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
             size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
         )
     speculative = vllm_config.speculative_config
-    identity = (
+    identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
         model.compute_hash(),
@@ -153,6 +160,8 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
         cache.block_size,
         speculative.compute_hash() if speculative is not None else None,
     )
+    if kvpp_namespace:
+        identity += (kvpp_namespace,)
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"mooncake_pp_v3:{digest}"
 

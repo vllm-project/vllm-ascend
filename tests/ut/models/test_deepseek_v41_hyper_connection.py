@@ -328,6 +328,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     draft = SimpleNamespace(
         hc_mult=4,
         hidden_size=8,
+        head_dim=4,
         dspark_block_size=5,
         dspark_markov_rank=4,
         num_nextn_predict_layers=3,
@@ -357,6 +358,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         for name in (
             "VocabParallelEmbedding",
             "ColumnParallelLinear",
+            "MergedColumnParallelLinear",
             "RMSNorm",
             "DSparkMarkovHead",
             "DSparkConfidenceHead",

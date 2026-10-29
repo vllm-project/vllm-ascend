@@ -34,7 +34,7 @@ From a technical view, vllm-ascend supports devices if TorchNPU is supported. Ot
 
 ### 2. How to get our docker containers?
 
-You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>cann</u>](https://quay.io/repository/ascend/cann?tab=tags).
+You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>CANN</u>](https://quay.io/repository/ascend/cann?tab=tags).
 
 If you are in China, you can use `daocloud` or some other mirror sites to accelerate your downloading:
 
@@ -115,6 +115,19 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 Yes, vllm-ascend supports Prefill-Decode Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
+If Mooncake reports `TransferEngine initialization previously failed`, inspect the
+first initialization error, correct its cause, and restart the affected process.
+The shared transfer engine is published only after initialization succeeds. Once
+native construction or initialization fails, further attempts in that process
+are rejected because Mooncake `0.3.11.post1` can leak native transport resources
+on failure. This guard prevents repeated failures from accumulating resources;
+it does not reclaim resources leaked by the first failure.
+
+The upstream cleanup fix, [Mooncake #2332](https://github.com/kvcache-ai/Mooncake/pull/2332),
+is included in the `v0.3.12` source. Retrying remains disabled until the minimum
+supported dependency includes the fix and repeated-failure cleanup is validated
+on Ascend. Installing a newer Mooncake package alone does not disable this guard.
+
 ### 9. Does vllm-ascend support quantization method?
 
 Currently, w8a8, w4a8, and w4a4 quantization methods are already supported by vllm-ascend.
@@ -170,37 +183,37 @@ There are several factors that affect output determinism:
 
 1. Sampler method: using **greedy sampling** by setting `temperature=0` in `SamplingParams`, e.g.:
 
-   ```python
-   from vllm import LLM, SamplingParams
+    ```python
+    from vllm import LLM, SamplingParams
 
-   prompts = [
+    prompts = [
       "Hello, my name is",
       "The president of the United States is",
       "The capital of France is",
       "The future of AI is",
-   ]
+      ]
 
-   # Create a sampling params object.
-   sampling_params = SamplingParams(temperature=0)
-   # Create an LLM.
-   llm = LLM(model="Qwen/Qwen3-0.6B")
+    # Create a sampling params object.
+    sampling_params = SamplingParams(temperature=0)
+    # Create an LLM.
+    llm = LLM(model="Qwen/Qwen3-0.6B")
 
-   # Generate texts from the prompts.
-   outputs = llm.generate(prompts, sampling_params)
-   for output in outputs:
+    # Generate texts from the prompts.
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
       prompt = output.prompt
       generated_text = output.outputs[0].text
       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-   ```
+    ```
 
 2. Set the following environment parameters:
 
-   ```bash
-   export LCCL_DETERMINISTIC=1
-   export HCCL_DETERMINISTIC=true
-   export ATB_MATMUL_SHUFFLE_K_ENABLE=0
-   export ATB_LLM_LCOC_ENABLE=0
-   ```
+    ```bash
+    export LCCL_DETERMINISTIC=1
+    export HCCL_DETERMINISTIC=true
+    export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+    export ATB_LLM_LCOC_ENABLE=0
+    ```
 
 ### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models?
 
@@ -244,20 +257,20 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
 
-   ```bash
-   export IMAGE_TAG=v0.10.0rc1-310p
-   export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
-   # If in China region, uncomment to use a mirror:
-   # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+    ```bash
+    export IMAGE_TAG=v0.10.0rc1-310p
+    export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+    # If in China region, uncomment to use a mirror:
+    # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
 
-   # Pull the image for the ARM64 platform and save it
-   docker pull --platform linux/arm64 "${IMAGE_NAME}"
-   docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
-   ```
+    # Pull the image for the ARM64 platform and save it
+    docker pull --platform linux/arm64 "${IMAGE_NAME}"
+    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
+    ```
 
 2. Transfer the image archive
 
-Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
+   Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
 
 ### 20. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
 
@@ -288,8 +301,8 @@ export SOC_VERSION="<value starting with ascend950>"
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
 
-- vLLM usually logs stats on your server. You might see metrics like `GPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
-- When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
+- vLLM usually logs stats on your server. You might see metrics like `NPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
+- When launching a vLLM server, you will see logs like `NPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
 
 Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.
 
