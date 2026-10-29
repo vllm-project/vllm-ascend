@@ -6,9 +6,10 @@ from functools import wraps
 import torch
 
 from .transfer import TorchExpertTransfer
-from .types import ExpertTensorSpec, PreparedExpertTensor
+from .utils import ExpertTensorSpec, PreparedExpertTensor
 
 ACL_MEMCPY_DEVICE_TO_HOST = 2
+EXPERTS_PER_HOST_CHUNK = 32
 
 
 class HostExpertStore:
@@ -39,7 +40,11 @@ class HostExpertStore:
                 name = parameter_names[id(param)]
                 experts = range(self.num_experts) if loaded_weight.ndim == 3 else (expert_id,)
                 shards: tuple[str, ...] = (shard_id,)
-                if name == "w13_weight_scale" and loaded_weight.shape[-2] == param.shape[-2]:
+                if (
+                    name == "w13_weight_scale"
+                    and loaded_weight.ndim >= 2
+                    and loaded_weight.shape[-2] == param.shape[-2]
+                ):
                     shards = ("w1", "w3")
                 self.loaded[name].update((eid, shard) for eid in experts for shard in shards)
             return success if return_success else None
@@ -79,27 +84,41 @@ class HostExpertStore:
         prepared = {}
         for expert_id in range(self.num_experts):
             bundle = adapter.materialize(self, (expert_id,), device)
-            if set(bundle) != set(self.names) or set(destination) != set(self.names):
+            if set(bundle) != set(adapter.output_names) or set(destination) != set(adapter.output_names):
                 raise RuntimeError("incomplete expert preparation bundle")
             # Loading only: complete format conversion before reading its storage.
             torch.npu.current_stream(device).synchronize()
             for name, tensor in bundle.items():
                 _, _, size = TorchExpertTransfer._physical_copy_parameters(destination[name], tensor, 0, torch_npu)
                 if expert_id == 0:
+                    # The host allocator rounds large pinned allocations up to a
+                    # power of two. Splitting 288 experts into 32-expert chunks
+                    # avoids reserving space for 512 experts in every GLM layer.
+                    chunks = tuple(
+                        torch.empty(
+                            (min(EXPERTS_PER_HOST_CHUNK, self.num_experts - start), size),
+                            dtype=torch.uint8,
+                            device="cpu",
+                            pin_memory=True,
+                        )
+                        for start in range(0, self.num_experts, EXPERTS_PER_HOST_CHUNK)
+                    )
                     prepared[name] = PreparedExpertTensor(
-                        data=torch.empty((self.num_experts, size), dtype=torch.uint8, device="cpu", pin_memory=True),
+                        data=chunks[0],
                         shape=tuple(tensor.shape[1:]),
                         stride=tuple(tensor.stride()),
                         dtype=tensor.dtype,
                         device=tensor.device,
                         npu_format=torch_npu.get_npu_format(tensor),
                         expert_bytes=size,
+                        extra_data=chunks[1:],
                     )
                 elif size != prepared[name].expert_bytes:
                     raise ValueError("expert physical layout changed during preparation")
                 # ACL reads the storage as bytes, never interpreting NZ as ND.
+                chunk, row = prepared[name].source_chunk(expert_id)
                 error = acl.rt.memcpy(
-                    prepared[name].data[expert_id].data_ptr(),
+                    chunk[row].data_ptr(),
                     size,
                     tensor.untyped_storage().data_ptr(),
                     size,

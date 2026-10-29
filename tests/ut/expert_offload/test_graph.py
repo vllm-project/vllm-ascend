@@ -10,6 +10,7 @@ from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManag
 from vllm_ascend.expert_offload.graph import GraphExpertStaging, supports_descriptor
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
+from vllm_ascend.expert_offload.utils import ExpertMapBuffer
 
 
 @pytest.mark.parametrize(
@@ -31,6 +32,14 @@ def test_speculative_graph_bounds_include_all_verification_and_padding_rows():
     assert not supports_descriptor(bindings, SimpleNamespace(num_tokens=6, uniform_token_count=None))
 
 
+@pytest.mark.parametrize("requests,expected", [(1, True), (2, True), (4, False)])
+def test_glm_mtp_three_draft_tokens_with_68_resident_experts(requests, expected):
+    bindings = [SimpleNamespace(top_k=8, num_slots=68)]
+    # Every request verifies the new target token plus three draft tokens.
+    desc = SimpleNamespace(num_tokens=requests * 4, uniform_token_count=4)
+    assert supports_descriptor(bindings, desc) is expected
+
+
 def staging_double():
     manager = ExpertOffloadManager()
     manager.state = OffloadState.READY
@@ -43,25 +52,29 @@ def staging_double():
     staging.binding = binding
     with torch.inference_mode():
         staging.ids = torch.tensor([[4, 5]])
-        staging.host_map = torch.zeros(6, dtype=torch.long)
+        staging.mapping = ExpertMapBuffer(6, torch.device("cpu"))
     return manager, staging
 
 
 def test_callback_updates_routes_each_replay_and_commits_after_copy():
     manager, staging = staging_double()
+    addresses = (staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
     with (
         patch.object(torch.npu, "set_device", create=True),
         patch.object(torch.npu, "stream", return_value=nullcontext(), create=True),
         patch.object(TorchExpertTransfer, "copy_experts") as copy,
     ):
-        staging.update()
+        with patch.object(torch, "tensor", side_effect=AssertionError("mapping must reuse its storage")):
+            staging.update()
         assert copy.call_count == 1
-        assert staging.host_map[4:6].tolist() == [0, 1]
+        assert staging.mapping.host_map[4:6].tolist() == [0, 1]
         with torch.inference_mode():
             staging.ids.copy_(torch.tensor([[1, 4]]))
-        staging.update()
+        with patch.object(torch, "tensor", side_effect=AssertionError("mapping must reuse its storage")):
+            staging.update()
         assert copy.call_count == 2
-        assert staging.host_map[1] >= 0 and staging.host_map[5] == -1
+        assert staging.mapping.host_map[1] >= 0 and staging.mapping.host_map[5] == -1
+        assert addresses == (staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
     assert manager.graph_error is None
 
 

@@ -5,7 +5,25 @@ from types import SimpleNamespace
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
+
+
+@pytest.fixture(autouse=True)
+def a5_hardware(monkeypatch):
+    profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+    monkeypatch.setattr("vllm_ascend.expert_offload.config.get_current_hardware_profile", lambda: profile)
+    return profile
+
+
+@pytest.mark.parametrize(
+    "family", [value for value in DeviceAdaptorFamily if value != DeviceAdaptorFamily.FP8_OPTIMIZED]
+)
+def test_unsupported_hardware_rejected_before_loading(a5_hardware, family):
+    a5_hardware.device_adaptor_family = family
+    with pytest.raises(ValueError, match="Ascend 950"):
+        ExpertOffloadConfig(enabled=True, num_device_experts=4).validate(*make_configs())
+    ExpertOffloadConfig().validate(None, None)
 
 
 def make_configs():
@@ -59,6 +77,59 @@ def make_dspark():
     )
 
 
+def make_glm_mtp(vc):
+    vc.model_config.hf_text_config.model_type = "glm5_next_text"
+    speculative = make_dspark()
+    speculative.method = "mtp"
+    speculative.draft_model_config.hf_config = SimpleNamespace(
+        model_type="glm5_next_mtp", architectures=["Glm5NextMTPModel"]
+    )
+    return speculative
+
+
+@pytest.mark.parametrize("method", ["mtp", "deepseek_mtp"])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("max_num_seqs", [1, 4])
+def test_checkpoint_glm_mtp_supports_concurrent_eager_drafting(method, async_scheduling, max_num_seqs):
+    vc, ac = make_configs()
+    vc.speculative_config = make_glm_mtp(vc)
+    vc.speculative_config.method = method
+    vc.scheduler_config.async_scheduling = async_scheduling
+    vc.scheduler_config.max_num_seqs = max_num_seqs
+    ExpertOffloadConfig(enabled=True, num_device_experts=68).validate(vc, ac)
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        ("method", "dspark"),
+        ("enforce_eager", False),
+        ("enable_adaptive_verification", True),
+        ("draft_model_config.model", "/models/other"),
+        ("draft_model_config.hf_config.model_type", "deepseek_mtp"),
+        ("draft_model_config.hf_config.architectures", ["DeepSeekMTPModel"]),
+    ],
+)
+def test_glm_mtp_requires_native_checkpoint_head_and_eager_drafting(path, value):
+    vc, ac = make_configs()
+    vc.speculative_config = make_glm_mtp(vc)
+    obj = vc.speculative_config
+    parts = path.split(".")
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+    setattr(obj, parts[-1], value)
+    with pytest.raises(ValueError, match="speculative_config"):
+        ExpertOffloadConfig(enabled=True, num_device_experts=68).validate(vc, ac)
+
+
+def test_glm_mtp_head_cannot_be_attached_to_a_different_target():
+    vc, ac = make_configs()
+    vc.speculative_config = make_glm_mtp(vc)
+    vc.model_config.hf_text_config.model_type = "deepseek_v4"
+    with pytest.raises(ValueError, match="speculative_config"):
+        ExpertOffloadConfig(enabled=True, num_device_experts=68).validate(vc, ac)
+
+
 @pytest.mark.parametrize("with_dspark", [False, True])
 def test_async_scheduling_accepts_otherwise_supported_configuration(with_dspark):
     vc, ac = make_configs()
@@ -76,9 +147,13 @@ def test_non_speculative_multi_request_accepts_both_scheduler_modes(async_schedu
     ExpertOffloadConfig(enabled=True, num_device_experts=16).validate(vc, ac)
 
 
-def test_checkpoint_dspark_with_eager_drafting_is_supported():
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("max_num_seqs", [1, 2, 4, 8, 32])
+def test_checkpoint_dspark_with_eager_drafting_supports_multiple_requests(async_scheduling, max_num_seqs):
     vc, ac = make_configs()
     vc.speculative_config = make_dspark()
+    vc.scheduler_config.async_scheduling = async_scheduling
+    vc.scheduler_config.max_num_seqs = max_num_seqs
     ExpertOffloadConfig(enabled=True, num_device_experts=96).validate(vc, ac)
 
 
@@ -94,16 +169,12 @@ def test_unsupported_speculative_modes_are_rejected(field, value):
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
-def test_external_dspark_checkpoint_and_multi_request_drafting_are_rejected(async_scheduling):
+def test_external_dspark_checkpoint_is_rejected(async_scheduling):
     vc, ac = make_configs()
     vc.scheduler_config.async_scheduling = async_scheduling
     vc.speculative_config = make_dspark()
     vc.speculative_config.draft_model_config.model = "/models/other"
     with pytest.raises(ValueError, match="speculative_config"):
-        ExpertOffloadConfig(enabled=True, num_device_experts=96).validate(vc, ac)
-    vc.speculative_config = make_dspark()
-    vc.scheduler_config.max_num_seqs = 2
-    with pytest.raises(ValueError, match="max_num_seqs"):
         ExpertOffloadConfig(enabled=True, num_device_experts=96).validate(vc, ac)
 
 
@@ -114,10 +185,14 @@ def test_defaults_and_disabled_validation():
     cfg.validate_layer(0, 0)
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v4", "qwen3_moe", "other_moe", None])
-def test_target_model_name_does_not_replace_layer_capability_checks(model_type):
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "glm5_next_text", "qwen4_exp", "qwen3_moe", "other_moe", None])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_non_speculative_target_compatibility_is_capability_based(model_type, async_scheduling):
     vc, ac = make_configs()
     vc.model_config.hf_text_config.model_type = model_type
+    vc.scheduler_config.async_scheduling = async_scheduling
+    vc.scheduler_config.max_num_seqs = 4
+    assert vc.speculative_config is None
     ExpertOffloadConfig(enabled=True, num_device_experts=4).validate(vc, ac)
 
 

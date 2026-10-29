@@ -5,11 +5,10 @@ import torch
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
-from vllm_ascend.quantization.quant_type import QuantType
 
 from .config import ExpertOffloadConfig
 from .expert_offload_manager import LayerOffloadBinding
-from .quantization import MXFP4ExpertAdapter
+from .quantization import expert_adapter_type
 
 
 class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
@@ -19,13 +18,9 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
         if not isinstance(method, AscendFusedMoEMethod):
             raise ValueError(
                 "selected quantization method does not support expert offload; "
-                "W4A8 MXFP quantized routed experts are required"
+                "a supported Ascend quantized routed-expert scheme is required"
             )
-        if method.quant_method.quant_type != QuantType.W4A8MXFP:
-            raise ValueError(
-                "expert offload requires W4A8 MXFP routed expert weights; no adapter exists for this format"
-            )
-        MXFP4ExpertAdapter.validate_scheme(method.quant_method)
+        expert_adapter_type(method.quant_method).validate_scheme(method.quant_method)
         super().__init__(method.quant_method, moe_config, tid2eid=method.tid2eid)
         self.expert_offload_config = config
         # Prevent the loader from moving the complete CPU layer to the NPU.

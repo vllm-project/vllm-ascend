@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from pydantic import ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -37,6 +38,8 @@ class ExpertOffloadConfig:
     def validate(self, vllm_config: VllmConfig, ascend_config) -> None:
         if not self.enabled:
             return
+        if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+            raise ValueError("expert offload currently requires Ascend 950 (A5) hardware")
         if not vllm_config.use_v2_model_runner:
             raise ValueError("expert offload requires Model Runner V2")
         if not vllm_config.model_config.enforce_eager:
@@ -81,20 +84,34 @@ class ExpertOffloadConfig:
                 raise ValueError(f"expert offload does not support {name}: {reason}; remove {name}")
         speculative = vllm_config.speculative_config
         if speculative is not None:
+            # Speculative decoding is optional. This guard only limits the supported
+            # composition; ordinary expert offload uses per-layer capability checks.
             draft = getattr(speculative, "draft_model_config", None)
+            draft_hf = getattr(draft, "hf_config", None)
+            method = getattr(speculative, "method", None)
+            dspark = (
+                method == "dspark"
+                and getattr(draft_hf, "model_type", None) == "deepseek_v4"
+                and getattr(draft_hf, "architectures", None) == ["DSparkDraftModel"]
+            )
+            # vLLM normalizes the documented deepseek_mtp alias to mtp and
+            # selects GLM's own MTP head from the checkpoint configuration.
+            glm_mtp = (
+                method in ("mtp", "deepseek_mtp")
+                and getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "glm5_next_text"
+                and getattr(draft_hf, "model_type", None) == "glm5_next_mtp"
+                and getattr(draft_hf, "architectures", None) == ["Glm5NextMTPModel"]
+            )
             if (
-                getattr(speculative, "method", None) != "dspark"
-                or draft is None
+                draft is None
                 or draft.model != vllm_config.model_config.model
-                or draft.hf_config.model_type != "deepseek_v4"
-                or draft.hf_config.architectures != ["DSparkDraftModel"]
                 or not speculative.enforce_eager
                 or speculative.enable_adaptive_verification
-                or vllm_config.scheduler_config.max_num_seqs != 1
+                or not (dspark or glm_mtp)
             ):
                 raise ValueError(
-                    "expert offload speculative_config supports only the checkpoint's DeepSeek V4 DSpark "
-                    "with eager drafting, fixed verification and max_num_seqs=1"
+                    "expert offload speculative_config supports only checkpoint-native DeepSeek V4 DSpark "
+                    "or GLM-5.3-Flash MTP, with eager drafting and fixed verification"
                 )
         offload = vllm_config.offload_config
         if offload.uva.cpu_offload_gb or offload.prefetch.offload_group_size:

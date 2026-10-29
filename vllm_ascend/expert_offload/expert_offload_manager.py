@@ -9,10 +9,10 @@ import torch
 
 from .host_store import HostExpertStore
 from .prefill import PrefillExpertPool
-from .quantization import MXFP4ExpertAdapter
+from .quantization import expert_adapter_type
 from .residency import ExpertResidency
 from .transfer import TorchExpertTransfer
-from .types import ExpertWeightView
+from .utils import ExpertMapBuffer, ExpertWeightView
 
 
 class OffloadState(Enum):
@@ -47,12 +47,13 @@ class LayerOffloadBinding:
         self.num_slots = config.num_device_experts
         self.top_k = layer.top_k
         self.device = torch.device(layer.moe_config.device)
-        self.adapter = MXFP4ExpertAdapter(layer, scheme)
+        self.adapter = expert_adapter_type(scheme)(layer, scheme)
         self.adapter.validate_layer(layer)
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.residency = ExpertResidency(self.num_experts, self.num_slots)
         self.manager: ExpertOffloadManager | None = None
         self.resident: dict[str, torch.Tensor] = {}
+        self.mapping: ExpertMapBuffer | None = None
         self.graph_staging = {}
 
     def process_weights_after_loading(self, layer) -> None:
@@ -64,9 +65,16 @@ class LayerOffloadBinding:
             if self.device.type == "npu":
                 torch.npu.current_stream(self.device).synchronize()
                 self.host_store.prepare_native(self.adapter, self.resident, self.device)
+            self.mapping = ExpertMapBuffer(self.num_experts, self.device)
             # Preserve Parameter metadata/loaders, and allocate no full device layer here.
+            for name in self.adapter.tensor_names:
+                if name not in self.resident:
+                    delattr(layer, name)
             for name, tensor in self.resident.items():
-                getattr(layer, name).data = tensor
+                if isinstance(getattr(layer, name, None), torch.nn.Parameter):
+                    getattr(layer, name).data = tensor
+                else:
+                    setattr(layer, name, tensor)
             self.residency.commit(self.residency.plan(range(self.num_slots)))
         except Exception:
             self.close()
@@ -74,7 +82,7 @@ class LayerOffloadBinding:
 
     def prepare(self, layer, selected_ids):
         manager = self.manager
-        if manager is None or manager.state is not OffloadState.READY or not manager.executing:
+        if manager is None or manager.state is not OffloadState.READY or not manager.executing or self.mapping is None:
             raise RuntimeError("expert offload layer requires a ready runner-owned execution")
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
             from .graph import GraphExpertStaging
@@ -109,8 +117,9 @@ class LayerOffloadBinding:
             else:
                 TorchExpertTransfer.copy_experts(self.adapter, self.host_store, self.resident, plan.loads, self.device)
                 self.residency.commit(plan)
-                mapping = torch.tensor(self.residency.logical_to_physical(), device=selected_ids.device)
-                physical_ids = mapping[selected_ids.long()].to(selected_ids.dtype)
+                # The blocking route D2H above also fences the previous use of this host map.
+                self.mapping.update(self.residency)
+                physical_ids = self.mapping.remap(selected_ids)
                 tensors = self.resident
                 count = self.num_slots
             # A private comm instance avoids mutating the cached full-layer dispatcher.
@@ -122,6 +131,7 @@ class LayerOffloadBinding:
     def close(self) -> None:
         self.host_store.close()
         self.resident.clear()
+        self.mapping = None
         self.graph_staging.clear()
         self.manager = None
 

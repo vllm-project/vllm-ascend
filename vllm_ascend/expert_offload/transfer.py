@@ -64,22 +64,24 @@ class TorchExpertTransfer:
             raise ValueError("incompatible expert physical layouts")
         if type(slot) is not int or not 0 <= slot < destination.shape[0]:
             raise ValueError("expert destination slot is out of range")
-        if type(expert_id) is not int or not 0 <= expert_id < prepared.data.shape[0]:
+        if type(expert_id) is not int or not 0 <= expert_id < prepared.num_experts:
             raise ValueError("logical expert is out of range")
+        source, row = prepared.source_chunk(expert_id)
         size = prepared.expert_bytes
         storage = destination.untyped_storage()
         if (
             size <= 0
             or int(torch_npu.get_storage_size(destination)) * destination.element_size() != size * destination.shape[0]
             or storage.nbytes() < size * destination.shape[0]
-            or prepared.data.device.type != "cpu"
-            or prepared.data.dtype != torch.uint8
-            or prepared.data.shape[1:] != (size,)
-            or not prepared.data.is_contiguous()
-            or not prepared.data.is_pinned()
+            or source.device.type != "cpu"
+            or source.dtype != torch.uint8
+            or source.shape[1:] != (size,)
+            or not 0 <= row < source.shape[0]
+            or not source.is_contiguous()
+            or not source.is_pinned()
         ):
             raise ValueError("expert physical storage does not contain uniform pinned bounded blocks")
-        return storage.data_ptr() + slot * size, prepared.data.data_ptr() + expert_id * size, size
+        return storage.data_ptr() + slot * size, source.data_ptr() + row * size, size
 
     @staticmethod
     def _physical_copy_parameters(destination, source, slot, torch_npu):
@@ -90,7 +92,7 @@ class TorchExpertTransfer:
         Scales retain their original transposed strides and packed byte layout.
         """
         if (
-            len(source.shape) not in (3, 4)
+            len(source.shape) not in (2, 3, 4)
             or len(destination.shape) != len(source.shape)
             or destination.device != source.device
             or destination.dtype != source.dtype
