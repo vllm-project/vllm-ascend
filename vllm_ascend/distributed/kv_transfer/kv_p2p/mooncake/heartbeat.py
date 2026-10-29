@@ -80,17 +80,20 @@ class MooncakeHeartbeatThread(threading.Thread):
                         for endpoint in peers.keys() - groups.keys():
                             self._close_peer(peers.pop(endpoint), poller)
                         for endpoint, ids in groups.items():
-                            if endpoint not in peers:
-                                path = make_zmq_path("tcp", *endpoint)
-                                sock = make_zmq_socket(context, path, zmq.REQ, bind=False)  # type: ignore[attr-defined]
-                                sock.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
-                                poller.register(sock, zmq.POLLIN)  # type: ignore[attr-defined]
-                                peers[endpoint] = _Peer(sock)
-                            ids_list = tuple(ids)
-                            peers[endpoint].pending = deque(
-                                encoder.encode((HEARTBEAT_MSG, ids_list[i : i + MAX_HEARTBEAT_REQUESTS]))
-                                for i in range(0, len(ids_list), MAX_HEARTBEAT_REQUESTS)
-                            )
+                            peer = peers.get(endpoint)
+                            if peer is None:
+                                peer = self._connect_peer(context, endpoint, poller)
+                                if peer is None:
+                                    continue
+                                peers[endpoint] = peer
+                            # Drain the current snapshot before starting another;
+                            # slow ACKs must not repeatedly discard its tail.
+                            if not peer.pending:
+                                ids_list = tuple(ids)
+                                peer.pending = deque(
+                                    encoder.encode((HEARTBEAT_MSG, ids_list[i : i + MAX_HEARTBEAT_REQUESTS]))
+                                    for i in range(0, len(ids_list), MAX_HEARTBEAT_REQUESTS)
+                                )
                         next_send = now + self.interval
                     for endpoint, peer in list(peers.items()):
                         try:
@@ -127,6 +130,23 @@ class MooncakeHeartbeatThread(threading.Thread):
             finally:
                 for peer in peers.values():
                     self._close_peer(peer, poller)
+
+    @staticmethod
+    def _connect_peer(context: Any, endpoint: tuple[str, int], poller: Any) -> _Peer | None:
+        sock = None
+        try:
+            path = make_zmq_path("tcp", *endpoint)
+            sock = make_zmq_socket(context, path, zmq.REQ, bind=False)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
+            poller.register(sock, zmq.POLLIN)  # type: ignore[attr-defined]
+            return _Peer(sock)
+        except Exception:
+            if sock is not None:
+                sock.close(linger=0)
+            logger.warning(
+                "Cannot connect Mooncake heartbeat peer %s:%s; retrying next interval", *endpoint, exc_info=True
+            )
+            return None
 
     @staticmethod
     def _close_peer(peer: _Peer, poller: Any) -> None:

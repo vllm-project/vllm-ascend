@@ -471,7 +471,7 @@ settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 
-On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node 脳 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
+On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
 
 | NPUs per Node | Reserved Port Range | Recommended kv_port |
 |---------------|---------------------|---------------------|

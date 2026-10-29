@@ -1134,3 +1134,117 @@ def test_heartbeat_batches_large_groups_and_reconnects_after_bad_ack(monkeypatch
             heartbeat.shutdown()
             stop.set()
             server.join(3)
+
+
+def test_slow_heartbeat_acks_do_not_starve_tail_or_retain_removed_requests() -> None:
+    stop = threading.Event()
+    received_all = threading.Event()
+    received_new = threading.Event()
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = set()
+        batch_sizes = []
+        new_snapshot_batches = []
+
+        def serve():
+            refreshed = False
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    _, ids = msgspec.msgpack.decode(frames[-1])
+                    seen.update(ids)
+                    batch_sizes.append(len(ids))
+                    if len(seen) >= 1025:
+                        received_all.set()
+                    if "new-remote" in ids:
+                        refreshed = True
+                        received_new.set()
+                    if refreshed:
+                        new_snapshot_batches.append(ids)
+                    # Cross a refresh interval while each ACK is outstanding.
+                    stop.wait(0.08)
+                    router.send_multipart((frames[0], b"", ACK_MSG))
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.05)
+        for index in range(1025):
+            heartbeat.add_request(str(index), "127.0.0.1", port, "remote-" + str(index))
+        heartbeat.start()
+        try:
+            assert received_all.wait(3), "unsent tail must survive heartbeat refreshes"
+            heartbeat.remove_request("0")
+            heartbeat.add_request("new", "127.0.0.1", port, "new-remote")
+            assert received_new.wait(3), "new requests must enter the next snapshot"
+            assert max(batch_sizes) <= 512
+            assert all("remote-0" not in ids for ids in new_snapshot_batches)
+            assert heartbeat.is_alive()
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+        assert not server.is_alive()
+
+
+@pytest.mark.parametrize("failure_stage", ["create", "configure"])
+def test_heartbeat_connection_failure_is_isolated_and_closes_partial_socket(monkeypatch, failure_stage) -> None:
+    stop = threading.Event()
+    received_twice = threading.Event()
+    original_make_socket = heartbeat_module.make_zmq_socket
+    failed_socket = MagicMock()
+    failed_socket.setsockopt.side_effect = RuntimeError("socket configuration failed")
+
+    def make_socket(context, path, *args, **kwargs):
+        if path.endswith(":1"):
+            if failure_stage == "create":
+                raise ValueError("invalid heartbeat endpoint")
+            return failed_socket
+        return original_make_socket(context, path, *args, **kwargs)
+
+    monkeypatch.setattr(heartbeat_module, "make_zmq_socket", make_socket)
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = []
+
+        def serve():
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    seen.append(msgspec.msgpack.decode(frames[-1]))
+                    router.send_multipart((frames[0], b"", ACK_MSG))
+                    if len(seen) >= 2:
+                        received_twice.set()
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.05)
+        heartbeat.add_request("bad", "127.0.0.1", 1, "bad-remote")
+        heartbeat.add_request("good", "127.0.0.1", port, "good-remote")
+        heartbeat.start()
+        try:
+            assert received_twice.wait(3), "a failed connection must not stop other producers"
+            assert heartbeat.is_alive()
+            assert all(message == [HEARTBEAT_MSG, ["good-remote"]] for message in seen)
+            if failure_stage == "configure":
+                failed_socket.close.assert_any_call(linger=0)
+            else:
+                failed_socket.close.assert_not_called()
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+        assert not server.is_alive()

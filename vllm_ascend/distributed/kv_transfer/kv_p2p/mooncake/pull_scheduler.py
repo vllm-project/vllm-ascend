@@ -327,7 +327,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         with self.state_lock:
             now = time.monotonic()
             for request_id in request_ids:
-                expiry = self.delayed_free_requests.get(request_id, self.renewed_requests.get(request_id))
+                expiry = self.delayed_free_requests.get(request_id)
+                if expiry is None:
+                    expiry = self.renewed_requests.get(request_id)
                 if expiry is None:
                     continue
                 if now >= expiry:
