@@ -120,7 +120,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
+from vllm_ascend.worker.v2.pp_transport import PPTokenShardBuffer, resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
@@ -320,6 +320,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+        self.pp_sharded_tensor_keys = getattr(self.model, "pp_sharded_tensor_keys", ())
+        self.model_state.pp_input_buffer = None
+        if self.pp_sharded_tensor_keys and self.intermediate_tensors is not None:
+            self.model_state.pp_input_buffer = PPTokenShardBuffer(
+                self.intermediate_tensors,
+                self.pp_sharded_tensor_keys,
+                self.parallel_config.tensor_parallel_size,
+            )
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""

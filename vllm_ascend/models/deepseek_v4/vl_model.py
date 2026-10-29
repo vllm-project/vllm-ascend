@@ -113,6 +113,7 @@ class AscendDeepseekV4ForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.pp_sharded_tensor_keys = getattr(self.language_model, "pp_sharded_tensor_keys", ())
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)

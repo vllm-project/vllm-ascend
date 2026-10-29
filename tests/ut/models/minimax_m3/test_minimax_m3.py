@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3 import (
@@ -259,16 +260,64 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         get_pp_group.return_value = SimpleNamespace(is_first_rank=True, is_last_rank=False)
         all_gather.side_effect = lambda value: torch.cat((value, value + 100), dim=0)
 
-        output = model(
-            input_ids=None,
-            positions=torch.arange(3),
-            intermediate_tensors=None,
-            inputs_embeds=torch.arange(6, dtype=torch.float32).reshape(3, 2),
-        )
+        for sharded_pp in (False, True):
+            with self.subTest(sharded_pp=sharded_pp):
+                model.pp_sharded_tensor_keys = ("hidden_states", "residual") if sharded_pp else ()
+                all_gather.reset_mock()
+                output = model(
+                    input_ids=None,
+                    positions=torch.arange(3),
+                    intermediate_tensors=None,
+                    inputs_embeds=torch.arange(6, dtype=torch.float32).reshape(3, 2),
+                )
 
-        self.assertEqual(all_gather.call_count, 2)
-        self.assertEqual(output["hidden_states"].shape, torch.Size([3, 2]))
-        self.assertEqual(output["residual"].shape, torch.Size([3, 2]))
+                self.assertEqual(all_gather.call_count, 0 if sharded_pp else 2)
+                rows = 2 if sharded_pp else 3
+                self.assertEqual(output["hidden_states"].shape, torch.Size([rows, 2]))
+                self.assertEqual(output["residual"].shape, torch.Size([rows, 2]))
+
+    def test_pipeline_shards_are_recognized_for_one_token_and_keep_full_aux(self) -> None:
+        class _SequenceParallelLayer(nn.Module):
+            use_sequence_parallel = True
+
+            def forward(self, positions, hidden_states, residual, input_is_sequence_parallel=False):
+                assert input_is_sequence_parallel
+                assert hidden_states.shape[0] == residual.shape[0] == 1
+                return hidden_states, residual
+
+        model = MiniMaxM3Model.__new__(MiniMaxM3Model)
+        nn.Module.__init__(model)
+        model.do_not_compile = True
+        model.pp_sharded_tensor_keys = ("hidden_states", "residual")
+        model.start_layer = 1
+        model.end_layer = 2
+        model.layers = nn.ModuleList([nn.Identity(), _SequenceParallelLayer()])
+        model.aux_hidden_state_layers = set()
+        model._maybe_add_hidden_state = MethodType(lambda self, states, *_args: states, model)
+        hidden = torch.tensor([[1.0, 2.0]])
+        residual = hidden + 3
+        aux = hidden + 5
+        context = SimpleNamespace(is_padding=torch.tensor([False]))
+        incoming = IntermediateTensors(
+            {"hidden_states": hidden, "residual": residual, "pp_transport_aux_hidden_states_0": aux}
+        )
+        module = "vllm_ascend.models.minimax_m3.minimax_m3."
+        with (
+            patch(module + "get_pp_group", return_value=SimpleNamespace(is_first_rank=False, is_last_rank=False)),
+            patch(module + "sp_all_gather") as gather,
+            patch(module + "envs.VLLM_MOE_SKIP_PADDING", True),
+            patch(module + "is_forward_context_available", return_value=True),
+            patch(module + "get_forward_context", return_value=context),
+            patch(module + "sp_padding_mask", return_value=torch.tensor([True])) as padding_mask,
+        ):
+            output = model(None, torch.arange(1), incoming)
+
+        gather.assert_not_called()
+        padding_mask.assert_called_once()
+        torch.testing.assert_close(context.is_padding, torch.tensor([False]))
+        torch.testing.assert_close(output["hidden_states"], hidden)
+        torch.testing.assert_close(output["residual"], residual)
+        torch.testing.assert_close(output["pp_transport_aux_hidden_states_0"], aux)
 
     def test_mxfp8_swiglu_uses_small_ops_then_dynamic_quant(self) -> None:
         activation = MiniMaxM3SwiGLUOAI(

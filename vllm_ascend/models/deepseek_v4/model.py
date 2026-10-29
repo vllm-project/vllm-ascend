@@ -852,6 +852,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.pp_sharded_tensor_keys = (
+            ("hidden_states",)
+            if self.use_sequence_parallel_moe
+            and vllm_config.use_v2_model_runner
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            else ()
+        )
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -905,6 +914,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             dtype: torch.dtype,
             device: torch.device,
         ) -> IntermediateTensors:
+            if self.pp_sharded_tensor_keys:
+                tp_size = get_tensor_model_parallel_world_size()
+                batch_size = (batch_size + tp_size - 1) // tp_size
             return IntermediateTensors(
                 {
                     "hidden_states": torch.zeros(
@@ -971,6 +983,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         pp_group = get_pp_group()
+        pp_sharded = bool(getattr(self, "pp_sharded_tensor_keys", ()))
         if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -989,8 +1002,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel_moe:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
-            hidden_states = sp_shard(hidden_states)
+                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, positions)
+            if pp_group.is_first_rank or not pp_sharded:
+                hidden_states = sp_shard(hidden_states)
             # Non-first PP ranks receive None input_ids (the embedding was
             # done upstream); only shard on the rank that owns the tokens.
             if input_ids is not None:
@@ -1025,9 +1039,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
-            # The next PP rank expects full-sequence hidden states; undo the
-            # sequence sharding applied above before crossing the PP boundary.
-            if self.use_sequence_parallel_moe:
+            if self.use_sequence_parallel_moe and not pp_sharded:
                 hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors(
                 {
@@ -1110,6 +1122,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.quant_config = quant_config
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.pp_sharded_tensor_keys = getattr(self.model, "pp_sharded_tensor_keys", ())
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

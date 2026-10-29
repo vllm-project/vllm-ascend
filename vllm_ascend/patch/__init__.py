@@ -918,6 +918,19 @@
 #    Future Plan:
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
+#   2. `deepseek_v2.DeepseekV2DecoderLayer` and `DeepseekV2Model`
+#    Why:
+#       GLM-5.2/5.3 need persistent SP token shards across MRV2 PP boundaries;
+#       upstream disables this combination and infers input layout from shape.
+#    How:
+#       Scope explicit decoder layouts and sharded main buffers to GLM MRV2
+#       SP+PP without CP or fine-grained OProj TP. Keep dense layers and aux/TopK
+#       payloads in their existing full-token layouts; retain all original weights.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; this adapts the Ascend MRV2 transport capability.
+#    Future Plan:
+#       Remove the decoder override once upstream accepts explicit PP input
+#       layouts and supports SP with pipeline parallelism.
 #
 # ** 4. File: worker/patch_eagle3_init.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

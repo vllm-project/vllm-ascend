@@ -48,6 +48,20 @@ Steps to follow to enable SP currently:
 > [!NOTE]
 > **Difference from upstream.** Upstream vLLM enables MoE sequence parallelism only when `data_parallel_size > 1`, together with a supported all2all backend, expert parallelism, and `tensor_parallel_size > 1`. On vLLM Ascend, `data_parallel_size > 1` is not part of the enablement condition. Ascend FlashComm also supports the TP/EP topology with `data_parallel_size = 1`, so SP MoE can be enabled when DP is 1 as long as the conditions above are met. `data_parallel_size > 1` remains supported.
 
+### Pipeline parallelism
+
+With Model Runner V2, DeepSeek-V4, Kimi-K3 with AttnRes, MiniMax-M3, and GLM-5.2/5.3
+keep the main activations sequence-sharded between pipeline stages. Each
+TP rank sends its token shard to the same TP rank in the next stage;
+auxiliary hidden states and Top-K indices retain their full-token layout.
+This path requires PCP and DCP sizes of 1. Other models and configurations
+retain their existing PP transport. The last stage still gathers the final
+hidden states for the output head.
+
+GLM-5.2/5.3 keeps dense layers in their original full-token layout and
+uses sequence-sharded computation in MoE layers. Fine-grained O-projection
+TP retains its existing PP transport.
+
 ### Matmul reduce-scatter fusion
 
 On supported Ascend devices, enable `fuse_gemm_comms` to fuse a

@@ -545,6 +545,7 @@ def _make_dump_runner(debugger=None):
     runner = _make_runner(need_timing=False)
     runner.debugger = debugger
     runner.model = Mock()
+    runner.model.pp_sharded_tensor_keys = ()
     runner.prompt_logprobs_worker = None
     runner._debugger_started = False
     return runner

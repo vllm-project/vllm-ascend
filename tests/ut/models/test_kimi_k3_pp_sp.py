@@ -69,6 +69,8 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
             data_parallel_size=dp,
             enable_expert_parallel=ep,
             enable_eplb=False,
@@ -291,7 +293,7 @@ def runtime(monkeypatch):
     return namespace, context
 
 
-def make_model(namespace, context, start, end, block_size, sp, materialized):
+def make_model(namespace, context, start, end, block_size, sp, materialized, sharded_pp=False):
     class Attention(nn.Module):
         def forward(self, *, hidden_states, positions):
             assert hidden_states.shape[0] == positions.shape[0]
@@ -302,6 +304,7 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model.config = SimpleNamespace(attn_res_block_size=block_size, hidden_size=3)
     model.start_layer, model.end_layer = start, end
     model.use_sequence_parallel = sp
+    model.pp_sharded_tensor_keys = ("hidden_states", "residual") if sp and sharded_pp else ()
     model.dspark_aux_capture_materialized = materialized
     model.aux_hidden_state_layers = (0, 1, 2, 3, 4, 5)
     model.layers = nn.ModuleList()
@@ -334,9 +337,10 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
 
 @pytest.mark.parametrize("materialized", [False, True])
 @pytest.mark.parametrize("sp", [False, True])
+@pytest.mark.parametrize("sharded_pp", [False, True])
 @pytest.mark.parametrize("tp,num_tokens", [(2, 8), (2, 3), (16, 8)])
 @pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5), (0, 2, 2, 5), (0, 2, 5, 5)])
-def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_tokens, cuts):
+def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, sharded_pp, tp, num_tokens, cuts):
     block_size = 2
     namespace, context = runtime
     dtype = torch.float32
@@ -364,7 +368,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
             context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2)
             context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
-            model = make_model(namespace, context, start, end, block_size, sp, materialized)
+            model = make_model(namespace, context, start, end, block_size, sp, materialized, sharded_pp)
             if intermediate is not None:
                 model._cache_aux_pp_layout()
                 capacity = max(12, num_tokens)
@@ -373,17 +377,26 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 assert model._aux_slot_base_cached == len(intermediate.tensors) - 2
                 if context.pp.is_last_rank:
                     assert model._aux_upstream_total_cached == len(intermediate.tensors) - 2
-                # Boundary tensors are full-sequence replicas under the
-                # stage-boundary gather contract.
-                for tensor in intermediate.tensors.values():
-                    assert tensor.shape[0] == num_tokens
-                # Upstream copies full-token tensors into persistent buffers.
+                # Main activations can stay sharded while aux keeps its
+                # full-token transport contract.
                 for name, tensor in buffers.tensors.items():
+                    is_shard = name in model.pp_sharded_tensor_keys
+                    rows = (num_tokens + tp - 1) // tp if is_shard else num_tokens
+                    capacity_rows = (capacity + tp - 1) // tp if is_shard else capacity
+                    assert tensor.shape[0] == capacity_rows
+                    assert intermediate[name].shape[0] == rows
                     tensor.fill_(999)
-                    assert tensor[:num_tokens].shape == intermediate[name].shape
-                    tensor[:num_tokens].copy_(intermediate[name])
+                    tensor[:rows].copy_(intermediate[name])
+                    if is_shard:
+                        valid_rows = max(0, min(rows, num_tokens - rank * rows))
+                        tensor[valid_rows:rows].zero_()
                 intermediate = IntermediateTensors(
-                    {name: tensor[:num_tokens] for name, tensor in buffers.tensors.items()}
+                    {
+                        name: tensor[
+                            : (num_tokens + tp - 1) // tp if name in model.pp_sharded_tensor_keys else num_tokens
+                        ]
+                        for name, tensor in buffers.tensors.items()
+                    }
                 )
             output = model(None, positions, intermediate, inputs_embeds=inputs if stage == 0 else None)
             if sp:
@@ -452,6 +465,7 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draf
     model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
     assert model.dspark_aux_capture_materialized is materialized
     assert model.use_sequence_parallel is runner_v2
+    assert model.pp_sharded_tensor_keys == (("hidden_states", "residual") if runner_v2 else ())
 
 
 @pytest.mark.parametrize("owns_embed", [False, True])

@@ -12,7 +12,8 @@ from vllm_ascend.models.deepseek_mtp import AscendGlmMoeDsaForCausalLM
 
 @pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("pp_size,local_layers", [(1, 75), (2, 39), (2, 36), (2, 0), (3, 24)])
-def test_eplb_layer_count_matches_local_weights_only_for_v2_pp(use_v2, pp_size, local_layers):
+@pytest.mark.parametrize("sharded_keys", [(), ("hidden_states", "residual")])
+def test_eplb_layer_count_matches_local_weights_only_for_v2_pp(use_v2, pp_size, local_layers, sharded_keys):
     config = SimpleNamespace(
         use_v2_model_runner=use_v2,
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
@@ -25,6 +26,7 @@ def test_eplb_layer_count_matches_local_weights_only_for_v2_pp(use_v2, pp_size, 
         assert prefix == "target"
         self.num_moe_layers = original_count
         self.moe_layers = [object() for _ in range(local_layers)]
+        self.model = SimpleNamespace(pp_sharded_tensor_keys=sharded_keys)
 
     with patch.object(GlmMoeDsaForCausalLM, "__init__", init):
         model = AscendGlmMoeDsaForCausalLM(vllm_config=config, prefix="target")
@@ -32,3 +34,4 @@ def test_eplb_layer_count_matches_local_weights_only_for_v2_pp(use_v2, pp_size, 
     expected = local_layers if use_v2 and pp_size > 1 else original_count
     assert model.num_moe_layers == expected
     assert len(model.moe_layers) == local_layers
+    assert model.pp_sharded_tensor_keys is sharded_keys

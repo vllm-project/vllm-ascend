@@ -116,6 +116,7 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
     vllm_version_is,
 )
+from vllm_ascend.worker.v2.pp_transport import zero_pp_shard_padding
 
 # vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
 # in kv_cache_utils, so importing the main-only module breaks worker startup.
@@ -889,10 +890,11 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        sharded_keys = getattr(self.model_runner, "pp_sharded_tensor_keys", ()) if self.use_v2_model_runner else ()
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if self.use_v2_model_runner and enable_sp(self.vllm_config):
+            if sharded_keys or (self.use_v2_model_runner and enable_sp(self.vllm_config)):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -918,10 +920,18 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if self.use_v2_model_runner and enable_sp(self.vllm_config):
+        if sharded_keys or (self.use_v2_model_runner and enable_sp(self.vllm_config)):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
+        if sharded_keys:
+            zero_pp_shard_padding(
+                output.tensors,
+                sharded_keys,
+                self.model_runner.model_state.pp_num_tokens,
+                get_tp_group().world_size,
+                get_tp_group().rank_in_group,
+            )
         self._pp_send_work = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
