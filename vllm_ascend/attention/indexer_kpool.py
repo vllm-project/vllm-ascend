@@ -31,7 +31,12 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_pcp_global_metadata,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_requests_to_run_as_prefill
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -260,6 +265,8 @@ class _KPoolMetadataBuffers:
     start_offsets: torch.Tensor
     token_indices: torch.Tensor
     pooled_slot_mapping: torch.Tensor
+    replicated_block_table: torch.Tensor | None = None
+    replicated_slot_mapping: torch.Tensor | None = None
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -300,6 +307,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.kernel_block_size = kv_cache_spec.block_size
         self.compress_ratio = compress_ratio
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         if self.kernel_block_size <= 0 or self.logical_block_size % self.kernel_block_size:
             raise ValueError(
@@ -314,6 +322,13 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.kernel_row_block_size = self.kernel_block_size // self.compress_ratio
         # MTP tables count expanded kernel pages.
         self.kernel_blocks_per_logical_block = self.logical_block_size // self.kernel_block_size
+        self._dcp_local_cols = get_sfa_dcp_max_local_block_table_cols(
+            vllm_config.model_config.max_model_len,
+            self.logical_block_size,
+            self.dcp_size,
+            self.kernel_blocks_per_logical_block,
+        )
+        self._replicated_columns = torch.arange(self._dcp_local_cols * self.dcp_size, device=device, dtype=torch.int32)
         scheduler_config = vllm_config.scheduler_config
         # Builders also run in CPU unit tests without the distributed runtime;
         # treat that as TP1 so the sharding gate stays closed there.
@@ -321,6 +336,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
         # FULL draft graphs can pad requests beyond max_num_seqs.
         self._max_num_metadata_reqs = max(scheduler_config.max_num_seqs, self._max_num_batched_tokens)
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        capture_sizes = getattr(compilation_config, "cudagraph_capture_sizes", None) or []
+        # PCP can split a request into two local chunks. FULL graphs can pad
+        # requests to their token bucket and append one additional dummy row.
+        max_local_reqs = scheduler_config.max_num_seqs * (2 if self.pcp_size > 1 else 1)
+        self._max_num_block_table_reqs = max([max_local_reqs, *capture_sizes]) + 1
         self._max_num_write_tokens = self._max_num_batched_tokens * self.pcp_size
         # Keep captured storage isolated between MTP draft steps.
         self._metadata_buffers: dict[int, _KPoolMetadataBuffers] = {}
@@ -437,7 +458,42 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 pooled_slot_mapping=torch.empty(tokens + 1, dtype=torch.int64, device=self.device),
             )
             metadata_buffers[key] = buffers
+            if self.dcp_size > 1:
+                buffers.replicated_block_table = torch.empty(
+                    (self._max_num_block_table_reqs, self._dcp_local_cols * self.dcp_size),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                buffers.replicated_slot_mapping = torch.empty(tokens, dtype=torch.int64, device=self.device)
         return buffers
+
+    def _replicated_cache_metadata(
+        self, common: CommonAttentionMetadata, buffers: _KPoolMetadataBuffers
+    ) -> CommonAttentionMetadata:
+        """Keep KPool compression and selection in full-sequence coordinates."""
+        if self.dcp_size == 1:
+            return common
+        assert buffers.replicated_block_table is not None and buffers.replicated_slot_mapping is not None
+        if common.num_reqs > buffers.replicated_block_table.shape[0]:
+            raise RuntimeError("KPool request count exceeds its persistent replicated block-table capacity.")
+        local_table = common.block_table_tensor[: common.num_reqs, : self._dcp_local_cols]
+        cols = local_table.shape[1] * self.dcp_size
+        block_table = build_sfa_dcp_replicated_block_table(
+            local_table,
+            common.seq_lens,
+            buffers.replicated_block_table[: common.num_reqs, :cols],
+            self._replicated_columns[:cols],
+            self.dcp_size,
+            self.kernel_blocks_per_logical_block,
+        )
+        slots = build_sfa_dcp_replicated_slot_mapping(
+            common,
+            block_table,
+            buffers.replicated_slot_mapping[: common.num_input_tokens],
+            self.kernel_block_size,
+            self.device,
+        )
+        return common.replace(block_table_tensor=block_table, slot_mapping=slots)
 
     def _get_state_table(self, common: CommonAttentionMetadata, graph_capture: bool, step: int) -> torch.Tensor:
         # Capture owns each table; eager shapes reuse one growing allocation.
@@ -518,6 +574,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         num_cache_tokens = num_input_tokens
         if num_cache_tokens > buffers.positions.numel():
             raise RuntimeError("KPool metadata token count exceeds its persistent buffer capacity.")
+        common_attn_metadata = self._replicated_cache_metadata(common_attn_metadata, buffers)
         num_source_tokens = min(
             num_input_tokens, common_attn_metadata.positions.shape[0], common_attn_metadata.slot_mapping.shape[0]
         )
@@ -815,13 +872,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise ValueError(
                 f"GLM-Next KPool indexing supports NoPE queries only, got qk_rope_head_dim={qk_rope_head_dim}."
             )
-        parallel_config = vllm_indexer.vllm_config.parallel_config
-        if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("GLM-Next KPool indexing does not support DCP.")
-
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
-
         self.n_head: int = vllm_indexer.n_head
         self.head_dim: int = vllm_indexer.head_dim
         self.topk_tokens: int = vllm_indexer.topk_tokens
@@ -846,6 +898,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # init runs before the memory profile on every runner, so the KV-cache
         # budget accounts for the worst sharded step even when profiling skips
         # attention (MRv2). All layers and the draft layers share one pair.
+        parallel_config = vllm_indexer.vllm_config.parallel_config
         if self.topk_indices_buffer is not None and _row_shard_exchange_reservation_supported(
             parallel_config,
             vllm_indexer.vllm_config.compilation_config.cudagraph_mode,

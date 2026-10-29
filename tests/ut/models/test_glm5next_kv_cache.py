@@ -24,6 +24,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolTailMetadataBuilder,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolSpec,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
@@ -312,10 +313,10 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
             ring_capacity=16 + lookahead,
         )
 
-    indexer_spec = indexer.get_kv_cache_spec(None)
+    indexer_spec = indexer.get_kv_cache_spec(current_config)
     state_spec = state.get_kv_cache_spec(None)
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
-    assert isinstance(indexer_spec, AscendMLAAttentionSpec)
+    assert isinstance(indexer_spec, AscendIndexerKPoolSpec)
     assert indexer_spec.block_size == 256
     assert indexer_spec.num_states == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
@@ -405,15 +406,17 @@ def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("invalid", [None, "group", "layout", "capacity"])
-def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, invalid):
+@pytest.mark.parametrize("dcp_size", [1, 2, 4])
+def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, invalid, dcp_size):
     """Keep one global CANN write request for two PCP-local query chunks."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=512),
         parallel_config=ParallelConfig(
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
             prefill_context_parallel_size=2,
+            tensor_parallel_size=2 if dcp_size == 4 else 1,
         ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
@@ -485,17 +488,18 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
 
     metadata = build()
 
-    assert metadata.block_table.tolist() == [[5, 6], [5, 6]]
+    expected_table = [5, 6] if dcp_size == 1 else list(range(5 * dcp_size, 5 * dcp_size + 4))
+    assert metadata.block_table.tolist() == [expected_table, expected_table]
     write = metadata.write_metadata
-    assert write.block_table.tolist() == [[5, 6]]
+    assert write.block_table.tolist() == [expected_table]
     assert write.keypool_state_table.shape == (1, 3)
     assert metadata.keypool_state_table.shape == (2, 2)
     assert write.positions.data_ptr() != metadata.positions.data_ptr()
     local_call, global_call = keypool_kernels.build_keypool_metadata.call_args_list
-    assert local_call.args[0] is common
+    assert (local_call.args[0] is common) == (dcp_size == 1)
     global_common = global_call.args[0]
     torch.testing.assert_close(global_common.positions, global_positions)
-    torch.testing.assert_close(global_common.slot_mapping, global_slots)
+    torch.testing.assert_close(global_common.slot_mapping, 5 * dcp_size * 128 + global_positions)
     assert global_common.query_start_loc.tolist() == [0, 8]
     assert global_common.seq_lens.tolist() == [8]
     assert global_common.max_query_len == 8

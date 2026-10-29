@@ -1824,9 +1824,9 @@ def _downgrade_swa_bounded_replay(vllm_config: VllmConfig, ascend_config) -> Non
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     cache_config = vllm_config.cache_config
-    model_config = vllm_config.model_config
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
+    model_config = vllm_config.model_config
     use_sparse = model_uses_sfa_sparse(model_config)
     # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
     # Mooncake pull path transfers kernel blocks and retains the DCP token
