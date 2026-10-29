@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import traceback
@@ -95,77 +94,15 @@ def _setup_store_engine(
         raise RuntimeError(f"Initialize {topology} MooncakeDistributedStore failed: {ret}")
 
 
-def configure_non_fabric_roce() -> None:
-    """Select RoCE for the next shared or Store-owned engine initialization."""
-    # Mooncake Store's native setup checks only getenv() presence, not whether
-    # the value equals "1".  Leaving ASCEND_ENABLE_USE_FABRIC_MEM=0 in the
-    # environment therefore enables FabricMem on a Store-owned engine.
-    os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
-    os.environ["HCCL_INTRA_PCIE_ENABLE"] = "0"
-    os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
-
-
-def configure_non_fabric_transport() -> None:
-    """Select EC transport, including HCCL's deferred channel initialization."""
-    # Mooncake resolves HCCL_INTRA_ROCE_ENABLE before the explicit
-    # comm_resource_config.  Keeping the global switch set therefore turns an
-    # EC engine configured with hccs:device into roce_mode=true.  A nonempty
-    # global resource config is the independent-engine contract. Only an
-    # explicit RoCE-only EC config can also set the process-global selectors:
-    # HCCL reads them when a channel is first created, after transfer engine initialization.
-    # Consumers do not create a Store, so they must not depend on Store setup
-    # to leave those selectors set as it does on producers.
-    os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
-    if use_store_independent_te():
-        resource_config = json.loads(os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"])
-        comm_config = resource_config.get("comm_resource_config")
-        if isinstance(comm_config, dict) and comm_config.get("protocol_desc") == ["roce:device"]:
-            configure_non_fabric_roce()
-        else:
-            # Do not force HCCS, implicit defaults or multi-protocol EC configs
-            # onto RoCE merely because the separate Store uses RoCE.
-            os.environ.pop("HCCL_INTRA_PCIE_ENABLE", None)
-            os.environ.pop("HCCL_INTRA_ROCE_ENABLE", None)
-    else:
-        configure_non_fabric_roce()
-
-
-def log_transport_environment(checkpoint: str) -> None:
-    """Compare Python's cached mapping with the actual C environment.
-
-    C/C++ setenv/unsetenv calls need not update os.environ. getenv is the public
-    libc API used by native libraries, not a private Mooncake/HCCL interface.
-    This is initialization-only evidence, not a channel-readiness guarantee.
-    """
-    keys = ("HCCL_INTRA_PCIE_ENABLE", "HCCL_INTRA_ROCE_ENABLE", "ASCEND_GLOBAL_RESOURCE_CONFIG")
-    getenv = ctypes.CDLL(None).getenv
-    getenv.argtypes = [ctypes.c_char_p]
-    getenv.restype = ctypes.c_char_p
-    native = {key: value.decode() if (value := getenv(key.encode())) is not None else None for key in keys}
-    logger.info(
-        "EC_TRANSPORT checkpoint=%s pid=%d python=%s native=%s",
-        checkpoint,
-        os.getpid(),
-        json.dumps({key: os.environ.get(key) for key in keys}, sort_keys=True),
-        json.dumps(native, sort_keys=True),
-    )
-
-
-def _configure_shared_roce() -> None:
-    """Validate configuration specific to the shared-engine RoCE path."""
-    if os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
-        raise ValueError("shared EC/Store RoCE requires ASCEND_GLOBAL_RESOURCE_CONFIG to be unset")
-    if os.getenv("ASCEND_BUFFER_POOL"):
-        raise ValueError("shared EC/Store RoCE requires ASCEND_BUFFER_POOL to be unset")
-    configure_non_fabric_roce()
-
-
 def create_ascend_mooncake_embedding_store_client(
     staging_pool: AscendProducerMemoryPool,
     registration_transfer: AscendMooncakeTransfer,
     read_buffer_bytes: int = 128 * 1024**2,  # 128 MiB
 ) -> AscendMooncakeEmbeddingStoreClient:
     """Create an embedding Store using the selected Ascend engine topology."""
+    # Native Store treats any present FabricMem flag as enabled, including "0".
+    if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
+        os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
     config = MooncakeStoreConfig.load_from_config()
     if config.protocol != "ascend":
         raise ValueError("Ascend cross_encoder_cache requires Mooncake Store protocol='ascend'")
@@ -205,7 +142,6 @@ def create_ascend_mooncake_embedding_store_client(
         engine_topology = "Store-owned independently configured TransferEngine"
         effective_local_buffer_size = 0
     else:
-        _configure_shared_roce()
         transfer_engine = registration_transfer._ensure_engine()
         _setup_store_engine(store, config, local_hostname, "shared", transfer_engine)
         engine_topology = "shared EC/Store RoCE TransferEngine"

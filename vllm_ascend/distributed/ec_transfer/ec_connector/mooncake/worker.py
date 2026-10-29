@@ -59,7 +59,6 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend imp
     AscendDeferredStoreBackend,
     PreparedStorePut,
     PreparedStoreSave,
-    configure_non_fabric_transport,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
@@ -156,7 +155,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             device=config.buffer_device,
         )
         if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-            configure_non_fabric_transport()
+            # Native Store uses presence rather than the value of this flag.
+            os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
         ensure_mooncake_available()
         device_index = torch.npu.current_device()
 

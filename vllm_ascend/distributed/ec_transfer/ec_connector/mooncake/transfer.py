@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -36,23 +35,8 @@ class AscendMooncakeTransfer(MooncakeTransfer):
         """Lazily initialize the Ascend engine with the selected EC transport."""
         with self._engine_lock:
             if self._engine is None:
-                from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
-                    configure_non_fabric_transport,
-                    log_transport_environment,
-                )
-
-                use_fabric = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
-                if not use_fabric:
-                    configure_non_fabric_transport()
-                    log_transport_environment("before_ec_engine")
                 torch.npu.set_device(self._device_index)
                 self._engine = global_te.get_transfer_engine(self._hostname, device_name=None)
-                if not use_fabric:
-                    # Both roles must leave selectors installed after native
-                    # initialization. Consumers have no later Store setup.
-                    log_transport_environment("after_ec_engine_before_restore")
-                    configure_non_fabric_transport()
-                    log_transport_environment("after_ec_engine")
             return self._engine
 
     def ensure_initialized(self) -> None:
@@ -71,17 +55,7 @@ class AscendMooncakeTransfer(MooncakeTransfer):
         # Even an unconfirmed partial registration must keep its allocation.
         """Register fixed storage and retain it even if registration is uncertain."""
         self.retain_owners([tensor])
-        status = super().register_memory(tensor)
-        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-            from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
-                configure_non_fabric_transport,
-                log_transport_environment,
-            )
-
-            log_transport_environment("after_ec_registration_before_restore")
-            configure_non_fabric_transport()
-            log_transport_environment("after_ec_registration")
-        return status
+        return super().register_memory(tensor)
 
     def unregister_memory(self, tensor: torch.Tensor) -> bool:
         # The shared engine has no public global channel-retirement barrier.

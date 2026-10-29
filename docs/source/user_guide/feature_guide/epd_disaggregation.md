@@ -80,6 +80,13 @@ For the PD disaggregation part, when using MooncakeLayerwiseConnector: The reque
 
 ## Cross-Encoder Mooncake Store reads
 
+Configure the transport environment before starting the Encoder and PD processes.
+The connector does not set, clear, or restore `HCCL_INTRA_PCIE_ENABLE` or
+`HCCL_INTRA_ROCE_ENABLE`. For RoCE deployments, set
+`HCCL_INTRA_PCIE_ENABLE=0` and `HCCL_INTRA_ROCE_ENABLE=1` consistently on both
+roles. Keep these settings consistent with `ASCEND_GLOBAL_RESOURCE_CONFIG`;
+do not apply forced RoCE settings to FabricMem/HCCS deployments.
+
 With the Ascend `ECMooncakeConnector`, enabling `cross_encoder_cache` also enables
 background Store GETs. Requests wait for their GET result before
 proceeding. This applies to both FabricMem and non-FabricMem Store paths.

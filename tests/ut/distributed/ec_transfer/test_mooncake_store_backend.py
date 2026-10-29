@@ -160,52 +160,20 @@ def _make_mooncake_modules(store):
     return mooncake, mooncake_store
 
 
-@pytest.mark.parametrize(
-    ("ec_config", "expected_selectors"),
-    [
-        ({"protocol_desc": ["roce:device"]}, ("0", "1")),
-        ({"protocol_desc": ["hccs:device"]}, (None, None)),
-        ({"protocol_desc": ["hccs:device", "roce:device"]}, (None, None)),
-        ({}, (None, None)),
-        (None, (None, None)),
-    ],
-    ids=["explicit-roce", "hccs", "multiple-protocols", "implicit", "store-only"],
-)
-def test_independent_ec_transport_keeps_only_explicit_roce_selectors(ec_config, expected_selectors):
-    resource_config = json.dumps(
-        {
-            **({"comm_resource_config": ec_config} if ec_config is not None else {}),
-            "store": {
-                "comm_resource_config": {"protocol_desc": ["roce:device"]},
-            },
-        }
-    )
-    with patch.dict(
-        module.os.environ,
-        {
-            "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
-            "ASCEND_GLOBAL_RESOURCE_CONFIG": resource_config,
-            "HCCL_INTRA_PCIE_ENABLE": "1",
-            "HCCL_INTRA_ROCE_ENABLE": "0",
-        },
-        clear=True,
-    ):
-        module.configure_non_fabric_transport()
-
-        assert "ASCEND_ENABLE_USE_FABRIC_MEM" not in module.os.environ
-        assert (
-            tuple(module.os.environ.get(key) for key in ("HCCL_INTRA_PCIE_ENABLE", "HCCL_INTRA_ROCE_ENABLE"))
-            == expected_selectors
-        )
-        assert module.os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] == resource_config
-
-
 @pytest.mark.parametrize("topology", ["shared", "independent", "fabric"])
-def test_factory_selects_engine_and_local_buffer(topology):
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        {},
+        {"HCCL_INTRA_PCIE_ENABLE": "0", "HCCL_INTRA_ROCE_ENABLE": "1"},
+        {"HCCL_INTRA_PCIE_ENABLE": "1", "HCCL_INTRA_ROCE_ENABLE": "0"},
+    ],
+)
+def test_factory_selects_engine_and_local_buffer(topology, selectors):
     store, transfer, pool = MagicMock(), MagicMock(), MagicMock()
     store.setup.return_value = 0
     transfer._ensure_engine.return_value.get_rpc_port.return_value = 12345
-    environment = {}
+    environment = {"ASCEND_ENABLE_USE_FABRIC_MEM": "0", **selectors}
     if topology == "fabric":
         environment["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
     elif topology == "independent":
@@ -218,11 +186,10 @@ def test_factory_selects_engine_and_local_buffer(topology):
         patch.object(module, "get_ip", return_value="127.0.0.1"),
     ):
         client = module.create_ascend_mooncake_embedding_store_client(pool, transfer)
-        if topology == "shared":
-            assert module.os.environ["HCCL_INTRA_PCIE_ENABLE"] == "0"
-            assert module.os.environ["HCCL_INTRA_ROCE_ENABLE"] == "1"
-        else:
-            assert dict(module.os.environ) == environment
+        expected_environment = dict(environment)
+        if topology != "fabric":
+            expected_environment.pop("ASCEND_ENABLE_USE_FABRIC_MEM")
+        assert dict(module.os.environ) == expected_environment
     shared = topology == "shared"
     engine = transfer._ensure_engine.return_value
     kwargs = {"engine": engine.get_engine.return_value} if shared else {}
@@ -242,47 +209,6 @@ def test_factory_selects_engine_and_local_buffer(topology):
         transfer._ensure_engine.assert_not_called()
     assert client._staging_pool is pool
     store.register_buffer.assert_not_called()
-
-
-@pytest.mark.parametrize("native_only", [False, True], ids=["python-env-change", "native-env-change"])
-def test_ec_engine_restores_selectors_after_initialization_and_registration(native_only):
-    import ctypes
-
-    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import transfer as transfer_module
-
-    config = json.dumps({"comm_resource_config": {"protocol_desc": ["roce:device"]}})
-    libc = ctypes.CDLL(None)
-    libc.getenv.argtypes = [ctypes.c_char_p]
-    libc.getenv.restype = ctypes.c_char_p
-    libc.unsetenv.argtypes = [ctypes.c_char_p]
-    libc.unsetenv.restype = ctypes.c_int
-
-    def clear_selectors(*args, **kwargs):
-        for key in ("HCCL_INTRA_PCIE_ENABLE", "HCCL_INTRA_ROCE_ENABLE"):
-            if native_only:
-                assert libc.unsetenv(key.encode()) == 0
-                assert key in module.os.environ  # Python mapping is stale.
-            else:
-                module.os.environ.pop(key, None)
-        return engine
-
-    engine = MagicMock()
-    engine.batch_register_memory.side_effect = lambda *args: (clear_selectors(), 0)[1]
-    with (
-        patch.dict(module.os.environ, {"ASCEND_GLOBAL_RESOURCE_CONFIG": config}, clear=True),
-        patch.object(transfer_module.global_te, "get_transfer_engine", side_effect=clear_selectors),
-        patch.object(transfer_module.torch.npu, "set_device"),
-    ):
-        transfer = transfer_module.AscendMooncakeTransfer("host", 0)
-        assert transfer._ensure_engine() is engine
-        assert libc.getenv(b"HCCL_INTRA_PCIE_ENABLE") == b"0"
-        assert libc.getenv(b"HCCL_INTRA_ROCE_ENABLE") == b"1"
-        tensor = MagicMock(nbytes=4096)
-        tensor.data_ptr.return_value = 2097152
-        assert transfer.register_memory(tensor) == 0
-        assert libc.getenv(b"HCCL_INTRA_PCIE_ENABLE") == b"0"
-        assert libc.getenv(b"HCCL_INTRA_ROCE_ENABLE") == b"1"
-        assert module.os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] == config
 
 
 @pytest.mark.parametrize("protocol", ["hccs:device", "roce:device"])
