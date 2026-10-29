@@ -68,7 +68,7 @@ def topology():
     return DraftWindowTopology(1, 1, 1, 1, 1, 0, 1, False, False, None, None, False)
 
 
-def inventory(types, topology, *, specs=None, builders=None, spans=None):
+def inventory(types, topology, *, specs=None, builders=None, spans=None, full_retention_dflash2=False):
     specs = [FullSpec()] if specs is None else specs
     builders = [DenseBuilder() for _ in specs] if builders is None else builders
     spans = [128 for _ in specs] if spans is None else spans
@@ -92,7 +92,19 @@ def inventory(types, topology, *, specs=None, builders=None, spans=None):
         block_tables=SimpleNamespace(kernel_block_sizes=spans),
         topology=topology,
         types=types,
+        full_retention_dflash2=full_retention_dflash2,
     )
+
+
+def test_dflash2_reference_full_allocation_keeps_native_read_provider(types, topology):
+    spec = FullSpec()
+    spec.sliding_window = 2048
+    kinds = replace(types, sliding_window_spec=SlidingSpec)
+    (original,) = inventory(kinds, topology, specs=[spec])
+    assert original.status is DraftWindowProviderStatus.DIRECT_DENSE
+    (reference,) = inventory(kinds, topology, specs=[spec], full_retention_dflash2=True)
+    assert reference.status is DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE
+    assert reference.native_window == 2048
 
 
 def test_kernel_column_span_is_not_scheduler_block_size(types, topology):

@@ -199,6 +199,7 @@ def inventory_draft_window_groups(
     block_tables: Any,
     topology: DraftWindowTopology,
     types: DraftWindowBackendTypes | None = None,
+    full_retention_dflash2: bool = False,
 ) -> tuple[DraftWindowGroupRoute, ...]:
     """Inventory every actual consumer without inspecting tensor contents.
 
@@ -263,6 +264,9 @@ def inventory_draft_window_groups(
                 backend is types.dense_backend
                 and type(builder) is types.dense_builder
                 and all(type(item) is types.full_attention_spec for item in consumer_specs)
+                and not (
+                    full_retention_dflash2 and all(getattr(item, "sliding_window", None) for item in consumer_specs)
+                )
                 and ratio == 1
                 and storage_size == scheduler_span
             ):
@@ -275,7 +279,13 @@ def inventory_draft_window_groups(
                 types.sliding_window_spec is not None
                 and backend is types.dense_backend
                 and type(builder) is types.dense_builder
-                and all(type(item) is types.sliding_window_spec for item in consumer_specs)
+                and (
+                    all(type(item) is types.sliding_window_spec for item in consumer_specs)
+                    or (
+                        full_retention_dflash2
+                        and all(type(item) is types.full_attention_spec for item in consumer_specs)
+                    )
+                )
                 and ratio == 1
                 and storage_size == scheduler_span
             ):
@@ -445,6 +455,7 @@ def describe_draft_window_routes(speculator: Any) -> tuple[DraftWindowGroupRoute
         kv_cache_config=speculator.kv_cache_config,
         block_tables=speculator.block_tables,
         topology=topology,
+        full_retention_dflash2=getattr(speculator, "_dflash2_full_kv_reference", False),
     )
     actual_layers = {name for route in routes for name in route.layers}
     if actual_layers != set(speculator.draft_attn_layer_names):

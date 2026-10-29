@@ -989,6 +989,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         else:
             if not attn_metadata.causal:
+                native_swa_mask = getattr(self, "_dflash2_native_swa_mask", None)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1001,7 +1002,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    sparse_mode=0,
+                    **(
+                        dict(
+                            sparse_mode=4,
+                            atten_mask=native_swa_mask,
+                            pre_tokens=self.sliding_window - 1,
+                            next_tokens=self.sliding_window - 1,
+                        )
+                        if native_swa_mask is not None
+                        else dict(sparse_mode=0)
+                    ),
                 )
             elif self.sliding_window is not None:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
