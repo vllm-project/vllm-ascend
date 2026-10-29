@@ -972,8 +972,11 @@ For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,
 and RecoverSSM settings on both sides.
 
-This feature is experimental. Floating-point differences can change generated
-tokens; evaluate model accuracy and performance for your workload before use.
+!!! warning
+
+    This feature is experimental. Floating-point differences can change generated
+    tokens; evaluate model accuracy and performance for your workload before use.
+
 Removing `--use-replayssm` selects the native KDA path.
 
 ## Synthetic Rejection Sampling
