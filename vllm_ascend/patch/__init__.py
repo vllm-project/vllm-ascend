@@ -28,6 +28,16 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_sampling_params.py:
+#   Target: vllm.sampling_params.SamplingParams._verify_extra_args.
+#   Why: Decoding P/D requests repeats Python integer validation over large
+#        kv_transfer_params block-id lists and delays decode progress.
+#   How: Skip the deep walk only when kv_transfer_params is the sole extension
+#        key, matching the upstream fast path. Delegate all other extensions
+#        to the original validator; leave other sampling checks unchanged.
+#   Related PR: https://github.com/vllm-project/vllm/pull/64490
+#   Future plan: Remove once supported vLLM versions include the upstream fix.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.
