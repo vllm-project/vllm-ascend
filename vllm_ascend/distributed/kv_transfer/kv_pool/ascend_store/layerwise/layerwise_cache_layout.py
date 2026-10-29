@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
@@ -113,19 +113,22 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def is_glm5_next_cache(layer_specs: dict[str, KVCacheSpec]) -> bool:
-    return any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values())
-
-
-def validate_glm5_next_layerwise_reuse(vllm_config: VllmConfig, layout: LayerwiseReuseLayout) -> None:
-    """Reject modes whose recurrent state cannot use the eager endpoint protocol."""
-    if not layout.has_layer_reuse or not is_glm5_next_cache(
-        {item.main.layer_name: item.main.spec for item in layout.layer_cache_specs.values()}
-    ):
+def validate_layerwise_reuse_config(vllm_config: VllmConfig, layout: LayerwiseReuseLayout) -> None:
+    """Validate the supported execution modes for recurrent or private state."""
+    state_specs = [
+        item.main.spec for item in layout.layer_cache_specs.values() if isinstance(item.main.spec, MambaSpec)
+    ]
+    has_private_state = any(
+        not is_prefix_cacheable(spec.spec)
+        for item in layout.layer_cache_specs.values()
+        for spec in (item.main, item.indexer, *item.extra_main_specs)
+        if spec is not None
+    )
+    if not layout.has_layer_reuse or not (state_specs or has_private_state):
         return
     parallel = vllm_config.parallel_config
     if not vllm_config.model_config.enforce_eager or vllm_config.speculative_config is not None:
-        raise ValueError("GLM-5.3-Flash layerwise reuse requires enforce_eager=True and speculative decoding disabled")
+        raise ValueError("Stateful layerwise reuse requires enforce_eager=True and speculative decoding disabled")
     if any(
         getattr(parallel, name, 1) != 1
         for name in (
@@ -135,20 +138,18 @@ def validate_glm5_next_layerwise_reuse(vllm_config: VllmConfig, layout: Layerwis
             "decode_context_parallel_size",
         )
     ):
-        raise ValueError("GLM-5.3-Flash layerwise reuse currently requires PP=DP=PCP=DCP=1")
+        raise ValueError("Stateful layerwise reuse currently requires PP=DP=PCP=DCP=1")
     transfer = vllm_config.kv_transfer_config
     if transfer.kv_connector != "AscendStoreConnector" or transfer.kv_role not in ("kv_producer", "kv_both"):
         raise ValueError(
-            "GLM-5.3-Flash reuse requires a saving AscendStoreConnector; P2P MultiConnector is unsupported"
+            "Stateful layerwise reuse requires a saving AscendStoreConnector; P2P MultiConnector is unsupported"
         )
     if len(layout.layer_cache_specs) != vllm_config.model_config.get_num_layers(parallel):
-        raise ValueError("GLM-5.3-Flash layerwise reuse does not support draft cache layers")
+        raise ValueError("Stateful layerwise reuse does not support draft cache layers")
     prefix_unit = vllm_config.cache_config.prefix_match_unit
-    state_block_sizes = {
-        item.main.spec.block_size for item in layout.layer_cache_specs.values() if isinstance(item.main.spec, MambaSpec)
-    }
-    if isinstance(prefix_unit, int) and state_block_sizes != {prefix_unit}:
-        raise ValueError("GLM-5.3-Flash reuse requires prefix_match_unit equal to the KDA block size (or unset)")
+    state_block_sizes = {spec.block_size for spec in state_specs}
+    if state_specs and isinstance(prefix_unit, int) and state_block_sizes != {prefix_unit}:
+        raise ValueError("Recurrent cache reuse requires prefix_match_unit equal to the state block size (or unset)")
 
 
 def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
@@ -345,28 +346,28 @@ def build_layerwise_reuse_layout(
                 prefetch_layer_map[layers_sharing_buffer[owner_index]] = layers_sharing_buffer[owner_index - 1]
 
     if prefetch_layer_map:
-        glm5_next = is_glm5_next_cache(layer_specs)
+        if any(not is_prefix_cacheable(item.main.spec) for item in layer_cache_specs.values()):
+            raise NotImplementedError("Private cache state must remain resident outside reusable main slots")
+        if any(is_prefix_cacheable(spec.spec) for item in layer_cache_specs.values() for spec in item.extra_main_specs):
+            raise NotImplementedError("Layerwise reuse does not support additional cacheable main components")
         unsupported_specs = [
             named_spec
             for named_specs in named_specs_by_layer.values()
             for named_spec in named_specs
             if not isinstance(named_spec.spec, AttentionSpec)
+            and is_prefix_cacheable(named_spec.spec)
             and not (
-                glm5_next
-                and (
-                    isinstance(named_spec.spec, AscendIndexerKPoolTailSpec)
-                    or (
-                        isinstance(named_spec.spec, MambaSpec)
-                        and named_spec.spec.mamba_cache_mode == "align"
-                        and named_spec.spec.num_speculative_blocks == 0
-                    )
-                )
+                isinstance(named_spec.spec, MambaSpec)
+                and named_spec.spec.mamba_cache_mode == "align"
+                and named_spec.spec.num_speculative_blocks == 0
+                and getattr(named_spec.spec, "num_prefill_checkpoint_blocks", 0) == 0
             )
         ]
         if unsupported_specs:
             named_spec = unsupported_specs[0]
             raise NotImplementedError(
-                "Layerwise KV cache reuse supports attention cache specs only; "
+                "Layerwise KV cache reuse supports attention cache specs only unless recurrent state uses align mode "
+                "without speculative or extra prefill checkpoint blocks; "
                 f"{named_spec.layer_name} uses {type(named_spec.spec).__name__}."
             )
 
@@ -406,8 +407,7 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    validate_glm5_next_layerwise_reuse(vllm_config, reuse_layout)
-    glm5_next = is_glm5_next_cache(layer_specs)
+    validate_layerwise_reuse_config(vllm_config, reuse_layout)
     if actual_layers < base_layers:
         logger.warning(
             "Layer reuse expected at least %d layers, got %d; skip tensor merge.",
@@ -450,6 +450,18 @@ def apply_layerwise_kv_cache_plan(
     if seen_layers != set(layer_specs):
         raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
+    # A private component keeps its entire backing resident, including any
+    # indexer sharing that allocation. Preserve its original views and strides.
+    resident_tensors = [
+        tensor
+        for tensor in old_tensors
+        if any(not is_prefix_cacheable(layer_specs[name]) for name in get_kv_cache_tensor_layers(tensor))
+    ]
+    resident_names = {name for tensor in resident_tensors for name in get_kv_cache_tensor_layers(tensor)}
+    main_names = {item.main.layer_name for item in reuse_layout.layer_cache_specs.values()}
+    if resident_names & main_names:
+        raise ValueError("Resident private state must have separate descriptors from reusable main caches")
+
     def _merge_specs(named_specs: list[NamedKVCacheSpec], *, indexer: bool = False) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
         reference_spec = layer_specs[shared_by[0]]
@@ -480,25 +492,15 @@ def apply_layerwise_kv_cache_plan(
         indexer_specs: list[NamedKVCacheSpec] = []
         for layer in slot:
             indexer = reuse_layout.layer_cache_specs[layer].indexer
-            if indexer is not None:
+            if indexer is not None and indexer.layer_name not in resident_names:
                 indexer_specs.append(indexer)
-        if indexer_specs and not glm5_next:
+        if indexer_specs:
             _merge_specs(indexer_specs, indexer=True)
-    if glm5_next:
-        # Keep each original indexer/tail allocation intact. Their block IDs
-        # belong to different groups; splitting this pair doubles small pages,
-        # while reusing tail pages destroys request-private continuation state.
-        main_names = {item.main.layer_name for item in reuse_layout.layer_cache_specs.values()}
-        for tensor in old_tensors:
-            names = set(get_kv_cache_tensor_layers(tensor))
-            if names.isdisjoint(main_names):
-                new_tensors.append(tensor)
-            elif not names <= main_names:
-                raise ValueError("GLM-5.3-Flash requires separate main and indexer/tail descriptors")
+    new_tensors.extend(resident_tensors)
     # Draft KV survives between forwards, unlike a layerwise target scratch
     # slot. Give every resident draft layer its own persistent descriptor.
     for layer_name in layer_specs:
-        if layer_name in excluded_layer_names:
+        if layer_name in excluded_layer_names and layer_name not in resident_names:
             _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(

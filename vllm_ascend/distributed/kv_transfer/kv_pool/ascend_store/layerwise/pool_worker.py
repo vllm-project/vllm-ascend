@@ -56,8 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
-    is_glm5_next_cache,
-    validate_glm5_next_layerwise_reuse,
+    validate_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -345,16 +344,18 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 if self.num_prefetch_layers <= 0:
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
         self.sync_save_events: list[torch.npu.Event] | None = None
-        self.glm5_next_reuse = (
+        if (
+            self._layerwise_reuse_layout is not None
+            and self.layerwise_offload
+            and (self._recurrent_layers or len(self.cacheable_group_ids) != self.num_kv_cache_groups)
+        ):
+            validate_layerwise_reuse_config(self.vllm_config, self._layerwise_reuse_layout)
+        if (
             self.layerwise_offload
-            and self.kv_cache_config is not None
-            and is_glm5_next_cache(get_layerwise_kv_cache_specs(self.kv_cache_config))
-        )
-        if self.glm5_next_reuse:
-            assert self._layerwise_reuse_layout is not None
-            validate_glm5_next_layerwise_reuse(self.vllm_config, self._layerwise_reuse_layout)
-            if _LW_DEFER_LAST_SAVE:
-                raise ValueError("GLM-5.3-Flash reuse requires VLLM_ASCEND_LW_DEFER_LAST_SAVE=0")
+            and (self._recurrent_layers or len(self.cacheable_group_ids) != self.num_kv_cache_groups)
+            and _LW_DEFER_LAST_SAVE
+        ):
+            raise ValueError("Stateful layerwise reuse requires VLLM_ASCEND_LW_DEFER_LAST_SAVE=0")
 
         logger.info(
             "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
@@ -738,6 +739,14 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             for group_id, layer_idx in self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
             if group_id in self.cacheable_group_ids
         ]
+
+    def _group_reuses_buffer(self, group_id: int) -> bool:
+        """Include both writers of each shared slot, including its first owner."""
+        return any(
+            candidate_group == group_id
+            for layer in set(self.prefetch_layer_map) | set(self.prefetch_layer_map.values())
+            for candidate_group, _ in self.physical_layer_to_group_layers.get(layer, [(0, layer)])
+        )
 
     def _masked_block_runs_cached(
         self,
@@ -1546,6 +1555,17 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             block_ids = request.block_ids_by_group[group_id]
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
+            if self.layerwise_offload and self._group_reuses_buffer(group_id):
+                # Only the running endpoint belongs to this layer after reuse.
+                # Older non-null slots may already hold another layer's state.
+                result[group_id] = [
+                    index == num_blocks - 1
+                    and request.target_token_len == request.save_end_token
+                    and index < len(block_ids)
+                    and block_ids[index] != 0
+                    for index in range(num_blocks)
+                ]
+                continue
             # An aligned prefill chunk ends with a real recurrent checkpoint,
             # even when it is not the final prompt replay boundary. Keep that
             # checkpoint before the next chunk moves/reuses its state slots.
@@ -1565,17 +1585,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 )
                 for index in range(num_blocks)
             ]
-            if getattr(self, "glm5_next_reuse", False):
-                # Align KDA writes only the running endpoint. Older non-null
-                # slots can contain another layer's bytes after scratch reuse;
-                # they are not new checkpoints merely because hashes exist.
-                result[group_id] = [
-                    index == num_blocks - 1
-                    and request.target_token_len == request.save_end_token
-                    and index < len(block_ids)
-                    and block_ids[index] != 0
-                    for index in range(num_blocks)
-                ]
         return tuple(result)
 
     def _process_load_for_layer_batch(
@@ -2030,16 +2039,22 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 request.load_gva_block_offset = 0
         return None
 
-    def _check_hybrid_load_errors(self) -> None:
-        # Memcache reports invalid blocks through the existing scheduler policy.
-        if self.use_layerwise_transfer:
+    def _check_layerwise_transfer_errors(self) -> None:
+        if self.layerwise_offload:
+            # Completion events also fire on failure. Reused buffers no longer
+            # have a resident copy to fall back to after a failed PUT or GET.
+            if self._save_disabled.is_set() or (self.kv_recv_thread and self.kv_recv_thread.load_disabled.is_set()):
+                self._layer_load_aborted.set()
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
+        elif self.use_layerwise_transfer:
+            # Ordinary Memcache loads retain the existing scheduler policy.
             return
         # A hybrid block ID can belong to SWA, compressed KV or compressor
         # state. Do not feed partially restored state to the attention kernel.
         with self._invalid_block_ids_lock:
-            if self._invalid_block_ids:
+            if self._invalid_block_ids or (self.layerwise_offload and self._failed_requests):
                 self._layer_load_aborted.set()
-                raise RuntimeError("Hybrid layerwise load failed; refusing incomplete KV/state")
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
 
     def _build_shared_load_data(self) -> None:
         """Share load metadata, preserving layer-specific selections for reuse."""
@@ -2104,29 +2119,34 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         managers need for a hit of ``cached_tokens`` are fetched, which is a
         subset of the blocks persisted by the reachable store masks.
         """
-        if getattr(self, "glm5_next_reuse", False) and cached_tokens > 0:
-            # A KDA page is a state at an endpoint, not a history of tokens.
-            # Unaligned continuation is loaded through the partial GVA; only
-            # an aligned endpoint needs a full-key state page.
-            return tuple(
-                [
-                    index == cached_tokens // size - 1 and cached_tokens % size == 0 and block_id != 0
-                    for index, block_id in enumerate(request.block_ids_by_group[group_id])
-                ]
-                if self.group_uses_align_state[group_id]
-                else None
-                for group_id, size in enumerate(self.grouped_block_size)
-            )
-        if getattr(self, "block_key_hybrid", False) and cached_tokens > 0:
-            if self.cache_coordinator is None:
-                raise ValueError("Block-key hybrid loads require a reachability coordinator")
-            return self.token_database.load_mask(request.block_hashes, cached_tokens)
-        if self.cache_coordinator is None or cached_tokens <= 0:
+        if cached_tokens <= 0:
             return None
-        try:
-            return self.token_database.load_mask(request.block_hashes, cached_tokens)
-        except AssertionError:
-            return None
+        if self.cache_coordinator is None and getattr(self, "block_key_hybrid", False):
+            raise ValueError("Block-key hybrid loads require a reachability coordinator")
+        masks = None
+        if self.cache_coordinator is not None:
+            try:
+                masks = self.token_database.load_mask(request.block_hashes, cached_tokens)
+            except AssertionError:
+                if getattr(self, "block_key_hybrid", False):
+                    raise
+        reused_state_groups = [
+            group_id
+            for group_id, uses_align in enumerate(self.group_uses_align_state)
+            if self.layerwise_offload and uses_align and self._group_reuses_buffer(group_id)
+        ]
+        if not reused_state_groups:
+            return masks
+        # Preserve other groups' reachability masks. An aligned recurrent page
+        # represents one endpoint; unaligned state uses the partial GVA path.
+        result = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        for group_id in reused_state_groups:
+            size = self.grouped_block_size[group_id]
+            result[group_id] = [
+                index == cached_tokens // size - 1 and cached_tokens % size == 0 and block_id != 0
+                for index, block_id in enumerate(request.block_ids_by_group[group_id])
+            ]
+        return tuple(result)
 
     def _drain_deferred_last_save(self) -> None:
         """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
@@ -2150,17 +2170,20 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        if getattr(self, "glm5_next_reuse", False):
+        reused_state_groups = [
+            group_id
+            for group_id, uses_align in enumerate(self.group_uses_align_state)
+            if self.layerwise_offload and uses_align and self._group_reuses_buffer(group_id)
+        ]
+        if reused_state_groups:
             for request in requests:
                 # No speculative tokens: every complete prompt page must have
                 # a hash. Do not publish a later state as an earlier endpoint.
                 if len(request.block_hashes) * self.hash_block_size < (
                     request.target_token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
                 ):
-                    raise ValueError("GLM-5.3-Flash reuse requires hashes for all computed full pages")
-                for group_id, uses_align in enumerate(self.group_uses_align_state):
-                    if not uses_align:
-                        continue
+                    raise ValueError("Recurrent cache reuse requires hashes for all computed full pages")
+                for group_id in reused_state_groups:
                     endpoints = [request.target_token_len] if request.can_save else []
                     if request.load_spec is not None and request.load_spec.can_load:
                         endpoints.append(request.load_spec.kvpool_cached_tokens)
@@ -2169,7 +2192,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                         if end > 0:
                             index = (end - 1) // self.grouped_block_size[group_id]
                             if index >= len(blocks) or blocks[index] == 0:
-                                raise ValueError("GLM-5.3-Flash recurrent endpoint has no allocated state page")
+                                raise ValueError("Recurrent cache endpoint has no allocated state page")
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
@@ -2196,19 +2219,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
         self._build_shared_load_data()
-        if getattr(self, "glm5_next_reuse", False):
-            self._check_glm5_next_reuse_errors()
-
-    def _check_glm5_next_reuse_errors(self) -> None:
-        if not self.glm5_next_reuse:
-            return
-        # Completion events are also signalled on failure. In reuse mode a
-        # failed PUT/GET cannot fall back to still-resident layer data.
-        if self._save_disabled.is_set() or (self.kv_recv_thread and self.kv_recv_thread.load_disabled.is_set()):
-            raise RuntimeError("GLM-5.3-Flash layerwise transfer failed; refusing incomplete KV/state")
-        with self._invalid_block_ids_lock:
-            if self._failed_requests or self._invalid_block_ids:
-                raise RuntimeError("GLM-5.3-Flash layerwise transfer failed; refusing incomplete KV/state")
+        if self.layerwise_offload:
+            self._check_layerwise_transfer_errors()
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
@@ -2288,7 +2300,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             thread.raise_if_failed()
         if drain_recv and self.kv_recv_thread is not None:
             # Errors are still surfaced per layer by wait_for_layer_load.
-            self._check_hybrid_load_errors()
+            self._check_layerwise_transfer_errors()
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
@@ -2370,10 +2382,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 self.kv_recv_thread.raise_if_failed()
             elif self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
-            if getattr(self, "glm5_next_reuse", False):
-                self._check_glm5_next_reuse_errors()
-            if getattr(self, "block_key_hybrid", False):
-                self._check_hybrid_load_errors()
+            if getattr(self, "layerwise_offload", False) or getattr(self, "block_key_hybrid", False):
+                self._check_layerwise_transfer_errors()
         except Exception:
             if hasattr(self, "_layer_load_aborted"):
                 self._layer_load_aborted.set()
@@ -2436,8 +2446,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 self._pending_last_save_drain = True
             else:
                 self._wait_for_final_layer_save(num_local, send_thread)
-                if getattr(self, "glm5_next_reuse", False):
-                    self._check_glm5_next_reuse_errors()
         self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
@@ -2459,6 +2467,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
+        if getattr(self, "layerwise_offload", False):
+            self._check_layerwise_transfer_errors()
         if self.block_key_hybrid:
             # An empty final layer signals completion without waiting for PUTs
             # from earlier layers. Drain those before the next step reuses KV.
