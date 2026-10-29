@@ -130,18 +130,26 @@ def test_a_row_wise_norm_before_the_combine_is_the_per_route_norm():
     torch.testing.assert_close(combined, reference)
 
 
+def _bare_moe_method() -> nn.Module:
+    """The MoE method without its constructor, which needs a live vLLM config."""
+    method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
+    nn.Module.__init__(method)
+    return method
+
+
 def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
     """The norm is installed on the down-projection output, one row per route."""
     torch.manual_seed(0)
     hidden_size = 8
-    method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
-    method.post_expert_norm = _post_expert_norm(hidden_size)
+    method = _bare_moe_method()
+    norm = _post_expert_norm(hidden_size)
+    method.post_expert_norm_fn = norm.forward
     routed_rows = torch.randn(NUM_TOKENS * 3, hidden_size)
 
     with patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=routed_rows):
         output = method.apply_gmm2(None, None, None)
 
-    expected = method.post_expert_norm.forward_native(routed_rows, out_dtype=routed_rows.dtype)
+    expected = norm.forward_native(routed_rows, out_dtype=routed_rows.dtype)
     torch.testing.assert_close(output, expected)
     assert output.dtype == routed_rows.dtype
 
@@ -308,7 +316,7 @@ def _build_moe(monkeypatch):
         def __init__(self) -> None:
             super().__init__()
             self.routed_experts = _FakeRoutedExperts()
-            self.routed_experts.quant_method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
+            self.routed_experts.quant_method = _bare_moe_method()
 
     factory = patch.object(muse_spark, "FusedMoEFactory", side_effect=lambda **kwargs: _FakeRunner())
     monkeypatch.setattr(muse_spark, "GateLinear", lambda *args, **kwargs: nn.Linear(1, 1))
@@ -346,4 +354,7 @@ def test_moe_hands_its_post_expert_norm_to_the_quant_method(monkeypatch):
     """Without this the MLP stage raises rather than skipping the norm."""
     moe, _ = _build_moe(monkeypatch)
 
-    assert moe.experts.routed_experts.quant_method.post_expert_norm is moe.post_expert_norm
+    attached = moe.experts.routed_experts.quant_method.post_expert_norm_fn
+    # A bound method, not the module: holding the module would register its
+    # weight again under the quant method.
+    assert attached.__self__ is moe.post_expert_norm

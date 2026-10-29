@@ -24,6 +24,8 @@ Quantized checkpoints, expert parallelism, sequence-parallel MoE and the
 DSpark draft are not supported yet.
 """
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -180,13 +182,16 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
 
     # Attached by the owning MoE once the factory has built the layer, as
     # upstream attaches its own post_expert_norm_fn to the routed experts.
-    post_expert_norm: nn.Module | None = None
+    # The bound method is held, not the module: this class is an ``nn.Module``,
+    # so holding the norm itself would register its weight a second time under
+    # the quant method and put a key in the state dict no checkpoint carries.
+    post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
 
     def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
         routed_rows = super().apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
-        if self.post_expert_norm is None:
+        if self.post_expert_norm_fn is None:
             raise RuntimeError("Muse Spark routed experts ran without their post-expert norm.")
-        return self.post_expert_norm(routed_rows, out_dtype=routed_rows.dtype)
+        return self.post_expert_norm_fn(routed_rows, out_dtype=routed_rows.dtype)
 
 
 class AscendMuseSparkRoutedExperts(AscendRoutedExperts):
@@ -378,7 +383,7 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
             routed_scaling_factor=self.route_scale,
             routed_experts_cls=AscendMuseSparkRoutedExperts,
         )
-        self.experts.routed_experts.quant_method.post_expert_norm = self.post_expert_norm
+        self.experts.routed_experts.quant_method.post_expert_norm_fn = self.post_expert_norm.forward
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
         pooled, _ = self.pooler(hidden_states)
