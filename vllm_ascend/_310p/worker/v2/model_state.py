@@ -138,7 +138,12 @@ class _Ascend310PModelStateMixin:
             model_config = getattr(self, "model_config", None)
             if model_config is not None and hasattr(model_config, "get_vocab_size"):
                 vocab_size = model_config.get_vocab_size()
-        base_sampler = Ascend310PSampler(max_num_reqs, device, vocab_size=vocab_size)
+        base_sampler = Ascend310PSampler(
+            max_num_reqs,
+            device,
+            vocab_size=vocab_size,
+            req_states=getattr(sampler, "req_states", None),
+        )
         vllm_config = getattr(self, "vllm_config", None)
         spec_config = None if vllm_config is None else vllm_config.speculative_config
         if spec_config is None:
