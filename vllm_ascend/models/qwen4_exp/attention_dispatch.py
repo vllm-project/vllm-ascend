@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Request-phase dispatch for Qwen4Exp: FIA prefill and optimized GBSA decode."""
+
+from dataclasses import dataclass
+
+import torch
+
+from .fia import prepare_qsa_fia_paged_kv, qsa_fia_attention
+from .gbsa import qsa_gbsa_attention
+
+
+@dataclass(frozen=True)
+class QSARequest:
+    request_index: int
+    query_start: int
+    query_end: int
+    kv_length: int
+    is_prefill: bool
+
+    @property
+    def use_paged_kv(self) -> bool:
+        return self.kv_length != self.query_end - self.query_start
+
+
+def build_qsa_request_plan(
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+    num_actual_tokens: int,
+    is_prefilling_cpu: torch.Tensor,
+) -> tuple[QSARequest, ...]:
+    """Use scheduler phase flags, including one-token prefills and MTP decodes."""
+    if any(t.device.type != "cpu" for t in (query_start_loc_cpu, seq_lens_cpu, is_prefilling_cpu)):
+        raise ValueError("QSA dispatch requires scheduler CPU metadata")
+    starts = query_start_loc_cpu.tolist()
+    lengths = seq_lens_cpu.tolist()
+    phases = is_prefilling_cpu.tolist()
+    if len(lengths) < len(starts) - 1 or len(phases) < len(starts) - 1:
+        raise ValueError("QSA phase and KV metadata must cover every request")
+    requests = []
+    for request_index, (start, end) in enumerate(zip(starts, starts[1:])):
+        start = min(max(start, 0), num_actual_tokens)
+        end = min(max(end, start), num_actual_tokens)
+        if end > start:
+            requests.append(
+                QSARequest(request_index, start, end, int(lengths[request_index]), bool(phases[request_index]))
+            )
+    return tuple(requests)
+
+
+def dispatch_qsa_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    compact_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    output: torch.Tensor,
+    request_plan: tuple[QSARequest, ...] | None,
+) -> torch.Tensor:
+    # None is the decode-only metadata sentinel, including graph capture.
+    # This branch contains no host length decisions or FIA launches; device KV
+    # lengths, positions and page tables may change between graph replays.
+    if request_plan is None or not any(request.is_prefill for request in request_plan):
+        return qsa_gbsa_attention(
+            query,
+            key_cache,
+            value_cache,
+            compact_indices,
+            block_table,
+            token_to_req,
+            logical_positions,
+            seq_lens,
+            output,
+        )
+
+    for request in request_plan:
+        if not request.is_prefill:
+            continue
+        rows = slice(request.query_start, request.query_end)
+        visible_lens = torch.minimum(
+            logical_positions[rows].add(1).clamp_min(0),
+            seq_lens[request.request_index],
+        )
+        if request.use_paged_kv:
+            keys, values, table, _ = prepare_qsa_fia_paged_kv(
+                key_cache,
+                value_cache,
+                block_table[request.request_index : request.request_index + 1],
+                request.kv_length,
+            )
+        else:
+            keys, values, table = key[rows], value[rows], None
+        qsa_fia_attention(
+            query[rows],
+            keys,
+            values,
+            compact_indices[rows],
+            visible_lens,
+            request.kv_length,
+            output[rows],
+            block_table=table,
+        )
+
+    # Runner ordering normally places decode requests together. Coalesce their
+    # consecutive rows without gathering/copying K/V or changing request IDs.
+    decode_spans: list[tuple[int, int]] = []
+    for request in request_plan:
+        if request.is_prefill:
+            continue
+        if decode_spans and decode_spans[-1][1] == request.query_start:
+            decode_spans[-1] = (decode_spans[-1][0], request.query_end)
+        else:
+            decode_spans.append((request.query_start, request.query_end))
+    for start, end in decode_spans:
+        rows = slice(start, end)
+        qsa_gbsa_attention(
+            query[rows],
+            key_cache,
+            value_cache,
+            compact_indices[rows],
+            block_table,
+            token_to_req[rows],
+            logical_positions[rows],
+            seq_lens,
+            output[rows],
+        )
+    return output

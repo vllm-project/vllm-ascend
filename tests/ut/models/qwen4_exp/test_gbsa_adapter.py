@@ -16,6 +16,7 @@ def _load_cache_views():
     module.body = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in names]
     namespace = {
         "torch": torch,
+        "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "math": math,
         "get_dtype_size": lambda dtype: torch.empty((), dtype=dtype).element_size(),
     }
