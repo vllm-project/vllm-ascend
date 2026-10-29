@@ -302,3 +302,12 @@ def test_bincount_issue_19958(length):
     expected_masks[:, 0] = 1 << 7
     torch.testing.assert_close(masks.cpu(), expected_masks, rtol=0, atol=0)
     assert torch.count_nonzero(counts).item() == 0
+
+
+@pytest.mark.parametrize("requests", [8, 64])
+@pytest.mark.parametrize("prompt,output", [(1, 0), (8, 4), (32, 32)])
+def test_bincount_short_request_admission(requests, prompt, output):
+    # These are legal text-token histories, including more requests than Vector
+    # cores. Preserve their exact results even when main has lower device work.
+    rows = requests + 2
+    _assert_bincount_case(list(range(requests)), [prompt] * rows, [prompt + output] * rows, 151936)

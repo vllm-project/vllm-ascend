@@ -147,3 +147,77 @@ the wins. A measured operator improvement does not establish model E2E gains.
 Issue candidate and PR captures use one warmup and three retained samples;
 the serialized main legal case uses one warmup and two samples with a longer
 external timeout. The raw records identify any failed comparator launches.
+
+## Extended legal input range
+
+This range checks 37 nonempty token-history shapes with
+`0 < prompt_len <= prefill_len <= token row length`, valid vocabulary IDs and
+valid request mappings. Every main/PR15270/new result matched the independent
+CPU reference exactly: 111 source/case checks and 1,110 measured invocations.
+These are valid operator inputs; the issue's 1M history is a separate operator
+launch boundary, beyond the selected model server's 40,960-token context.
+
+The new implementation is faster than PR15270 on all 37 cases and faster than
+main on 31. Six legal short-prompt, multi-request cases regress against main;
+they remain in the table and have dedicated correctness tests. The source is
+frozen at the approved implementation rather than claiming a universal win.
+
+The text decoder admission path rejects `prompt_len == 0` with
+`VLLMValidationError` in `vllm/v1/engine/input_processor.py::_validate_prompt_len`.
+For the text-only Qwen3 model the multimodal skip flag is false. Thus the earlier
+zero-prompt/output-only input is a diagnostic guard, outside the text admission
+performance range. Its measured regression remains documented; guard correctness
+is preserved. This exclusion does not remove any of the six legal regressions.
+
+All captures use a separately idle Ascend910_9362 device, the same CANN/compiler
+and runtime as the earlier scope, three warmups and ten retained calls per case.
+Multiple cases share a profiler session; each measured group begins after that
+case's own warmup anchors, so input construction and compilation are excluded.
+Values sum the device tasks per wrapper invocation, including initialization.
+
+For the `rR_pP_oO` rows, R=requests, P=prompt length, O=output length;
+vocab151936, int32, random token IDs and contiguous outputs. Additional cases:
+tail151000=4/2049/33/vocab151000; tail5121=3/1025/33/vocab5121;
+tail33=2/31/33/vocab33 within one word; repeated7 and one_word=8/4096/256;
+int64=4/1025/33/vocab151000 with int64 inputs/mappings;
+strided=8/4096/256/vocab151936 with row padding.
+
+| Case | Main ms | PR15270 ms | New ms | Main/new | PR/new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| r1_p1_o0 | 0.083 | 0.141 | 0.066 | 1.26x | 2.13x |
+| r1_p8_o4 | 0.085 | 0.142 | 0.066 | 1.28x | 2.15x |
+| r1_p32_o32 | 0.096 | 0.150 | 0.074 | 1.29x | 2.02x |
+| r1_p128_o32 | 0.119 | 0.162 | 0.087 | 1.38x | 1.87x |
+| r1_p1023_o2 | 0.345 | 0.270 | 0.195 | 1.77x | 1.39x |
+| r1_p1024_o1 | 0.343 | 0.271 | 0.194 | 1.77x | 1.40x |
+| r1_p1025_o33 | 0.347 | 0.269 | 0.196 | 1.77x | 1.37x |
+| r1_p4096_o256 | 1.117 | 0.273 | 0.198 | 5.66x | 1.38x |
+| r1_p16384_o256 | 4.218 | 0.277 | 0.199 | 21.19x | 1.39x |
+| r1_p32768_o4096 | 9.522 | 0.332 | 0.256 | 37.25x | 1.30x |
+| r8_p1_o0 | 0.194 | 0.978 | 0.373 | 0.52x | 2.62x |
+| r8_p8_o4 | 0.209 | 0.980 | 0.375 | 0.56x | 2.62x |
+| r8_p32_o32 | 0.262 | 0.988 | 0.383 | 0.68x | 2.58x |
+| r8_p128_o32 | 0.457 | 1.000 | 0.396 | 1.15x | 2.52x |
+| r8_p1023_o2 | 2.295 | 1.115 | 0.509 | 4.51x | 2.19x |
+| r8_p1024_o1 | 2.315 | 1.114 | 0.509 | 4.55x | 2.19x |
+| r8_p1025_o33 | 2.308 | 1.116 | 0.509 | 4.53x | 2.19x |
+| r8_p4096_o256 | 9.247 | 1.124 | 0.522 | 17.70x | 2.15x |
+| r8_p16384_o256 | 39.896 | 1.506 | 0.923 | 43.22x | 1.63x |
+| r8_p32768_o4096 | 87.592 | 2.114 | 1.630 | 53.73x | 1.30x |
+| r64_p1_o0 | 0.491 | 6.607 | 2.015 | 0.24x | 3.28x |
+| r64_p8_o4 | 0.623 | 6.613 | 2.014 | 0.31x | 3.28x |
+| r64_p32_o32 | 1.100 | 6.626 | 2.031 | 0.54x | 3.26x |
+| r64_p128_o32 | 2.969 | 6.654 | 2.059 | 1.44x | 3.23x |
+| r64_p1023_o2 | 21.132 | 6.879 | 2.279 | 9.27x | 3.02x |
+| r64_p1024_o1 | 21.208 | 6.876 | 2.280 | 9.30x | 3.02x |
+| r64_p1025_o33 | 21.194 | 6.892 | 2.295 | 9.24x | 3.00x |
+| r64_p4096_o256 | 84.869 | 7.602 | 3.002 | 28.27x | 2.53x |
+| r64_p16384_o256 | 341.879 | 10.111 | 5.642 | 60.60x | 1.79x |
+| r64_p32768_o4096 | 685.319 | 14.675 | 10.281 | 66.66x | 1.43x |
+| tail151000 | 2.225 | 0.635 | 0.334 | 6.66x | 1.90x |
+| tail5121 | 0.824 | 0.264 | 0.182 | 4.52x | 1.45x |
+| tail33 | 0.085 | 0.132 | 0.057 | 1.51x | 2.33x |
+| repeated7 | 8.590 | 1.227 | 0.625 | 13.75x | 1.96x |
+| one_word | 8.679 | 1.228 | 0.608 | 14.27x | 2.02x |
+| int64 | 1.231 | 0.633 | 0.332 | 3.71x | 1.91x |
+| strided | 9.579 | 1.152 | 0.548 | 17.47x | 2.10x |
