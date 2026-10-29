@@ -5,11 +5,11 @@
 import numpy as np
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
 def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False):
-    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
     worker.pp_size = 2
     worker.pp_rank = int(offset > 0)
     worker.layerwise_key_layer_offset = offset

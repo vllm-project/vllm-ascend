@@ -28,8 +28,7 @@ from unittest.mock import MagicMock, call, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
-    get_layerwise_data_plane,
-    get_layerwise_protocol,
+    get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
@@ -43,10 +42,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
-    extract_layout_config,
     make_full_key,
     make_hit_check_keys,
-    make_partial_key,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
@@ -148,32 +145,27 @@ class TestBackendDeviceBinding(unittest.TestCase):
 
 
 # =========================================================================
-# Backend layerwise protocol registry
+# Backend registry
 # =========================================================================
-class TestLayerwiseProtocolRegistry(unittest.TestCase):
-    """``get_layerwise_protocol`` is the generic layers' only knowledge of
-    layerwise support: it resolves the backend module carrying the layerwise
-    protocol functions (registered under the normalized backend name), or
-    None when the entry carries no protocol marker."""
+class TestBackendRegistry(unittest.TestCase):
+    """Resolve backend classes without constructing their store clients."""
 
-    def test_get_layerwise_protocol_resolves_modules(self):
+    def test_get_backend_class_resolves_layerwise_capabilities(self):
         expected = {"memcache": "gva", "mooncake": "block_key"}
         for backend_name, data_plane in expected.items():
             with self.subTest(backend=backend_name):
-                protocol = get_layerwise_protocol(backend_name)
-                self.assertIsNotNone(protocol)
-                self.assertEqual(get_layerwise_data_plane(protocol), data_plane)
-                self.assertTrue(callable(getattr(protocol, "extract_layout_config", None)))
+                backend_class = get_backend_class(backend_name)
+                self.assertIsNotNone(backend_class)
+                self.assertEqual(backend_class.layerwise_data_plane, data_plane)
 
-    def test_get_layerwise_protocol_normalizes_name(self):
+    def test_get_backend_class_normalizes_name(self):
         for backend_name in ("MEMCACHE", " Memcache ", "MOONCAKE", " Mooncake "):
             with self.subTest(backend=backend_name):
-                self.assertIsNotNone(get_layerwise_protocol(backend_name))
+                self.assertIsNotNone(get_backend_class(backend_name))
 
-    def test_get_layerwise_protocol_returns_none_without_protocol(self):
-        for backend_name in ("yuanrong", "nonexistent"):
-            with self.subTest(backend=backend_name):
-                self.assertIsNone(get_layerwise_protocol(backend_name))
+    def test_get_backend_class_returns_none_for_unknown_backend(self):
+        self.assertIsNone(get_backend_class("nonexistent"))
+        self.assertIsNone(get_backend_class("yuanrong").layerwise_data_plane)
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
@@ -1433,13 +1425,11 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
 
 # =========================================================================
-# Memcache layerwise transfer protocol
+# Memcache layerwise backend capabilities
 # =========================================================================
-_PROTOCOL_FUNCTIONS = (
+_LAYERWISE_KEY_FUNCTIONS = (
     "make_full_key",
-    "make_partial_key",
     "make_hit_check_keys",
-    "extract_layout_config",
 )
 
 _LAYERWISE_STORE_METHODS = (
@@ -1451,8 +1441,8 @@ _LAYERWISE_STORE_METHODS = (
 )
 
 
-class TestLayerwiseProtocolRegistration(unittest.TestCase):
-    """Protocol adapters and backend store implementations stay aligned."""
+class TestLayerwiseBackendRegistration(unittest.TestCase):
+    """Backend layerwise capabilities and store operations stay aligned."""
 
     def _backend_entries(self):
         import importlib
@@ -1461,32 +1451,19 @@ class TestLayerwiseProtocolRegistration(unittest.TestCase):
             module = importlib.import_module(entry["path"])
             yield name, entry, module, getattr(module, entry["name"])
 
-    def test_protocol_registration_and_store_overrides(self):
+    def test_layerwise_capabilities_and_store_overrides(self):
         for name, entry, module, backend_class in self._backend_entries():
             with self.subTest(backend=name):
-                exposes_protocol = all(callable(getattr(module, func, None)) for func in _PROTOCOL_FUNCTIONS)
+                exposes_layerwise_keys = all(callable(getattr(module, func, None)) for func in _LAYERWISE_KEY_FUNCTIONS)
                 owns_overrides = all(
                     any(method in vars(cls) for cls in backend_class.__mro__ if cls is not Backend)
                     for method in _LAYERWISE_STORE_METHODS
                 )
-                self.assertEqual(exposes_protocol, name == "memcache")
+                self.assertEqual(exposes_layerwise_keys, name == "memcache")
                 self.assertEqual(owns_overrides, name == "memcache")
-                self.assertEqual(bool(entry.get("layerwise_protocol")), name in ("memcache", "mooncake"))
-                protocol = get_layerwise_protocol(name)
-                self.assertEqual(protocol is not None, name in ("memcache", "mooncake"))
-                self.assertEqual(owns_overrides, exposes_protocol)
-
-
-class TestExtractLayoutConfig(unittest.TestCase):
-    """The protocol owns the layerwise opt-in check of the layout layer."""
-
-    def test_returns_config_when_opted_in(self):
-        extra_config = {"use_layerwise": True, "layerwise_num_shared_buffers": 2}
-        self.assertIs(extract_layout_config(extra_config), extra_config)
-
-    def test_returns_none_when_not_opted_in(self):
-        self.assertIsNone(extract_layout_config({}))
-        self.assertIsNone(extract_layout_config({"use_layerwise": False}))
+                self.assertEqual(backend_class.layerwise_data_plane is not None, name in ("memcache", "mooncake"))
+                self.assertIs(get_backend_class(name), backend_class)
+                self.assertEqual(owns_overrides, exposes_layerwise_keys)
 
 
 class TestLayerwiseKeyFormats(unittest.TestCase):
@@ -1512,7 +1489,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_partial_key_format(self):
         self.assertEqual(
-            make_partial_key("model", "r1", 0, 1, 20, 3),
+            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3),
             "model@partial@r1@0@1@20@3",
         )
 
@@ -1522,7 +1499,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@2@pp1@hash0@3",
         )
         self.assertEqual(
-            make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
             "model@partial@r1@0@1@20@pp1@3",
         )
         self.assertEqual(

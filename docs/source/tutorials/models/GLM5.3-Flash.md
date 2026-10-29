@@ -45,24 +45,15 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
-
-**Step 1:** Download the Docker image
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:{tag}
-```
-
-**Step 2:** Start Docker container
-
-Select the `docker run` command for your hardware platform:
+Select an image for your hardware and start a container on each node.
+Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
 === "950DT products"
 
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -100,7 +91,7 @@ Select the `docker run` command for your hardware platform:
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -145,7 +136,7 @@ Select the `docker run` command for your hardware platform:
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -183,7 +174,7 @@ Select the `docker run` command for your hardware platform:
     If startup reports that Transformers does not recognize `glm5_next`, the failure occurs while
     loading the model configuration, before DP engine initialization. Check
     the active software versions and recreate the containers with a compatible
-    image tag if they still use the legacy `glm-5.3-flash` image or a vLLM
+    image if they still use the legacy `glm-5.3-flash` image or a vLLM
     `0.23.0` environment. For source builds, follow the
     [installation guide](../../getting_started/installation.md) and use the
     matching vLLM, vLLM-Ascend, and Transformers dependencies for the checked-out
@@ -672,13 +663,16 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     ##### Start the Proxy
 
-    Run on a separate host after the Prefill and Decode endpoints are healthy.
+    Run inside a vLLM-Ascend container on a separate host after the Prefill
+    and Decode endpoints are healthy. The official image includes the proxy
+    at the absolute path below; for a source installation, replace the
+    checkout prefix with the actual source directory.
 
     ```shell
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
