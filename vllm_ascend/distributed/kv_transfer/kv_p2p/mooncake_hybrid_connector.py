@@ -1855,12 +1855,12 @@ class MooncakeConnectorWorker:
                     page_groups.add(layer_group_idx[layer_name])
                     layer_tensors = as_kv_cache_tensors(kv_caches[layer_name])
                     if not layer_tensors:
-                        raise ValueError(f"DeepSeek-V4 shared KV cache layer has no materialized tensor: {layer_name}.")
+                        raise ValueError(f"Shared KV cache layer has no materialized tensor: {layer_name}.")
 
                     layer_page_base = _min_data_ptr(layer_tensors) - placement_offset
                     if page_base_addr is not None and layer_page_base != page_base_addr:
                         raise ValueError(
-                            "DeepSeek-V4 layers with the same placement and block stride "
+                            "Layers with the same placement and block stride "
                             "do not resolve to the same page base: "
                             f"layers={shared_by}, layer={layer_name}, "
                             f"placement_offset={placement_offset}."
