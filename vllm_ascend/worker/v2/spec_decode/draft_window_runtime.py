@@ -14,11 +14,14 @@ from typing import Any
 
 import numpy as np
 import torch
+from vllm.logger import init_logger
 
 from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerPool
 from vllm_ascend.worker.v2.spec_decode.draft_window_plan import compute_draft_window_plan, freeze_eagle_window_plan
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import DraftWindowPolicyDecision
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource, materialize_direct_prefix
+
+logger = init_logger(__name__)
 
 
 class _NPUCompletion:
@@ -104,6 +107,25 @@ class DraftWindowRuntime:
         self._eagle_prompt_exact_base = None
         self._next_step = 0
         self._proposal_mapping = None
+        narrowed_native_windows = tuple(
+            sorted(
+                {
+                    native_window
+                    for native_window in self.native_swa_intersections.values()
+                    if self.window_size < native_window
+                }
+            )
+        )
+        if narrowed_native_windows:
+            logger.warning_once(
+                "The Draft model contains native SWA layers with windows %s. "
+                "The additional draft_window_size=%s narrows those layers and may reduce "
+                "acceptance or throughput. Prefer the native window by default and "
+                "enable an additional window only after measuring your workload.",
+                narrowed_native_windows,
+                self.window_size,
+                scope="global",
+            )
 
     @property
     def reads_active(self) -> bool:

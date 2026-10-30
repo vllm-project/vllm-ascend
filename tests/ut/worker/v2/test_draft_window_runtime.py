@@ -79,6 +79,43 @@ def test_effective_draft_eager_preserves_target_graph(setup, method, inherited_e
             DraftWindowRuntime(spec, policy)
 
 
+@pytest.mark.parametrize(
+    "native_windows,window,expected",
+    [
+        ({}, 1024, ()),
+        ({0: 2048}, 1024, (2048,)),
+        ({0: 2048}, 2048, ()),
+        ({0: 2048}, 4096, ()),
+        ({0: 2048, 1: 4096}, 2048, (4096,)),
+        ({0: 4096, 1: 4096}, 1024, (4096,)),
+    ],
+)
+def test_native_swa_warning_uses_only_certified_narrowed_draft_groups(
+    setup, monkeypatch, native_windows, window, expected
+):
+    _, spec, canonical, _ = setup
+    before = canonical.clone()
+    warnings = []
+
+    def validate(runtime, actual_spec):
+        assert actual_spec is spec
+        runtime.native_swa_intersections = native_windows
+        return (0,)
+
+    monkeypatch.setattr(DraftWindowRuntime, "_validate_route", validate)
+    monkeypatch.setattr(runtime_module.logger, "warning_once", lambda *args, **kwargs: warnings.append((args, kwargs)))
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=window, method="dflash"))
+    assert runtime.window_size == window
+    assert runtime.native_swa_intersections == native_windows
+    assert torch.equal(canonical, before)
+    assert len(warnings) == bool(expected)
+    if expected:
+        args, kwargs = warnings[0]
+        assert args[1:] == (expected, window)
+        assert kwargs == {"scope": "global"}
+        assert "may reduce" in args[0]
+
+
 def batch(*, rows=(1, 3), computed=(8, 24), prompt=(16, 16), scheduled=(7, 3), drafts=(3, 2)):
     return SimpleNamespace(
         num_reqs=len(rows),
@@ -650,13 +687,15 @@ def test_actual_dense_builder_preserves_sp_padding_after_window_projection(setup
     )
     build = next(node for node in builder_class.body if isinstance(node, ast.FunctionDef) and node.name == "build")
     utils_tree = ast.parse((root / "vllm_ascend/attention/utils.py").read_text())
-    select_lengths = next(
-        node for node in utils_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_select_seq_lens"
-    )
+    utility_functions = [
+        node
+        for node in utils_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"_select_seq_lens", "uses_pcp_sharded_layout"}
+    ]
     module = ast.Module(
         body=[
             ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
-            select_lengths,
+            *utility_functions,
             build,
         ],
         type_ignores=[],
@@ -667,6 +706,7 @@ def test_actual_dense_builder_preserves_sp_padding_after_window_projection(setup
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda tensor: tensor)
     builder = SimpleNamespace(
         pcp_enabled=False,
+        use_pcp=False,
         device=torch.device("cpu"),
         kv_cache_spec=object(),
         speculative_config=None,

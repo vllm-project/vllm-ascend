@@ -571,14 +571,16 @@ for read ownership, backend boundaries, and current synchronization costs.
   degrades as conversations grow: e.g. an early GLM-5.2 DSpark draft dropped
   from mean acceptance ~5 (short context) to ~1 at 32k; a 512-1024 window
   restored it to ~4.7-5.5, with end-to-end throughput up to +381% at 32k.
-- **Leave it off** when the draft is already stable at long context — the
-  window then only removes information the draft could have used. In
-  particular, if the draft itself was trained with sliding-window attention
-  (its config carries a native `sliding_window`), keep
-  `draft_window_size` at or above that training window, or disable the
-  feature; a window smaller than the training window measurably reduces
-  acceptance (observed -4.5% mean acceptance for a 1024 window against a
-  2048-native SWA DSpark draft at 32k input).
+- **Prefer the native window by default** for a draft that already uses SWA.
+  Omitting `draft_window_size` preserves the model's native attention window.
+  An additional supported window can remove information and may reduce
+  acceptance or throughput; its effect depends on the checkpoint and workload.
+  MRV2 emits one startup warning on the global first rank when the requested
+  window is smaller than a certified Draft group's native SWA window. Mixed
+  Full/SWA models are checked by their actual Draft groups, not their names.
+  The warning does not disable the feature, change either window, or relax
+  provider checks. Choose only values supported by that provider; for example,
+  the native-only non-causal DFlash2 bounds above still apply.
 
 Check the effect with the server log: `SpecDecoding metrics: Mean acceptance
 length: ...` lines report the acceptance per interval — compare runs with the
