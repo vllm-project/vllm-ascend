@@ -114,11 +114,23 @@ def target_metadata_config_supported(model_state):
         return False
     if any(type(size) is not int or size <= 0 for size in sizes):
         return False
-    target_sizes = sorted({((size + query_len - 1) // query_len) * query_len for size in sizes})
+    # Match MRV2 _init_candidates: an off-stride raw size can round past
+    # either the configured graph maximum or the request capacity and is then
+    # not captured. It must not make an otherwise complete usable grid sparse.
+    max_tokens = max(sizes)
+    configured_max = getattr(config.compilation_config, "max_cudagraph_capture_size", None)
+    max_num_reqs = getattr(getattr(config, "scheduler_config", None), "max_num_seqs", None)
+    if type(configured_max) is int:
+        max_tokens = configured_max
+    if type(max_num_reqs) is int:
+        max_tokens = min(max_tokens, max_num_reqs * query_len)
+    target_sizes = sorted(
+        {rounded for size in sizes if (rounded := ((size + query_len - 1) // query_len) * query_len) <= max_tokens}
+    )
     # A sparse grid can pad a real verification batch into a larger graph: its CPU mapped
     # total then differs from the capture specialization. Keep the original
     # producer for that whole configuration, rather than fail during replay.
-    if target_sizes != list(range(query_len, target_sizes[-1] + 1, query_len)):
+    if not target_sizes or target_sizes != list(range(query_len, target_sizes[-1] + 1, query_len)):
         return False
     # This producer uses rank-local token/cache metadata, not TP head geometry.
     # Replay still verifies each rank's actual tensor addresses and layouts.

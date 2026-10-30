@@ -119,7 +119,11 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
+from vllm_ascend.worker.v2.kv_connector import (
+    MambaCopyKVConnector,
+    PDDecodeQueueKVConnector,
+    wrap_pd_decode_queue_connector,
+)
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.mm_decode_queue import (
     MMDecodeCertificateState,
@@ -572,6 +576,9 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
+        if self._qwen_mrv2_early_queue_enabled and has_kv_transfer_group():
+            self.kv_connector = wrap_pd_decode_queue_connector(self.kv_connector, get_kv_transfer_group())
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -839,6 +846,11 @@ class NPUModelRunner(GPUModelRunner):
         return batch_state, uniform_token_count
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        connector = getattr(self, "kv_connector", None)
+        if isinstance(connector, PDDecodeQueueKVConnector):
+            # This also runs on tokenless receive steps, before request slots
+            # are retired/reused. The original connector callbacks still run.
+            connector.observe_scheduler_output(scheduler_output)
         if self._qwen_mrv2_mm_decode_proof_enabled and (
             scheduler_output.scheduled_new_reqs
             or scheduler_output.scheduled_cached_reqs.resumed_req_ids
@@ -891,6 +903,7 @@ class NPUModelRunner(GPUModelRunner):
         self._update_seq_lens_cpu(scheduler_output, req_ids, allow_cpu_upper_bound=allow_cpu_upper_bound)
         if not allow_cpu_upper_bound:
             self._qwen_mrv2_certify_mm_decode(scheduler_output, batch_req_state)
+            self._qwen_mrv2_certify_pd_decode(scheduler_output, batch_req_state)
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
@@ -1388,6 +1401,10 @@ class NPUModelRunner(GPUModelRunner):
             self._qwen_mrv2_snapshot_generation += 1
             self._qwen_mrv2_snapshot_source_stream = default_stream
             self._qwen_mrv2_early_queue_stats["exact_snapshots_recorded"] += 1
+            if isinstance(self.kv_connector, PDDecodeQueueKVConnector):
+                self.kv_connector.decode_queue_state.record_snapshot(
+                    self.req_states.req_id_to_index, self._qwen_mrv2_snapshot_generation
+                )
         if self._qwen_mrv2_mm_decode_proof_enabled:
             self._qwen_mrv2_mm_snapshot_stream = default_stream
             request_indices = self.req_states.req_id_to_index
@@ -1561,6 +1578,27 @@ class NPUModelRunner(GPUModelRunner):
             # an unfamiliar batch schema into an optimization-specific error.
             return False
 
+    def _qwen_mrv2_certify_pd_decode(self, scheduler_output, batch) -> None:
+        connector = self.kv_connector
+        if (
+            not isinstance(connector, PDDecodeQueueKVConnector)
+            or self.speculator is None
+            or self.sync_spec_pp_cpu_counts
+            or self._can_skip_spec_cpu_length_sync()
+            or self._qwen_mrv2_snapshot_source_stream != torch.npu.current_stream()
+            or not self._qwen_mrv2_mm_batch_is_stable_decode(scheduler_output, batch)
+        ):
+            return
+        # The preceding baseline path synchronized the exact pinned snapshot.
+        # Transfer completion alone does not prove prompt/slot readiness.
+        connector.decode_queue_state.certify(
+            batch.req_ids,
+            batch.idx_mapping_np,
+            batch.prefill_len_np,
+            self.num_computed_tokens_cpu.numpy()[batch.idx_mapping_np].tolist(),
+            self._qwen_mrv2_snapshot_generation,
+        )
+
     def _qwen_mrv2_can_queue_decode(
         self,
         scheduler_output: SchedulerOutput,
@@ -1696,6 +1734,20 @@ class NPUModelRunner(GPUModelRunner):
         parallel = self.parallel_config
         spec = self.speculative_config
         draft_tokens = self.num_speculative_steps
+        connector_ready = (
+            type(self.kv_connector) is KVConnector
+            and not has_kv_transfer_group()
+            and scheduler_output.kv_connector_metadata is None
+        )
+        if isinstance(self.kv_connector, PDDecodeQueueKVConnector):
+            connector_ready = (
+                has_kv_transfer_group()
+                and self.kv_connector.transfer_group is get_kv_transfer_group()
+                and not getattr(scheduler_output, "has_sync_kv_loads", False)
+                and self.kv_connector.decode_queue_state.can_queue(
+                    req_ids, indices, batch_req_state.prefill_len_np, self._qwen_mrv2_snapshot_generation
+                )
+            )
         checks = {
             "exact_qwen_model_state": type(self.model_state) is AscendQwen4ExpModelState,
             "exact_mtp_speculator": type(self.speculator) is AscendMTPSpeculator,
@@ -1750,12 +1802,10 @@ class NPUModelRunner(GPUModelRunner):
             # length snapshot. LoRA remains an unaudited metadata layout.
             "no_lora": self.lora_config is None,
             "no_connectors_or_adaptive_verification": (
-                type(self.kv_connector) is KVConnector
-                and not has_kv_transfer_group()
+                connector_ready
                 and self.aux_output_connector is None
                 and self.adaptive_verification is None
                 and not self.sparse_kv_offload_manager
-                and scheduler_output.kv_connector_metadata is None
                 and scheduler_output.ec_connector_metadata is None
                 and scheduler_output.ec_manager_metadata is None
                 and not scheduler_output.kv_cache_block_copies

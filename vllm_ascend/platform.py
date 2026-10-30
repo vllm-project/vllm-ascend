@@ -1350,6 +1350,59 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         compilation_config.cudagraph_mode = cudagraph_mode
 
 
+def _complete_qwen_mrv2_capture_sizes(vllm_config: VllmConfig) -> None:
+    """Keep fixed-MTP target verification batches on exact-size FULL graphs.
+
+    The original QSA producer specializes its CPU mapped-token total during
+    capture. A sparse token grid otherwise pads a real request batch into a
+    larger graph and prevents that producer from moving into the graph. Fill
+    only the missing verification sizes, before any target/draft dispatcher is
+    built. Preserve all requested sizes and the configured maximum; in
+    particular, do not round an off-stride maximum upward.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    model = vllm_config.model_config
+    compilation = vllm_config.compilation_config
+    speculative = vllm_config.speculative_config
+    if (
+        not vllm_config.use_v2_model_runner
+        or getattr(model, "architecture", None) not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        or model.enforce_eager
+        or compilation.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+        or speculative is None
+        or speculative.method != "mtp"
+        or speculative.uses_dynamic_speculative_decoding()
+        or speculative.enable_adaptive_verification
+    ):
+        return
+    draft_tokens = speculative.num_speculative_tokens
+    sizes = compilation.cudagraph_capture_sizes
+    max_capture_size = compilation.max_cudagraph_capture_size
+    if (
+        type(draft_tokens) is not int
+        or draft_tokens <= 0
+        or not sizes
+        or type(max_capture_size) is not int
+        or max_capture_size <= 0
+    ):
+        return
+    query_len = draft_tokens + 1
+    max_size = min(
+        max_capture_size,
+        vllm_config.scheduler_config.max_num_seqs * query_len,
+    )
+    completed_sizes = sorted(set(sizes) | set(range(query_len, max_size + 1, query_len)))
+    if completed_sizes != sizes:
+        compilation.cudagraph_capture_sizes = completed_sizes
+        logger.info(
+            "Completed Qwen MRV2 fixed-MTP capture grid: %s -> %s (maximum unchanged: %d).",
+            sizes,
+            completed_sizes,
+            compilation.max_cudagraph_capture_size,
+        )
+
+
 def _setup_compile_backend(
     vllm_config: VllmConfig,
     compile_backend: str,
@@ -1387,6 +1440,7 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
+    _complete_qwen_mrv2_capture_sizes(vllm_config)
     additional_config = vllm_config.additional_config or {}
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (

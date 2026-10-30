@@ -21,6 +21,10 @@ HELPER = importlib.util.module_from_spec(SPEC)
 # Load only the CPU proof helper; do not import the NPU runner dependencies.
 with patch.dict(sys.modules, {SPEC.name: HELPER}):
     SPEC.loader.exec_module(HELPER)
+PD_SPEC = importlib.util.spec_from_file_location("_test_pd_runner_helper", RUNNER_PATH.with_name("pd_decode_queue.py"))
+PD_HELPER = importlib.util.module_from_spec(PD_SPEC)
+with patch.dict(sys.modules, {PD_SPEC.name: PD_HELPER}):
+    PD_SPEC.loader.exec_module(PD_HELPER)
 
 
 class BaseRunner:
@@ -37,6 +41,7 @@ METHODS = {
     "_qwen_mrv2_mm_batch_is_stable_decode",
     "_qwen_mrv2_mm_decode_is_certified",
     "_qwen_mrv2_certify_mm_decode",
+    "_qwen_mrv2_certify_pd_decode",
     "_update_seq_lens_cpu",
 }
 # Execute the production methods unchanged with explicit CPU stand-ins. This
@@ -66,6 +71,7 @@ namespace = {
     "ObjectIdentity": HELPER.ObjectIdentity,
     "CUDAGraphMode": NS(FULL_DECODE_ONLY=object(), FULL=object()),
     "has_kv_transfer_group": lambda: False,
+    "PDDecodeQueueKVConnector": type("PDDecodeQueueKVConnector", (), {}),
 }
 exec(compile(tree, str(RUNNER_PATH), "exec"), namespace)
 Runner = namespace["RunnerMethods"]
@@ -408,6 +414,65 @@ class TestMMConsumerPolicy(unittest.TestCase):
         self.assertEqual(runner._qwen_mrv2_mm_decode_stats["queue_eligible_steps"], 0)
         runner._qwen_mrv2_early_queue_enabled = False
         self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+
+    def pd_queue_runner(self):
+        runner, current_batch, output, desc = self.queue_runner([])
+        connector = namespace["PDDecodeQueueKVConnector"]()
+        connector.transfer_group = object()
+        connector.decode_queue_state = PD_HELPER.PDDecodeQueueState()
+        runner.kv_connector = connector
+        output.kv_connector_metadata = NS(requests={}, requests_to_send={}, reqs_in_batch=set())
+        output.has_sync_kv_loads = False
+        connector.decode_queue_state.observe_step(output, metadata_known=True)
+        connector.decode_queue_state.record_snapshot({"image": 0}, runner._qwen_mrv2_snapshot_generation)
+        runner.num_computed_tokens_cpu = NS(numpy=lambda: np.array([100]))
+        self.enterContext(
+            patch.dict(
+                namespace,
+                {
+                    "has_kv_transfer_group": lambda: True,
+                    "get_kv_transfer_group": lambda: connector.transfer_group,
+                },
+            )
+        )
+        return runner, current_batch, output, desc
+
+    def test_pd_queue_requires_exact_stable_prompt_certificate(self):
+        runner, current_batch, output, desc = self.pd_queue_runner()
+        self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+        runner._qwen_mrv2_certify_pd_decode(output, current_batch)
+        self.assertTrue(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+        self.assertEqual(runner.kv_connector.decode_queue_state.stats["exact_certified_batches"], 1)
+
+    def test_pd_preserves_parallel_prefix_and_ple_generalization(self):
+        runner, current_batch, output, desc = self.pd_queue_runner()
+        runner._qwen_mrv2_certify_pd_decode(output, current_batch)
+        for tp, dp, pp, sp, prefix, offload in product(
+            (1, 2, 4), (1, 2), (1, 2), (False, True), (False, True), (False, True)
+        ):
+            runner.parallel_config.tensor_parallel_size = tp
+            runner.parallel_config.data_parallel_size = dp
+            runner.parallel_config.pipeline_parallel_size = pp
+            runner.parallel_config.use_sequence_parallel_moe = sp
+            runner.ascend_config.enable_sp_by_pass = sp
+            runner.cache_config.enable_prefix_caching = prefix
+            runner.vllm_config.engram_config = NS(cpu_offload=offload)
+            with self.subTest(tp=tp, dp=dp, pp=pp, sp=sp, prefix=prefix, offload=offload):
+                self.assertTrue(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+
+    def test_pd_sync_load_copy_or_connector_change_keeps_baseline(self):
+        for mutation in ("sync_load", "cache_copy", "group_change"):
+            with self.subTest(mutation=mutation):
+                runner, current_batch, output, desc = self.pd_queue_runner()
+                runner._qwen_mrv2_certify_pd_decode(output, current_batch)
+                self.assertTrue(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+                if mutation == "sync_load":
+                    output.has_sync_kv_loads = True
+                elif mutation == "cache_copy":
+                    output.kv_cache_block_copies = [(1, 2)]
+                else:
+                    namespace["get_kv_transfer_group"] = object
+                self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
 
     def test_mm_extension_requires_new_flag_and_exact_certificate(self):
         media = [

@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU control-flow tests; device numeric parity is a separate NPU test."""
 
+import ast
 import importlib.util
 import sys
 import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[4]
 SOURCE = ROOT / "vllm_ascend"
@@ -237,6 +238,68 @@ class TestTargetMetadata(unittest.TestCase):
                     self.build()
                 with self.assertRaisesRegex(RuntimeError, "inputs or static geometry changed"):
                     self.m.validate_target_metadata_replay(self.model_state, self.desc)
+
+    def test_platform_default_grid_completion_enables_original_producer_capture(self):
+        config = self.model_state.vllm_config
+        config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8, *range(16, 129, 8)]
+        config.compilation_config.max_cudagraph_capture_size = 128
+        config.scheduler_config = types.SimpleNamespace(max_num_seqs=32)
+        config.use_v2_model_runner = True
+        config.model_config.architecture = "Qwen4ExpForCausalLM"
+        self.assertFalse(self.m.target_metadata_config_supported(self.model_state))
+        # Execute the actual early platform hook, before worker/model state
+        # capture. Do not repair an already initialized graph dispatcher.
+        source = SOURCE / "platform.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_complete_qwen_mrv2_capture_sizes"
+        )
+        namespace = {"VllmConfig": object, "logger": Mock()}
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(source), "exec"),
+            namespace,
+        )
+        namespace[function.name](config)
+        self.assertTrue(self.m.target_metadata_config_supported(self.model_state))
+        self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [1, 2, *range(4, 129, 4)])
+        self.batch = types.SimpleNamespace(num_tokens_after_padding=12, num_reqs_after_padding=3)
+        self.desc = types.SimpleNamespace(num_tokens=12, num_reqs=3)
+        self.common = Common(
+            Tensor([0, 4, 8, 12]),
+            Tensor([0, 4, 8, 12], device="cpu"),
+            Tensor([10000] * 3),
+            12,
+            Tensor(shape=(3, 184)),
+            self.common.slot_mapping,
+        )
+        self.capture()
+        with self.preparation():
+            self.build()
+        self.assertTrue(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+        self.assertEqual(self.model_state._qsa_target_metadata.captured.keys(), {(12, 3)})
+
+    def test_off_stride_or_over_request_capacity_raw_sizes_match_actual_target_grid(self):
+        config = self.model_state.vllm_config
+        config.scheduler_config = types.SimpleNamespace(max_num_seqs=2)
+        config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8, 17]
+        config.compilation_config.max_cudagraph_capture_size = 17
+        # 17 rounds to 20, which MRV2 does not capture. It cannot disable the
+        # complete usable 4/8 grid for this two-request target model.
+        self.assertTrue(self.m.target_metadata_config_supported(self.model_state))
+        self.capture()
+        with self.preparation():
+            self.build()
+        self.assertTrue(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+
+    def test_raw_bucket_rounded_within_configured_maximum_is_not_ignored(self):
+        config = self.model_state.vllm_config
+        config.compilation_config.cudagraph_capture_sizes = [1, 13]
+        config.compilation_config.max_cudagraph_capture_size = 16
+        # MRV2 captures 4 and 16 here; ignoring 13 after rounding would hide
+        # the missing 8/12 buckets and incorrectly enable sparse replay.
+        self.assertFalse(self.m.target_metadata_config_supported(self.model_state))
 
     def test_pointer_mismatch_fails_before_replay(self):
         self.capture()

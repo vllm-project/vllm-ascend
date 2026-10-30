@@ -60,13 +60,31 @@ their existing persistent buffers, which are checked before capture.
 The historical requested capture sizes were
 `[1, 2, 4, 8, 12, 16, 20, 24, 28, 32]`; with K3 target query length four, the
 applicable target plans are `4, 8, 12, 16, 20, 24, 28, 32`. The effective target
-capture grid must contain every K+1-token bucket up to its configured maximum.
-Missing, invalid, or sparse grids disable this metadata
-migration for the entire configuration, avoiding partial capture or mismatched
-rounded replay plans. Unsupported configurations and non-FULL calls
-retain the original immediate producer path. MTP retains its existing calls; this
-change does not migrate MTP metadata or change MTP graph capture. No embedding or
-TP AllReduce preparation graph is introduced.
+capture grid must contain every usable K+1-token bucket. For fixed-MTP Qwen MRV2
+with `FULL_DECODE_ONLY`, the platform automatically fills missing buckets after
+upstream capture-size calculation and before constructing target or draft graph
+managers. It keeps the original requested sizes and configured maximum, fills no
+size beyond that maximum or the request capacity, and leaves the platform's
+existing SP alignment filter in place. An off-stride maximum is not rounded upward.
+The effective service configuration, capture candidates, and runtime dispatchers
+therefore use the same completed list; no manual capture-size export or new switch
+is required. Dynamic/adaptive MTP and other models retain their existing grids.
+
+For example, K3 with a maximum of 128 tokens, 32 request slots, and no SP filtering
+changes the default raw list from 19 to 34 entries. The target and MTP first-step
+managers each capture 32 effective buckets instead of 17; the later MTP query-one
+manager captures 10 instead of seven because its request capacity is 32. This adds
+33 graphs per rank across those three managers without increasing the configured
+maximum. More graphs can increase capture time and graph-pool memory; their device
+memory cost and performance impact still require measurement.
+
+If the effective usable grid remains missing, invalid, or sparse after layout
+adjustments, metadata migration retains the original immediate producer for the
+configuration, avoiding partial capture or mismatched rounded replay plans.
+Unsupported configurations and non-FULL calls likewise retain the original path.
+MTP keeps its existing producer calls and graph implementation while receiving the
+same completed size configuration; this change does not migrate MTP metadata.
+No embedding or TP AllReduce preparation graph is introduced.
 
 Each target model state owns its pending and captured plans, including the tensors
 whose lifetimes must span capture and replay. A context variable routes builder calls
@@ -106,7 +124,7 @@ synchronous scheduling are admitted; synchronous scheduling may offer less overl
 Prefix caching, Mamba cache modes, and the global KV-sharing fast-prefill setting
 do not disable stable decode submission. Request arrival, resume, preemption,
 completion, active encoder work, prompt embeddings, DBO,
-LoRA, connectors, structured output, and unsupported configurations
+LoRA, unsupported connector states, structured output, and unsupported configurations
 fall back to the synchronized path. Bounds must fit both target and draft model limits.
 
 Prefix-cache restoration and partial-hit block copies keep their original ordering.
@@ -115,6 +133,32 @@ the exact synchronized path. Only a subsequent stable decode batch can use the
 upper bound. Mamba block-boundary decisions, state copies, accepted counts, and
 postprocessing retain the exact device inputs. This does not add fast-prefill or
 cache-mode support beyond what the underlying model and runtime already support.
+
+### Stable PD decode
+
+The Mooncake pull consumer path can submit stable decode batches early after KV
+receipt and exact request-state readiness have been established. A runner-local
+connector wrapper observes the completion output at its existing consumption point;
+it does not poll the connector again, consume another notification, or change
+transfer metadata. Existing receive waits, Mamba state restoration, send/ACK
+callbacks, finalization, and failure handling keep their original ordering.
+
+An observed remote receive must complete successfully before certification. The
+first eligible stable batch still takes the synchronized path and consumes the
+exact corrected-count snapshot to prove that the prompt is complete. The proof
+binds the request incarnation, transfer generation, request slot, prompt length,
+and snapshot generation. Later batches can replace the corrected-count host wait
+with its existing device-stream wait while the proof remains valid. Local prefill
+or a full prefix-cache hit can establish the same exact proof without a remote
+receive; the mere presence of a PD consumer does not exclude those requests.
+
+Pending transfers or transfer actions for a queued request, synchronous KV loads,
+receive failures, invalid blocks, lifecycle or slot changes, overlapping receives
+for a reused ID, and unfamiliar connector schemas retain synchronized submission.
+Unrelated requests can receive concurrently without invalidating already-ready
+rows. Other connector implementations retain their original path. This extension
+adds no switch or blanket TP, DP, PP, SP, prefix-cache, or PLE-offload exclusion;
+the existing per-batch model, snapshot, and backend dependencies still apply.
 
 For multimodal requests, scheduler flags alone cannot prove that the last image or
 video prompt token has been processed. The worker first consumes a synchronized,
@@ -161,9 +205,10 @@ Other remaining limits are:
 | --- | --- |
 | Early submission | Exact Qwen model-state and MTP-speculator types; approved target/draft attention builder pairs; fixed positive K without dynamic drafting; a uniform FULL verification batch with K+1 tokens per request and K drafts. |
 | Early submission | Pure decode with no new, resumed, preempted, or finished requests; conservative lengths within both target and draft limits; no active decoder replay. |
-| Early submission | No prompt embeddings, MM prefix-LM, scheduled encoder work, DBO, LoRA, KV/EC transfer metadata, auxiliary connectors, adaptive verification, sparse-KV offload, KV block copies, or structured output. The exact snapshot must have been produced on the same stream. |
+| Early submission | No prompt embeddings, MM prefix-LM, scheduled encoder work, DBO, LoRA, unsupported KV connector states, EC transfer metadata, auxiliary connectors, adaptive verification, sparse-KV offload, KV block copies, or structured output. The exact snapshot must have been produced on the same stream. |
+| Stable PD extension | A recognized Mooncake pull consumer, completed or unnecessary receive, no transfer action for the queued rows, and a matching exact readiness certificate. Other connector implementations and unproven request states keep synchronized submission. |
 | Multimodal extension | Both queue switches enabled, a valid exact prompt-completion certificate, stable request/slot/media identities, and non-realtime media layouts without embedding masks, MM pruning, encoder-decoder inputs, or active deepstack embeddings. |
-| Target metadata capture | `FULL_DECODE_ONLY`, non-eager target, fixed positive K, no dynamic/adaptive drafting, LoRA, or DBO; positive integer requested capture sizes whose rounded target grid contains every K+1-token bucket. Actual input/output views must fit the existing owner buffers. |
+| Target metadata capture | `FULL_DECODE_ONLY`, non-eager target, fixed positive K, no dynamic/adaptive drafting, LoRA, or DBO; positive integer capture sizes whose effective usable target grid contains every K+1-token bucket after automatic completion and existing layout filtering. Actual input/output views must fit the existing owner buffers. |
 | Target metadata placement | DP/SP padding, unsupported query geometry, external cached mappings, and shared Common metadata select the original producer before capture. Migrated buckets need query lengths zero or K+1 and mapped-token count within the padded token count. |
 | Target metadata replay | Captured pointers, devices, dtypes, shapes, strides, static arguments, and query length must match before replay. Already captured incompatible state and native operator failures remain errors. |
 
@@ -184,6 +229,12 @@ Additional CPU cases cover DP/PP sizes 1/2/4 with SP enabled or disabled, offloa
 settings, local request reordering, padded or idle DP batches, PP stages without a
 local speculator, and sticky metadata fallback. These are control-flow checks;
 no new distributed or offload NPU execution was performed for this expansion.
+CPU checks for automatic grid completion execute the platform setup path and the
+pinned upstream candidate/dispatch methods, including off-stride maxima and target
+versus draft request capacities. PD cases exercise receive completion, exact
+certification, request reuse, lifecycle invalidation, concurrent unrelated receives,
+and synchronized fallback. These checks do not establish PD output correctness or
+device overlap.
 
 ## Validation before production use
 
@@ -194,6 +245,11 @@ Validate token outputs, cache correctness, actual graph replay, synchronization,
 and performance on the intended hardware and workload. Compare latency or throughput
 using the same model, environment, and request set. A shorter gap in one profiling
 trace is insufficient to establish an end-to-end speedup or generation correctness.
+
+Hardware validation of the latest automatic-grid and stable-PD changes on server 62
+(Ascend A5) is pending release of the intended resources by the user. No A5 result
+is claimed for this revision. The historical TP4 and server-101 observations below
+predate these changes and do not validate them.
 
 The historical single-variant collection on server 101 used multimodal inputs of
 10,000 total tokens, 100 output tokens, concurrency two, TP8, and prefix caching off.
