@@ -1741,7 +1741,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     ):
         replay = self.model.decoder_replay_layers
         # Keep replay's per-step row selection outside the compiled full-batch path.
-        model_forward = self.model.forward if replay is not None and replay.rows is not None else self.model
+        model_forward: Callable[..., Any] = self.model
+        if replay is not None and replay.rows is not None:
+            model_forward = self.model.forward
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count
