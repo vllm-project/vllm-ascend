@@ -8,3 +8,5 @@ entries:
     text: Removed the TP8-only gate from eligible text and completed-multimodal decode submission and original target QSA metadata capture. Other configuration, dependency, and replay-layout guards remain in place.
   - category: feature
     text: Allowed stable decode submission with prefix caching, Mamba cache modes, either scheduling setting, and configurable static MTP lengths. Target QSA metadata capture follows K+1 and existing buffer capacity instead of fixed K3 and 32-token limits; cache-transition and replay dependency guards remain enforced.
+  - category: feature
+    text: Removed blanket DP, PP, SP, and weight-offload exclusions from eligible rank-local decode submission. DP/SP metadata padding and unsupported capture layouts keep the original producer before graph capture, while incompatible batches retain synchronized submission; underlying model and runtime restrictions still apply.

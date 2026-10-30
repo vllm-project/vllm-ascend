@@ -33,6 +33,7 @@ METHODS = {
     "_qwen_mrv2_mm_decode_request_keys",
     "_qwen_mrv2_mm_decode_context",
     "_qwen_mrv2_can_queue_decode",
+    "_qwen_mrv2_has_local_uniform_verification",
     "_qwen_mrv2_mm_batch_is_stable_decode",
     "_qwen_mrv2_mm_decode_is_certified",
     "_qwen_mrv2_certify_mm_decode",
@@ -381,6 +382,7 @@ class TestMMConsumerPolicy(unittest.TestCase):
         runner._qwen_mrv2_backend_proof = False
         current_batch = batch()
         current_batch.num_scheduled_tokens = np.array([draft_tokens + 1])
+        current_batch.num_tokens = draft_tokens + 1
         current_batch.num_draft_tokens_np = np.array([draft_tokens])
         output = scheduler(
             num_scheduled_tokens={"image": draft_tokens + 1},
@@ -391,7 +393,12 @@ class TestMMConsumerPolicy(unittest.TestCase):
             ec_manager_metadata=None,
             kv_cache_block_copies=[],
         )
-        desc = NS(cg_mode=namespace["CUDAGraphMode"].FULL, uniform_token_count=draft_tokens + 1)
+        desc = NS(
+            cg_mode=namespace["CUDAGraphMode"].FULL,
+            uniform_token_count=draft_tokens + 1,
+            num_tokens=draft_tokens + 1,
+            num_reqs=1,
+        )
         return runner, current_batch, output, desc
 
     def test_existing_text_queue_flag_behavior_is_unchanged(self):
@@ -531,6 +538,159 @@ class TestMMConsumerPolicy(unittest.TestCase):
                 self.assertTrue(exact.synchronized)
                 self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [105])
 
+    def test_dp_pp_sp_and_weight_offload_do_not_exclude_local_decode(self):
+        for dp_size, pp_size, sp, multimodal in product((1, 2, 4), (1, 2, 4), (False, True), (False, True)):
+            with self.subTest(dp=dp_size, pp=pp_size, sp=sp, multimodal=multimodal):
+                media = (
+                    [
+                        NS(
+                            data=object(),
+                            modality="image",
+                            identifier="photo",
+                            mm_position=NS(offset=20, length=30, is_embed=None),
+                        )
+                    ]
+                    if multimodal
+                    else []
+                )
+                runner, current_batch, output, desc = self.queue_runner(media)
+                runner.parallel_config.data_parallel_size = dp_size
+                runner.parallel_config.pipeline_parallel_size = pp_size
+                runner.parallel_config.use_sequence_parallel_moe = sp
+                runner.ascend_config.enable_sp_by_pass = sp
+                runner.use_pp = pp_size > 1
+                runner.is_last_pp_rank = True
+                # PLE offload is separate from general UVA/prefetch offload.
+                # Neither owns an exact CPU request-length consumer.
+                runner.vllm_config.engram_config = NS(cpu_offload=True)
+                runner.vllm_config.offload_config.uva = NS(cpu_offload_gb=8, cpu_offload_params=["embedding"])
+                runner.vllm_config.offload_config.prefetch = NS(offload_group_size=2, offload_params=["weights"])
+                # Other DP replicas may choose a larger graph. Local request
+                # rows remain unpadded; padding is prepared after admission.
+                desc.num_tokens = 16
+                desc.num_reqs = 4
+                runner._qwen_mrv2_mm_decode_queue_enabled = True
+                if multimodal:
+                    self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+                    keys = runner._qwen_mrv2_mm_decode_request_keys(
+                        current_batch.req_ids, current_batch.idx_mapping_np, current_batch.prefill_len_np
+                    )
+                    runner._qwen_mrv2_mm_decode_state.record_snapshot(keys)
+                    self.assertTrue(runner._qwen_mrv2_mm_decode_state.certify(keys, [100]))
+                self.assertTrue(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+                runner._qwen_mrv2_early_queue_stats.update(host_length_wait_skipped=0, length_device_wait_enqueued=0)
+                runner.req_states.num_computed_tokens_cpu = np.array([104])
+                runner.input_buffers = NS(seq_lens_cpu=np.zeros(1, dtype=np.int32))
+                runner.num_computed_tokens_cpu = object()  # Must not read the pending pinned D2H.
+                runner.num_computed_tokens_event = NS(synchronize=lambda: self.fail("unexpected host wait"))
+                waits = []
+                with patch.object(namespace["torch"].npu, "current_stream", return_value=NS(wait_event=waits.append)):
+                    runner._update_seq_lens_cpu(output, current_batch.req_ids, allow_cpu_upper_bound=True)
+                self.assertEqual(waits, [runner.num_computed_tokens_event])
+                self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [108])
+
+    def test_dp_empty_or_malformed_local_rows_fall_back_without_error(self):
+        for case in (
+            "empty",
+            "padded_logical_rows",
+            "different_local_schedule",
+            "missing_slot",
+            "negative_slot",
+            "out_of_range_slot",
+            "non_integer_slot",
+            "wrong_local_token_count",
+            "too_small_graph",
+            "too_few_graph_rows",
+            "inconsistent_graph_rows",
+            "nonuniform_graph_capacity",
+            "unknown_descriptor_schema",
+        ):
+            with self.subTest(case=case):
+                runner, current_batch, output, desc = self.queue_runner([])
+                runner.parallel_config.data_parallel_size = 4
+                desc.num_tokens, desc.num_reqs = 16, 4
+                if case == "empty":
+                    current_batch.req_ids = []
+                elif case == "padded_logical_rows":
+                    current_batch.num_draft_tokens_np = np.array([3, -1])
+                elif case == "different_local_schedule":
+                    output.num_scheduled_tokens["image"] = 1
+                elif case == "missing_slot":
+                    runner.req_states.req_id_to_index = {}
+                elif case == "negative_slot":
+                    current_batch.idx_mapping_np = np.array([-1])
+                elif case == "out_of_range_slot":
+                    current_batch.idx_mapping_np = np.array([1])
+                elif case == "non_integer_slot":
+                    current_batch.idx_mapping_np = np.array([0.0])
+                elif case == "wrong_local_token_count":
+                    current_batch.num_tokens = 8
+                elif case == "too_small_graph":
+                    desc.num_tokens = 0
+                elif case == "too_few_graph_rows":
+                    desc.num_reqs = 0
+                elif case == "inconsistent_graph_rows":
+                    desc.num_reqs = 3
+                elif case == "nonuniform_graph_capacity":
+                    desc.num_tokens = 15
+                else:
+                    del desc.num_reqs
+                self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+                self.assertEqual(runner._qwen_mrv2_early_queue_last_guard["failed"], ["full_uniform_verification"])
+
+    def test_dp_local_request_order_is_independent_of_global_graph_padding(self):
+        runner, current_batch, output, desc = self.queue_runner([])
+        runner.parallel_config.data_parallel_size = 4
+        runner.req_states.req_id_to_index = {"left": 3, "right": 1}
+        runner.req_states.num_computed_tokens_np = np.array([0, 104, 0, 204])
+        runner.req_states.num_computed_tokens_cpu = np.array([0, 104, 0, 204])
+        runner.encoder_cache.mm_features = {"left": [], "right": []}
+        current_batch.req_ids = ["left", "right"]
+        current_batch.idx_mapping_np = np.array([3, 1])
+        current_batch.num_scheduled_tokens = np.array([4, 4])
+        current_batch.num_draft_tokens_np = np.array([3, 3])
+        current_batch.prefill_len_np = np.array([100, 100])
+        current_batch.is_prefilling_np = np.array([False, False])
+        current_batch.num_tokens = 8
+        output.num_scheduled_tokens = {"left": 4, "right": 4}
+        output.scheduled_spec_decode_tokens = {"left": [1, 2, 3], "right": [4, 5, 6]}
+        desc.num_tokens, desc.num_reqs = 16, 4
+        self.assertTrue(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+        runner._qwen_mrv2_early_queue_stats.update(host_length_wait_skipped=0, length_device_wait_enqueued=0)
+        runner.input_buffers = NS(seq_lens_cpu=np.zeros(2, dtype=np.int32))
+        runner.num_computed_tokens_cpu = object()
+        runner.num_computed_tokens_event = NS(synchronize=lambda: self.fail("unexpected host wait"))
+        waits = []
+        with patch.object(namespace["torch"].npu, "current_stream", return_value=NS(wait_event=waits.append)):
+            runner._update_seq_lens_cpu(output, current_batch.req_ids, allow_cpu_upper_bound=True)
+        self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [208, 108])
+        self.assertEqual(waits, [runner.num_computed_tokens_event])
+        # Do not admit a rank-local row mapping that aliases two real requests.
+        current_batch.idx_mapping_np = np.array([3, 3])
+        self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+
+    def test_pp_stage_without_local_speculator_keeps_original_count_path(self):
+        for exact_cpu_consumer in (False, True):
+            with self.subTest(exact_cpu_consumer=exact_cpu_consumer):
+                runner, current_batch, output, desc = self.queue_runner([])
+                runner.parallel_config.pipeline_parallel_size = 4
+                runner.use_pp = True
+                runner.is_last_pp_rank = False
+                runner.speculator = None
+                runner.sync_spec_pp_cpu_counts = exact_cpu_consumer
+                self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
+                self.assertEqual(
+                    runner._qwen_mrv2_early_queue_last_guard["failed"], ["exact_qwen_model_state_and_mtp_speculator"]
+                )
+                exact = make_runner(exact=101)
+                runner.num_computed_tokens_cpu = exact.num_computed_tokens_cpu
+                runner.num_computed_tokens_event = exact.num_computed_tokens_event
+                runner.req_states.num_computed_tokens_cpu = np.array([104])
+                runner.input_buffers = NS(seq_lens_cpu=np.zeros(1, dtype=np.int32))
+                runner._update_seq_lens_cpu(output, current_batch.req_ids)
+                self.assertEqual(exact.synchronized, exact_cpu_consumer)
+                self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [105 if exact_cpu_consumer else 108])
+
     def test_configured_mtp_lengths_still_reject_mismatched_batches_and_bounds(self):
         for k in (1, 2, 3, 4, 5, 8):
             for case in ("descriptor", "scheduled", "draft_counts", "draft_ids", "draft_limit"):
@@ -557,11 +717,9 @@ class TestMMConsumerPolicy(unittest.TestCase):
 
     def test_certified_mm_still_obeys_original_queue_guards(self):
         cases = (
-            ("runner.parallel_config", "data_parallel_size", 2, "dp1_pp1_dcp1_pcp1"),
-            ("runner.parallel_config", "pipeline_parallel_size", 2, "dp1_pp1_dcp1_pcp1"),
-            ("runner.parallel_config", "decode_context_parallel_size", 2, "dp1_pp1_dcp1_pcp1"),
-            ("runner.parallel_config", "prefill_context_parallel_size", 2, "dp1_pp1_dcp1_pcp1"),
-            ("runner", "num_speculative_steps", 0, "fixed_mtp"),
+            ("runner.parallel_config", "decode_context_parallel_size", 2, "dcp1_pcp1"),
+            ("runner.parallel_config", "prefill_context_parallel_size", 2, "dcp1_pcp1"),
+            ("runner", "num_speculative_steps", 0, "full_uniform_verification"),
             ("runner.speculative_config", "method", "eagle", "fixed_mtp"),
             ("runner.speculative_config", "uses_dynamic_speculative_decoding", lambda: True, "fixed_mtp"),
             ("desc", "cg_mode", object(), "full_uniform_verification"),
@@ -581,12 +739,8 @@ class TestMMConsumerPolicy(unittest.TestCase):
             ("runner.model_state", "decoder_replay", object(), "no_decoder_replay"),
             ("runner.model_config", "enable_prompt_embeds", True, "text_without_prompt_embeddings"),
             ("output", "scheduled_encoder_inputs", {"image": [0]}, "text_without_prompt_embeddings"),
-            ("runner.parallel_config", "use_sequence_parallel_moe", True, "no_flashcomm_or_dbo"),
-            ("runner.parallel_config", "enable_dbo", True, "no_flashcomm_or_dbo"),
-            ("runner.ascend_config", "enable_sp_by_pass", True, "no_flashcomm_or_dbo"),
-            ("runner", "lora_config", object(), "no_lora_or_weight_offload"),
-            ("runner.vllm_config.offload_config.uva", "cpu_offload_gb", 1, "no_lora_or_weight_offload"),
-            ("runner.vllm_config.offload_config.prefetch", "offload_group_size", 1, "no_lora_or_weight_offload"),
+            ("runner.parallel_config", "enable_dbo", True, "no_dbo"),
+            ("runner", "lora_config", object(), "no_lora"),
             ("runner", "adaptive_verification", object(), "no_connectors_or_adaptive_verification"),
             ("runner", "aux_output_connector", object(), "no_connectors_or_adaptive_verification"),
             ("runner", "sparse_kv_offload_manager", object(), "no_connectors_or_adaptive_verification"),

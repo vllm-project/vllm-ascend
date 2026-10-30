@@ -21,10 +21,11 @@ import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -137,6 +138,9 @@ from vllm_ascend.worker.v2.utils import (
     prepare_v41_source_rope,
     torch_cuda_wrapper,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -264,10 +268,12 @@ class NPUModelRunner(GPUModelRunner):
         self._qwen_mrv2_early_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE
         self._qwen_mrv2_snapshot_generation = 0
         self._qwen_mrv2_snapshot_source_stream = None
-        self._qwen_mrv2_allowed_backend_builders = None
-        self._qwen_mrv2_qsa_backend = None
-        self._qwen_mrv2_qsa_impl = None
-        self._qwen_mrv2_backend_proof_key = None
+        self._qwen_mrv2_allowed_backend_builders: (
+            dict[type[AttentionBackend], tuple[type[AttentionMetadataBuilder], ...]] | None
+        ) = None
+        self._qwen_mrv2_qsa_backend: type[AttentionBackend] | None = None
+        self._qwen_mrv2_qsa_impl: type | None = None
+        self._qwen_mrv2_backend_proof_key: tuple[object, ...] | None = None
         self._qwen_mrv2_backend_proof = False
         self._qwen_mrv2_early_queue_stats = {
             "eligible_steps": 0,
@@ -276,7 +282,7 @@ class NPUModelRunner(GPUModelRunner):
             "host_length_wait_skipped": 0,
             "length_device_wait_enqueued": 0,
         }
-        self._qwen_mrv2_early_queue_last_guard = None
+        self._qwen_mrv2_early_queue_last_guard: dict[str, object] | None = None
         self._qwen_mrv2_mm_decode_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE
         self._qwen_mrv2_mm_decode_proof_enabled = self._qwen_mrv2_mm_decode_queue_enabled
         self._qwen_mrv2_mm_decode_state = MMDecodeCertificateState()
@@ -916,7 +922,7 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np: NDArray[np.int32] = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
@@ -949,7 +955,7 @@ class NPUModelRunner(GPUModelRunner):
         # See _pad_query_start_loc_for_fia.
         # Inputs are still global here; eager PCP descriptors carry local counts.
         num_reqs_padded = max(num_reqs, graph_num_reqs or 0)
-        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np: NDArray[np.int32] = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
@@ -1055,7 +1061,7 @@ class NPUModelRunner(GPUModelRunner):
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np: NDArray[np.int32] = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             num_computed_tokens_np,
             num_scheduled_tokens_upper_bound,
@@ -1494,6 +1500,67 @@ class NPUModelRunner(GPUModelRunner):
             if self._qwen_mrv2_mm_decode_state.certify(keys, exact_counts):
                 self._qwen_mrv2_mm_decode_stats["exact_certified_batches"] += 1
 
+    def _qwen_mrv2_has_local_uniform_verification(self, scheduler_output, batch, batch_desc) -> bool:
+        """Validate logical request rows independently of DP/SP graph padding.
+
+        DP dispatch already agrees graph capacity across replicas. SP shards
+        hidden states inside the model, after these global request inputs are
+        prepared. Neither changes the ownership of this rank's count snapshot.
+        Empty ranks and incompatible/padded logical rows retain the exact path.
+        """
+        try:
+            draft_tokens = self.num_speculative_steps
+            if type(draft_tokens) is not int or draft_tokens <= 0:
+                return False
+            query_len = draft_tokens + 1
+            req_ids = batch.req_ids
+            num_reqs = len(req_ids)
+            if num_reqs == 0 or len(set(req_ids)) != num_reqs:
+                return False
+            arrays = (
+                batch.num_scheduled_tokens,
+                batch.num_draft_tokens_np,
+                batch.idx_mapping_np,
+                batch.prefill_len_np,
+                batch.is_prefilling_np,
+            )
+            if any(not isinstance(array, np.ndarray) or array.shape != (num_reqs,) for array in arrays):
+                return False
+            indices = batch.idx_mapping_np
+            if (
+                not np.issubdtype(indices.dtype, np.integer)
+                or len(np.unique(indices)) != num_reqs
+                or np.any(indices < 0)
+                or np.any(indices >= len(self.req_states.num_computed_tokens_np))
+                or any(self.req_states.req_id_to_index.get(req_id) != index for req_id, index in zip(req_ids, indices))
+            ):
+                return False
+            # The descriptor is padded capacity, not the local request count.
+            # Check capacity without requiring equality across DP replicas or SP.
+            graph_num_tokens = batch_desc.num_tokens
+            graph_num_reqs = batch_desc.num_reqs
+            return (
+                batch_desc.cg_mode == CUDAGraphMode.FULL
+                and batch_desc.uniform_token_count == query_len
+                and batch.num_tokens == num_reqs * query_len
+                and graph_num_tokens >= batch.num_tokens
+                and graph_num_tokens % query_len == 0
+                and graph_num_reqs is not None
+                and graph_num_reqs >= num_reqs
+                and graph_num_tokens == graph_num_reqs * query_len
+                and bool(np.all(batch.num_scheduled_tokens == query_len))
+                and bool(np.all(batch.num_draft_tokens_np == draft_tokens))
+                and all(
+                    scheduler_output.num_scheduled_tokens.get(req_id) == query_len
+                    and len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())) == draft_tokens
+                    for req_id in req_ids
+                )
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            # Admission must not turn an otherwise supported configuration or
+            # an unfamiliar batch schema into an optimization-specific error.
+            return False
+
     def _qwen_mrv2_can_queue_decode(
         self,
         scheduler_output: SchedulerOutput,
@@ -1517,6 +1584,14 @@ class NPUModelRunner(GPUModelRunner):
         if type(self.model_state) is not AscendQwen4ExpModelState or type(self.speculator) is not AscendMTPSpeculator:
             self._qwen_mrv2_early_queue_last_guard = {
                 "failed": ["exact_qwen_model_state_and_mtp_speculator"],
+                "snapshot_generation": self._qwen_mrv2_snapshot_generation,
+            }
+            self._qwen_mrv2_early_queue_stats["fallback_steps"] += 1
+            return False
+
+        if not self._qwen_mrv2_has_local_uniform_verification(scheduler_output, batch_req_state, batch_desc):
+            self._qwen_mrv2_early_queue_last_guard = {
+                "failed": ["full_uniform_verification"],
                 "snapshot_generation": self._qwen_mrv2_snapshot_generation,
             }
             self._qwen_mrv2_early_queue_stats["fallback_steps"] += 1
@@ -1550,6 +1625,17 @@ class NPUModelRunner(GPUModelRunner):
             self._qwen_mrv2_qsa_backend = AscendQSABackend
             self._qwen_mrv2_qsa_impl = AscendQSAImpl
 
+        allowed_backend_builders = self._qwen_mrv2_allowed_backend_builders
+        qsa_backend = self._qwen_mrv2_qsa_backend
+        qsa_impl = self._qwen_mrv2_qsa_impl
+        if allowed_backend_builders is None or qsa_backend is None or qsa_impl is None:
+            self._qwen_mrv2_early_queue_last_guard = {
+                "failed": ["audited_backend_builder_pairs"],
+                "snapshot_generation": self._qwen_mrv2_snapshot_generation,
+            }
+            self._qwen_mrv2_early_queue_stats["fallback_steps"] += 1
+            return False
+
         try:
             target_group_pairs = tuple(
                 (group.backend, type(group.get_metadata_builder(0)))
@@ -1568,21 +1654,21 @@ class NPUModelRunner(GPUModelRunner):
                 draft_group_pairs,
                 self.speculator.attn_architecture,
                 self.speculator.attn_backend,
-                self._qwen_mrv2_qsa_backend.get_impl_cls(),
+                qsa_backend.get_impl_cls(),
             )
             if backend_proof_key != self._qwen_mrv2_backend_proof_key:
                 self._qwen_mrv2_backend_proof = (
                     bool(target_group_pairs)
                     and bool(draft_group_pairs)
                     and all(
-                        builder in self._qwen_mrv2_allowed_backend_builders.get(backend, ())
+                        builder in allowed_backend_builders.get(backend, ())
                         for backend, builder in (*target_group_pairs, *draft_group_pairs)
                     )
-                    and any(backend is self._qwen_mrv2_qsa_backend for backend, _ in target_group_pairs)
-                    and any(backend is self._qwen_mrv2_qsa_backend for backend, _ in draft_group_pairs)
+                    and any(backend is qsa_backend for backend, _ in target_group_pairs)
+                    and any(backend is qsa_backend for backend, _ in draft_group_pairs)
                     and self.speculator.attn_architecture == "QSA"
-                    and self.speculator.attn_backend is self._qwen_mrv2_qsa_backend
-                    and backend_proof_key[4] is self._qwen_mrv2_qsa_impl
+                    and self.speculator.attn_backend is qsa_backend
+                    and backend_proof_key[4] is qsa_impl
                 )
                 self._qwen_mrv2_backend_proof_key = backend_proof_key
         except (AttributeError, TypeError, IndexError, AssertionError, NotImplementedError):
@@ -1591,7 +1677,6 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
         scheduled = batch_req_state.num_scheduled_tokens
-        draft_counts = batch_req_state.num_draft_tokens_np
         indices = batch_req_state.idx_mapping_np
         # Advanced indexing owns this CPU array; it never aliases the pinned
         # destination of the in-flight D2H copy.
@@ -1608,30 +1693,18 @@ class NPUModelRunner(GPUModelRunner):
         certified_mm_decode = self._qwen_mrv2_mm_decode_queue_enabled and self._qwen_mrv2_mm_decode_is_certified(
             scheduler_output, batch_req_state
         )
-        offload = self.vllm_config.offload_config
-        no_weight_offload = (
-            offload.uva.cpu_offload_gb == 0
-            and not offload.uva.cpu_offload_params
-            and offload.prefetch.offload_group_size == 0
-            and not offload.prefetch.offload_params
-        )
         parallel = self.parallel_config
         spec = self.speculative_config
         draft_tokens = self.num_speculative_steps
-        query_len = draft_tokens + 1
         checks = {
             "exact_qwen_model_state": type(self.model_state) is AscendQwen4ExpModelState,
             "exact_mtp_speculator": type(self.speculator) is AscendMTPSpeculator,
             "audited_backend_builder_pairs": self._qwen_mrv2_backend_proof,
-            # TP changes model sharding, not this rank-local count snapshot.
-            # Keep the other parallelism guards: they change CPU consumers or
-            # token ownership and need separate dependency proofs.
-            "dp1_pp1_dcp1_pcp1": (
-                parallel.data_parallel_size == 1
-                and parallel.pipeline_parallel_size == 1
-                and parallel.decode_context_parallel_size == 1
-                and parallel.prefill_context_parallel_size == 1
-            ),
+            # DP padding and model-internal SP do not change count ownership.
+            # PP's last stage owns the speculator and its local D2H producer;
+            # non-last stages already fall back above, keeping PP receive and
+            # exact-count synchronization unchanged. CP changes request rows.
+            "dcp1_pcp1": (parallel.decode_context_parallel_size == 1 and parallel.prefill_context_parallel_size == 1),
             "fixed_mtp": (
                 spec is not None
                 and spec.method == "mtp"
@@ -1639,18 +1712,7 @@ class NPUModelRunner(GPUModelRunner):
                 and draft_tokens > 0
                 and not spec.uses_dynamic_speculative_decoding()
             ),
-            "full_uniform_verification": (
-                batch_desc.cg_mode == CUDAGraphMode.FULL
-                and batch_desc.uniform_token_count == query_len
-                and bool(req_ids)
-                and bool(np.all(scheduled == query_len))
-                and draft_counts is not None
-                and bool(np.all(draft_counts == draft_tokens))
-                and all(
-                    len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())) == draft_tokens
-                    for req_id in req_ids
-                )
-            ),
+            "full_uniform_verification": True,
             "pure_decode": (
                 not batch_req_state.has_prefill
                 and bool(np.all(batch_req_state.prefill_len_np > 0))
@@ -1682,12 +1744,11 @@ class NPUModelRunner(GPUModelRunner):
                 and not self.model_config.is_mm_prefix_lm
                 and not scheduler_output.scheduled_encoder_inputs
             ),
-            "no_flashcomm_or_dbo": (
-                not parallel.use_sequence_parallel_moe
-                and not self.ascend_config.enable_sp_by_pass
-                and not parallel.enable_dbo
-            ),
-            "no_lora_or_weight_offload": self.lora_config is None and no_weight_offload,
+            "no_dbo": not parallel.enable_dbo,
+            # PLE/UVA/prefetch offload owns its copy/lookup dependencies inside
+            # forward. Keep those waits intact; it does not consume this CPU
+            # length snapshot. LoRA remains an unaudited metadata layout.
+            "no_lora": self.lora_config is None,
             "no_connectors_or_adaptive_verification": (
                 type(self.kv_connector) is KVConnector
                 and not has_kv_transfer_group()
@@ -1844,7 +1905,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded += 1
             return query_start_loc_np, num_reqs_padded
 
-        cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        cumulative_padding: NDArray[np.int32] = (
+            np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        )
         query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
 

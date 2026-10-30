@@ -51,7 +51,7 @@ layers execute in the same graph with the existing buffer ABI. There is no separ
 metadata graph, extra graph replay, fused metadata kernel, or staging copy.
 
 This integration is automatic for the supported Qwen model state. Its configuration
-gate checks `FULL_DECODE_ONLY`, DP1, PP1, DCP1, PCP1, a fixed positive MTP K,
+gate checks `FULL_DECODE_ONLY`, DCP1, PCP1, a fixed positive MTP K,
 and a non-eager target. Dynamic or adaptive drafting, LoRA capture cases, and DBO
 retain the original immediate producer path.
 The target query length follows the configured K+1; zero-length padding is
@@ -76,12 +76,19 @@ function patching or builder-class replacement, and no upstream source is edited
 A weak registry and counters support diagnostic
 snapshots and do not choose or own execution plans.
 
-Before native replay, the code checks the plan against the captured input/output
-addresses, device, dtype, shape, stride, and Python-specialized geometry. Changed
-aliases, missing plans, duplicate shared-builder patterns, or unsupported geometry in
-the selected FULL path raise an error before submission rather than replaying an
-incompatible graph. These replay failures are distinct from the synchronized queue
-fallback described below.
+Each graph bucket chooses its producer placement before capture. DP and SP token
+padding, unsupported producer geometry, an externally cached token mapping, or
+builders sharing a Common metadata object retain the original immediate producer.
+Earlier deferred builders are first materialized in their original order, preserving
+their shared aliases. The bucket keeps that placement through warmup, capture, and
+replay, without another graph or another producer. PP stages without QSA likewise
+retain their existing model graph.
+
+Before native replay of a migrated bucket, the code checks the captured input/output
+addresses, device, dtype, shape, stride, and Python-specialized geometry. A missing
+plan or changed alias or geometry after capture still raises before submission:
+switching that graph to an immediate producer would execute two incompatible
+producers. Ordinary configuration fallback is chosen before capture instead.
 
 ## Earlier CPU submission
 
@@ -93,13 +100,13 @@ positions, sequence lengths, KV slots, rejection state, and subsequent writes ke
 their dependencies. It does not change MTP graph capture or sampling.
 
 Admission is deliberately restricted to the audited Qwen model state, MTP speculator,
-and target/draft attention backend and builder pairs. It requires DP1, PP1, DCP1,
-PCP1, fixed positive MTP K, and a uniform FULL decode batch. Both asynchronous and
+and target/draft attention backend and builder pairs. It requires DCP1, PCP1,
+fixed positive MTP K, and a uniform local FULL decode batch. Both asynchronous and
 synchronous scheduling are admitted; synchronous scheduling may offer less overlap.
 Prefix caching, Mamba cache modes, and the global KV-sharing fast-prefill setting
 do not disable stable decode submission. Request arrival, resume, preemption,
-completion, active encoder work, prompt embeddings, sequence-parallel MoE, DBO,
-LoRA, weight offload, connectors, structured output, and unsupported configurations
+completion, active encoder work, prompt embeddings, DBO,
+LoRA, connectors, structured output, and unsupported configurations
 fall back to the synchronized path. Bounds must fit both target and draft model limits.
 
 Prefix-cache restoration and partial-hit block copies keep their original ordering.
@@ -117,7 +124,7 @@ cache. Lifecycle changes invalidate the proof. Until a matching certificate exis
 the worker uses the original synchronized path. Realtime inputs, embedding masks,
 prompt embeddings, and other unaudited media layouts are excluded.
 
-## Tensor parallelism and remaining limits
+## Parallelism, offload, and remaining limits
 
 Text early submission, certified multimodal early submission, and target metadata
 capture do not require a particular TP size. Model sharding must still be supported
@@ -127,25 +134,41 @@ The queue dependency is a per-rank device-count snapshot; the metadata producer
 uses per-rank token and cache tensors rather than TP head geometry. Their device
 dependencies and replay-address checks are retained for every TP size.
 
-DP1, PP1, DCP1, and PCP1 remain required by both paths. Increasing one of these
-dimensions keeps the original synchronized queue and immediate metadata producer.
-DP can pad a local batch to another rank's graph shape, which needs a separate
-proof for the producer's CPU-specialized mapped-token total and idle batches.
-PP and context parallelism change token ownership or CPU consumers and require
-separate adaptations.
+DP, PP, and SP do not disable early submission globally. Admission checks the local
+request IDs, unique slots, actual K+1 verification rows, and snapshot ownership
+separately from the padded graph capacity. Empty DP ranks or incompatible layouts
+retain the original path. A PP stage can use early submission only when it owns the
+local MTP speculator and count snapshot; other stages keep their original receive
+and count-handling paths. DP coordination and SP model collectives are unchanged.
+
+Target metadata capture is independent of queue admission. DP and SP currently keep
+the original metadata producer outside the existing FULL graph because padded and
+idle batches can change its CPU-specialized mapped-token total. The main model still
+uses its normal FULL graph, and eligible local decode can still submit early. PP has
+no blanket metadata gate: each stage uses its own QSA builders and buffers.
+
+PLE weight offload and general UVA/prefetch weight offload do not disable early
+submission. Their original device lookup, copy streams, events, and model-forward
+waits remain intact; this change only relaxes the corrected-count CPU wait. Native
+offload support is still required. In particular, the pinned upstream Qwen model
+state rejects PLE n-gram layers together with PP greater than one because non-first
+stages do not receive raw token IDs. Removing this PR's PP gate does not remove that
+upstream initialization limitation. Context parallelism still uses the original
+queue and metadata paths: DCP1 and PCP1 remain required for these optimizations.
 Other remaining limits are:
 
 | Path | Conditions retained |
 | --- | --- |
 | Early submission | Exact Qwen model-state and MTP-speculator types; approved target/draft attention builder pairs; fixed positive K without dynamic drafting; a uniform FULL verification batch with K+1 tokens per request and K drafts. |
 | Early submission | Pure decode with no new, resumed, preempted, or finished requests; conservative lengths within both target and draft limits; no active decoder replay. |
-| Early submission | No prompt embeddings, MM prefix-LM, scheduled encoder work, sequence-parallel MoE, SP bypass, DBO, LoRA, weight offload, KV/EC transfer metadata, auxiliary connectors, adaptive verification, sparse-KV offload, KV block copies, or structured output. The exact snapshot must have been produced on the same stream. |
+| Early submission | No prompt embeddings, MM prefix-LM, scheduled encoder work, DBO, LoRA, KV/EC transfer metadata, auxiliary connectors, adaptive verification, sparse-KV offload, KV block copies, or structured output. The exact snapshot must have been produced on the same stream. |
 | Multimodal extension | Both queue switches enabled, a valid exact prompt-completion certificate, stable request/slot/media identities, and non-realtime media layouts without embedding masks, MM pruning, encoder-decoder inputs, or active deepstack embeddings. |
 | Target metadata capture | `FULL_DECODE_ONLY`, non-eager target, fixed positive K, no dynamic/adaptive drafting, LoRA, or DBO; positive integer requested capture sizes whose rounded target grid contains every K+1-token bucket. Actual input/output views must fit the existing owner buffers. |
-| Target metadata replay | Query lengths zero or K+1, mapped-token count within the padded token count, uncached external token mapping, and one QSA producer per Common metadata object. Captured pointers, devices, dtypes, shapes, strides, static arguments, and query length must match before replay. |
+| Target metadata placement | DP/SP padding, unsupported query geometry, external cached mappings, and shared Common metadata select the original producer before capture. Migrated buckets need query lengths zero or K+1 and mapped-token count within the padded token count. |
+| Target metadata replay | Captured pointers, devices, dtypes, shapes, strides, static arguments, and query length must match before replay. Already captured incompatible state and native operator failures remain errors. |
 
 An ineligible queue batch takes the synchronized fallback. Unsupported metadata
-configurations and non-FULL calls use the immediate original producer. A violated
+configurations, ineligible capture buckets, and non-FULL calls use the immediate original producer. A violated
 metadata alias or geometry invariant after selecting the captured path raises
 before native replay; it is not silently bypassed.
 The CPU admission and plan-lifecycle tests exercise TP sizes 1, 2, 4, 8, 16, and 32.
@@ -157,6 +180,10 @@ CPU tests also cover prefix-cache settings, Mamba modes `none`/`align`/`all`, bo
 scheduling settings, static K values 1/2/3/4/5/8, and metadata batches larger than
 32 tokens. These checks establish control flow and buffer handling; the expanded
 configurations still require native NPU output/cache and performance validation.
+Additional CPU cases cover DP/PP sizes 1/2/4 with SP enabled or disabled, offload
+settings, local request reordering, padded or idle DP batches, PP stages without a
+local speculator, and sticky metadata fallback. These are control-flow checks;
+no new distributed or offload NPU execution was performed for this expansion.
 
 ## Validation before production use
 
@@ -177,7 +204,8 @@ comparisons differed, so the collection does not establish generation correctnes
 an isolated performance gain. No new hardware collection was performed for the
 source cleanup and default-on update.
 
-With the refreshed dependency, a separate Ascend A3 run used pure-text input of
+Before the DP/PP/SP and offload admission expansion, commit `4e019b10e` had a
+separate Ascend A3 run using pure-text input of
 900 tokens, output of 100 tokens, concurrency one, TP4/DP1/EP, prefix caching on,
 Mamba cache mode `align`, asynchronous scheduling, and MTP K3. All three switches
 were unset and resolved to their enabled defaults. The service used a 1024-token

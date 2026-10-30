@@ -35,6 +35,7 @@ class TestQsaTargetMetadataGraphOrdering(unittest.TestCase):
         self.producer_error = False
         self.guard_error = False
         self.native_error = False
+        self.optimized_bucket = True
         helper = ModuleType(HELPER_MODULE)
 
         def materialize(state):
@@ -49,6 +50,7 @@ class TestQsaTargetMetadataGraphOrdering(unittest.TestCase):
             self.events.append("validate")
             if self.guard_error:
                 raise ValueError("replay guard failed")
+            return self.optimized_bucket
 
         def success(state):
             self.assertIs(state, self.state)
@@ -160,6 +162,12 @@ class TestQsaTargetMetadataGraphOrdering(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "replay guard failed"):
             run(manager, self.desc)
         self.assertEqual(self.events, ["validate"])
+
+    def test_baseline_bucket_replays_without_claiming_metadata_migration(self):
+        self.optimized_bucket = False
+        manager, run = self.graph_manager()
+        self.assertIs(run(manager, self.desc), self.result)
+        self.assertEqual(self.events, ["validate", "native", "finish_replay"])
 
     def test_native_failure_is_not_counted_as_replay_success(self):
         manager, run = self.graph_manager()

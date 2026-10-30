@@ -125,8 +125,6 @@ class NoFusionIntegrationTests(unittest.TestCase):
     def test_each_unsupported_configuration_keeps_upstream_path(self):
         config = self.state.vllm_config
         changes = [
-            (config.parallel_config, "data_parallel_size", 2),
-            (config.parallel_config, "pipeline_parallel_size", 2),
             (config.parallel_config, "decode_context_parallel_size", 2),
             (config.parallel_config, "prefill_context_parallel_size", 2),
             (config.compilation_config, "cudagraph_mode", "NONE"),
@@ -145,6 +143,19 @@ class NoFusionIntegrationTests(unittest.TestCase):
                 self.assertIsNone(self.calls[-1][-1])
                 self.assertEqual(self.calls[-1][4], {"marker": 5})
                 self.assertFalse(hasattr(self.state, "_qsa_target_metadata"))
+
+    def test_dp_and_pp_configurations_prepare_without_a_serial_parallelism_gate(self):
+        config = self.state.vllm_config
+        parallel = config.parallel_config
+        for dp_size, pp_size in product((1, 2, 4), (1, 2, 4)):
+            with self.subTest(dp=dp_size, pp=pp_size):
+                parallel.data_parallel_size = dp_size
+                parallel.pipeline_parallel_size = pp_size
+                self.state = self.module.AscendQwen4ExpModelState()
+                self.state.vllm_config = config
+                self.assertTrue(self.state._qsa_target_metadata_enabled)
+                self.assertIs(self.state.prepare_attn(self.batch, "FULL"), self.result)
+                self.assertEqual(self.calls[-1][-1].defer, dp_size == 1)
 
     def test_non_full_batch_preserves_eager_scope_with_supported_configuration(self):
         self.state.prepare_attn(self.batch, "NONE")

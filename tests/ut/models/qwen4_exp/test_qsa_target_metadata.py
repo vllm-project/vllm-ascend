@@ -68,14 +68,15 @@ class TestTargetMetadata(unittest.TestCase):
 
         def original(common, *buffers, **kwargs):
             self.calls.append(dict(common=common, capturing=self.capturing))
-            common._token_to_req_indices_cache = buffers[0]
+            if common._token_to_req_indices_cache is None:
+                common._token_to_req_indices_cache = buffers[0]
             n = common.num_actual_tokens
             slot = (
                 common.slot_mapping
                 if kwargs["compress_ratio"] == 1 and kwargs["circular_buffer_size"] == 0
                 else buffers[3][:n]
             )
-            return buffers[0][:n], buffers[1][:n], buffers[2][:n], slot
+            return common._token_to_req_indices_cache[:n], buffers[1][:n], buffers[2][:n], slot
 
         fake_torch = types.ModuleType("torch")
         fake_torch.Tensor = Tensor
@@ -254,11 +255,14 @@ class TestTargetMetadata(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m.validate_target_metadata_replay(self.model_state, self.desc)
 
-    def test_external_cached_mapping_is_rejected(self):
+    def test_external_cached_mapping_selects_original_bucket_before_capture(self):
         self.common._token_to_req_indices_cache = Tensor(shape=(8,))
-        with self.assertRaisesRegex(RuntimeError, "Cached external"), self.preparation():
+        with self.preparation():
             self.build()
         self.assertIsNone(self.m._SCOPE.get())
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.model_state._qsa_target_metadata.baseline[(8, 2)], "external_cached_mapping")
+        self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
 
     def test_ratio_one_preserves_common_slot_alias(self):
         with self.preparation():
@@ -322,9 +326,10 @@ class TestTargetMetadata(unittest.TestCase):
         for index in range(4):
             with self.subTest(index=index):
                 self.buffers = tuple(Tensor(shape=(7 if i == index else 4096,)) for i in range(4))
-                with self.assertRaisesRegex(RuntimeError, "persistent buffer capacity"), self.preparation():
+                with self.preparation():
                     self.build()
-                self.assertEqual(self.calls, [])
+                self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+                self.assertEqual(self.model_state._qsa_target_metadata.baseline[(8, 2)], "persistent_buffer_capacity")
 
     def test_input_capacity_is_checked_before_deferred_capture(self):
         for name, value in (
@@ -333,9 +338,10 @@ class TestTargetMetadata(unittest.TestCase):
             ("block_table_tensor", Tensor(shape=(1, 184))),
         ):
             with self.subTest(name=name), patch.object(self.common, name, value):
-                with self.assertRaisesRegex(RuntimeError, "persistent buffer capacity"), self.preparation():
+                with self.preparation():
                     self.build()
-                self.assertEqual(self.calls, [])
+                self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+                self.assertEqual(self.model_state._qsa_target_metadata.baseline[(8, 2)], "persistent_buffer_capacity")
 
     def test_dcp_pcp_unsupported_config_stays_eager(self):
         for field in ("decode_context_parallel_size", "prefill_context_parallel_size"):
@@ -375,10 +381,22 @@ class TestTargetMetadata(unittest.TestCase):
         self.assertEqual(self.m.target_metadata_snapshot()["eligible_outside_model_calls"], 1)
         self.assertEqual(self.calls, [])
 
-    def test_shared_common_token_alias_pattern_fails_closed(self):
-        with self.assertRaisesRegex(RuntimeError, "sharing one Common"), self.preparation():
+    def test_shared_common_token_alias_pattern_uses_baseline_capture(self):
+        with self.m.target_metadata_capture(self.model_state):
+            with self.preparation(capture=True):
+                first = self.build()
+                second = self.build()
+            self.capturing = True
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.capturing = False
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(all(not call["capturing"] for call in self.calls))
+        self.assertTrue(all(self.m._same_view(a, b) for a, b in zip(first, second)))
+        with self.preparation():
             self.build()
             self.build()
+        self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+        self.assertFalse(self.model_state._qsa_target_metadata.captured)
 
     def test_output_alias_violation_aborts_capture(self):
         def wrong(common, *buffers, **kwargs):
@@ -499,10 +517,149 @@ class TestTargetMetadata(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "inputs or static geometry changed"):
             self.m.validate_target_metadata_replay(self.model_state, self.desc)
 
-    def test_unsupported_query_layout_is_rejected(self):
+    def test_unsupported_query_layout_selects_baseline_bucket(self):
         self.common.query_start_loc_cpu.values[:] = [0, 3, 8]
-        with self.assertRaisesRegex(RuntimeError, "configured MTP verification length"), self.preparation():
+        with self.preparation():
             self.build()
+        self.assertEqual(self.model_state._qsa_target_metadata.baseline[(8, 2)], "query_layout")
+        self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+
+    def test_pipeline_and_ple_offload_do_not_disable_rank_local_producer(self):
+        config = self.model_state.vllm_config
+        config.parallel_config.pipeline_parallel_size = 4
+        config.model_config.hf_text_config = types.SimpleNamespace(ple_cpu_cache_mb=4096)
+        self.assertTrue(self.m.target_metadata_config_supported(self.model_state))
+        self.capture()
+        with self.preparation():
+            self.build()
+        self.assertTrue(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+
+    def test_sp_modes_select_original_capture_route_without_configuration_error(self):
+        for field in ("use_sequence_parallel_moe", "_qsa_target_metadata_sp_padding"):
+            with self.subTest(field=field):
+                obj = self.model_state.vllm_config.parallel_config if field.startswith("use_") else self.model_state
+                setattr(obj, field, True)
+                self.assertTrue(self.m.target_metadata_config_supported(self.model_state))
+                self.common._token_to_req_indices_cache = None
+                before = len(self.calls)
+                self.capture()
+                self.assertEqual(len(self.calls), before + 1)
+                self.assertFalse(self.calls[-1]["capturing"])
+                self.common.num_actual_tokens = 4
+                self.common.query_start_loc_cpu = Tensor([0, 4], device="cpu")
+                self.common.query_start_loc = Tensor([0, 4, 4])
+                self.common._token_to_req_indices_cache = None
+                with self.preparation():
+                    self.build()
+                self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+                self.assertEqual(self.model_state._qsa_target_metadata.baseline[(8, 2)], "sequence_parallel_padding")
+                delattr(obj, field)
+
+    def test_dp_active_padded_and_idle_ranks_keep_original_producer(self):
+        config = self.model_state.vllm_config
+        config.parallel_config.data_parallel_size = 4
+        self.assertTrue(self.m.target_metadata_config_supported(self.model_state))
+        self.capture()
+        self.assertFalse(self.calls[0]["capturing"])
+        for n, cpu, device in ((8, [0, 4, 8], [0, 4, 8]), (4, [0, 4], [0, 4, 4]), (0, [0], [0, 0, 0])):
+            with self.subTest(n=n):
+                self.common.num_actual_tokens = n
+                self.common.query_start_loc_cpu = Tensor(cpu, device="cpu")
+                self.common.query_start_loc = Tensor(device)
+                self.common._token_to_req_indices_cache = None
+                with self.preparation():
+                    self.build()
+                self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+                self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+        self.assertFalse(self.model_state._qsa_target_metadata.captured)
+        self.assertEqual(len(self.calls), 4)
+
+    def test_pipeline_stage_without_qsa_uses_baseline_graph(self):
+        self.model_state.vllm_config.parallel_config.pipeline_parallel_size = 4
+        with self.m.target_metadata_capture(self.model_state):
+            with self.preparation(capture=True):
+                pass
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+        with self.preparation():
+            pass
+        self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+        self.assertEqual(self.calls, [])
+
+    def test_new_unsupported_layout_never_reuses_migrated_graph(self):
+        self.capture()
+        self.common.query_start_loc_cpu.values[:] = [0, 3, 8]
+        with self.assertRaisesRegex(RuntimeError, "layout changed after graph capture"), self.preparation():
+            self.build()
+        # Falling back just the producer would allow captured work to overwrite
+        # it. Reject this invariant change before either producer or replay.
+        self.assertEqual(len(self.calls), 1)
+
+    def test_baseline_warmup_stays_baseline_when_geometry_later_becomes_eligible(self):
+        with self.m.target_metadata_capture(self.model_state):
+            self.common.query_start_loc_cpu.values[:] = [0, 3, 8]
+            with self.preparation(capture=True):
+                self.build()
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.common.query_start_loc_cpu.values[:] = [0, 4, 8]
+            self.common._token_to_req_indices_cache = None
+            with self.preparation(capture=True):
+                self.build()
+            self.capturing = True
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.capturing = False
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(any(call["capturing"] for call in self.calls))
+        self.assertFalse(self.model_state._qsa_target_metadata.captured)
+        self.common._token_to_req_indices_cache = None
+        with self.preparation():
+            self.build()
+        self.assertFalse(self.m.validate_target_metadata_replay(self.model_state, self.desc))
+
+    def test_eligible_warmup_then_capture_fallback_leaves_no_captured_plan(self):
+        with self.m.target_metadata_capture(self.model_state):
+            with self.preparation(capture=True):
+                self.build()
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.assertEqual(len(self.calls), 1)
+            self.common.query_start_loc_cpu.values[:] = [0, 3, 8]
+            with self.preparation(capture=True):
+                self.build()
+            self.capturing = True
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.capturing = False
+        snapshot = self.m.target_metadata_snapshot()
+        self.assertEqual(snapshot["capture_batches"], 0)
+        self.assertEqual(snapshot["capture_calls"], 0)
+        self.assertEqual(snapshot["captured_plans"], [])
+        self.assertIsNone(self.model_state._qsa_target_metadata.pending)
+        self.assertEqual(snapshot["baseline_plans"][0]["reason"], "query_layout")
+
+    def test_shared_common_fallback_retains_first_builder_token_mapping_alias(self):
+        second_buffers = tuple(Tensor(shape=(4096,)) for _ in range(4))
+        with self.m.target_metadata_capture(self.model_state):
+            with self.preparation(capture=True):
+                first = self.build()
+                second = self.m.build_qsa_metadata_original_target_graph(self.common, *second_buffers, **self.kwargs)
+            self.capturing = True
+            self.m.execute_target_metadata_at_model_entry(self.model_state)
+            self.capturing = False
+        self.assertEqual(len(self.calls), 2)
+        self.assertIs(self.calls[0]["common"], self.common)
+        self.assertIs(self.calls[1]["common"], self.common)
+        self.assertEqual(first[0].data_ptr(), second[0].data_ptr())
+        self.assertNotEqual(first[1].data_ptr(), second[1].data_ptr())
+        self.assertEqual(second[0].data_ptr(), self.buffers[0].data_ptr())
+        self.assertEqual(second[1].data_ptr(), second_buffers[1].data_ptr())
+        self.assertEqual(
+            self.m.target_metadata_snapshot()["materializations_by_location"], {"target_baseline_original_eager": 2}
+        )
+
+    def test_unknown_bucket_does_not_silently_enter_native_replay(self):
+        self.capture()
+        with self.preparation():
+            self.build()
+        with self.assertRaises(RuntimeError):
+            self.m.validate_target_metadata_replay(self.model_state, types.SimpleNamespace(num_tokens=12, num_reqs=3))
 
     def test_no_nested_context_leak_on_failure(self):
         with self.assertRaises(ValueError), self.preparation():

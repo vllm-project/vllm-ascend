@@ -24,9 +24,9 @@ from vllm.models.qwen4_exp.common import qsa_cache
 
 _ORIGINAL_PRODUCER = qsa_cache._build_qsa_metadata_torch
 _SCOPE: ContextVar[Any] = ContextVar("qsa_target_metadata_scope", default=None)
-_STATES: WeakSet = WeakSet()
-_OUTSIDE_FALLBACKS: Counter = Counter()
-_OUTSIDE_LOCATIONS: Counter = Counter()
+_STATES: WeakSet[Any] = WeakSet()
+_OUTSIDE_FALLBACKS: Counter[str] = Counter()
+_OUTSIDE_LOCATIONS: Counter[str] = Counter()
 
 
 def _tensor_signature(value):
@@ -62,12 +62,15 @@ class _Plan:
 
 class TargetMetadataState:
     def __init__(self):
-        self.pending = None
-        self.captured = {}
+        self.pending: _Scope | None = None
+        self.captured: dict[tuple, Any] = {}
+        # These graph buckets were captured with the original producer outside
+        # the model. Their runtime producer must stay outside as well.
+        self.baseline: dict[tuple, str] = {}
         self.capture_depth = 0
-        self.stats = Counter()
-        self.fallbacks = Counter()
-        self.locations = Counter()
+        self.stats: Counter[str] = Counter()
+        self.fallbacks: Counter[str] = Counter()
+        self.locations: Counter[str] = Counter()
         _STATES.add(self)
 
 
@@ -79,6 +82,10 @@ class _Scope:
     defer: bool
     plans: list
     query_len: int
+
+
+class _UnsupportedPlan(Exception):
+    """A valid original producer layout that cannot be moved into this graph."""
 
 
 def _state(model_state):
@@ -117,8 +124,6 @@ def target_metadata_config_supported(model_state):
     # Replay still verifies each rank's actual tensor addresses and layouts.
     return bool(
         config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        and parallel.data_parallel_size == 1
-        and parallel.pipeline_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
         and parallel.prefill_context_parallel_size == 1
         and not getattr(parallel, "enable_dbo", False)
@@ -141,6 +146,22 @@ def target_metadata_preparation(model_state, input_batch, cg_mode, for_capture):
     wants_full = actual_capture or cg_mode == CUDAGraphMode.FULL
     defer = wants_full and target_metadata_config_supported(model_state)
     key = (int(input_batch.num_tokens_after_padding), int(input_batch.num_reqs_after_padding))
+    if defer and model_state.vllm_config.parallel_config.data_parallel_size > 1:
+        # DP may replay a larger graph on a padded or entirely idle rank. The
+        # unchanged Torch producer specializes its CPU mapped-token total and
+        # output views to the *local* batch, not the DP graph size. Select the
+        # original capture route up front, never eager-produce and then replay
+        # a graph containing another layout's captured producer.
+        state.baseline[key] = "dp_local_padding"
+    if defer and (
+        getattr(model_state.vllm_config.parallel_config, "use_sequence_parallel_moe", False)
+        or getattr(model_state, "_qsa_target_metadata_sp_padding", False)
+    ):
+        # Sequence-parallel token alignment can likewise make the model's graph
+        # width differ from the local QSA producer's original output views.
+        state.baseline[key] = "sequence_parallel_padding"
+    if key in state.baseline:
+        defer = False
     scope = _Scope(state, key, actual_capture, defer, [], _target_query_len(model_state))
     state.pending = None
     token = _SCOPE.set(scope)
@@ -150,6 +171,8 @@ def target_metadata_preparation(model_state, input_batch, cg_mode, for_capture):
         state.stats["preparation_failures"] += 1
         raise
     else:
+        if actual_capture and not scope.plans:
+            state.baseline.setdefault(key, "no_target_qsa_producer")
         if scope.plans:
             state.pending = scope
             state.stats["deferred_batches"] += 1
@@ -161,11 +184,11 @@ def _make_plan(common, buffers, kwargs, query_len):
     n = int(common.num_actual_tokens)
     cpu_q = common.query_start_loc_cpu
     if str(cpu_q.device) != "cpu":
-        raise RuntimeError("QSA CPU query boundaries must actually be on CPU")
+        raise _UnsupportedPlan("non_cpu_query_boundaries")
     mapped = int(cpu_q[-1])
     r = int(common.query_start_loc.shape[0]) - 1
     if not (n > 0 and 0 < mapped <= n and r > 0):
-        raise RuntimeError("Unsupported QSA target FULL token geometry")
+        raise _UnsupportedPlan("token_geometry")
     uses_common_slots = kwargs.get("circular_buffer_size", 0) == 0 and kwargs["compress_ratio"] == 1
     slot_buffer = common.slot_mapping if uses_common_slots else buffers[3]
     if (
@@ -175,15 +198,15 @@ def _make_plan(common, buffers, kwargs, query_len):
         or common.block_table_tensor.shape[0] < r
         or not 2 <= len(cpu_q) <= r + 1
     ):
-        raise RuntimeError("QSA target metadata exceeds its persistent buffer capacity")
+        raise _UnsupportedPlan("persistent_buffer_capacity")
     # The original producer specializes on the CPU *total*. Per-request device
     # boundaries may differ under adaptive verification and are never replaced
     # by this CPU layout. Padding may have zero CPU query lengths.
     query_lens = [int(cpu_q[i + 1]) - int(cpu_q[i]) for i in range(len(cpu_q) - 1)]
     if any(q not in (0, query_len) for q in query_lens):
-        raise RuntimeError("QSA target query layout does not match the configured MTP verification length")
+        raise _UnsupportedPlan("query_layout")
     if getattr(common, "_token_to_req_indices_cache", None) is not None:
-        raise RuntimeError("Cached external token mapping cannot be deferred safely")
+        raise _UnsupportedPlan("external_cached_mapping")
     normalized = replace(
         common,
         query_start_loc=common.query_start_loc[: r + 1],
@@ -224,6 +247,24 @@ def _invoke_original(common, buffers, kwargs, *, state=None, eligible=False, at_
     return _ORIGINAL_PRODUCER(common, *buffers, **kwargs)
 
 
+def _select_original_bucket(scope, reason):
+    """Choose the baseline graph before capture, preserving builder aliases."""
+    if scope.key in scope.state.captured:
+        # At this point that graph already contains its producer. Submitting
+        # it after an eager fallback would overwrite the newly built metadata.
+        raise RuntimeError("Captured QSA metadata layout changed after graph capture")
+    scope.state.baseline[scope.key] = reason
+    scope.state.fallbacks[reason] += 1
+    scope.defer = False
+    # Earlier builders may already have returned persistent owner views. Fill
+    # those in original order, on the original Common objects: shared token-map
+    # caches then retain precisely the baseline alias semantics.
+    for plan in scope.plans:
+        _invoke_original(plan.source_common, plan.buffers, plan.kwargs)
+        scope.state.locations["target_baseline_original_eager"] += 1
+    scope.plans.clear()
+
+
 def build_qsa_metadata_original_target_graph(
     common_attn_metadata,
     token_to_req_buffer,
@@ -248,18 +289,31 @@ def build_qsa_metadata_original_target_graph(
     )
     scope = _SCOPE.get()
     if scope is None or not scope.defer:
-        reason = "outside_target_scope" if scope is None else "non_full_or_unsupported_config"
+        reason = (
+            "outside_target_scope"
+            if scope is None
+            else scope.state.baseline.get(scope.key, "non_full_or_unsupported_config")
+        )
         (_OUTSIDE_FALLBACKS if scope is None else scope.state.fallbacks)[reason] += 1
         (_OUTSIDE_LOCATIONS if scope is None else scope.state.locations)[
-            "unscoped_original_eager" if scope is None else "target_nonfull_original_eager"
+            "unscoped_original_eager"
+            if scope is None
+            else "target_baseline_original_eager"
+            if scope.key in scope.state.baseline
+            else "target_nonfull_original_eager"
         ] += 1
         return _invoke_original(common_attn_metadata, buffers, kwargs, state=None if scope is None else scope.state)
     if any(plan.source_common is common_attn_metadata for plan in scope.plans):
         # Upstream would share its cached token map between those builders.
-        # This audited lane has one QSA owner per common cache-group metadata;
-        # reject a new sharing pattern rather than silently change its aliases.
-        raise RuntimeError("Multiple QSA builders sharing one Common metadata need an explicit alias plan")
-    plan = _make_plan(common_attn_metadata, buffers, kwargs, scope.query_len)
+        _select_original_bucket(scope, "shared_common_mapping")
+        scope.state.locations["target_baseline_original_eager"] += 1
+        return _invoke_original(common_attn_metadata, buffers, kwargs)
+    try:
+        plan = _make_plan(common_attn_metadata, buffers, kwargs, scope.query_len)
+    except _UnsupportedPlan as exc:
+        _select_original_bucket(scope, str(exc))
+        scope.state.locations["target_baseline_original_eager"] += 1
+        return _invoke_original(common_attn_metadata, buffers, kwargs)
     scope.plans.append(plan)
     scope.state.stats["deferred_calls"] += 1
     return plan.outputs
@@ -270,6 +324,7 @@ def target_metadata_capture(model_state):
     """Track the existing target capture lifecycle; creates no graph itself."""
     state = _state(model_state)
     state.captured.clear()
+    state.baseline.clear()
     state.capture_depth += 1
     try:
         yield
@@ -308,6 +363,13 @@ def validate_target_metadata_replay(model_state, desc):
     """Fail before native submission if captured pointers/geometry changed."""
     state = _state(model_state)
     scope = state.pending
+    query_len = _target_query_len(model_state)
+    key = (int(desc.num_tokens), int(desc.num_reqs or desc.num_tokens // query_len))
+    if key in state.baseline:
+        if key in state.captured or scope is not None:
+            raise RuntimeError("Original QSA bucket unexpectedly contains a deferred producer")
+        state.stats["baseline_replay_batches"] += 1
+        return False
     try:
         if scope is None or scope.for_capture:
             raise RuntimeError("Target FULL replay has no current QSA producer plan")
@@ -321,6 +383,7 @@ def validate_target_metadata_replay(model_state, desc):
         state.stats["replay_guard_failures"] += 1
         raise
     state.stats["validated_replay_batches"] += 1
+    return True
 
 
 def mark_target_metadata_replay_success(model_state):
@@ -331,14 +394,18 @@ def mark_target_metadata_replay_success(model_state):
 
 
 def target_metadata_snapshot():
-    stats = Counter()
+    stats: Counter[str] = Counter()
     fallbacks = Counter(_OUTSIDE_FALLBACKS)
     locations = Counter(_OUTSIDE_LOCATIONS)
     plans = []
+    baseline_plans: list[dict[str, Any]] = []
     for state in list(_STATES):
         stats.update(state.stats)
         fallbacks.update(state.fallbacks)
         locations.update(state.locations)
+        baseline_plans.extend(
+            dict(num_tokens=key[0], num_reqs=key[1], reason=reason) for key, reason in state.baseline.items()
+        )
         for key, (signatures, owned_plans) in state.captured.items():
             plans.append(
                 dict(
@@ -360,10 +427,11 @@ def target_metadata_snapshot():
         "successful_replay_batches",
         "replay_guard_failures",
         "preparation_failures",
+        "baseline_replay_batches",
     )
     return dict(
         status="verified",
-        placement="inside_target_full_graph",
+        placement="mixed" if plans and baseline_plans else "inside_target_full_graph" if plans else "original_producer",
         original_producer_is_torch=_ORIGINAL_PRODUCER is qsa_cache._build_qsa_metadata_torch,
         fused_metadata_enabled=False,
         standalone_graphs=0,
@@ -372,5 +440,6 @@ def target_metadata_snapshot():
         materializations_by_location=dict(locations),
         eager_fallbacks_by_reason=dict(fallbacks),
         captured_plans=plans,
+        baseline_plans=baseline_plans,
         **{name: stats[name] for name in fields},
     )
