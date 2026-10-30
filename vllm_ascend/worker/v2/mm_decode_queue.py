@@ -9,6 +9,7 @@ layout that it describes; only the synchronized consumer may certify it.
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any
 
 
@@ -50,9 +51,16 @@ def make_mm_decode_request_key(
         position = feature.mm_position
         offset, length = position.offset, position.length
         if (
-            not isinstance(offset, int)
-            or not isinstance(length, int)
-            or offset < previous_end
+            not isinstance(offset, Integral)
+            or not isinstance(length, Integral)
+            or isinstance(offset, bool)
+            or isinstance(length, bool)
+        ):
+            return None
+        # Normalize NumPy integers before arithmetic to avoid fixed-width overflow.
+        offset, length = int(offset), int(length)
+        if (
+            offset < previous_end
             or length <= 0
             or offset + length > prefill_len
             or feature.modality == "prompt_embeds"

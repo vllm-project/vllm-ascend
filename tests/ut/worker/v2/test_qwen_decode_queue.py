@@ -169,6 +169,37 @@ class TestQwenDecodeQueue(unittest.TestCase):
         self.assertTrue(state.certify([key], [100]))
         self.assertTrue(state.is_certified([key]))
 
+    def test_mm_layout_integers_are_normalized_before_bounds_checks(self):
+        cases: list[tuple[object, object, bool]] = [
+            (kind(20), kind(30), True) for kind in (int, np.int32, np.int64, np.uint64)
+        ]
+        cases += [
+            (True, 30, False),
+            (20, True, False),
+            (np.bool_(True), 30, False),
+            (20.0, 30, False),
+            (20, 30.0, False),
+            (-1, 30, False),
+            (20, 0, False),
+            (80, 30, False),
+            (np.uint64(2**64 - 1), np.uint64(30), False),
+        ]
+        for offset, length, valid in cases:
+            with self.subTest(offset=offset, length=length):
+                media = [
+                    NS(
+                        data=object(),
+                        modality="image",
+                        identifier="image",
+                        mm_position=NS(offset=offset, length=length, is_embed=None),
+                    )
+                ]
+                key = MM.make_mm_decode_request_key("r", 0, 100, (), media)
+                self.assertEqual(key is not None, valid)
+                if key is not None:
+                    self.assertEqual(key.features[1][0][5:7], (20, 30))
+                    self.assertTrue(all(type(value) is int for value in key.features[1][0][5:7]))
+
     def test_mm_identity_layout_and_lifecycle_changes_revoke_proof(self):
         for change in ("slot", "context", "media", "request", "invalidate"):
             with self.subTest(change=change):
@@ -292,6 +323,37 @@ class TestQwenDecodeQueue(unittest.TestCase):
         wrapper.decode_queue_state.invalidate.assert_called_once_with()
         wrapper.decode_queue_state.observe_completion.assert_not_called()
         transfer.get_finished.assert_not_called()
+
+    def test_connector_unknown_metadata_revokes_proof_without_interrupting_forward(self):
+        def read_metadata(instance: Any, name: str) -> Any:
+            if name == "requests":
+                raise RuntimeError("metadata schema changed")
+            return object.__getattribute__(instance, name)
+
+        for scenario in ("known", "slots", "extra", "missing", "wrong_type", "unreadable"):
+            with self.subTest(scenario=scenario):
+                inner = NS(pre_forward=Mock())
+                wrapper, transfer = self.connector(inner)
+                wrapper.decode_queue_state = ready_pd()
+                if scenario == "slots":
+                    wrapper._metadata_type = type(
+                        "Metadata", (), {"__slots__": ("requests", "requests_to_send", "reqs_in_batch")}
+                    )
+                if scenario == "unreadable":
+                    wrapper._metadata_type = type("Metadata", (), {"__getattribute__": read_metadata})
+                metadata = wrapper._metadata_type()
+                metadata.requests, metadata.requests_to_send, metadata.reqs_in_batch = {}, {}, set()
+                if scenario == "extra":
+                    metadata.new_transfer_action = {"r"}
+                if scenario == "missing":
+                    del metadata.reqs_in_batch
+                if scenario == "wrong_type":
+                    metadata.requests = []
+                output = pd_step(kv_connector_metadata=metadata)
+                wrapper.pre_forward(output)
+                self.assertEqual(wrapper.decode_queue_state.can_queue(["r"], [2], [100], 10), scenario == "known")
+                inner.pre_forward.assert_called_once_with(output)
+                transfer.get_finished.assert_not_called()
 
 
 if __name__ == "__main__":

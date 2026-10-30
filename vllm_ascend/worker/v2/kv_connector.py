@@ -68,14 +68,23 @@ class PDDecodeQueueKVConnector(KVConnector):
     def observe_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
             return
-        metadata = scheduler_output.kv_connector_metadata
-        known = (
-            type(metadata) is self._metadata_type
-            and type(getattr(metadata, "requests", None)) is dict
-            and type(getattr(metadata, "requests_to_send", None)) is dict
-            and type(getattr(metadata, "reqs_in_batch", None)) is set
-            and set(vars(metadata)) == {"requests", "requests_to_send", "reqs_in_batch"}
-        )
+        known = False
+        try:
+            metadata = scheduler_output.kv_connector_metadata
+            fields = getattr(metadata, "__dict__", None)
+            # Unknown fields may add transfer actions: retain the baseline path
+            # until their semantics are supported, including slot-only metadata.
+            known = (
+                type(metadata) is self._metadata_type
+                and type(fields) is dict
+                and set(fields) == {"requests", "requests_to_send", "reqs_in_batch"}
+                and type(getattr(metadata, "requests", None)) is dict
+                and type(getattr(metadata, "requests_to_send", None)) is dict
+                and type(getattr(metadata, "reqs_in_batch", None)) is set
+            )
+        except Exception:
+            # Optional queue admission must not interrupt the connector itself.
+            pass
         self.decode_queue_state.observe_step(scheduler_output, metadata_known=known)
 
     def pre_forward(self, scheduler_output: "SchedulerOutput", *args: Any, **kwargs: Any) -> None:
