@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe import moe_utils
 
 
@@ -23,6 +25,7 @@ def test_int64_counts_dispatches_to_custom_scan(n):
     counts = npu_counts()
     counts.numel.return_value = n
     with (
+        patch.object(moe_utils, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)),
         patch.object(moe_utils, "enable_custom_op", return_value=True),
         patch.object(torch.ops._C_ascend, "moe_counts_cumsum", create=True) as scan,
     ):
@@ -46,6 +49,7 @@ def test_unsupported_counts_keep_existing_conversion(case):
     elif case == "matrix":
         counts.ndim = 2
     with (
+        patch.object(moe_utils, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)),
         patch.object(moe_utils, "enable_custom_op", return_value=case != "disabled"),
         patch.object(torch.ops._C_ascend, "moe_counts_cumsum", create=True) as scan,
     ):
@@ -58,10 +62,26 @@ def test_unsupported_counts_keep_existing_conversion(case):
 def test_missing_custom_scan_keeps_existing_conversion():
     counts = npu_counts()
     with (
+        patch.object(moe_utils, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)),
         patch.object(moe_utils, "enable_custom_op", return_value=True),
         patch.object(torch.ops, "_C_ascend", SimpleNamespace()),
     ):
         result = moe_utils.cumsum_group_list(counts, 1, 0)
+        counts.cumsum.assert_called_once_with(dim=0)
+        assert result is counts.cumsum.return_value
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType._310P, AscendDeviceType.A5])
+def test_other_device_families_keep_existing_conversion(device_type):
+    counts = npu_counts()
+    with (
+        patch.object(moe_utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        patch.object(moe_utils, "enable_custom_op") as enabled,
+        patch.object(torch.ops._C_ascend, "moe_counts_cumsum", create=True) as scan,
+    ):
+        result = moe_utils.cumsum_group_list(counts, 1, 0)
+        scan.assert_not_called()
+        enabled.assert_not_called()
         counts.cumsum.assert_called_once_with(dim=0)
         assert result is counts.cumsum.return_value
 

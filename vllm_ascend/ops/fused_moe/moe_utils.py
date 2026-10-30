@@ -31,6 +31,7 @@ from torch.nn.functional import pad
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
@@ -331,6 +332,7 @@ def cumsum_group_list(
             and group_list.ndim == 1
             and group_list.is_contiguous()
             and 0 < group_list.numel() <= _MOE_COUNTS_CUMSUM_MAX_EXPERTS
+            and get_current_hardware_profile().supports(HardwareCapability.MOE_COUNTS_CUMSUM)
             # Register custom ops lazily before checking this kernel.
             and enable_custom_op()
             and hasattr(torch.ops._C_ascend, "moe_counts_cumsum")
