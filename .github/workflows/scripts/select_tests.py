@@ -247,9 +247,7 @@ def _load_precision_only_e2e(
         raise ValueError("precision_only_e2e partitions must be partition names")
     unknown = sorted({partition for partition in partitions if partition not in partition_config})
     if unknown:
-        raise ValueError(
-            "precision_only_e2e references undefined logical partition(s): " + ", ".join(unknown)
-        )
+        raise ValueError("precision_only_e2e references undefined logical partition(s): " + ", ".join(unknown))
     return PrecisionOnlyE2E(root=root, partitions=tuple(partitions))
 
 

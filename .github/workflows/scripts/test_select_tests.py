@@ -23,7 +23,6 @@ import json
 import sys
 
 import pytest
-
 import select_tests
 
 _OPS_TEST = "tests/e2e/nightly/single_node/ops/singlecard_ops/test_grouped_matmul_situ_quant_weight_nz.py"
