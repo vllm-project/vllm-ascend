@@ -249,7 +249,7 @@ def main():
         json.dumps(llm.collective_rpc(inspect_feature_worker), indent=2)
     )
     if args.model_parser_checks:
-        from model_parser_checks import run_model_parser_checks
+        from tests.e2e.runner_parity.model_parser_checks import run_model_parser_checks
 
         llm.collective_rpc(select_case, args=("parser/actual-generation", False))
         run_model_parser_checks(llm, args.output.parent / "model-parser-checks.json")
