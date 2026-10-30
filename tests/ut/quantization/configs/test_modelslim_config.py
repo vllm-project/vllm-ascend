@@ -1,8 +1,10 @@
+import gc
 import json
 import os
 import tempfile
+import weakref
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -10,6 +12,12 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.model_loader.reload import layerwise
+from vllm.model_executor.model_loader.reload.sanitize import (
+    layer_ref_sentinel,
+    restore_layer_refs,
+    sanitize_layer_refs,
+)
 from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
@@ -239,6 +247,84 @@ class TestAscendModelSlimConfig(TestBase):
             expert_id=0,
             return_success=True,
         )
+
+    def test_bound_modelslim_moe_weight_loader_does_not_pin_discarded_layer(self):
+        # Regression for https://github.com/vllm-project/vllm-ascend/issues/18679
+        class Expert(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.seen: list[str] = []
+                self.weight = torch.nn.Parameter(torch.empty(8, 8, dtype=torch.int8), requires_grad=False)
+                self.weight_loader = _make_modelslim_moe_weight_loader(self._load_weight)
+                self.weight.weight_loader = self.weight_loader
+
+            def _load_weight(
+                self,
+                param: torch.nn.Parameter,
+                loaded_weight: torch.Tensor,
+                weight_name: str,
+                shard_id: str,
+                expert_id: int,
+                return_success: bool = False,
+            ) -> bool:
+                self.seen.append(weight_name)
+                return True
+
+        layer = Expert()
+        meta_weight = None
+        try:
+            loader = layer.weight.weight_loader
+            self.assertIsInstance(loader, MethodType)
+            assert isinstance(loader, MethodType)
+            self.assertIs(loader.__self__, layer)
+            self.assertNotIn("weight_loader", loader.__func__.__code__.co_freevars)
+            self.assertFalse(hasattr(loader, "__wrapped__"))
+
+            loaded = loader(
+                layer.weight,
+                layer.weight,
+                "model.layers.0.mlp.experts.w2_scale_bias",
+                "w2",
+                1,
+                True,
+            )
+            self.assertTrue(loaded)
+            self.assertEqual(layer.seen, ["model.layers.0.mlp.experts.w2_scale"])
+            layer.seen.clear()
+
+            layerwise.record_metadata_for_reloading(layer)
+            meta_weight = layerwise.LAYERWISE_INFO[layer].restore_metadata[0]["weight"]
+            meta_loader = meta_weight.weight_loader
+            assert isinstance(meta_loader, MethodType)
+            self.assertIs(meta_loader.__self__, layer_ref_sentinel)
+
+            restore_layer_refs(meta_weight, layer)
+            meta_loader = meta_weight.weight_loader
+            assert isinstance(meta_loader, MethodType)
+            reloaded = meta_loader(
+                param=meta_weight,
+                loaded_weight=meta_weight,
+                weight_name="model.layers.0.mlp.experts.w13_scale_bias",
+                shard_id="w1",
+                expert_id=0,
+                return_success=True,
+            )
+            self.assertTrue(reloaded)
+            self.assertEqual(layer.seen, ["model.layers.0.mlp.experts.w13_scale"])
+            sanitize_layer_refs(meta_weight, layer)
+
+            layer_ref = weakref.ref(layer)
+            weight_ref = weakref.ref(layer.weight)
+            del layer
+            del meta_weight
+            del loader
+            del meta_loader
+            gc.collect()
+            gc.collect()
+            self.assertIsNone(layer_ref())
+            self.assertIsNone(weight_ref())
+        finally:
+            layerwise.LAYERWISE_INFO.clear()
 
     def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
         layer = RoutedExperts.__new__(RoutedExperts)

@@ -27,6 +27,7 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from functools import wraps
+from types import MethodType
 from typing import Any, Optional
 
 import regex as re
@@ -76,10 +77,49 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
 )
 
 
+def _map_modelslim_moe_weight_name(weight_name: str) -> str:
+    """Rewrite ModelSlim ``*_scale_bias`` names onto the upstream scale tensors."""
+    prefix, separator, param_name = weight_name.rpartition(".")
+    mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
+    return f"{prefix}{separator}{mapped_name}"
+
+
 def _make_modelslim_moe_weight_loader(
     weight_loader: Callable[..., bool | None],
 ) -> Callable[..., bool | None]:
-    """Map ModelSlim MoE scale-bias names to the upstream scale path."""
+    """Map ModelSlim MoE scale-bias names to the upstream scale path.
+
+    A bound loader is re-bound as a method on the same module. vLLM's reload
+    sanitizer only strips ``__self__`` from ``MethodType`` attributes. A plain
+    function that closes over the original bound method, or stores it on
+    ``__wrapped__``, keeps the discarded expert layer reachable from
+    ``LAYERWISE_INFO`` after the model is dropped.
+    """
+    if isinstance(weight_loader, MethodType):
+        # Keep the unbound function only. The returned method's ``__self__`` is
+        # what ``sanitize_layer_refs`` replaces with a sentinel.
+        unbound_loader = weight_loader.__func__
+
+        def modelslim_moe_bound_weight_loader(
+            self: Any,
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ) -> bool | None:
+            return unbound_loader(
+                self,
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=_map_modelslim_moe_weight_name(weight_name),
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=return_success,
+            )
+
+        return modelslim_moe_bound_weight_loader.__get__(weight_loader.__self__)
 
     @wraps(weight_loader)
     def modelslim_moe_weight_loader(
@@ -90,13 +130,10 @@ def _make_modelslim_moe_weight_loader(
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        prefix, separator, param_name = weight_name.rpartition(".")
-        mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
-        mapped_weight_name = f"{prefix}{separator}{mapped_name}"
         return weight_loader(
             param=param,
             loaded_weight=loaded_weight,
-            weight_name=mapped_weight_name,
+            weight_name=_map_modelslim_moe_weight_name(weight_name),
             shard_id=shard_id,
             expert_id=expert_id,
             return_success=return_success,
