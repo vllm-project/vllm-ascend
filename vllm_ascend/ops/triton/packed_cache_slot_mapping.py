@@ -76,6 +76,19 @@ def _build_packed_cache_slot_mapping_kernel(
     tl.store(coordinates_ptr + tokens * 2 + 1, rows, mask=mask)
 
 
+def supports_packed_slot_mapping(compress_ratio: int, has_positions: bool) -> bool:
+    """Return whether the fused kernel can serve this cache group.
+
+    The kernel only implements the ratio-1 and ratio-2 cache planes. Ratio 1
+    ignores token positions entirely, while ratio 2 reads them for the
+    completion test, so a ratio-2 group without positions has to stay on the
+    eager chain.
+    """
+    if compress_ratio == 1:
+        return True
+    return compress_ratio == 2 and has_positions
+
+
 def build_packed_cache_slot_mapping(
     slots: torch.Tensor,
     positions: torch.Tensor,
@@ -95,6 +108,11 @@ def build_packed_cache_slot_mapping(
     This replaces the eager GE/Add/Remainder/And/Div/Where/Copy chain used by
     every KV cache group. Ratio-2 completion and padded-row masking follow the
     existing metadata builder contract exactly.
+
+    ``positions`` is dereferenced only when ``compress_ratio == 2``; the ratio-1
+    branch compiles the load away and reads nothing but ``positions.stride(0)``
+    on the host. A ratio-1 caller without positions may therefore pass ``slots``
+    itself as a stride-only placeholder.
     """
     if compress_ratio not in (1, 2):
         raise ValueError("compress_ratio must be 1 or 2")
