@@ -37,7 +37,11 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendMetadata,
 )
-from vllm_ascend.attention.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.attention.utils import (
+    FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+    expand_pa_per_token_rows,
+    in_full_cudagraph_mode,
+)
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
@@ -81,31 +85,6 @@ def build_paged_verify_mask(
     qpos = torch.arange(qlen, device=device).view(1, 1, qlen, 1)
     mask = kpos > (seqv - qlen + qpos)
     return mask
-
-
-def _cudagraph_mode(vllm_config=None):
-    """Resolved cudagraph mode of the active vLLM config, or None."""
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config_or_none
-
-        vllm_config = get_current_vllm_config_or_none()
-    compilation_config = getattr(vllm_config, "compilation_config", None)
-    return getattr(compilation_config, "cudagraph_mode", None)
-
-
-def _in_full_cudagraph_mode(vllm_config=None) -> bool:
-    """True when the engine runs whole steps inside FULL cudagraphs.
-
-    FULL graphs capture every op of the step, so the head_dim=512 layers are
-    captured by the stock PagedAttention path (the one the no-spec FULL
-    profile uses) and must keep the natural LBNHC cache layout. The B1
-    FIA-v2 BNSD verify capture stays exclusive to the FULL_DECODE_ONLY lane,
-    where prefill runs eagerly and only the uniform k+1-query steps are
-    captured.
-    """
-    from vllm.config import CUDAGraphMode
-
-    return _cudagraph_mode(vllm_config) == CUDAGraphMode.FULL
 
 
 def maybe_route_512_capture(impl, attn_metadata) -> bool:
@@ -164,9 +143,6 @@ class AscendB1Metadata(AscendMetadata):
     # so the draft graph update must rebind PagedAttention kwargs instead of
     # the FIA-v2 ones. Set on every runtime build of that group.
     b1_pa_graph: bool = False
-    # FULL cudagraph mode: block_tables/seq_lens above were re-laid as one
-    # row per query token (see _expand_pa_per_token_rows); guards rebuilds.
-    b1_pa_rows_expanded: bool = False
 
 
 def _uniform_query_len(actual_seq_lengths_q: list[int] | None) -> int | None:
@@ -180,64 +156,6 @@ def _uniform_query_len(actual_seq_lengths_q: list[int] | None) -> int | None:
             return None
         prev = end
     return query_len
-
-
-def _expand_pa_per_token_rows(metadata) -> bool:
-    """Re-lay the 512-dim group's PagedAttention metadata as one query per row.
-
-    ``torch_npu._npu_paged_attention`` is decode-only: it splits the query
-    tensor evenly over the rows of ``context_lens``, so every row must hold
-    exactly one query.  FULL cudagraph steps do not satisfy that -- the MTP
-    verify runs k+1 queries per request and prefills run many per request --
-    and the op then silently returns wrong values (verified on NPU: a single
-    multi-query row matches neither causal nor full-context attention, while
-    one-query-per-row stays within bf16 noise of a torch reference for every
-    context length tried).
-
-    Splitting each request's query block into one row per token -- the row's
-    context length being the request's computed prefix plus its own causal
-    position -- restores exact causal attention with the same output row
-    order.  ``block_tables`` and ``seq_lens`` are replaced in place because
-    they are exactly the two fields full_graph_pa binds and PAParamProvider
-    rebinds on every replay.  Zero-query rows (the pad row the runner appends)
-    contribute nothing.
-    """
-    if getattr(metadata, "b1_pa_rows_expanded", False):
-        return True
-    block_tables = getattr(metadata, "block_tables", None)
-    query_lengths = getattr(metadata, "actual_seq_lengths_q", None)
-    seq_lens_list = getattr(metadata, "seq_lens_list", None)
-    if block_tables is None or not query_lengths or not seq_lens_list:
-        return False
-    if len(query_lengths) != len(seq_lens_list):
-        return False
-    query_lens: list[int] = []
-    prev = 0
-    for end in query_lengths:
-        query_lens.append(int(end) - prev)
-        prev = int(end)
-    num_tokens = int(query_lengths[-1])
-    if sum(query_lens) != num_tokens:
-        return False
-    if all(q == 1 for q in query_lens):
-        # Already one query per row; the per-request metadata is exact.
-        metadata.b1_pa_rows_expanded = True
-        return True
-    context_lens: list[int] = []
-    for query_len, seq_len in zip(query_lens, seq_lens_list):
-        if query_len <= 0:
-            continue
-        # seq_len counts the computed prefix plus this step's queries; the
-        # query at index j therefore attends prefix + j + 1 KV positions.
-        prefix = max(int(seq_len) - query_len, 0)
-        context_lens.extend(prefix + j + 1 for j in range(query_len))
-    if len(context_lens) != num_tokens:
-        return False
-    counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
-    metadata.block_tables = block_tables.repeat_interleave(counts, dim=0)
-    metadata.seq_lens = torch.tensor(context_lens, dtype=torch.int32)
-    metadata.b1_pa_rows_expanded = True
-    return True
 
 
 def b1_verify_graph_params(layer_name: str | None, metadata) -> dict[str, Any]:
@@ -345,13 +263,13 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build=fast_build)
         if getattr(self.kv_cache_spec, "head_size", None) != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
             return metadata
-        if _in_full_cudagraph_mode(self.vllm_config):
+        if in_full_cudagraph_mode(self.vllm_config):
             # FULL cudagraph mode captures this group through full_graph_pa:
             # no verify mask is needed, and the draft graph update must emit
             # PagedAttention kwargs (see b1_verify_graph_params). The decode-only
             # PA op also needs one query per row, so re-lay multi-query steps.
             metadata.b1_pa_graph = True
-            _expand_pa_per_token_rows(metadata)
+            expand_pa_per_token_rows(metadata)
             return metadata
         verify_len = self._b1_verify_len()
         if verify_len is None or metadata.block_tables is None:
@@ -383,13 +301,13 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
-        if getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and _in_full_cudagraph_mode(
+        if getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and in_full_cudagraph_mode(
             self.vllm_config
         ):
             # FULL captures this group through full_graph_pa; the decode-only
             # PA op needs the same one-query-per-row layout as at runtime.
             metadata.b1_pa_graph = True
-            _expand_pa_per_token_rows(metadata)
+            expand_pa_per_token_rows(metadata)
         return metadata
 
 
@@ -401,7 +319,7 @@ class AscendB1AttentionBackendImpl(AscendAttentionBackendImpl):
         # FULL graphs capture the 512-dim group through the stock
         # PagedAttention path, which needs the natural cache layout; BNSD is
         # only for the own B1 FIA-v2 verify capture.
-        self.full_cudagraph = _in_full_cudagraph_mode(getattr(self, "vllm_config", None))
+        self.full_cudagraph = in_full_cudagraph_mode(getattr(self, "vllm_config", None))
         # Keep this in lockstep with AscendB1AttentionBackend.get_kv_cache_shape:
         # head_dim=512 layers are allocated in BNSD on A2/A3 even when the
         # model-wide layout (and every other layer) stays natural.
@@ -600,7 +518,7 @@ class AscendB1AttentionBackend(AscendAttentionBackend):
         if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
             from vllm_ascend.utils import is_950
 
-            if not is_950() and not _in_full_cudagraph_mode():
+            if not is_950() and not in_full_cudagraph_mode():
                 return (2, num_blocks, num_kv_heads, block_size, head_size)
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
