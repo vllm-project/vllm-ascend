@@ -15,7 +15,11 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
+from vllm_ascend.attention.sparse_flash_mla import (
+    build_dspark_sparse_flash_mla_metadata,
+    sparse_flash_mla,
+    write_dspark_topk_lengths,
+)
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 
@@ -83,6 +87,10 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert not plan.requires_block_offset_slots
+        # The draft contract: logical indices with op-owned pre-processing.
+        assert plan.uses_draft_logical_indices
+        assert plan.draft_metadata_builder is build_dspark_sparse_flash_mla_metadata
+        assert plan.draft_topk_lengths_writer is write_dspark_topk_lengths
         torch.testing.assert_close(
             plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
             torch.tensor([5, -1], dtype=torch.int32),
