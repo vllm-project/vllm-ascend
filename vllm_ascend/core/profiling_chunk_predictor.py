@@ -35,6 +35,15 @@ import torch
 from scipy.optimize import nnls  # type: ignore[import-untyped]
 from vllm.logger import logger
 
+# Minimum number of (seq_len, latency) samples required to fit the quadratic
+# latency model; fewer than this and the least-squares solution is too noisy.
+MIN_FIT_POINTS_NO_CHUNK = 8
+
+# Predicted chunk sizes are rounded up to a multiple of the KV cache page size,
+# but never with a granularity finer than this many tokens (short sequences can
+# report a page size smaller than this).
+MIN_CHUNK_ALIGNMENT = 64
+
 
 def _start_profiling_chunk_timing(profiling_config, scheduler_output) -> float | None:
     if not profiling_config.need_timing:
@@ -119,12 +128,12 @@ class ChunkSizePredictor:
         """
         L = np.array(seq_lens, dtype=np.float64)
         T = np.array(latencies, dtype=np.float64)
-        MIN_FIT_POINTS_NO_CHUNK = 8
 
         if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
-                "[ProfilingChunk] Not enough data points for quadratic fitting (%d < 8)",
+                "[ProfilingChunk] Not enough data points for quadratic fitting (%d < %d)",
                 len(L),
+                MIN_FIT_POINTS_NO_CHUNK,
             )
             return False
 
@@ -268,8 +277,9 @@ class ChunkSizePredictor:
                 representing the current position in the sequence.
             base_chunk_size: The default/fallback chunk size used as a
                 baseline for smoothing the predicted value.
-            page_size: The memory page size, used together with 64 to
-                determine the alignment granularity of the final chunk size.
+            page_size: The memory page size, used together with
+                MIN_CHUNK_ALIGNMENT to determine the alignment granularity of
+                the final chunk size.
             target_time: Override target latency in seconds. If > 0, this
                 value is used instead of self.target_latency for the
                 prediction equation.
@@ -307,7 +317,7 @@ class ChunkSizePredictor:
         smoothed = base_chunk_size + self.smooth_factor * (x - base_chunk_size)
         chunk_size = max(int(smoothed), self.min_chunk)
 
-        align = max(page_size, 64)
+        align = max(page_size, MIN_CHUNK_ALIGNMENT)
         chunk_size = ((chunk_size + align - 1) // align) * align
         if chunk_size < align:
             chunk_size = align
@@ -330,8 +340,9 @@ class ChunkSizePredictor:
                 representing the current computed position in the sequence.
             base_chunk_size: The default/fallback chunk size used as a
                 baseline for smoothing the predicted value.
-            page_size: The memory page size, used together with 64 to
-                determine the alignment granularity of the final chunk size.
+            page_size: The memory page size, used together with
+                MIN_CHUNK_ALIGNMENT to determine the alignment granularity of
+                the final chunk size.
             target_time: Override target latency in seconds. If > 0, this
                 value is used instead of self.target_latency for the
                 prediction equation.
@@ -373,7 +384,7 @@ class ChunkSizePredictor:
         smoothed = base_chunk_size + self.smooth_factor * (x - base_chunk_size)
         chunk_size = max(int(smoothed), self.min_chunk)
 
-        align = max(page_size, 64)
+        align = max(page_size, MIN_CHUNK_ALIGNMENT)
         chunk_size = ((chunk_size + align - 1) // align) * align
         if chunk_size < align:
             chunk_size = align
