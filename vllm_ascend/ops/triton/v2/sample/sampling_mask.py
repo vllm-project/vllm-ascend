@@ -60,12 +60,17 @@ def _pack_sampling_mask_kernel_ascend(
 
 
 def sampling_mask_from_logits_npu(
-    cls: type[SamplingMaskTensors],
     logits: torch.Tensor,
     num_sampled_tokens: torch.Tensor,
     max_num_kept: int | None = None,
 ) -> SamplingMaskTensors:
     """Pack sampling masks after making strided vocab loads NPU-friendly."""
+    # Registered as a class-mount kernel override. KernelOverride is not a
+    # descriptor, so unlike the retired classmethod() mount no implicit `cls`
+    # is passed at call time. Lazy import: the module is always loaded by
+    # the time this wrapper runs.
+    from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+
     if logits.stride(1) != 1:
         logits = logits.contiguous()
 
@@ -106,6 +111,6 @@ def sampling_mask_from_logits_npu(
             dtype=torch.int32,
             device=logits.device,
         )
-        return cls(token_ids, packed_mask, counts, vocab_size)
+        return SamplingMaskTensors(token_ids, packed_mask, counts, vocab_size)
 
-    return cls(packed_mask, counts, vocab_size)
+    return SamplingMaskTensors(packed_mask, counts, vocab_size)

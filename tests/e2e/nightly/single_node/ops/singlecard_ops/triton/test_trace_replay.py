@@ -1,5 +1,3 @@
-import importlib
-
 import pytest
 
 from vllm_ascend.device.device_config import get_ascend_device_type
@@ -13,9 +11,9 @@ pytest.importorskip("triton")
 if not hasattr(torch, "npu") or not torch.npu.is_available():
     pytest.skip("Trace replay kernel test requires an available Ascend NPU", allow_module_level=True)
 
+from vllm.triton_utils.dispatcher import KernelOverride  # noqa: E402
 from vllm.v1.worker.gpu.sample import trace_replay as upstream_trace_replay  # noqa: E402
 
-import vllm_ascend.patch.worker  # noqa: E402,F401
 from vllm_ascend.worker.v2.sample.trace_replay import (  # noqa: E402
     apply_trace_tokens,
 )
@@ -31,17 +29,16 @@ def _tensor(values, dtype):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-def test_trace_replay_patches_only_outer_call(monkeypatch):
-    from vllm_ascend.patch.worker.patch_v2 import patch_triton
-
-    upstream_trace_replay_kernel = upstream_trace_replay._trace_replay_kernel
-    unpatched_apply_trace_tokens = object()
-    monkeypatch.setattr(upstream_trace_replay, "apply_trace_tokens", unpatched_apply_trace_tokens)
-    importlib.reload(patch_triton)
-
-    assert upstream_trace_replay.apply_trace_tokens is apply_trace_tokens
-    assert upstream_trace_replay.apply_trace_tokens is not unpatched_apply_trace_tokens
-    assert upstream_trace_replay._trace_replay_kernel is upstream_trace_replay_kernel
+def test_trace_replay_patches_only_outer_call():
+    """The conftest-registered override delegates to the NPU impl: the
+    dispatcher installs a KernelOverride wrapper (not the raw impl) over
+    the module attribute. The inner kernel must stay raw -- our impl
+    launches it through this module attribute, and a wrapper there would
+    drop the launch grid."""
+    wrapper = upstream_trace_replay.apply_trace_tokens
+    assert wrapper.func is apply_trace_tokens
+    inner = upstream_trace_replay._trace_replay_kernel
+    assert not isinstance(inner, KernelOverride)
 
 
 @pytest.mark.skipif(

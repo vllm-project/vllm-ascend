@@ -5,7 +5,7 @@
 - 算子功能：`_num_nans_kernel` 逐请求（逐行）统计 logits 中的 NaN 数量，
   输出 INT32 计数张量，供采样链路上报 `num_nans_in_logits` 指标（如
   `recompute_scheduler` 依据该指标判断 logits 质量并触发重算）。生产环境经
-  `vllm_ascend/patch/worker/patch_v2/patch_triton.py` 将上游
+  `vllm_ascend/triton_kernel_overrides.py` 将上游
   `vllm.v1.worker.gpu.metrics.logits.get_num_nans` 整体替换为本实现（包装
   函数为 `get_num_nans`）。
 
@@ -34,9 +34,9 @@
   triton-ascend 不提供该模块。
 - vLLM Ascend 版本直接导入 `triton.language.extra.cann.libdevice`，内核逻辑
   与上游一致，仅 libdevice 来源不同。
-- 通过 patch 整体替换 `sampler.get_num_nans` 与
+- 通过 kernel dispatcher 注册整体替换 `sampler.get_num_nans` 与
   `rejection_sampler.get_num_nans`；待编译器与 Triton Ascend toolkit 支持上游
-  实现后可回退（见 `patch_triton.py` 内注释）。
+  实现后可回退（见 `triton_kernel_overrides.py` 内注释）。
 
 ## 参数说明
 
