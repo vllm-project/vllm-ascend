@@ -153,6 +153,39 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     assert coordinator.eagle_group_ids == {1}
 
 
+def _retention_coordinator(monkeypatch, *, is_deepseek_v4: bool):
+    # The retention gate reads kv_cache_config.prefix_cache_retention_interval
+    # (populated by the kv-cache-utils builder) only for DeepSeek-V4/V4.1.
+    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    monkeypatch.setattr(mod, "_is_deepseek_v4_kv_cache_config", lambda cfg: is_deepseek_v4)
+    kv_cache_config = _hybrid_config()
+    kv_cache_config.kv_transfer_config = None
+    kv_cache_config.prefix_cache_retention_interval = 4096
+    return AscendHybridKVCacheCoordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
+    )
+
+
+def test_retention_honored_for_deepseek_v4(monkeypatch):
+    coordinator = _retention_coordinator(monkeypatch, is_deepseek_v4=True)
+    assert coordinator.retention_interval == 4096
+
+
+def test_retention_forced_none_for_non_deepseek_v4(monkeypatch):
+    # Other models keep the dense (None) default regardless of the config value.
+    coordinator = _retention_coordinator(monkeypatch, is_deepseek_v4=False)
+    assert coordinator.retention_interval is None
+
+
 # ---------------------------------------------------------------------------
 # Fix ② role detection: kv_transfer_config (attached by the kv-cache-utils
 # builder) -> coordinator
