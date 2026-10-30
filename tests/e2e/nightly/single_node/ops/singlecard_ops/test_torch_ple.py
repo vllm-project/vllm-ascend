@@ -9,7 +9,15 @@ import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
 from vllm_ascend.ops.torch_ple import ple_conv_torch
+
+
+def test_model_dispatch_uses_upstream_decode():
+    from vllm.models.qwen4_exp.amd import ple_layer
+
+    patch_upstream_ple_short_conv()
+    assert ple_layer.ple_conv is _ple_conv_ascend
 
 
 def test_modes_and_token_mapping():
@@ -59,7 +67,7 @@ def test_modes_and_token_mapping():
                 expected, actual = residual.clone(), residual.clone()
                 expected_state, actual_state = state.clone(), state.clone()
                 upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
-                ple_conv_torch(**kwargs, residual=actual, conv_state=actual_state)
+                _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
                 torch.npu.synchronize()
                 exact = (expected == actual).float().mean().item()
                 max_abs = (expected.float() - actual.float()).abs().max().item()
