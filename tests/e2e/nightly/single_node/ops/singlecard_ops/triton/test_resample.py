@@ -6,33 +6,21 @@
 # PyTorch/analytic references; no Triton implementation is reproduced here.
 
 import gc
-from types import SimpleNamespace
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ascend_config import RejectionSamplerConfig
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
-from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
 STAT_TRIALS = 4096
 STAT_ATOL = 0.03
 VOCAB_BLOCK_SIZE = 8192
-
-
-@pytest.fixture(autouse=True)
-def _default_rejection_config(monkeypatch):
-    monkeypatch.setattr(
-        rejection_sampler_utils,
-        "get_ascend_config",
-        lambda: SimpleNamespace(rejection_sampler_config=RejectionSamplerConfig()),
-    )
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -806,6 +794,7 @@ def test_rejection_sample_residual_is_independent_of_acceptance_draw(
         torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 4001,
         num_spec_steps,
         use_block_verification=use_block_verification,
+        use_entropy_verify=False,
     )
     torch.npu.synchronize()
 
@@ -871,6 +860,7 @@ def test_rejection_sample_greedy_end_to_end():
         temperature,
         seed,
         num_spec_steps,
+        use_entropy_verify=False,
     )
     torch.npu.synchronize()
 
