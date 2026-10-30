@@ -5,6 +5,10 @@ import pytest
 import torch
 import torch_npu
 
+pytestmark = pytest.mark.skip(
+    reason="CI torch_npu 2.10.0.post4 does not support swiglu_mode=2; re-enable after the CI runtime is upgraded"
+)
+
 
 def fused(x, limit, alpha, bias):
     return torch_npu.npu_swiglu_mx_quant(
