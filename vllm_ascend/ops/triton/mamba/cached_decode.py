@@ -5,6 +5,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 
 @triton.jit(do_not_specialize=["actual_rows", "graph_rows", "token_count"])
@@ -120,7 +121,7 @@ def materialize_cached_gdn_decode(
         QUERY_STRIDE=query_source.stride(0),
         ACCEPTED_STRIDE=accepted_source.stride(0),
         WIDTH=width,
-        BLOCK_SLOTS=triton.next_power_of_2(width),
+        BLOCK_SLOTS=next_power_of_2(width),
         BLOCK=32,
         multibuffer=False,
         unit_flag=False,
