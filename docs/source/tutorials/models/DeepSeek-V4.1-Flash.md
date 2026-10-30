@@ -2638,7 +2638,6 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
     export VLLM_ENGINE_READY_TIMEOUT_S=360000
@@ -2690,7 +2689,9 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
               "enable_static_kernel":false
           },
           "enable_cpu_binding":true,
-          "multistream_overlap_shared_expert":true
+          "enable_dsa_cp":true,
+          "enable_flashcomm1":true,
+          "enable_shared_expert_dp":true
       }'
     ```
 
