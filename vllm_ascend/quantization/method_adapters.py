@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
@@ -368,3 +369,89 @@ class AscendEmbeddingMethod(AscendLinearMethod):
 
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
+
+
+def _initialize_online_processing(layer: torch.nn.Module) -> None:
+    """Wrap a layer's weight loaders with vLLM's layerwise online processing.
+
+    Imported lazily: the reload package reaches into the model loader, which
+    should not be pulled in while the quantization package is initializing.
+    """
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        initialize_online_processing,
+    )
+
+    initialize_online_processing(layer)
+
+
+class AscendOnlineLinearMethod(AscendLinearMethod):
+    """Linear method for Ascend online (load-time) quantization.
+
+    Behaves exactly like :class:`AscendLinearMethod`, except that the
+    full-precision weight is staged on the meta device and materialized one
+    layer at a time by vLLM's layerwise processing. Only a single layer's
+    checkpoint-dtype weight is then resident while the model is quantized,
+    which is the memory win that makes quantizing at load time worthwhile.
+
+    Args:
+        scheme: The online quantization scheme instance.
+    """
+
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        super().__init__(scheme)
+        self.uses_meta_device = bool(ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        if self.uses_meta_device:
+            _initialize_online_processing(layer)
+
+
+class AscendOnlineFusedMoEMethod(AscendFusedMoEMethod):
+    """FusedMoE method for Ascend online (load-time) quantization.
+
+    Args:
+        scheme: The online quantization scheme instance.
+        moe_config: The FusedMoE configuration.
+    """
+
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
+        super().__init__(scheme, moe_config)
+        self.uses_meta_device = bool(ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        if self.uses_meta_device:
+            _initialize_online_processing(layer)

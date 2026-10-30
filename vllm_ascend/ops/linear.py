@@ -41,6 +41,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -174,7 +175,14 @@ class AscendLinearBase(LinearBase):
         if quant_config is None:
             self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            # Route through vLLM's resolver, exactly like `LinearBase.__init__`
+            # does, instead of calling `quant_config.get_quant_method` directly.
+            # Calling the config directly skips the online-quantization overlay
+            # (`quant_config.online_quantization_config`), so a checkpoint that
+            # carries quantization metadata plus an online target would silently
+            # leave the layer in its checkpoint dtype.
+            quant_method = resolve_quant_method(quant_config, self, prefix=prefix)
+            self.quant_method = quant_method if quant_method is not None else AscendUnquantizedLinearMethod()
         self.return_bias = return_bias
         self.disable_tp = disable_tp
 

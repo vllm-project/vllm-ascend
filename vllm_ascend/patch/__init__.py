@@ -1671,3 +1671,30 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+#
+# ** 37. File: platform/patch_online_quant.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.vllm.VllmConfig._get_quantization_config`
+#    Why:
+#       Online quantization is dispatched by constructing the concrete upstream
+#       `OnlineQuantizationConfig` at each online return site of
+#       `get_quant_config`, one of them behind an identity test
+#       (`quant_cls is OnlineQuantizationConfig`). Construction is therefore
+#       hardcoded, so the config registered through
+#       `register_quantization_config` for `online` /
+#       `int8_per_channel_weight_only` is never instantiated and Ascend's INT8
+#       implementation cannot be reached without patching the loader.
+#    How:
+#       Wrap `VllmConfig._get_quantization_config` and divert only those two
+#       method names to `build_ascend_online_quant_config`. Every other
+#       quantization method -- checkpoint formats included -- still takes the
+#       upstream path. Patching the config funnel rather than
+#       `get_quant_config` avoids pulling the model-loader import graph into
+#       the platform hook.
+#    Related PR (if no, explain why):
+#       vllm-project/vllm#64056.
+#    Future Plan:
+#       Delete this module, its import in `patch/platform/__init__.py` and this
+#       entry once the upstream dispatch fix lands. `AscendOnlineQuantizationConfig`
+#       is already registered for both method names, so nothing else changes:
+#       the upstream dispatch takes over as soon as the patch is gone.

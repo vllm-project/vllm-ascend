@@ -29,6 +29,7 @@ from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
 from vllm.forward_context import is_forward_context_available
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -255,7 +256,10 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.embedding_dim = embedding_dim
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            # Same resolver as `VocabParallelEmbedding.__init__`: it keeps the
+            # checkpoint quantization method for embeddings and applies the
+            # online-quantization overlay where upstream supports one.
+            quant_method = resolve_quant_method(quant_config, self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 

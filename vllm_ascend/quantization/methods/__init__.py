@@ -45,6 +45,11 @@ from .base import (
     WeightSwitchState,
 )
 from .kv_cache import AscendFAQuantAttentionMethod
+from .online import (
+    ONLINE_INT8_W8A8_SCHEME,
+    AscendOnlineInt8W8A8FusedMoEMethod,
+    AscendOnlineInt8W8A8LinearMethod,
+)
 from .registry import get_scheme_class, register_scheme
 from .w4a4 import (
     AscendW4A4FlatQuantDynamicLinearMethod,
@@ -132,4 +137,7 @@ __all__ = [
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
     "AscendFp8BlockLinearMethod",
     "AscendFp8BlockFusedMoEMethod",
+    "ONLINE_INT8_W8A8_SCHEME",
+    "AscendOnlineInt8W8A8LinearMethod",
+    "AscendOnlineInt8W8A8FusedMoEMethod",
 ]

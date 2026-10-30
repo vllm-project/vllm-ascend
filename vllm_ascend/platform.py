@@ -48,6 +48,7 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+from vllm_ascend.quantization.online_methods import ASCEND_ONLINE_QUANT_METHODS
 
 # isort: off
 from vllm_ascend.utils import (
@@ -250,6 +251,14 @@ class NPUPlatform(Platform):
         "deepseek_v4_fp8",
         "modelopt_mxfp8",
         "mxfp8",
+        # Online (load-time) quantization: a plain bf16 checkpoint quantized
+        # while the weights are loaded. Only the INT8 recipes have an Ascend
+        # execution path. register_quantization_config() cannot add these two
+        # names automatically because they already live in vLLM's
+        # QuantizationMethods Literal, so verify_quantization() needs them here.
+        # Dispatch to the Ascend config comes from patch_online_quant until
+        # vLLM instantiates the registered class itself.
+        *ASCEND_ONLINE_QUANT_METHODS,
     ]
 
     @classmethod
@@ -565,6 +574,7 @@ class NPUPlatform(Platform):
                 AscendFp8Config,
                 AscendModelOptMxFp8Config,
                 AscendModelSlimConfig,
+                AscendOnlineQuantizationConfig,
             )
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
