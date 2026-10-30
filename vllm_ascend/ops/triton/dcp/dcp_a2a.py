@@ -452,20 +452,18 @@ def fused_dcp_lse_combine(
             BLOCK_ROWS=8,
         )
         return output
-    # Bound the FP32 rank/feature temporary. Amortize repeated LSE work over
-    # enough ranks and fill the vector cores with rank-row work; small-rank,
-    # wide-head and feature-strided cases retain the scalar fallback.
+    # Bound the FP32 rank/feature temporary. Require enough rank work and
+    # feature tiles to occupy the vector cores.
     rank_tile = triton.next_power_of_2(dcp_size)
     feature_tile = min(128, triton.next_power_of_2(head_dim), 2048 // rank_tile)
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
+    min_rows = max(triton.cdiv(4 * vector_cores, max(dcp_size, 1)), triton.cdiv(vector_cores, tiles_per_head))
     rank_tiled = (
         recv.dtype == torch.bfloat16
         and 4 <= dcp_size <= 16
-        and feature_tile >= 32
         and dcp_size >= 2 * tiles_per_head
-        and total_rows * dcp_size >= 4 * vector_cores
         and scatter_dim == 1
-        and total_rows * tiles_per_head >= vector_cores
+        and total_rows >= min_rows
         and local_output is not None
         and local_output.stride(-1) == 1
     )
