@@ -27,6 +27,7 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from functools import wraps
+from types import MethodType
 from typing import Any, Optional
 
 import regex as re
@@ -76,13 +77,53 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
 )
 
 
+def _map_modelslim_moe_weight_name(weight_name: str) -> str:
+    """Rewrite a ModelSlim MoE scale-bias name to the upstream scale path."""
+    prefix, separator, param_name = weight_name.rpartition(".")
+    mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
+    return f"{prefix}{separator}{mapped_name}"
+
+
 def _make_modelslim_moe_weight_loader(
     weight_loader: Callable[..., bool | None],
 ) -> Callable[..., bool | None]:
-    """Map ModelSlim MoE scale-bias names to the upstream scale path."""
+    """Map ModelSlim MoE scale-bias names to the upstream scale path.
 
-    @wraps(weight_loader)
+    When ``weight_loader`` is a bound method, the mapped loader is bound to the
+    same owning layer instead of closing over the bound method. vLLM copies
+    parameter attributes into ``LAYERWISE_INFO`` reload metadata while building
+    the meta tensors, and ``sanitize_layer_refs`` only breaks the
+    ``metadata -> tensor -> weight_loader -> layer`` cycle for attributes that
+    are bound methods of that layer. A plain closure keeps the discarded layer
+    (and its real weights) alive through its closure/``__wrapped__`` cell.
+    """
+    if not isinstance(weight_loader, MethodType):
+        # Preserve the existing interface for callables without a bound owner.
+        @wraps(weight_loader)
+        def plain_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ) -> bool | None:
+            return weight_loader(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=_map_modelslim_moe_weight_name(weight_name),
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=return_success,
+            )
+
+        return plain_weight_loader
+
+    owner = weight_loader.__self__
+    unbound_loader = weight_loader.__func__
+
     def modelslim_moe_weight_loader(
+        self: Any,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
@@ -90,19 +131,32 @@ def _make_modelslim_moe_weight_loader(
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        prefix, separator, param_name = weight_name.rpartition(".")
-        mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
-        mapped_weight_name = f"{prefix}{separator}{mapped_name}"
-        return weight_loader(
+        return unbound_loader(
+            self,
             param=param,
             loaded_weight=loaded_weight,
-            weight_name=mapped_weight_name,
+            weight_name=_map_modelslim_moe_weight_name(weight_name),
             shard_id=shard_id,
             expert_id=expert_id,
             return_success=return_success,
         )
 
-    return modelslim_moe_weight_loader
+    # Copy the metadata by hand: `functools.wraps` would also set
+    # `__wrapped__` to the bound method and reintroduce the layer reference.
+    # Preserve its `__dict__` merge semantics for loader flags such as
+    # `supports_moe_loading` without retaining the bound method.
+    modelslim_moe_weight_loader.__module__ = getattr(
+        unbound_loader, "__module__", modelslim_moe_weight_loader.__module__
+    )
+    modelslim_moe_weight_loader.__name__ = getattr(unbound_loader, "__name__", modelslim_moe_weight_loader.__name__)
+    modelslim_moe_weight_loader.__qualname__ = getattr(
+        unbound_loader, "__qualname__", modelslim_moe_weight_loader.__qualname__
+    )
+    modelslim_moe_weight_loader.__doc__ = getattr(unbound_loader, "__doc__", None)
+    modelslim_moe_weight_loader.__annotations__ = getattr(unbound_loader, "__annotations__", {})
+    modelslim_moe_weight_loader.__dict__.update(getattr(unbound_loader, "__dict__", {}))
+
+    return MethodType(modelslim_moe_weight_loader, owner)
 
 
 # The config filename that ModelSlim generates after quantizing a model.
@@ -263,6 +317,50 @@ def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bo
     return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
+def _find_quant_description_key(quant_description: dict[str, Any], prefix: str) -> str | None:
+    """Return the weight or bare ModelSlim entry for ``prefix``."""
+    weight_key = prefix + ".weight"
+    if weight_key in quant_description:
+        return weight_key
+    if prefix in quant_description:
+        return prefix
+    return None
+
+
+def _resolve_fused_packed_shard_keys(
+    quant_description: dict[str, Any],
+    prefix: str,
+    shard_prefixes: list[str],
+) -> list[str] | None:
+    """Resolve descriptions that keep a runtime packed module fused.
+
+    ModelSlim may describe a packed runtime module directly. Routed experts
+    may also keep gate/up fused while vLLM exposes split logical shards. Only
+    use these entries when none of the normal expanded shard entries exists;
+    callers reject partially mixed descriptions.
+    """
+    direct_key = _find_quant_description_key(quant_description, prefix)
+    if direct_key is not None:
+        return [direct_key]
+
+    if prefix.rpartition(".")[-1] != "experts":
+        return None
+
+    expected_suffixes = {
+        shard_prefix.removeprefix(prefix + ".").partition(".")[-1]
+        for shard_prefix in shard_prefixes
+        if shard_prefix.startswith(prefix + ".")
+    }
+    if not {"gate_proj", "up_proj", "down_proj"}.issubset(expected_suffixes):
+        return None
+
+    gate_up_key = _find_quant_description_key(quant_description, f"{prefix}.gate_up_proj")
+    down_key = _find_quant_description_key(quant_description, f"{prefix}.down_proj")
+    if gate_up_key is None or down_key is None:
+        return None
+    return [gate_up_key, down_key]
+
+
 def get_quant_type_for_layer(
     quant_description: dict[str, Any],
     prefix: str,
@@ -292,14 +390,35 @@ def get_quant_type_for_layer(
         shard_prefixes = [
             prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
-        for shard_prefix in shard_prefixes:
-            if prefix_mapper is not None:
-                shard_prefix = prefix_mapper(shard_prefix)
-            shard_key = shard_prefix + ".weight"
-            # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
-            # shards fall through to the original dictionary lookup below.
-            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
-                continue
+        if prefix_mapper is not None:
+            prefix = prefix_mapper(prefix)
+            shard_prefixes = [prefix_mapper(shard_prefix) for shard_prefix in shard_prefixes]
+        shard_keys = [_find_quant_description_key(quant_description, shard_prefix) for shard_prefix in shard_prefixes]
+        missing_v_shards = [
+            key is None and _is_missing_v_shard(shard_prefix + ".weight", quant_description)
+            for key, shard_prefix in zip(shard_keys, shard_prefixes)
+        ]
+        normal_keys = [key for key in shard_keys if key is not None]
+        missing_normal_shards = [
+            shard_prefix
+            for key, shard_prefix, missing_v in zip(shard_keys, shard_prefixes, missing_v_shards)
+            if key is None and not missing_v
+        ]
+
+        if missing_normal_shards:
+            # Never combine a partial normal description with fused aliases;
+            # that would hide malformed or mixed quantization metadata.
+            if normal_keys:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            fused_keys = _resolve_fused_packed_shard_keys(quant_description, prefix, shard_prefixes)
+            if fused_keys is None:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            shard_keys_to_check = fused_keys
+        else:
+            # Only Gemma4 k_eq_v is allowed to omit v_proj.
+            shard_keys_to_check = normal_keys
+
+        for shard_key in shard_keys_to_check:
             shard_quant_type = quant_description[shard_key]
 
             if quant_type is None:
@@ -315,7 +434,8 @@ def get_quant_type_for_layer(
     else:
         if prefix_mapper is not None:
             prefix = prefix_mapper(prefix)
-        quant_type = quant_description.get(prefix + ".weight")
+        quant_key = _find_quant_description_key(quant_description, prefix)
+        quant_type = quant_description.get(quant_key) if quant_key is not None else None
     return quant_type if quant_type != "FLOAT" else None
 
 
@@ -540,13 +660,19 @@ class AscendModelSlimConfig(QuantizationConfig):
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
     def _has_quant_weight(self, prefix: str) -> bool:
+        if _find_quant_description_key(self.quant_description, prefix) is not None:
+            return True
         proj_name = prefix.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             return all(
-                f"{prefix.removesuffix(proj_name) + shard_proj_name}.weight" in self.quant_description
+                _find_quant_description_key(
+                    self.quant_description,
+                    prefix.removesuffix(proj_name) + shard_proj_name,
+                )
+                is not None
                 for shard_proj_name in self.packed_modules_mapping[proj_name]
             )
-        return f"{prefix}.weight" in self.quant_description
+        return False
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type

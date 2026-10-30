@@ -704,6 +704,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer.use_pcp = False
         indexer._dsa_cp_active = False
+        indexer._use_fused_cache_store = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)

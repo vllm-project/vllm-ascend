@@ -1815,13 +1815,11 @@ class TestNPUWorker(TestBase):
 
             with (
                 patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-                patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
             ):
                 worker.load_model()
 
             worker.model_runner.load_model.assert_called_once()
             join_nz.assert_not_called()
-            join_early.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
