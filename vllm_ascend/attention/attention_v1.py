@@ -679,7 +679,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
+        # A merged KV group may share a band template with full-attention
+        # layers. Select locally: mode 0 would apply that template as a mask.
+        attn_mask = None if not attn_metadata.causal and self.sliding_window is None else attn_metadata.attn_mask
         sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
         output_view = output[: attn_metadata.num_actual_tokens]
 
@@ -782,6 +784,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value = value.contiguous()
 
         sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
+        attn_mask = None if not attn_metadata.causal and self.sliding_window is None else attn_metadata.attn_mask
 
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
@@ -790,7 +793,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query=query,
                 key=key,
                 value=value,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=attn_mask,
                 block_table=block_table,
                 input_layout="TND",
                 block_size=block_size,
@@ -812,7 +815,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "query": query,
                 "key": key,
                 "value": value,
-                "atten_mask": attn_metadata.attn_mask,
+                "atten_mask": attn_mask,
                 "block_table": block_table,
                 "input_layout": "TND",
                 "block_size": block_size,
@@ -961,6 +964,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Get workspace from cache or calculate it if not present.
         sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
+        attn_mask = None if not attn_metadata.causal and self.sliding_window is None else attn_metadata.attn_mask
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -974,7 +978,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 input_layout="TND",
                 pre_tokens=pre_tokens,
                 next_tokens=next_tokens,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=attn_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
                 block_table=block_table,
@@ -1004,7 +1008,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1042,7 +1046,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,

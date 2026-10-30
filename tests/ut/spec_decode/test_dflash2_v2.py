@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.v1.worker.gpu.sample import gumbel as gumbel_module
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -33,6 +34,7 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
+    _selector_step_seed,
     _selector_walk_kernel_ascend,
 )
 
@@ -525,3 +527,13 @@ def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
         dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
 
     kernel.assert_not_called()
+
+
+def test_selector_seed_policy_matches_installed_vllm():
+    if hasattr(gumbel_module, "spec_step_seed"):
+        assert _selector_step_seed is gumbel_module.spec_step_seed
+    else:
+        # Older upstream does not mix steps; preserve even the seed's high bits.
+        for seed in (13, 13 + (1 << 48), -(1 << 55) + 9):
+            for step in (0, 3):
+                assert _selector_step_seed.fn(seed, step) == seed

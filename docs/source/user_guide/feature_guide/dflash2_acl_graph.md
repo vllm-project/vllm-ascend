@@ -45,3 +45,12 @@ Non-causal sliding-window draft layers retain the symmetric window from the
 checkpoint in both eager and graph execution. FIA uses its compressed band-mask
 template with matching left/right bounds; removing the mask and selecting full
 attention would expose cache entries outside the window and alter draft scores.
+
+When full and sliding-window layers share a KV group, each FIA call selects its
+mask using the actual layer's attention mode. Non-causal full attention ignores
+the group's band template; sliding-window layers retain it. Shared metadata is
+not modified, so eager and graph execution preserve the same layer semantics.
+
+Selector seed handling follows the installed upstream vLLM: releases without
+`spec_step_seed` keep the request seed unchanged, while newer versions mix the
+speculative step into the seed. Both paths use upstream Gumbel sampling.

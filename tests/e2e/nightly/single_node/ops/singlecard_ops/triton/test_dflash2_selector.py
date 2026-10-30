@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample import gumbel as gumbel_module
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
 
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import _selector_walk_kernel_ascend
@@ -26,7 +27,8 @@ def _uniform_reference(seed, step, position, token):
         value ^= (key * 0x1B873593) & mask
         return (rotate(value, 13) * 5 + 0xE6546B64) & mask
 
-    seed ^= step << 32
+    if hasattr(gumbel_module, "spec_step_seed"):
+        seed ^= step << 32
     position = position - 1 + (1 << 30)
     h = 0
     for key in (seed & mask, (seed >> 32) & mask, position & mask, token & mask):
