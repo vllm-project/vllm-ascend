@@ -1581,6 +1581,16 @@
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
+#   2. `vllm.v1.worker.gpu.spec_decode.dflash2.speculator._selector_walk_kernel`
+#    Why:
+#       NPU selector sampling supports FP32 only.
+#    How:
+#       Keep an FP32-only walk sharing upstream Gumbel hashing and stable math.
+#    Related PR (if no, explain why):
+#       No, Ascend-specific FP64 capability restriction.
+#    Future Plan:
+#       Remove when upstream validates the platform's sampling precision.
+#
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`

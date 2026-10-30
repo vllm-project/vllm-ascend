@@ -35,3 +35,8 @@ compilation settings are preserved. V1 remains available through
 
 Validate eager/graph output parity, acceptance rate, and latency on the deployment
 NPU, including partial batches, request reordering, and mixed prefill/decode.
+
+DFlash2 probability sampling uses upstream seed/step/position hashing and the
+stable FP32 Gumbel transform in both eager and graph execution. This changes
+seeded probabilistic outputs compared with the previous Ascend Philox-based
+selector. FP64 Gumbel sampling remains unsupported on NPU.
