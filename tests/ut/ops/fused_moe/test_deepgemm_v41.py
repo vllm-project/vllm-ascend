@@ -35,10 +35,6 @@ def context():
     backend.get_ep_group = lambda: group
     backend.get_tensor_model_parallel_world_size = lambda: 1
     backend.get_ascend_config = lambda: ascend
-    backend._EXTRA_CTX = SimpleNamespace(
-        max_tokens_across_dp=2, in_profile_run=False, capturing=False, is_draft_model=False
-    )
-    backend.get_forward_context = lambda: SimpleNamespace(cudagraph_runtime_mode=backend.CUDAGraphMode.NONE)
     dependency = MagicMock()
     dependency.transform_weights_for_mega_moe.side_effect = lambda a, b: (a, b)
 
@@ -266,39 +262,14 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context):
     dependency.fp8_fp4_mega_moe.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "tokens,global_tokens,experts,profile,capture,draft,graph,expected",
-    [
-        (0, 513, 384, False, False, False, False, True),
-        (1, 513, 384, False, False, False, False, True),
-        (513, 513, 384, False, False, False, False, True),
-        (512, 512, 384, False, False, False, False, False),
-        (513, 513, 384, True, False, False, False, False),
-        (513, 513, 384, False, True, False, False, False),
-        (513, 513, 384, False, False, True, False, False),
-        (513, 513, 384, False, False, False, True, False),
-        (513, 513, 128, False, False, False, False, False),
-    ],
-)
-def test_prefill_fence_uses_global_count_and_skips_graphs(
-    context, tokens, global_tokens, experts, profile, capture, draft, graph, expected
-):
+@pytest.mark.parametrize("tokens", [0, 1, 513, 1024])
+def test_large_prefill_does_not_synchronize_host(context, tokens):
     backend, config, _, _, dependency = context
     config.scheduler_config.max_num_batched_tokens = 1024
     adapter = backend.DeepGemmV41Experts(layer())
-    adapter.num_experts = experts
-    backend._EXTRA_CTX = SimpleNamespace(
-        max_tokens_across_dp=global_tokens, in_profile_run=profile, capturing=capture, is_draft_model=draft
-    )
-    backend.get_forward_context = lambda: SimpleNamespace(
-        cudagraph_runtime_mode=backend.CUDAGraphMode.FULL if graph else backend.CUDAGraphMode.NONE
-    )
     stream = MagicMock()
-    order = []
-    stream.synchronize.side_effect = lambda: order.append("sync")
 
     def quant(x, **kwargs):
-        order.append("quant")
         return x.to(torch.float8_e4m3fn), torch.full((tokens, 8), 127, dtype=torch.uint8)
 
     with (
@@ -306,17 +277,16 @@ def test_prefill_fence_uses_global_count_and_skips_graphs(
         patch.object(backend.torch_npu, "npu_dynamic_mx_quant", side_effect=quant, create=True),
         patch.dict(
             sys.modules,
-            {
-                "vllm_ascend.ops.fused_moe.moe_comm_method": SimpleNamespace(
-                    FusedExpertsResult=lambda **kw: SimpleNamespace(**kw)
-                )
-            },
+            {"vllm_ascend.ops.fused_moe.moe_comm_method": SimpleNamespace(FusedExpertsResult=SimpleNamespace)},
         ),
     ):
-        backend_input = torch.ones((tokens, 256), dtype=torch.bfloat16)
-        adapter.apply(layer(), backend_input, torch.ones((tokens, 6)), torch.zeros((tokens, 6), dtype=torch.int32))
-    assert stream.synchronize.call_count == int(expected)
-    assert order == (["sync", "quant"] if expected else ["quant"])
+        adapter.apply(
+            layer(),
+            torch.ones((tokens, 256), dtype=torch.bfloat16),
+            torch.ones((tokens, 6)),
+            torch.zeros((tokens, 6), dtype=torch.int32),
+        )
+    stream.synchronize.assert_not_called()
     dependency.fp8_fp4_mega_moe.assert_called_once()
 
 
