@@ -98,11 +98,13 @@ def init_speculator(
 
         return AscendEagleSpeculator(vllm_config, device)
     if speculative_config.method == "suffix":
+        if req_states is None:
+            raise ValueError("MRV2 suffix speculative decoding requires request states")
         from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (
             SuffixSpeculator,
         )
 
-        return SuffixSpeculator(vllm_config, device)
+        return SuffixSpeculator(vllm_config, device, req_states)
     if speculative_config.uses_draft_model():
         from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
             AscendStandaloneARSpeculator,
