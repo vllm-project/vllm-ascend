@@ -2448,9 +2448,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_result = None
         assert self.layer_name is not None
 
+        # PROLOG_V3 writes decode KV before its prefill sub-branch. Consume the
+        # connector load once before either sub-branch can access the cache.
+        wait_for_kv_layer_from_connector(self.layer_name)
         if self.layerwise_kv_cache_hook is not None:
-            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-                wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
         if num_decode_tokens > 0:
@@ -2506,8 +2507,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_actual_tokens > num_decode_tokens:
             if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
                 raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
-            if self.layerwise_kv_cache_hook is None or not getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-                wait_for_kv_layer_from_connector(self.layer_name)
             prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
             num_prefill_tokens = num_actual_tokens - num_decode_tokens
             # Metadata can include graph padding beyond the actual prefill rows.
@@ -2927,6 +2926,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        # Release subsequent layer prefetches at the decode attention boundary,
+        # just as prefill and external FlashMLA do.
+        record_attention_compute_start()
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -3325,8 +3327,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         # replicated draft decode keeps its local slots and per-path writes.
         writes_sharded_pcp_kv = self.is_pcp_decode_sharded and attn_metadata.uses_pcp_sharded_layout
         should_write_kv_cache = has_decode or has_prefill or writes_sharded_pcp_kv
-        if has_prefill:
-            wait_for_kv_layer_from_connector(layer_name)
+        # Keep Q/KV projections above overlapped with connector loads. Short
+        # prefills can be classified as decode and still need this layer's KV.
+        wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
             # Wait for the broadcast before reading or updating the cache.
@@ -3478,6 +3481,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
+            wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
