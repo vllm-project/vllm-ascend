@@ -114,17 +114,16 @@ Earlier performance/model tables retain their frozen pre-fix source identity.
 
 ## Correctness and regression coverage
 
-CPU wrapper tests exercise real tensor initialization and typed-view aliasing
-with mocked NPU launches, including device-derived launch bounds and the 1M
-metadata case. NPU tests retain the original PR cases and add ragged and padded
+Task-local CPU validation exercised tensor initialization and typed-view
+aliasing with mocked NPU launches, including device-derived launch bounds and
+the 1M metadata case. The standalone CPU test file is not shipped in this PR.
+NPU tests retain the original PR cases and add ragged and padded
 strides, int32/int64 inputs, duplicate mappings, empty histories, all 16 flag-byte
 patterns in every nibble, both stages below/at/above the Vector tile count,
 and the exact issue geometry with vocab151936. Chained penalty cases compare
 FP32 logits with the original independent reference at `rtol=atol=1e-5`.
 
 ```bash
-python -B -m pytest -q -p no:cacheprovider --confcutdir=tests/ut/worker/v2 \
-  tests/ut/worker/v2/test_bincount.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bincount.py
 ```
 
