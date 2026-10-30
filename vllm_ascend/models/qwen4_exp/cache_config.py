@@ -43,6 +43,82 @@ PLE: Final = "ple"
 HIDDEN: Final = "hidden"
 
 
+def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
+    """Whether the configured draft model is Qwen4Exp MTP."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return False
+    draft_model_config = getattr(
+        speculative_config,
+        "draft_model_config",
+        None,
+    )
+    architectures = tuple(getattr(draft_model_config, "architectures", ()) or ())
+    if "Qwen4ExpMTP" in architectures:
+        return True
+    text_config = getattr(draft_model_config, "hf_text_config", None)
+    text_architectures = tuple(getattr(text_config, "architectures", ()) or ())
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or (
+        "Qwen4ExpMTP" in text_architectures
+    )
+
+
+def annotate_qwen4_exp_mtp_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Annotate Qwen4Exp's actual MTP cache group, not every group.
+
+    Qwen4Exp's MTP attention spec is otherwise indistinguishable from the
+    target's spec. Its predictor is registered at the target layer count, so
+    use that model-scoped position to find only the group containing the real
+    draft layer. Leaving every group unannotated triggers vLLM's flag-all
+    fallback, which incorrectly treats target Mamba groups as draft state and
+    disables cross-request prefix reuse.
+
+    The generic KV-cache patch owns the upstream hook and delegates only the
+    Qwen-specific annotation policy here.
+    """
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.use_eagle_block_drop()
+        or not _uses_qwen4_exp_mtp(vllm_config)
+    ):
+        return
+
+    text_config = vllm_config.model_config.hf_text_config
+    first_draft_layer = int(text_config.num_hidden_layers)
+    num_draft_layers = int(
+        getattr(
+            getattr(
+                speculative_config.draft_model_config,
+                "hf_text_config",
+                None,
+            ),
+            "mtp_num_hidden_layers",
+            1,
+        )
+        or 1
+    )
+    draft_markers = tuple(
+        f".layers.{layer_idx}."
+        for layer_idx in range(
+            first_draft_layer,
+            first_draft_layer + num_draft_layers,
+        )
+    )
+    for group in kv_cache_groups:
+        if any(marker in f".{layer_name}." for marker in draft_markers for layer_name in group.layer_names):
+            group.is_eagle_group = True
+
+    if not any(group.is_eagle_group for group in kv_cache_groups):
+        raise ValueError(
+            "Qwen4Exp MTP is enabled, but no KV cache group contains "
+            f"its draft layer(s) {draft_markers}."
+        )
+
+
 @dataclass(frozen=True)
 class CacheOwner:
     layer_name: str
