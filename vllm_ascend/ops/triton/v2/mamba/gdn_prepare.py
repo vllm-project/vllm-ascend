@@ -117,7 +117,7 @@ def _prepare_gdn_kernel(
         tl.store(conv_output + offsets, 0, offsets < CONV_NUMEL)
 
 
-def prepare_gdn_metadata(
+def prepare_gdn(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     query: torch.Tensor,

@@ -38,7 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import prepare_gdn_metadata
+from vllm_ascend.ops.triton.v2.mamba.gdn_prepare import prepare_gdn
 from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
@@ -1186,7 +1186,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             spec_tokens = m.seq_lens.new_empty(num_spec_tokens, dtype=torch.int64)
             non_spec_tokens = m.seq_lens.new_empty(num_prefill_tokens, dtype=torch.int64)
 
-        prepare_gdn_metadata(
+        prepare_gdn(
             m.block_table_tensor,
             m.seq_lens,
             m.query_start_loc,

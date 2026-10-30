@@ -1,9 +1,9 @@
-# prepare_gdn_metadata
+# prepare_gdn
 
 ## Description
 
-- **Location**: [`v2/mamba/gdn_metadata.py`](../v2/mamba/gdn_metadata.py).
-  `prepare_gdn_metadata` is the Python entry point for the private
+- **Location**: [`v2/mamba/gdn_prepare.py`](../v2/mamba/gdn_prepare.py).
+  `prepare_gdn` is the Python entry point for the private
   `_prepare_gdn_kernel` Triton kernel.
 - **Function**: Build aligned-cache GDN metadata and clear the shared
   convolution output in one launch. Writes caller-provided buffers and returns `None`.
@@ -88,7 +88,7 @@ strided inputs, shrinking batches, graph padding, shared-output clearing and
 compiled-kernel reuse across changing batch counts.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_decode_metadata.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_prepare.py
 ```
 
 Model accuracy and performance measurements are recorded in

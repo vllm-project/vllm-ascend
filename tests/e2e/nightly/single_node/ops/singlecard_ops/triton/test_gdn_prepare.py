@@ -13,7 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
-from vllm_ascend.ops.triton.v2.mamba.gdn_metadata import _prepare_gdn_kernel
+from vllm_ascend.ops.triton.v2.mamba.gdn_prepare import _prepare_gdn_kernel
 
 
 def _assert_metadata_equal(actual, expected):
