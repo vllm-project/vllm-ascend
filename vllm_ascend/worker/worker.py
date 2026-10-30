@@ -455,12 +455,17 @@ class NPUWorker(WorkerBase):
             for name, child in module.named_children()
         ]
 
+        has_use_cuda_graph = hasattr(drafter, "use_cuda_graph")
+        orig_use_cuda_graph = getattr(drafter, "use_cuda_graph", None)
+        if has_use_cuda_graph:
+            drafter.use_cuda_graph = False
         try:
             # Reuse Ascend's model-specific sharing rules without rebuilding the
             # ACL graph wrapper or clearing its update stream.
-            with patch.object(drafter, "use_cuda_graph", False):
-                drafter._maybe_share_lm_head(self.get_model())
+            drafter._maybe_share_lm_head(self.get_model())
         finally:
+            if has_use_cuda_graph:
+                drafter.use_cuda_graph = orig_use_cuda_graph
             # Keep the original modules alive: captured graphs still refer to
             # their tensors. Also record partial swaps if sharing raises.
             self._draft_lm_head_swaps = [
