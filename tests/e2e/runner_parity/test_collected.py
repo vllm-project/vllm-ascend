@@ -4,7 +4,8 @@
 import json
 
 import pytest
-from compare import compare_performance, compare_precision, compare_provenance
+
+from tests.e2e.runner_parity.compare import compare_performance, compare_precision, compare_provenance
 
 
 def test_glm51_same_runtime_code(parity_root, expected_rounds):
