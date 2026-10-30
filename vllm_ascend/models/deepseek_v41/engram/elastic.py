@@ -23,6 +23,23 @@ FP32_EXPONENT_SHIFT = 23
 FP32_E8M0_MIN_BITS = 1 << 22  # 2**-127, a float32 subnormal.
 FP32_NAN_BITS = 0x7FC00000
 SCALE_COPY_CHUNK_ROWS = 8192
+ENGRAM_STORAGE_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _validate_engram_op_schema(name: str, parameters: tuple[tuple[str, str], ...]) -> str:
+    """Check the registered inference ABI before native resources are created."""
+    try:
+        schema = getattr(torch.ops.cann_ops_transformer, name).default._schema
+        actual = tuple((argument.name, str(argument.type)) for argument in schema.arguments)
+        returns = tuple(str(result.type) for result in schema.returns)
+    except AttributeError as exc:
+        raise RuntimeError(f"Engram MXFP8 requires the registered {name} operation") from exc
+    if actual != parameters or returns != ("Tensor",):
+        raise RuntimeError(
+            f"Engram MXFP8 requires the inference tensor-scale ABI for {name}; "
+            f"expected parameters={parameters} and one Tensor result; installed schema: {schema}"
+        )
+    return str(schema)
 
 
 class EngramTableState(Enum):
@@ -487,25 +504,41 @@ class ElasticEngramEmbedding(nn.Module):
             raise ValueError("Engram MXFP8 ElasticBuffer requires engram_tp_size >= 2")
         if getattr(torch, "float8_e8m0fnu", None) is None:
             raise RuntimeError("Engram MXFP8 requires torch.float8_e8m0fnu support")
-        signature = inspect.signature(elastic_buffer_cls.engram_write)
-        sf_parameter = signature.parameters.get("sf")
-        if sf_parameter is None or sf_parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
-            raise RuntimeError("Engram MXFP8 requires ElasticBuffer.engram_write(storage, sf=...)")
         try:
-            schema = str(torch.ops.cann_ops_transformer.engram_fetch.default._schema)
-        except AttributeError as exc:
-            raise RuntimeError("Engram MXFP8 requires the registered EngramFetch tensor-scale ABI") from exc
-        if "Tensor sf_table" not in schema or "Tensor fetched_sf" not in schema:
-            raise RuntimeError(f"Engram MXFP8 requires the tensor-scale ABI; installed schema: {schema}")
+            constructor = inspect.signature(elastic_buffer_cls)
+            constructor.bind(self.group, num_cpu_bytes=0, with_grad=False, explicitly_destroy=True, netlayer="auto")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Engram MXFP8 requires the current ops-transformer ElasticBuffer constructor "
+                "with with_grad=False, explicitly_destroy=True and netlayer='auto'"
+            ) from exc
         try:
-            wait_schema = str(torch.ops.cann_ops_transformer.engram_fetch_wait.default._schema)
-        except AttributeError as exc:
-            raise RuntimeError("Engram MXFP8 requires the registered EngramFetchWait operation") from exc
+            signature = inspect.signature(elastic_buffer_cls.engram_write)
+            signature.bind(None, None, sf=None, zero_copy=False)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Engram MXFP8 requires ElasticBuffer.engram_write(storage, sf=..., zero_copy=False)"
+            ) from exc
+        schema = _validate_engram_op_schema(
+            "engram_fetch",
+            (
+                ("context", "Tensor"),
+                ("indices", "Tensor"),
+                ("hidden_size", "int"),
+                ("num_entries", "int"),
+                ("dtype", "int"),
+                ("sf_table", "Tensor"),
+                ("fetched_sf", "Tensor"),
+            ),
+        )
+        wait_schema = _validate_engram_op_schema("engram_fetch_wait", (("context", "Tensor"), ("fetched", "Tensor")))
         logger.debug(
-            "FOR-ENGRAM FP8 interface preflight: layer=%s tp_rank=%d write_signature=%s "
-            "fetch_schema=%s wait_schema=%s opp_validation=pending-runtime-probe storage_policy=fp8-only",
+            "FOR-ENGRAM FP8 interface preflight: layer=%s tp_rank=%d constructor_signature=%s write_signature=%s "
+            "fetch_schema=%s wait_schema=%s with_grad=false zero_copy=false netlayer=auto "
+            "opp_validation=pending-runtime-probe storage_policy=fp8-only",
             self.layer_id,
             self.rank,
+            constructor,
             signature,
             schema,
             wait_schema,
@@ -656,6 +689,16 @@ class ElasticEngramEmbedding(nn.Module):
                 self.width,
                 storage.dtype,
             )
+            if (
+                not isinstance(num_cpu_bytes, int)
+                or isinstance(num_cpu_bytes, bool)
+                or num_cpu_bytes < weight_bytes
+                or num_cpu_bytes % ENGRAM_STORAGE_ALIGNMENT
+            ):
+                raise RuntimeError(
+                    "Engram storage size hint must be an integer capacity aligned to 2 MiB "
+                    f"and cover the weight payload; hint={num_cpu_bytes}, weight_bytes={weight_bytes}"
+                )
         except Exception as exc:
             local_error = exc
             logger.exception(
@@ -694,7 +737,9 @@ class ElasticEngramEmbedding(nn.Module):
             buffer = elastic_buffer_cls(
                 self.group,
                 num_cpu_bytes=num_cpu_bytes,
+                with_grad=False,
                 explicitly_destroy=True,
+                netlayer="auto",
             )
         except Exception as exc:
             local_error = exc
@@ -731,7 +776,9 @@ class ElasticEngramEmbedding(nn.Module):
         assert buffer is not None
         local_error = None
         try:
-            buffer.engram_write(storage, sf=self._scale)
+            # Inference owns an internal host copy; staging can be released
+            # after the startup probe without retaining a zero-copy mapping.
+            buffer.engram_write(storage, sf=self._scale, zero_copy=False)
         except Exception as exc:
             local_error = exc
             logger.exception(

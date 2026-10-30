@@ -411,6 +411,25 @@ its draft configuration with a different TP size. It rejects dummy weights,
 MoE sequence parallelism and unsupported speculative combinations. These checks
 do not select a proposer.
 
+External DP servers may each manage one local replica even when all participating
+ranks share a host. In this mode, `data_parallel_size_local=1` does not describe
+the physical host topology, so the same-node check is deferred until worker
+initialization. Before creating Engram resources, every Elastic deployment
+verifies that the distributed world and its CPU group cover the resolved target
+domain, then checks shared-memory access across all ranks. Cross-node or isolated
+IPC deployments are rejected. Keep the per-server local DP size at one for
+external DP launches; the outer launcher controls how many servers run locally.
+
+The Elastic backend uses the current ops-transformer sliced inference API:
+`ElasticBuffer(group, with_grad=False, explicitly_destroy=True, netlayer="auto")`
+and `engram_write(storage, sf=scale, zero_copy=False)`. CPU weight shards are
+copied into the buffer's internal host window; the complete padded E8M0 scale
+table remains on each NPU. Startup checks the constructor/write signatures,
+the complete Tensor-SF fetch ABI, the two-Tensor-argument wait ABI, and the
+2 MiB alignment and capacity of the storage-size hint before native buffer
+creation. The Python wrapper, C++ extension and op_api/OPP must be compatible;
+schema validation alone cannot establish native binary compatibility.
+
 Move `enabled`, `backend` and `overlap` out of the native option into the nested
 additional-config object. The previous flat `enable_engram`,
 `engram_offload_backend`, `multistream_engram_overlap` and `engram_tp_size`

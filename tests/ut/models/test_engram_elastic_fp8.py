@@ -18,6 +18,11 @@ from vllm_ascend.models.deepseek_v41.engram.elastic import ElasticEngramEmbeddin
 
 WEIGHT_KEY = "model.layers.1.engram.embed.weight"
 SCALE_KEY = "model.layers.1.engram.embed.scale"
+FETCH_SCHEMA = (
+    "cann_ops_transformer::engram_fetch(Tensor context, Tensor indices, int hidden_size, "
+    "int num_entries, int dtype, Tensor sf_table, Tensor fetched_sf) -> Tensor"
+)
+WAIT_SCHEMA = "cann_ops_transformer::engram_fetch_wait(Tensor context, Tensor fetched) -> Tensor"
 
 
 def _table(*, storage=None, rows=6, width=4, rank=1):
@@ -59,16 +64,27 @@ def _install_buffer(monkeypatch, global_codes, *, corruption=None):
         @staticmethod
         def get_engram_storage_size_hint(rows, width, dtype):
             assert dtype == torch.float8_e4m3fn
-            return rows * width + 64
+            alignment = 2 * 1024 * 1024
+            return ((rows * width + alignment - 1) // alignment) * alignment
 
-        def __init__(self, group, **kwargs):
+        def __init__(self, group, *, num_cpu_bytes=0, with_grad=False, explicitly_destroy=False, netlayer="auto"):
             type(self).instance = self
+            self.arguments = dict(
+                group=group,
+                num_cpu_bytes=num_cpu_bytes,
+                with_grad=with_grad,
+                explicitly_destroy=explicitly_destroy,
+                netlayer=netlayer,
+            )
             self.waits = 0
             self.destroyed = False
             self.scale = None
             self.storage = None
+            self.zero_copy = None
 
-        def engram_write(self, storage, sf=None):
+        def engram_write(self, storage, sf=None, *, zero_copy=None):
+            self.zero_copy = zero_copy
+            assert zero_copy is False
             if corruption == "write":
                 raise RuntimeError("OPP write failure")
             self.storage = storage.clone()
@@ -103,6 +119,21 @@ def _install_buffer(monkeypatch, global_codes, *, corruption=None):
     monkeypatch.setitem(sys.modules, "cann_ops_transformer", package)
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
     return Buffer
+
+
+def _preflight(monkeypatch, *, fetch_schema=FETCH_SCHEMA, wait_schema=WAIT_SCHEMA):
+    from vllm_ascend.device import hardware_profile
+
+    table = _table()
+    monkeypatch.setattr(table, "_target_device", lambda: SimpleNamespace(type="npu"))
+    monkeypatch.setattr(
+        hardware_profile, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
+    )
+    buffer = _install_buffer(monkeypatch, torch.empty((0, 4), dtype=torch.uint8))
+    for name, schema in (("engram_fetch", fetch_schema), ("engram_fetch_wait", wait_schema)):
+        op = None if schema is None else SimpleNamespace(default=SimpleNamespace(_schema=torch._C.parse_schema(schema)))
+        monkeypatch.setattr(torch.ops.cann_ops_transformer, name, op, raising=False)
+    return table, buffer
 
 
 @pytest.mark.parametrize("storage", [None, "fp8", "mxfp8"])
@@ -154,6 +185,14 @@ def test_fp8_offload_probe_and_inference_match_bf16(tmp_path, monkeypatch, caplo
     table.offload_weights()
     buffer = buffer_cls.instance
     assert table.state is EngramTableState.READY
+    assert buffer.arguments == dict(
+        group=table.group,
+        num_cpu_bytes=2 * 1024 * 1024,
+        with_grad=False,
+        explicitly_destroy=True,
+        netlayer="auto",
+    )
+    assert buffer.zero_copy is False
     assert torch.equal(buffer.storage.view(torch.uint8), codes[3:6])
     assert table._host_weight is None and table._host_scale is None and table._probe_codes is None
     assert table._scale is buffer.scale
@@ -247,6 +286,21 @@ def test_remote_format_failure_never_initializes_buffer(tmp_path, monkeypatch):
     assert table.state is EngramTableState.POISONED and table._scale is None
 
 
+@pytest.mark.parametrize("hint", [0, 1, 2 * 1024 * 1024 + 1, True, float(2 * 1024 * 1024)])
+def test_invalid_storage_size_hint_is_rejected_before_buffer_creation(tmp_path, monkeypatch, hint):
+    codes, _ = _checkpoint(tmp_path)
+    buffer_cls = _install_buffer(monkeypatch, codes)
+    monkeypatch.setattr(buffer_cls, "get_engram_storage_size_hint", staticmethod(lambda *args: hint))
+    table = _table()
+    table.load_checkpoint(tmp_path, WEIGHT_KEY)
+    monkeypatch.setattr(table, "_check_fp8_runtime", lambda cls: None)
+    with pytest.raises(RuntimeError, match="storage size hint"):
+        table.offload_weights()
+    assert buffer_cls.instance is None
+    assert table.state is EngramTableState.POISONED
+    assert table._host_weight is None and table._scale is None
+
+
 def test_scale_capacity_failure_happens_before_elastic_init(tmp_path, monkeypatch):
     codes, _ = _checkpoint(tmp_path)
     buffer_cls = _install_buffer(monkeypatch, codes)
@@ -320,20 +374,9 @@ def test_fetch_failure_poisons_table_without_retry(cause):
     ],
 )
 def test_preflight_rejects_old_python_abi(monkeypatch, schema, has_sf):
-    from vllm_ascend.device import hardware_profile
-
-    table = _table()
-    monkeypatch.setattr(table, "_target_device", lambda: SimpleNamespace(type="npu"))
-    monkeypatch.setattr(
-        hardware_profile, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
-    )
-    monkeypatch.setattr(
-        torch.ops.cann_ops_transformer,
-        "engram_fetch",
-        SimpleNamespace(default=SimpleNamespace(_schema=schema)),
-        raising=False,
-    )
-    buffer = SimpleNamespace(engram_write=(lambda storage, sf=None: None) if has_sf else (lambda storage: None))
+    table, buffer = _preflight(monkeypatch, fetch_schema=schema)
+    if not has_sf:
+        monkeypatch.setattr(buffer, "engram_write", lambda self, storage: None)
     with pytest.raises(RuntimeError, match="tensor-scale ABI|engram_write"):
         table._check_fp8_runtime(buffer)
 
@@ -493,51 +536,51 @@ def test_loaded_library_paths_preserve_spaces_and_deleted_marker(monkeypatch):
 
 
 def test_preflight_accepts_native_tensor_scale_abi(monkeypatch, caplog):
-    from vllm_ascend.device import hardware_profile
-
     caplog.set_level(logging.DEBUG)
-    table = _table()
-    monkeypatch.setattr(table, "_target_device", lambda: SimpleNamespace(type="npu"))
-    monkeypatch.setattr(
-        hardware_profile, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
-    )
-    monkeypatch.setattr(
-        torch.ops.cann_ops_transformer,
-        "engram_fetch",
-        SimpleNamespace(default=SimpleNamespace(_schema="engram_fetch(Tensor sf_table, Tensor fetched_sf) -> Tensor")),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        torch.ops.cann_ops_transformer,
-        "engram_fetch_wait",
-        SimpleNamespace(
-            default=SimpleNamespace(
-                _schema="cann_ops_transformer::engram_fetch_wait(Tensor context, Tensor fetched) -> Tensor"
-            )
-        ),
-        raising=False,
-    )
-    table._check_fp8_runtime(SimpleNamespace(engram_write=lambda storage, sf=None: None))
+    table, buffer = _preflight(monkeypatch)
+    table._check_fp8_runtime(buffer)
     assert "opp_validation=pending-runtime-probe" in caplog.text
+    assert "with_grad=false zero_copy=false netlayer=auto" in caplog.text
 
 
 def test_preflight_rejects_missing_fetch_wait(monkeypatch):
-    from vllm_ascend.device import hardware_profile
+    table, buffer = _preflight(monkeypatch, wait_schema=None)
+    with pytest.raises(RuntimeError, match="registered.*engram_fetch_wait"):
+        table._check_fp8_runtime(buffer)
 
-    table = _table()
-    monkeypatch.setattr(table, "_target_device", lambda: SimpleNamespace(type="npu"))
-    monkeypatch.setattr(
-        hardware_profile, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
-    )
-    monkeypatch.setattr(
-        torch.ops.cann_ops_transformer,
-        "engram_fetch",
-        SimpleNamespace(default=SimpleNamespace(_schema="engram_fetch(Tensor sf_table, Tensor fetched_sf) -> Tensor")),
-        raising=False,
-    )
-    monkeypatch.setattr(torch.ops.cann_ops_transformer, "engram_fetch_wait", None, raising=False)
-    with pytest.raises(RuntimeError, match="registered.*EngramFetchWait"):
-        table._check_fp8_runtime(SimpleNamespace(engram_write=lambda storage, sf=None: None))
+
+def test_preflight_rejects_constructor_without_netlayer(monkeypatch):
+    table, buffer = _preflight(monkeypatch)
+
+    class LegacyBuffer(buffer):
+        def __init__(self, group, *, num_cpu_bytes=0, with_grad=False, explicitly_destroy=False):
+            pass
+
+    with pytest.raises(RuntimeError, match="constructor.*netlayer"):
+        table._check_fp8_runtime(LegacyBuffer)
+
+
+def test_preflight_rejects_write_without_zero_copy(monkeypatch):
+    table, buffer = _preflight(monkeypatch)
+    monkeypatch.setattr(buffer, "engram_write", lambda self, storage, sf=None: None)
+    with pytest.raises(RuntimeError, match="engram_write.*zero_copy=False"):
+        table._check_fp8_runtime(buffer)
+
+
+@pytest.mark.parametrize(
+    "fetch_schema,wait_schema",
+    [
+        (FETCH_SCHEMA.replace("Tensor sf_table, Tensor fetched_sf", "Tensor fetched_sf, Tensor sf_table"), WAIT_SCHEMA),
+        (FETCH_SCHEMA.replace("int hidden_size", "float hidden_size"), WAIT_SCHEMA),
+        (FETCH_SCHEMA.replace(" -> Tensor", " -> (Tensor, Tensor)"), WAIT_SCHEMA),
+        (FETCH_SCHEMA, WAIT_SCHEMA.replace("Tensor fetched)", "Tensor fetched, Tensor fetched_sf)")),
+        (FETCH_SCHEMA, WAIT_SCHEMA.replace(" -> Tensor", " -> (Tensor, Tensor)")),
+    ],
+)
+def test_preflight_checks_complete_fetch_and_wait_signatures(monkeypatch, fetch_schema, wait_schema):
+    table, buffer = _preflight(monkeypatch, fetch_schema=fetch_schema, wait_schema=wait_schema)
+    with pytest.raises(RuntimeError, match="inference tensor-scale ABI"):
+        table._check_fp8_runtime(buffer)
 
 
 def test_preflight_rejects_cpu_runtime():

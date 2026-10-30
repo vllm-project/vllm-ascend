@@ -4,7 +4,9 @@
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_world_group, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 
 from . import ops as _ops  # noqa: F401
 from .elastic import ElasticEngramEmbedding, create_engram_process_group
@@ -27,19 +29,53 @@ class ElasticEngramRuntime:
         self.executor = None
         self.inputs = None
 
+    def _validate_topology(self, expected_world_size: int) -> None:
+        """Collectively verify the target domain before allocating Engram resources."""
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            raise RuntimeError("Engram topology validation requires an initialized distributed process group")
+        world_size = torch.distributed.get_world_size()
+        if world_size != expected_world_size:
+            raise RuntimeError(
+                "Engram requires the PyTorch distributed world to span all configured "
+                f"ranks; runtime={world_size}, configured={expected_world_size}"
+            )
+        cpu_group = get_world_group().cpu_group
+        cpu_world_size = torch.distributed.get_world_size(cpu_group)
+        if cpu_world_size != expected_world_size:
+            raise RuntimeError(
+                "Engram requires the CPU world group to span all configured "
+                f"ranks; cpu_world_size={cpu_world_size}, configured={expected_world_size}"
+            )
+        same_node = in_the_same_node_as(cpu_group)
+        if len(same_node) != expected_world_size:
+            raise RuntimeError(
+                "Engram same-node probe returned an incomplete domain; "
+                f"probe_ranks={len(same_node)}, configured={expected_world_size}"
+            )
+        if not all(same_node):
+            failed_ranks = [rank for rank, local in enumerate(same_node) if not local]
+            raise RuntimeError(
+                "ElasticBuffer Engram requires all participating ranks on the same node "
+                f"and shared-memory namespace; configured={expected_world_size}, failed_ranks={failed_ranks}"
+            )
+        logger.info_once(
+            "Engram topology verified: configured_world_size=%d runtime_world_size=%d "
+            "cpu_world_size=%d node_local=True",
+            expected_world_size,
+            world_size,
+            cpu_world_size,
+        )
+
     def initialize(self):
         if self.tables:
             return
         from vllm_ascend.ascend_config import get_ascend_config
 
         size = get_ascend_config().engram_config.group_size
-        parallel = self.vllm_config.parallel_config
-        expected_world = getattr(parallel, "world_size_across_dp", getattr(parallel, "world_size", 1))
         try:
+            self._validate_topology(size)
             for slot, layer_id in enumerate(self.model.config.engram_layer_ids):
-                group, owns_group = create_engram_process_group(
-                    size, layer_id=layer_id, expected_world_size=expected_world
-                )
+                group, owns_group = create_engram_process_group(size, layer_id=layer_id, expected_world_size=size)
                 rows = self.model.config.engram_num_embeddings[slot]
                 minimum = sum(size for order in self.model.engram_layout.primes[slot] for size in order)
                 try:

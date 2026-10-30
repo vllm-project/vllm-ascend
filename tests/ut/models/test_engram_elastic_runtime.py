@@ -41,7 +41,30 @@ def runtime():
 
 
 @pytest.fixture
-def initialization(monkeypatch):
+def topology(monkeypatch):
+    from vllm_ascend.models.deepseek_v41.engram import runtime as runtime_mod
+
+    cpu_group = object()
+    initialized = Mock(return_value=True)
+    world_size = Mock(return_value=4)
+    world_group = Mock(return_value=SimpleNamespace(cpu_group=cpu_group))
+    same_node = Mock(return_value=[True] * 4)
+    monkeypatch.setattr(torch.distributed, "is_available", Mock(return_value=True))
+    monkeypatch.setattr(torch.distributed, "is_initialized", initialized)
+    monkeypatch.setattr(torch.distributed, "get_world_size", world_size)
+    monkeypatch.setattr(runtime_mod, "get_world_group", world_group)
+    monkeypatch.setattr(runtime_mod, "in_the_same_node_as", same_node)
+    return SimpleNamespace(
+        cpu_group=cpu_group,
+        initialized=initialized,
+        world_size=world_size,
+        world_group=world_group,
+        same_node=same_node,
+    )
+
+
+@pytest.fixture
+def initialization(monkeypatch, topology):
     from vllm_ascend import ascend_config
     from vllm_ascend.models.deepseek_v41.engram import runtime as runtime_mod
 
@@ -69,18 +92,65 @@ def initialization(monkeypatch):
     return rt, factory, tables, groups
 
 
-def test_initialize_binds_every_table_to_model_device_and_is_idempotent(initialization):
+def test_initialize_binds_every_table_to_model_device_and_is_idempotent(initialization, topology):
     rt, factory, tables, groups = initialization
     rt.initialize()
     rt.initialize()
+    topology.same_node.assert_called_once_with(topology.cpu_group)
     assert factory.call_count == groups.call_count == 2
     assert rt.tables == dict(zip([1, 14], tables))
-    for call, layer_id, table in zip(factory.call_args_list, [1, 14], tables):
+    for call, group_call, layer_id, table in zip(factory.call_args_list, groups.call_args_list, [1, 14], tables):
+        assert group_call.args == (4,) and group_call.kwargs["expected_world_size"] == 4
         assert call.kwargs["device"] == rt.model.topk_indices_buffer.device
         assert call.kwargs["layer_id"] == layer_id and call.kwargs["minimum_rows"] == 64
         table.load_checkpoint.assert_called_once_with("/checkpoint", f"layers.{layer_id}.engram.embed.weight")
         table.offload_weights.assert_called_once()
         assert rt.model.layers[layer_id].engram.embed_tokens is table
+
+
+def test_initialize_uses_resolved_target_domain_when_draft_parallel_world_is_smaller(initialization):
+    rt, factory, tables, groups = initialization
+    rt.vllm_config.parallel_config.world_size_across_dp = 1
+    rt.initialize()
+    assert factory.call_count == 2
+    assert all(call.args == (4,) and call.kwargs["expected_world_size"] == 4 for call in groups.call_args_list)
+
+
+@pytest.mark.parametrize("runtime_world,cpu_world", [(1, 4), (4, 1)])
+def test_initialize_rejects_incomplete_worlds_before_allocating_resources(
+    initialization, topology, runtime_world, cpu_world
+):
+    rt, factory, tables, groups = initialization
+    topology.world_size.side_effect = lambda group=None: cpu_world if group is topology.cpu_group else runtime_world
+    with pytest.raises(RuntimeError, match="span all configured ranks"):
+        rt.initialize()
+    topology.same_node.assert_not_called()
+    groups.assert_not_called()
+    factory.assert_not_called()
+    assert not rt.tables
+
+
+def test_initialize_requires_distributed_startup_before_locality_probe(initialization, topology):
+    rt, factory, tables, groups = initialization
+    topology.initialized.return_value = False
+    with pytest.raises(RuntimeError, match="initialized distributed process group"):
+        rt.initialize()
+    topology.world_group.assert_not_called()
+    topology.same_node.assert_not_called()
+    groups.assert_not_called()
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("same_node", [[True, True, False, False], [True, False, False, False], [True]])
+def test_initialize_rejects_cross_node_or_isolated_ipc_before_allocating_resources(initialization, topology, same_node):
+    rt, factory, tables, groups = initialization
+    topology.same_node.return_value = same_node
+    with pytest.raises(RuntimeError, match="same node|same-node probe"):
+        rt.initialize()
+    topology.same_node.assert_called_once_with(topology.cpu_group)
+    groups.assert_not_called()
+    factory.assert_not_called()
+    assert not rt.tables
 
 
 def test_initialize_failure_closes_tables_before_returning(initialization):
