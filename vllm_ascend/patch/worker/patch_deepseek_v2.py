@@ -9,6 +9,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -23,16 +24,19 @@ from vllm.model_executor.layers.mla import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekAttention,
+    DeepseekV2DecoderLayer,
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
+    DeepseekV2MLP,
     DeepseekV2Model,
     Indexer,
     _get_llama_4_scaling,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import extract_layer_index, sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
@@ -321,6 +325,68 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
 DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
+def _deepseek_v2_decoder_layer_forward(
+    self,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    llama_4_scaling: torch.Tensor | None = None,
+    *,
+    input_is_sequence_parallel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """DeepSeek V2 decoder forward with explicit SP input state.
+
+    Upstream infers sequence-parallel input from a shape mismatch. For a
+    one-token decode batch on TP2, both the full and rank-local token counts are
+    one, so that check mistakes a rank-local shard for the full batch and skips
+    the all-gather before attention.
+    """
+    full_num_tokens = positions.shape[0]
+    input_is_sequence_parallel = self.use_sequence_parallel_moe and input_is_sequence_parallel
+
+    if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+    else:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+    if input_is_sequence_parallel:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+
+    if self.use_mha:
+        hidden_states = self.self_attn(positions, hidden_states)
+    else:
+        hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
+
+    if not isinstance(self.self_attn, DeepseekAttention) and hidden_states.dtype == torch.float16:
+        hidden_states *= 1.0 / self.routed_scaling_factor
+        if self.layer_idx == 0:
+            residual *= 1.0 / self.routed_scaling_factor
+
+    if self.use_sequence_parallel_moe:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        sp_pad = (-hidden_states.shape[0]) % tp_world_size
+        # Keep zero padding in the compiled graph: an even profiling batch can
+        # be followed by an odd prefill batch, and collectives need contiguous
+        # storage even when the current batch requires no extra rows.
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+        hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        if not input_is_sequence_parallel:
+            residual = sequence_parallel_chunk(residual)
+
+    hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+    if self.use_sequence_parallel_moe:
+        hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+    else:
+        hidden_states = self.mlp(hidden_states)
+
+    if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        hidden_states *= 1.0 / self.routed_scaling_factor
+
+    return hidden_states, residual
+
+
 # Reuse upstream slot bookkeeping; Ascend owns capture and TP gathering.
 for _member in (
     "AUX_HIDDEN_STATE_KEY",
@@ -345,11 +411,19 @@ def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
 DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
 
 
-def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, residual, positions):
+def _capture_aux_hidden_state(
+    self,
+    aux_hidden_states,
+    layer_id,
+    hidden_states,
+    residual,
+    positions,
+    hidden_states_are_sequence_parallel: bool,
+):
     if layer_id not in self.aux_hidden_state_layers:
         return
     aux_hidden_state = hidden_states if residual is None else hidden_states + residual
-    if aux_hidden_state.shape[0] != positions.shape[0]:
+    if hidden_states_are_sequence_parallel:
         aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
         aux_hidden_state = aux_hidden_state[: positions.shape[0]]
     aux_hidden_states.append(aux_hidden_state)
@@ -384,6 +458,13 @@ def _patched_forward(
                 pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
             )
 
+    # The first PP stage starts with replicated embeddings. A later stage keeps
+    # the existing shape-based fallback because current IntermediateTensors do
+    # not carry the SP layout flag yet.
+    hidden_states_are_sequence_parallel = (
+        False if pp_group.is_first_rank else hidden_states.shape[0] != positions.shape[0]
+    )
+
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
     if llama_4_scaling_config is not None:
@@ -396,14 +477,50 @@ def _patched_forward(
         llama_4_scaling = None
 
     if pp_group.is_first_rank:
-        _capture_aux_hidden_state(self, aux_hidden_states, 0, hidden_states, residual, positions)
+        _capture_aux_hidden_state(
+            self,
+            aux_hidden_states,
+            0,
+            hidden_states,
+            residual,
+            positions,
+            hidden_states_are_sequence_parallel,
+        )
     for idx, layer in enumerate(
         islice(self.layers, self.start_layer, self.end_layer),
         start=self.start_layer,
     ):
-        hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+        use_sequence_parallel = bool(getattr(layer, "use_sequence_parallel_moe", False))
+        if hidden_states_are_sequence_parallel and not use_sequence_parallel:
+            combined_states = torch.cat([hidden_states, residual], dim=-1)
+            combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+            combined_states = combined_states[: positions.shape[0]]
+            hidden_size = self.hidden_size
+            hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+            hidden_states_are_sequence_parallel = False
+
+        if isinstance(layer, DeepseekV2DecoderLayer):
+            hidden_states, residual = _deepseek_v2_decoder_layer_forward(
+                layer,
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                input_is_sequence_parallel=hidden_states_are_sequence_parallel,
+            )
+        else:
+            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+        hidden_states_are_sequence_parallel = use_sequence_parallel
         # A boundary state belongs to the stage producing it, including end_layer.
-        _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
+        _capture_aux_hidden_state(
+            self,
+            aux_hidden_states,
+            idx + 1,
+            hidden_states,
+            residual,
+            positions,
+            hidden_states_are_sequence_parallel,
+        )
 
     if not pp_group.is_last_rank:
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
@@ -429,7 +546,7 @@ def _patched_forward(
             )
         return pp_output
 
-    if hidden_states.shape[0] != positions.shape[0]:
+    if hidden_states_are_sequence_parallel:
         combined_states = torch.cat([hidden_states, residual], dim=-1)
         combined_states = tensor_model_parallel_all_gather(combined_states, 0)
         combined_states = combined_states[: positions.shape[0]]

@@ -11,6 +11,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
 import vllm_ascend.worker.v2.pp_transport as pp_transport
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
+    _deepseek_v2_decoder_layer_forward,
     _patched_deepseek_v2_model_init,
     _patched_forward,
     _should_skip_indexer_init,
@@ -80,6 +81,245 @@ def test_mtp_layer_keeps_indexer():
         "model.layers.80.self_attn",
         skip_topk=True,
     )
+
+
+def test_single_token_sp_decoder_gathers_rank_local_state(monkeypatch):
+    gather_calls = []
+
+    def all_gather(hidden_states, dim):
+        gather_calls.append(tuple(hidden_states.shape))
+        return torch.cat([hidden_states, hidden_states + 1], dim=dim)
+
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", all_gather)
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_reduce_scatter", lambda value, dim: value[:1])
+
+    def norm(hidden_states, residual=None):
+        return hidden_states, hidden_states if residual is None else residual
+
+    def attention(_positions, hidden_states, _scaling=None):
+        return hidden_states
+
+    layer = SimpleNamespace(
+        use_sequence_parallel_moe=True,
+        use_mha=False,
+        input_layernorm=norm,
+        post_attention_layernorm=norm,
+        self_attn=attention,
+        mlp=lambda hidden_states, **_kwargs: hidden_states,
+        routed_scaling_factor=1.0,
+        layer_idx=1,
+    )
+    hidden_states = torch.tensor([[2.0]])
+    residual = torch.tensor([[1.0]])
+
+    output, output_residual = _deepseek_v2_decoder_layer_forward(
+        layer,
+        positions=torch.tensor([0]),
+        hidden_states=hidden_states,
+        residual=residual,
+        input_is_sequence_parallel=True,
+    )
+
+    assert gather_calls == [(1, 1)]
+    torch.testing.assert_close(output, hidden_states)
+    torch.testing.assert_close(output_residual, residual)
+
+
+def test_forward_gathers_explicit_sp_state_when_local_rows_equal_full(monkeypatch):
+    gather_calls = []
+    group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: group)
+
+    def all_gather(hidden_states, dim):
+        gather_calls.append(tuple(hidden_states.shape))
+        return torch.cat([hidden_states, hidden_states + 1], dim=dim)
+
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", all_gather)
+
+    def layer(_positions, hidden_states, residual, _scaling):
+        return hidden_states + 1, torch.zeros_like(hidden_states) if residual is None else residual
+
+    layer.use_sequence_parallel_moe = True
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        hidden_size=2,
+        layers=[layer],
+        start_layer=0,
+        end_layer=1,
+        aux_hidden_state_layers=(),
+        _use_upstream_aux_relay=False,
+        send_pp_topk_indices=False,
+        embed_input_ids=lambda ids: torch.ones((len(ids), 2)),
+        norm=lambda hidden_states, residual: (hidden_states + residual, None),
+    )
+
+    output = _patched_forward(model, torch.tensor([1]), torch.tensor([0]), None)
+
+    assert gather_calls == [(1, 4)]
+    torch.testing.assert_close(output, torch.full((1, 2), 2.0))
+
+
+@pytest.mark.parametrize("num_tokens", [1, 3, 4])
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("input_is_sp", [False, True])
+def test_sp_decoder_keeps_residual_aligned(monkeypatch, num_tokens, rank, input_is_sp):
+    import vllm.model_executor.models.utils as model_utils
+
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(model_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(model_utils, "get_tensor_model_parallel_rank", lambda: rank)
+    # Exercise upstream's padding/chunk implementation, including the padded
+    # rank when one token is distributed over two ranks.
+    monkeypatch.setattr(patch_deepseek_v2, "sequence_parallel_chunk", model_utils.sequence_parallel_chunk_impl)
+    full = torch.arange(num_tokens * 4, dtype=torch.float32).reshape(num_tokens, 4)[:, ::2]
+    local = model_utils.sequence_parallel_chunk_impl(full)
+    gather_calls = []
+
+    def gather(value, dim):
+        gather_calls.append(tuple(value.shape))
+        return torch.nn.functional.pad(full, (0, 0, 0, num_tokens % 2))
+
+    def norm(value, residual=None):
+        if residual is not None:
+            assert value.shape == residual.shape
+        return value, value if residual is None else residual
+
+    layer = SimpleNamespace(
+        use_sequence_parallel_moe=True,
+        use_mha=False,
+        input_layernorm=lambda value, residual=None: value if residual is None else (value, residual),
+        post_attention_layernorm=norm,
+        self_attn=lambda positions, value, scaling: value,
+        mlp=lambda value, **kwargs: value,
+        routed_scaling_factor=1.0,
+        layer_idx=1,
+    )
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", gather)
+
+    def reduce_scatter(value, dim):
+        assert value.is_contiguous()
+        return value.chunk(2, dim)[rank]
+
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_reduce_scatter", reduce_scatter)
+    output, residual = _deepseek_v2_decoder_layer_forward(
+        layer,
+        torch.arange(num_tokens),
+        local if input_is_sp else full,
+        local if input_is_sp else None,
+        input_is_sequence_parallel=input_is_sp,
+    )
+    assert len(gather_calls) == int(input_is_sp)
+    torch.testing.assert_close(output, local)
+    torch.testing.assert_close(residual, local)
+
+
+@pytest.mark.parametrize("sp_layouts", [(False, True, True), (True, False), (True, True)])
+def test_forward_passes_layout_across_decoder_boundaries(monkeypatch, sp_layouts):
+    group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: group)
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", lambda value, dim: value.repeat(2, 1))
+    seen = []
+
+    def decoder(layer, positions, hidden, residual, scaling, *, input_is_sequence_parallel):
+        seen.append(input_is_sequence_parallel)
+        assert hidden.shape[0] == (2 if input_is_sequence_parallel else 4)
+        if layer.use_sequence_parallel_moe:
+            hidden = hidden[:2]
+        return hidden, torch.zeros_like(hidden)
+
+    monkeypatch.setattr(patch_deepseek_v2, "_deepseek_v2_decoder_layer_forward", decoder)
+    layers = []
+    for enabled in sp_layouts:
+        layer = patch_deepseek_v2.DeepseekV2DecoderLayer.__new__(patch_deepseek_v2.DeepseekV2DecoderLayer)
+        torch.nn.Module.__init__(layer)
+        layer.use_sequence_parallel_moe = enabled
+        layers.append(layer)
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        hidden_size=2,
+        layers=layers,
+        start_layer=0,
+        end_layer=len(layers),
+        aux_hidden_state_layers=tuple(range(len(layers) + 1)),
+        _use_upstream_aux_relay=False,
+        send_pp_topk_indices=False,
+        embed_input_ids=lambda ids: torch.ones((len(ids), 2)),
+        norm=lambda hidden, residual: (hidden + residual, None),
+    )
+    output, auxiliary = _patched_forward(model, torch.arange(4), torch.arange(4), None)
+    assert seen == [False] + [previous and current for previous, current in zip(sp_layouts, sp_layouts[1:])]
+    torch.testing.assert_close(output, torch.ones((4, 2)))
+    assert all(value.shape == (4, 2) for value in auxiliary)
+
+
+@pytest.mark.parametrize("input_is_sp", [False, True])
+def test_sp_decoder_compiles_with_explicit_layout(monkeypatch, input_is_sp):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", lambda value, dim: value.repeat(2, 1))
+    monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_reduce_scatter", lambda value, dim: value[:1])
+    monkeypatch.setattr(patch_deepseek_v2, "sequence_parallel_chunk", lambda value: value[:1])
+    layer = SimpleNamespace(
+        use_sequence_parallel_moe=True,
+        use_mha=False,
+        input_layernorm=lambda value, residual: (value + residual, residual),
+        post_attention_layernorm=lambda value, residual: (value, residual),
+        self_attn=lambda positions, value, scaling: value,
+        mlp=lambda value, **kwargs: value,
+        routed_scaling_factor=1.0,
+        layer_idx=1,
+    )
+    args = (layer, torch.tensor([0]), torch.ones((1, 2)), torch.ones((1, 2)))
+    torch._dynamo.reset()
+    try:
+        with torch.inference_mode():
+            expected = _deepseek_v2_decoder_layer_forward(*args, input_is_sequence_parallel=input_is_sp)
+            actual = torch.compile(_deepseek_v2_decoder_layer_forward, backend="eager", fullgraph=True)(
+                *args, input_is_sequence_parallel=input_is_sp
+            )
+        torch.testing.assert_close(actual, expected)
+    finally:
+        torch._dynamo.reset()
+
+
+def test_sp_decoder_export_preserves_padding_for_odd_runtime_batch(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        patch_deepseek_v2, "tensor_model_parallel_reduce_scatter", lambda value, dim: value.reshape(2, -1, 2)[0]
+    )
+    monkeypatch.setattr(
+        patch_deepseek_v2,
+        "sequence_parallel_chunk",
+        lambda value: torch.nn.functional.pad(value, (0, 0, 0, (-value.shape[0]) % 2)).reshape(2, -1, 2)[0],
+    )
+    layer = SimpleNamespace(
+        use_sequence_parallel_moe=True,
+        use_mha=False,
+        input_layernorm=lambda value, residual: (value, residual),
+        post_attention_layernorm=lambda value, residual: (value, residual),
+        self_attn=lambda positions, value, scaling: value,
+        mlp=lambda value, **kwargs: value,
+        routed_scaling_factor=1.0,
+        layer_idx=1,
+    )
+
+    def forward(positions, hidden):
+        return _deepseek_v2_decoder_layer_forward(layer, positions, hidden, hidden)
+
+    torch._dynamo.reset()
+    try:
+        # npugraph_ex can reuse the graph built from an even profiling batch
+        # for an odd prefill batch. Run that graph directly to exercise the
+        # symbolic padding, independently of Dynamo's Python recompile guards.
+        exported = torch._dynamo.export(forward, aten_graph=True)(torch.arange(4), torch.ones((4, 2)))
+        output, residual = exported.graph_module(torch.arange(3), torch.ones((3, 2)))
+        expected = torch.ones((2, 2))
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(residual, expected)
+    finally:
+        torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("last_rank", [False, True])
