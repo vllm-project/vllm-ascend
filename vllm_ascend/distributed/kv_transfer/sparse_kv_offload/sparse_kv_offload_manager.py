@@ -1881,7 +1881,8 @@ class SparseKVOffloadManager:
         owners = np.asarray(generations, dtype=np.int64)
         prefixes = np.asarray(stable_prefixes, dtype=np.int64)
         if slots.ndim != 1 or owners.shape != slots.shape or prefixes.shape != slots.shape:
-            raise ValueError("delayed D2H slot, generation, and stable-prefix vectors must be one-dimensional and equal")
+            raise ValueError(
+                "delayed D2H slot/generation/stable-prefix vectors must be 1-D and equal")
         if np.any((slots < 0) | (slots >= self.d2h_capacity)):
             raise ValueError("delayed D2H pool slot is outside the configured capacity")
         if np.unique(slots).size != slots.size:
