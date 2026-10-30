@@ -376,6 +376,9 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         output = self._inner.get_output()
+        guard = getattr(self._runner, "runtime_guard", None)
+        if guard is not None:
+            guard.consume_rare_pairs(output)
         _safe_check_after_sample(self._runner, output)
         return output
 

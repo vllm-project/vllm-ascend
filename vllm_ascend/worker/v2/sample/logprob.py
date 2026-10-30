@@ -128,7 +128,9 @@ def _v35_finish(PMax, PSum, X, stride, Sampled, Out, N: tl.constexpr, PARTS: tl.
 def compute_top1_and_chosen_logprobs(
     logits: torch.Tensor,
     chosen_token_ids: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    packed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
     """Sampler-side narrow collect: top-1 and chosen logprobs from raw logits.
 
     Uses the v35 two-kernel Triton path (partitioned max+sum-exp, then LSE +
@@ -181,6 +183,8 @@ def compute_top1_and_chosen_logprobs(
         block_p,
         num_warps=1,
     )
+    if packed:
+        return out
     return out[:, 0], out[:, 1]
 
 
