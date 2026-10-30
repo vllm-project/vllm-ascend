@@ -544,10 +544,9 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
-        # Model-specific submission policy is owned by the model state.
-        initialize_submission = getattr(self.model_state, "initialize_decode_submission", None)
-        if callable(initialize_submission):
-            initialize_submission(self)
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -815,12 +814,6 @@ class NPUModelRunner(GPUModelRunner):
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
 
-    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
-        before_requests = getattr(getattr(self, "model_state", None), "before_decode_requests", None)
-        if callable(before_requests):
-            before_requests(self, scheduler_output)
-        super().finish_requests(scheduler_output)
-
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
@@ -856,12 +849,7 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        prepare_seq_lens = getattr(getattr(self, "model_state", None), "prepare_decode_seq_lens", None)
-        if (
-            not callable(prepare_seq_lens)
-            or prepare_seq_lens(self, scheduler_output, batch_req_state, batch_desc) is not True
-        ):
-            self._update_seq_lens_cpu(scheduler_output, req_ids)
+        self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
@@ -1291,6 +1279,10 @@ class NPUModelRunner(GPUModelRunner):
         if is_deepseek_v41(self.model_config.hf_config):
             return True
 
+        model_can_skip = getattr(getattr(self, "model_state", None), "can_skip_spec_cpu_length_sync", None)
+        if callable(model_can_skip) and model_can_skip() is True:
+            return True
+
         spec = self.speculative_config
         if (  # noqa: SIM103
             spec is not None
@@ -1381,9 +1373,6 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
-        record_snapshot = getattr(getattr(self, "model_state", None), "record_decode_snapshot", None)
-        if callable(record_snapshot):
-            record_snapshot(self, default_stream)
 
     def _update_seq_lens_cpu(
         self,

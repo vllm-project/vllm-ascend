@@ -356,43 +356,39 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ### 9.3 Model Runner V2 Decode Submission
 
-The following `--additional-config` boolean options default to `false`
-(disabled). Qwen3.8 Flash Next owns the submission policy in
-`models/qwen4_exp/`, for target architectures `Qwen4ExpForCausalLM` and
-`Qwen4ExpForConditionalGeneration`. Its model state initializes the policy and
-validates the target/draft attention consumers before admission. The shared
-runner only calls optional model-state hooks; other models retain their original
-path even when both options are `true`.
+The `--additional-config` boolean `enable_decode_early_queue` defaults to
+`false` (disabled). It lets audited Qwen3.8 Flash Next Model Runner V2 consumers
+use optimistic CPU length bounds while exact execution lengths remain on device.
+The resolved target architecture must be `Qwen4ExpForCausalLM` or
+`Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
 
-| Option | Behavior |
-| --- | --- |
-| `enable_decode_early_queue` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
-| `enable_mm_decode_early_queue` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding option. |
-
-Set the first option to `true` to enable text and stable PD decode submission.
-To enable the completed-prompt multimodal extension as well, include both keys
-in the existing `--additional-config` JSON:
+Merge this option into the service's existing `--additional-config` JSON:
 
 ```bash
---additional-config '{"enable_decode_early_queue":true,"enable_mm_decode_early_queue":true}'
+--additional-config '{"enable_decode_early_queue":true}'
 ```
 
-Early submission replaces the CPU corrected-length wait with a device-stream
-wait. Exact positions, accepted counts, KV slots, recurrent state, and weight
-offload dependencies remain unchanged. It requires the model-owned capability
-and supported backend consumers, fixed positive MTP K, DCP1/PCP1, a uniform local FULL decode
-batch, and a matching same-stream snapshot. Stable Mooncake pull-consumer decode
-also requires completed KV receipt and an exact readiness certificate. Pending
-transfers, new or changing requests, unsupported connectors, active encoder work,
-LoRA, DBO, dynamic/adaptive drafting, and structured output retain the original
-synchronized path. Multimodal certificates bind request, slot, media and encoder
-cache identities; realtime media, prompt embeddings and unaudited layouts retain
-the original path.
+The model checks the initialized target and MTP draft attention consumers once
+after KV initialization. A supported model skips both the corrected-count D2H
+copy and its CPU synchronization, using the runner's existing paired exemption.
+Exact positions, accepted counts, KV slots and recurrent state still use device
+state. Existing connector loads, waits, acknowledgements and errors are unchanged.
 
-There is no blanket TP8, DP1, PP1, SP-off, prefix-cache-off or weight-offload gate.
-Admission is per local batch; PP stages without a local MTP count producer retain
-their original synchronization. Underlying model and runtime restrictions still
-apply.
+The same option covers text and ordinary non-realtime multimodal requests.
+Completed prompts use the existing encoder gather fast path; there are no extra
+media certificates or PD observers. The earlier unmerged
+`enable_mm_decode_early_queue` option is removed.
+
+Unknown target/draft consumers, context parallelism, sparse KV offload and
+realtime media retain exact CPU synchronization. The runner's existing PP
+exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off,
+prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement.
+Underlying model/runtime restrictions still apply.
+
+The decision is fixed for the model state's initialized lifetime so production
+and consumption cannot switch independently between batches. Change the option
+when starting the service; changing it in memory does not toggle a running model.
+Initialization drains the old copy stream once before enabling the exemption.
 
 ## 10 FAQ
 

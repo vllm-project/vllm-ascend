@@ -16,17 +16,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
-
-if TYPE_CHECKING:
-    from vllm_ascend.models.qwen4_exp.decode_queue import QwenDecodeQueueCapability
-    from vllm_ascend.models.qwen4_exp.decode_submission import DecodeQueueController
 
 
 class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
@@ -39,64 +35,26 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     (``update_full_graph_params`` reads ``model_state.attn_metadata``).
     """
 
-    _decode_submission: DecodeQueueController | None
+    _skip_spec_cpu_length_sync: bool
 
-    def initialize_decode_submission(self, runner: Any) -> None:
-        """Create model-owned scheduling proofs after each KV initialization."""
-        previous = getattr(self, "_decode_submission", None)
-        if previous is not None:
-            previous.invalidate()
-        self._decode_submission = None
-        connector = getattr(runner, "kv_connector", None)
-        if connector is not None:
-            from vllm_ascend.models.qwen4_exp.decode_queue_connector import unwrap_pd_decode_queue_connector
+    def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
+        """Bind length consumers once, after target and draft KV initialization."""
+        from vllm_ascend.models.qwen4_exp.cpu_length_sync import can_skip_qwen_cpu_length_sync
 
-            # Even an opt-out or a fresh profiling model state must detach an
-            # earlier queue observer before returning to the baseline path.
-            runner.kv_connector = unwrap_pd_decode_queue_connector(connector)
-        if self.get_decode_queue_capability(runner) is None:
+        self._skip_spec_cpu_length_sync = False
+        if not can_skip_qwen_cpu_length_sync(runner):
             return
-        config = getattr(runner, "ascend_config", None)
-        if getattr(config, "enable_decode_early_queue", False) is not True:
+        stream = getattr(runner, "num_computed_tokens_stream", None)
+        if stream is None or not callable(getattr(stream, "synchronize", None)):
             return
-        from vllm.config.compilation import CUDAGraphMode
+        # Retire any profiling/previous-initialization copy before dropping
+        # both its producer and consumer. This runs once, never per token.
+        stream.synchronize()
+        self._skip_spec_cpu_length_sync = True
 
-        from vllm_ascend.models.qwen4_exp.decode_submission import DecodeQueueController
-
-        controller = DecodeQueueController(
-            enabled=True,
-            multimodal=getattr(config, "enable_mm_decode_early_queue", False) is True,
-            full_graph_mode=CUDAGraphMode.FULL,
-        )
-        if controller.initialize(runner):
-            self._decode_submission = controller
-
-    def before_decode_requests(self, runner: Any, output: Any) -> None:
-        controller = getattr(self, "_decode_submission", None)
-        if controller is not None:
-            controller.before_requests_for_runner(runner, output)
-
-    def prepare_decode_seq_lens(self, runner: Any, output: Any, batch: Any, desc: Any) -> bool:
-        controller = getattr(self, "_decode_submission", None)
-        return controller is not None and controller.prepare_seq_lens(runner, output, batch, desc)
-
-    def record_decode_snapshot(self, runner: Any, source_stream: Any) -> None:
-        controller = getattr(self, "_decode_submission", None)
-        if controller is not None:
-            controller.record_runner_snapshot(runner, source_stream)
-
-    def get_decode_queue_capability(self, runner: Any) -> QwenDecodeQueueCapability | None:
-        """Bind the Qwen submission policy to audited model consumers."""
-        if (
-            type(self) is not AscendQwen4ExpModelState
-            or getattr(runner, "model_state", None) is not self
-            or getattr(getattr(runner, "model_config", None), "architecture", None)
-            not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
-        ):
-            return None
-        from vllm_ascend.models.qwen4_exp.decode_queue import QwenDecodeQueueCapability
-
-        return QwenDecodeQueueCapability()
+    def can_skip_spec_cpu_length_sync(self) -> bool:
+        """Keep the D2H producer and consumer on the same stable decision."""
+        return getattr(self, "_skip_spec_cpu_length_sync", False) is True
 
 
 __all__ = ["AscendQwen4ExpModelState"]
