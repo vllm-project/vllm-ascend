@@ -70,17 +70,37 @@ SAMPLING_LEN_TOL = 32  # same-seed sampling length tolerance (NPU nondet)
 CASES = [  # (lang, length, prompt, strict)
     ("zh", "short", "用一句话解释重力。", True),
     ("zh", "short", "写一个 Python 函数判断回文字符串。", True),
-    ("zh", "long", "请详细对比 Adam 与 SGD 优化器的原理、优缺点和适用场景，"
-     + "并给出在训练小型 Transformer 时的实践建议与常见陷阱。" * 90, True),  # ~3.7k tokens
+    (
+        "zh",
+        "long",
+        "请详细对比 Adam 与 SGD 优化器的原理、优缺点和适用场景，"
+        + "并给出在训练小型 Transformer 时的实践建议与常见陷阱。" * 90,
+        True,
+    ),  # ~3.7k tokens
     ("en", "short", "Explain gravity in one sentence.", False),  # open-ended
     ("en", "short", "Write a Python function to check palindromes.", True),
-    ("en", "long", "Compare Adam and SGD optimizers in detail, "
-     + "and give practical advice and common pitfalls for small Transformers. " * 185, False),  # ~3.7k tokens, open-ended
-    ("zh", "long", "总结以下编程规范要点并逐条举例说明其对工程的影响："
-     + "命名、注释、错误处理、测试与评审。每次阐述务必具体。"
-     + "请分点展开论述并给出代码级示例。" * 65, False),  # ~3.6k tokens, open-ended (run-to-run rouge 0.73-0.84: borderline)
-    ("en", "long", "Describe the trade-offs between microservices and a modular "
-     + "monolith, covering deployment, observability and data ownership. " * 170, False),  # ~3.7k tokens, open-ended
+    (
+        "en",
+        "long",
+        "Compare Adam and SGD optimizers in detail, "
+        + "and give practical advice and common pitfalls for small Transformers. " * 185,
+        False,
+    ),  # ~3.7k tokens, open-ended
+    (
+        "zh",
+        "long",
+        "总结以下编程规范要点并逐条举例说明其对工程的影响："
+        + "命名、注释、错误处理、测试与评审。每次阐述务必具体。"
+        + "请分点展开论述并给出代码级示例。" * 65,
+        False,
+    ),  # ~3.6k tokens, open-ended (run-to-run rouge_l 0.73-0.84: borderline)
+    (
+        "en",
+        "long",
+        "Describe the trade-offs between microservices and a modular "
+        + "monolith, covering deployment, observability and data ownership. " * 170,
+        False,
+    ),  # ~3.7k tokens, open-ended
 ]
 
 # Sampling self-consistency reuses one prompt per (lang, length) tier.
@@ -224,7 +244,7 @@ def test_greedy_vs_hf(llm_and_tok, hf_ref, lang, length, prompt, strict):
     ids = tok_hf(text, return_tensors="pt")
     with torch.no_grad():
         gen = hf_model.generate(**ids, max_new_tokens=MAX_NEW, do_sample=False)
-    hf_text = tok_hf.decode(gen[0][ids["input_ids"].shape[1]:], skip_special_tokens=True)
+    hf_text = tok_hf.decode(gen[0][ids["input_ids"].shape[1] :], skip_special_tokens=True)
 
     n_target = PREFIX_SHORT if length == "short" else PREFIX_LONG
     min_eq = PREFIX_SHORT_MIN_EQ if length == "short" else PREFIX_LONG_MIN_EQ
@@ -237,9 +257,7 @@ def test_greedy_vs_hf(llm_and_tok, hf_ref, lang, length, prompt, strict):
 
     if strict:
         assert eq >= min_eq, f"{lang}/{length}: prefix_equal {eq}/{n_target} < {min_eq}"
-        assert ed >= EDIT_DIST_MIN or rl >= ROUGE_L_MIN, (
-            f"{lang}/{length}: edit_dist={ed:.3f} rouge_l={rl:.3f}"
-        )
+        assert ed >= EDIT_DIST_MIN or rl >= ROUGE_L_MIN, f"{lang}/{length}: edit_dist={ed:.3f} rouge_l={rl:.3f}"
     else:
         assert ed >= OPEN_EDIT_DIST_MIN and rl >= OPEN_ROUGE_L_MIN, (
             f"{lang}/{length} (open-ended): edit_dist={ed:.3f} < {OPEN_EDIT_DIST_MIN} "
@@ -262,8 +280,7 @@ def test_sampling_self_consistency(llm_and_tok, lang, length, prompt):
     a = llm.generate([text], sp)[0].outputs[0]
     b = llm.generate([text], sp)[0].outputs[0]
     ed = norm_edit_distance(a.text, b.text)
-    print(f"{lang}/{length}: run1_len={len(a.token_ids)} run2_len={len(b.token_ids)} "
-          f"edit_dist={ed:.4f}")
+    print(f"{lang}/{length}: run1_len={len(a.token_ids)} run2_len={len(b.token_ids)} edit_dist={ed:.4f}")
     assert abs(len(a.token_ids) - len(b.token_ids)) <= SAMPLING_LEN_TOL, (
         f"{lang}/{length}: length {len(a.token_ids)} vs {len(b.token_ids)}"
     )
@@ -271,21 +288,24 @@ def test_sampling_self_consistency(llm_and_tok, lang, length, prompt):
 
 
 def test_boundary_inputs(llm_and_tok):
-    """Boundary inputs: empty string errors explicitly; over-length raises
-    ValueError (no silent truncation)."""
+    """Boundary inputs: empty string errors explicitly; non-string input is
+    rejected; over-length raises VLLMValidationError (no silent truncation).
+    Exception types follow vLLM's InputProcessor: empty/over-length decoder
+    prompts raise VLLMValidationError, non-string prompts raise TypeError."""
     from vllm import SamplingParams
+    from vllm.exceptions import VLLMValidationError
 
     llm, _ = llm_and_tok
     sp = SamplingParams(temperature=0, max_tokens=8)
 
     # Empty prompt: must fail explicitly (not silently produce output).
-    with pytest.raises(Exception):
+    with pytest.raises(VLLMValidationError):
         llm.generate([""], sp)
 
     # Non-string input: must fail explicitly.
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         llm.generate([None], sp)
 
-    # Over max_model_len: explicit ValueError, no silent truncation.
-    with pytest.raises(ValueError):
+    # Over max_model_len: explicit validation error, no silent truncation.
+    with pytest.raises(VLLMValidationError):
         llm.generate(["x " * 10000], sp)
