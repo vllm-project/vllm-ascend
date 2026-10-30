@@ -163,33 +163,33 @@ extra:
   # release and its complete compatible stack have been published and verified;
   # do not update it for main development. Git and container tags include the
   # leading "v" and are used across tutorials.
-  vllm_version: v0.23.0
-  vllm_ascend_version: v0.23.0
+  vllm_version: v0.30.0
+  vllm_ascend_version: v0.30.0
   # Stable documentation target used by the developer-preview banner.
-  stable_vllm_ascend_version: v0.23.0
+  stable_vllm_ascend_version: v0.30.0
   # PyPI versions omit the leading "v" and are used by installation commands/tests.
-  release_vllm_ascend_version: 0.23.0
-  release_vllm_version: 0.23.0
+  release_vllm_ascend_version: 0.30.0
+  release_vllm_version: 0.30.0
   # The supported Python range and the Python version inside release images differ.
   release_python_version: ">= 3.10, < 3.13"
   release_image_python_version: "3.12"
-  release_hdk_version: "26.0.RC1"
-  release_cann_version: "9.1.0"
+  release_hdk_version: "26.1.1"
+  release_cann_version: "9.2.0"
   release_pytorch_version: "2.10.0"
-  release_torch_npu_version: "2.10.0.post4"
-  release_nnal_version: "9.1.0"
-  release_triton_ascend_version: "3.2.2"
+  release_torch_npu_version: "2.10.0.post7"
+  release_nnal_version: "9.2.0"
+  release_triton_ascend_version: "3.6.0.post2"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
   # Update this group when repository requirements or the verified main build image changes.
-  cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
+  cann_image_tag: 9.2.0-920b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.1.0"
+  main_cann_version: "9.2.0"
   main_pytorch_version: "2.10.0"
-  main_torch_npu_version: "2.10.0.post4"
+  main_torch_npu_version: "2.10.0.post7"
   main_torchvision_version: "0.25.0"
   main_torchaudio_version: "2.10.0"
-  main_triton_ascend_version: "3.2.2"
+  main_triton_ascend_version: "3.6.0.post2"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
