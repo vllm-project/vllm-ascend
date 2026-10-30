@@ -13,7 +13,7 @@ from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_pl
 from vllm_ascend.ops.torch_ple import ple_conv_torch
 
 
-def test_model_dispatch_uses_upstream_decode():
+def test_model_dispatch_uses_upstream_decode_and_spec():
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()

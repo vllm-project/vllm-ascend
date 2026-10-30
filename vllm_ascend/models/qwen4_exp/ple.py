@@ -32,7 +32,8 @@ from vllm_ascend.ops.torch_ple import ple_conv_torch
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
-    if mode == "decode":
+    # Only long prefill benefits from the PyTorch path on Ascend.
+    if mode != "prefill":
         upstream_ple_conv(*args, mode=mode, **kwargs)
     else:
         ple_conv_torch(*args, mode=mode, **kwargs)
