@@ -30,6 +30,8 @@ from ..registry import register_scheme
 _MODELSLIM_SCALE_BIAS_PARTITIONS = 16
 _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
+_INT4_NZ_OUTPUT_ALIGNMENT = 64
+_INT4_NZ_INPUT_ALIGNMENT = 16
 
 
 @register_scheme("W4A8_DYNAMIC", "linear")
@@ -138,10 +140,20 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         return output.reshape(output_shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if torch.any(layer.weight_offset.data != 0):
+        weight_offset = layer.weight_offset.detach().cpu()
+        if torch.any(weight_offset != 0).item():
             raise ValueError("W4A8 INT Linear only supports symmetric weight offsets.")
-        packed_weight = layer.weight.data.transpose(0, 1).contiguous().unsqueeze(0)
-        layer.weight.data = maybe_trans_nz(packed_weight).view(torch.int32).contiguous()
+        # Materialize the 3D single-group tensor before NZ conversion. A view
+        # retains the 2D storage descriptor and triggers an unsupported TransData.
+        packed_weight = layer.weight.data.transpose(0, 1).contiguous().unsqueeze(0).clone()
+        # INT4 NZ requires K divisible by 16 and N divisible by 64. Keep ND
+        # for smaller TP partitions, such as the QSA indexer (N=80 at TP8).
+        if (
+            packed_weight.shape[1] % _INT4_NZ_INPUT_ALIGNMENT == 0
+            and layer.weight_scale.numel() % _INT4_NZ_OUTPUT_ALIGNMENT == 0
+        ):
+            packed_weight = maybe_trans_nz(packed_weight)
+        layer.weight.data = packed_weight.view(torch.int32).contiguous()
         layer.weight_scale_fp32 = layer.weight_scale.data.flatten().to(torch.float32).contiguous()
         # CANN A8W4 consumes the FP32 scale bits in the low half of INT64.
         layer.weight_scale.data = layer.weight_scale_fp32.view(torch.int32).to(torch.int64)
