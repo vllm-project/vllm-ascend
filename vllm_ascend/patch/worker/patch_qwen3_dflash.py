@@ -51,8 +51,7 @@ def precompute_and_store_context_kv(
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
     stacked_norm = (
-        self._use_q_only_context_rope
-        and all_k.numel() * all_k.element_size() <= _MAX_STACKED_CONTEXT_NORM_BYTES
+        self._use_q_only_context_rope and all_k.numel() * all_k.element_size() <= _MAX_STACKED_CONTEXT_NORM_BYTES
     )
     if stacked_norm:
         # Retain native norm arithmetic while replacing six small output copies
