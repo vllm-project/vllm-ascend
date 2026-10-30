@@ -17,8 +17,8 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
-from contextlib import contextmanager
-from typing import Any
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -119,6 +119,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
+        qsa_metadata_replay = False
+        if getattr(self.model_runner.model_state, "_qsa_target_metadata_enabled", False):
+            from vllm_ascend.models.qwen4_exp.qsa_target_metadata import validate_target_metadata_replay
+
+            qsa_metadata_replay = validate_target_metadata_replay(self.model_runner.model_state, desc)
         assert self.update_stream is not None
         with set_current_vllm_config(self.vllm_config):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
@@ -143,10 +148,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 ):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                result = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                result = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            if qsa_metadata_replay:
+                from vllm_ascend.models.qwen4_exp.qsa_target_metadata import mark_target_metadata_replay_success
+
+                mark_target_metadata_replay_success(self.model_runner.model_state)
+            return result
         finally:
             if metadata is not None:
                 metadata.finish_replay()
@@ -216,9 +226,18 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
-        model = ModelWithContext(model, device_metadata=metadata)
+        qsa_state = model_state if getattr(model_state, "_qsa_target_metadata_enabled", False) else None
+        qsa_capture: AbstractContextManager[Any] = nullcontext()
+        if qsa_state is not None:
+            from vllm_ascend.models.qwen4_exp.qsa_target_metadata import target_metadata_capture
+
+            cast(Any, qsa_state)._qsa_target_metadata_sp_padding = bool(
+                getattr(self.model_runner.ascend_config, "enable_sp_by_pass", False)
+            )
+            qsa_capture = target_metadata_capture(qsa_state)
+        model = ModelWithContext(model, device_metadata=metadata, qsa_metadata_state=qsa_state)
         try:
-            with communicator_switch():
+            with communicator_switch(), qsa_capture:
                 return super().capture(
                     model,
                     model_state,
@@ -244,12 +263,20 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
+    def __init__(
+        self,
+        original_model,
+        is_draft_model=False,
+        is_draft_model_prefill=False,
+        device_metadata=None,
+        qsa_metadata_state=None,
+    ):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
+        self.qsa_metadata_state = qsa_metadata_state
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -267,6 +294,10 @@ class ModelWithContext(nn.Module):
         try:
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
+            if self.qsa_metadata_state is not None:
+                from vllm_ascend.models.qwen4_exp.qsa_target_metadata import execute_target_metadata_at_model_entry
+
+                execute_target_metadata_at_model_entry(self.qsa_metadata_state)
             return self.original_model(*args, **kwargs)
         finally:
             # Warmup and actual capture receive separate prepare_attn calls.

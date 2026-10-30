@@ -800,9 +800,9 @@ class NPUWorker(WorkerBase):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
+        # allocation. For block-compact layouts, Ascend can
         # preserve that contract for attention/Mamba and eligible full/sliding
-        # attention models while exposing contiguous per-layer views. Do not
+        # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -829,7 +829,6 @@ class NPUWorker(WorkerBase):
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
-            and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)
