@@ -1,0 +1,7 @@
+pr: 20138
+entries:
+  - category: performance
+    text: >-
+      rare_chars collects top-1 and chosen logprobs without a host sync before
+      the sampler returns. Sampled ids stay on device, the pair is copied with
+      the token ids, and rc4 feed runs on the action queue.
