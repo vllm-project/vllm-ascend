@@ -4,8 +4,9 @@
 import json
 
 import regex as re
-from compare import compare_precision
-from evidence_checks import assert_control_runtime_and_ownership
+
+from tests.e2e.runner_parity.compare import compare_precision
+from tests.e2e.runner_parity.evidence_checks import assert_control_runtime_and_ownership
 
 
 def test_glm51_controlled_greedy(control_root, upstream_utils):
