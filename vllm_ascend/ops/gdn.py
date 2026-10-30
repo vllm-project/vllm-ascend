@@ -44,7 +44,10 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNFusedAttentionBackend,
+    GDNSpecCausalConv1dMetadata,
+)
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -198,7 +201,7 @@ def _flatten_recurrent_state_indices(
 
 
 def _get_recurrent_state_flat_indices(
-    metadata: object,
+    metadata: GDNSpecCausalConv1dMetadata,
     state_indices: torch.Tensor,
     total_tokens: int,
     query_start_loc: torch.Tensor,
