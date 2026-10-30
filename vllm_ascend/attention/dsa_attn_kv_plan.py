@@ -16,7 +16,12 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
     mixed_quant_sparse_flash_mla_metadata_turboquant,
     mixed_quant_sparse_flash_mla_turboquant,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import (
+    build_dspark_sparse_flash_mla_metadata,
+    sparse_flash_mla,
+    sparse_flash_mla_metadata,
+    write_dspark_topk_lengths,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
@@ -150,6 +155,13 @@ class DsaAttnKvPlan:
     sparse_attn_metadata_kwargs: dict[str, Any]
     include_metadata_device: bool
     applies_sparse_attn_runtime_kwargs: bool
+    # DSpark draft contract: the draft attends through per-query top-k
+    # visibility (logical indices + per-query lengths) instead of physical
+    # borrow-mode slots. The hooks are op-owned pre-processing; the defaults
+    # keep the generic SAS draft path for every other plan.
+    uses_draft_logical_indices: bool = False
+    draft_metadata_builder: Callable[..., Any] | None = None
+    draft_topk_lengths_writer: Callable[..., torch.Tensor] | None = None
 
     def get_dsa_sparse_attn_metadata_op(self):
         return self.sparse_attn_metadata_op
@@ -263,6 +275,9 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
             sparse_attn_metadata_kwargs={},
             include_metadata_device=True,
             applies_sparse_attn_runtime_kwargs=True,
+            uses_draft_logical_indices=True,
+            draft_metadata_builder=build_dspark_sparse_flash_mla_metadata,
+            draft_topk_lengths_writer=write_dspark_topk_lengths,
         )
     return DsaAttnKvPlan(
         uses_sparse_flash_mla=False,

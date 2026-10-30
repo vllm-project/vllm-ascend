@@ -49,6 +49,10 @@ from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
+from vllm_ascend.attention.sparse_flash_mla import (
+    build_dspark_sparse_flash_mla_metadata,
+    write_dspark_topk_lengths,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -129,9 +133,14 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
     plan = MagicMock()
     plan.layout_kv = "PA_ND"
-    # A bare MagicMock attribute is truthy; default the sparse-flash gate off
-    # so plain FIA tests do not wander into the draft sparse branch.
+    # A bare MagicMock attribute is truthy; default the draft gate off so
+    # plain FIA tests do not wander into the logical-index draft branch.
+    # The draft hooks route to the real SparseFlashMla entries, so a draft
+    # test only needs to flip the gate on the mocked plan.
     plan.uses_sparse_flash_mla = False
+    plan.uses_draft_logical_indices = False
+    plan.draft_metadata_builder = build_dspark_sparse_flash_mla_metadata
+    plan.draft_topk_lengths_writer = write_dspark_topk_lengths
     for name, value in method_returns.items():
         getattr(plan, name).return_value = value
     return plan
@@ -286,12 +295,15 @@ def test_num_compressor_metadata_rows(
 
 
 @pytest.mark.parametrize("use_sparse_flash", [False, True])
-@patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla")
-def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_sparse_flash):
-    draft_uses_sparse_flash.return_value = use_sparse_flash
+def test_draft_swa_and_sas_share_attention_task(use_sparse_flash):
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
     assert builder.dspark_swa_indices_buffer is not None
+    if use_sparse_flash:
+        # The lengths buffer is allocated under the plan's draft gate in
+        # __init__; the gate is driven through the mocked plan below, so the
+        # CPU test provides the buffer here.
+        builder.dspark_swa_topk_lengths_buffer = torch.zeros((16, 1), dtype=torch.int32)
     sas_result = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=sas_result)
     plan = _mock_dsa_kv_plan(
@@ -299,6 +311,10 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
         get_dsa_sparse_attn_metadata_op=metadata_op,
     )
     plan.layout_kv = "PA_BBND"
+    plan.uses_draft_logical_indices = use_sparse_flash
+    # The draft metadata call goes through the SparseFlashMla adapter
+    # directly, so its toolkit op is mocked at the adapter's loader.
+    draft_metadata_op = MagicMock(return_value=sas_result)
 
     with (
         patch(
@@ -312,6 +328,10 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
         ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch(
+            "vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops",
+            return_value=(MagicMock(), draft_metadata_op),
+        ),
     ):
         metadata = _build_draft_req_metadata(
             builder,
@@ -321,25 +341,29 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
         )
         task = builder.take_device_metadata_tasks()
         metadata_op.assert_not_called()
+        draft_metadata_op.assert_not_called()
         assert metadata.dspark_swa_indices.data_ptr() == builder.dspark_swa_indices_buffer.data_ptr()
         assert task[0].stage == DeviceMetadataStage.ATTENTION
         assert task[0].group_id == id(metadata.sas_metadata)
 
         task[0].run()
 
-        assert metadata.use_sparse_flash_mla_for_draft == use_sparse_flash
+        assert (metadata.dspark_swa_topk_lengths is not None) == use_sparse_flash
         if use_sparse_flash:
             lengths = metadata.dspark_swa_topk_lengths
             assert lengths is not None
             assert builder.dspark_swa_topk_lengths_buffer is not None
             assert lengths.data_ptr() == builder.dspark_swa_topk_lengths_buffer.data_ptr()
             assert lengths[:, 0].tolist() == [10] * 3 + [14] * 3
-            kwargs = metadata_op.call_args.kwargs
+            kwargs = draft_metadata_op.call_args.kwargs
             assert kwargs["ori_topk"] == metadata.dspark_swa_indices.shape[-1]
             assert kwargs["ori_topk_length"] is lengths
-            assert kwargs["ori_mask_mode"] == 0
-            assert kwargs["cmp_mask_mode"] == 0
+            # The draft contract is applied by the SparseFlashMla adapter on
+            # the way to the op: window/mask rewrite plus the seqused rename.
+            assert kwargs["cmp_ratio"] == 1
+            assert kwargs["ori_mask_mode"] == kwargs["cmp_mask_mode"] == 0
             assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+            assert "seqused_kv" not in kwargs
         first_indices = metadata.dspark_swa_indices.clone()
         next_metadata = _build_draft_req_metadata(
             builder,
@@ -356,17 +380,24 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
             assert next_lengths.data_ptr() == lengths.data_ptr()
             assert next_lengths.shape == (3, 1)
             assert next_lengths[:, 0].tolist() == [12] * 3
-            assert metadata_op.call_args.kwargs["ori_topk_length"] is next_lengths
+            assert draft_metadata_op.call_args.kwargs["ori_topk_length"] is next_lengths
 
-    assert metadata_op.call_count == 2
+    if use_sparse_flash:
+        assert draft_metadata_op.call_count == 2
+        assert metadata_op.call_count == 0
+    else:
+        assert metadata_op.call_count == 2
     assert not torch.equal(next_metadata.dspark_swa_indices, first_indices[:3])
     assert torch.equal(metadata.sas_metadata, sas_result)
 
 
-@patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla", return_value=True)
-def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse_flash):
+def test_initial_draft_step_uses_sparse_flash_logical_indices():
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
+    # The lengths buffer is allocated under the plan's draft gate in
+    # __init__; the gate is driven through the mocked plan below, so the
+    # CPU test provides the buffer here.
+    builder.dspark_swa_topk_lengths_buffer = torch.zeros((16, 1), dtype=torch.int32)
     builder.num_actual_tokens = 6
     builder.num_decode_tokens = 6
     builder.num_prefills = 0
@@ -388,10 +419,18 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
         get_dsa_sparse_attn_metadata_op=metadata_op,
     )
     plan.layout_kv = "PA_BBND"
+    plan.uses_draft_logical_indices = True
+    # The draft metadata call goes through the SparseFlashMla adapter
+    # directly, so its toolkit op is mocked at the adapter's loader.
+    draft_metadata_op = MagicMock(return_value=sas_result)
 
     with (
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch(
+            "vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops",
+            return_value=(MagicMock(), draft_metadata_op),
+        ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as get_cmp_offsets,
     ):
@@ -406,7 +445,7 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
         assert len(tasks) == 1
         tasks[0].run()
 
-    assert metadata.use_sparse_flash_mla_for_draft
+    assert metadata.dspark_swa_topk_lengths is not None
     assert metadata.dspark_swa_topk_lengths is not None
     assert metadata.dspark_swa_topk_lengths[:, 0].tolist() == [10] * 3 + [14] * 3
     assert metadata.dspark_swa_indices is not None
@@ -414,10 +453,14 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
     assert metadata.dspark_swa_indices[3, 0, :14].tolist() == list(range(14))
     get_ori_offsets.assert_not_called()
     get_cmp_offsets.assert_not_called()
-    kwargs = metadata_op.call_args.kwargs
+    kwargs = draft_metadata_op.call_args.kwargs
     assert kwargs["ori_topk_length"] is metadata.dspark_swa_topk_lengths
+    # The draft contract is applied by the SparseFlashMla adapter on the way
+    # to the op: window/mask rewrite plus the seqused rename.
+    assert kwargs["cmp_ratio"] == 1
     assert kwargs["ori_mask_mode"] == kwargs["cmp_mask_mode"] == 0
     assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+    assert "seqused_kv" not in kwargs
     assert torch.equal(metadata.sas_metadata, sas_result)
 
 
@@ -3268,7 +3311,6 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
 
 @pytest.mark.parametrize("logical_indices", [False, True])
 def test_dspark_indices_preserve_physical_fallback(logical_indices):
-    lengths_output = torch.zeros((3, 1), dtype=torch.int32) if logical_indices else None
     indices, lengths = build_dspark_swa_indices(
         block_table=torch.tensor([[5, 2]], dtype=torch.int32),
         num_speculative_tokens=3,
@@ -3279,18 +3321,19 @@ def test_dspark_indices_preserve_physical_fallback(logical_indices):
         num_decode_tokens=3,
         index_width=8,
         use_logical_indices=logical_indices,
-        lengths_output=lengths_output,
     )
     expected = [0, 1, 2, 3, 4, 5] if logical_indices else [20, 21, 22, 23, 8, 9]
     assert indices[:, 0].tolist() == [expected + [-1, -1]] * 3
-    if logical_indices:
-        # The top-k interface supplies a persistent [T, 1] length view.
-        assert lengths is lengths_output
-        assert lengths.shape == (3, 1)
-    else:
-        # Callers without a lengths view keep the plain [T] lengths.
-        assert lengths.shape == (3,)
+    # All callers keep the plain [T] lengths here; the [T, 1] top-k view is
+    # produced by the SparseFlashMla file's write_dspark_topk_lengths.
+    assert lengths.shape == (3,)
     assert lengths.flatten().tolist() == [6] * 3
+    if logical_indices:
+        lengths_output = torch.zeros((3, 1), dtype=torch.int32)
+        assert write_dspark_topk_lengths(lengths, lengths_output) is lengths_output
+        assert lengths_output.tolist() == [[6]] * 3
+        with pytest.raises(ValueError, match=r"num_tokens, 1"):
+            write_dspark_topk_lengths(lengths, torch.zeros((3, 2), dtype=torch.int32))
 
 
 @pytest.mark.parametrize("is_draft", [False, True])
@@ -3302,19 +3345,17 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     req.cos = {"layer": torch.ones(2, 1, 1, 2)}
     req.sin = {"layer": torch.zeros(2, 1, 1, 2)}
     req.sas_metadata = torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
-    req.use_sparse_flash_mla_for_draft = is_draft
-    # Indices alone must not switch the main model's operator.
+    # Indices alone must not switch the call into per-query top-k mode.
     req.dspark_swa_indices = torch.zeros((2, 1, 128), dtype=torch.int32)
-    req.dspark_swa_topk_lengths = torch.ones((2, 1), dtype=torch.int32)
+    if is_draft:
+        req.dspark_swa_topk_lengths = torch.ones((2, 1), dtype=torch.int32)
     metadata = AscendDSAMetadata(2, 1, 2, 0, req_metadata=req)
     layer = AscendDSALayerMetadata(attention=metadata, swa=metadata)
     output = torch.ones(2, 1, 2)
     original_op = MagicMock(return_value=(output,))
-    draft_op = MagicMock(return_value=(output,))
     plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_op=original_op, get_dsa_sparse_attn_base_kwargs={})
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
-        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=is_draft),
         patch.object(
             DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
@@ -3325,15 +3366,15 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
         assert impl._forward_attention("layer", torch.ones(2, 4), (), layer) is output
-    selected, unused = (draft_op, original_op) if is_draft else (original_op, draft_op)
-    selected.assert_called_once()
-    unused.assert_not_called()
-    kwargs = selected.call_args.kwargs
+    original_op.assert_called_once()
+    kwargs = original_op.call_args.kwargs
     assert kwargs["cmp_ratio"] == 1
-    assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
     if is_draft:
-        assert kwargs["cmp_mask_mode"] == 0
+        # The impl forwards only the per-query top-k data; the draft
+        # window/mask contract is owned by the SparseFlashMla adapter
+        # (see tests/ut/attention/test_sparse_flash_mla.py).
         assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths
-        assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+        assert kwargs["ori_sparse_indices"] is req.dspark_swa_indices
     else:
+        assert kwargs["ori_mask_mode"] == 4
         assert "ori_topk_length" not in kwargs
