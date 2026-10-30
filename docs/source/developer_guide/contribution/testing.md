@@ -411,7 +411,9 @@ The checker validates rendered HTTP(S) links and images, skipping code blocks,
 example addresses, and translated docs under `docs/source/zh`. Relative links and
 remote anchors are not checked. Add `--extract-only` to list links without requests.
 
-Link failures produce a nonzero exit code. Check the CI summary and logs for the URL,
+Link failures produce a nonzero exit code. Unresolved HTTP 429 responses are
+non-blocking warnings; those URLs remain unverified.
+Check the CI summary and logs for the URL,
 source files, and failure reason. Detailed results are in
 `docs/_build/linkcheck/output.json`; the summary is in the same directory as
 `summary.md`. Use `--report-dir` to change the output directory.

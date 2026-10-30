@@ -66,19 +66,18 @@ jobs:
 
       - name: Install checker dependencies
         run: |
-          python -m venv /tmp/linkcheck-venv
-          /tmp/linkcheck-venv/bin/python -m pip install -r docs/requirements-linkcheck.txt 'pytest>=8,<9'
+          python -m pip install -r docs/requirements-linkcheck.txt 'pytest>=8,<9'
 
       - name: Test checker
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
         run: |
-          /tmp/linkcheck-venv/bin/python -m pytest --confcutdir=tests/ut/_tools tests/ut/_tools/test_check_md_links.py
+          python -m pytest --confcutdir=tests/ut/_tools tests/ut/_tools/test_check_md_links.py
 
       - name: Run full link check
         if: ${{ github.event_name != 'pull_request' || steps.changed.outputs.checker_any_changed == 'true' }}
         run: |
-          /tmp/linkcheck-venv/bin/python .github/workflows/scripts/check_md_links.py docs/source
+          python .github/workflows/scripts/check_md_links.py docs/source
 
       - name: Run link check for changed docs
         if: ${{ github.event_name == 'pull_request' && steps.changed.outputs.checker_any_changed != 'true' && steps.changed.outputs.docs_any_changed == 'true' }}
@@ -86,7 +85,7 @@ jobs:
           CHANGED_DOCS: ${{ steps.changed.outputs.docs_all_changed_files }}
         run: |
           printf '%s' "${CHANGED_DOCS}" > /tmp/changed-docs.json
-          /tmp/linkcheck-venv/bin/python .github/workflows/scripts/check_md_links.py \
+          python .github/workflows/scripts/check_md_links.py \
             --files-from /tmp/changed-docs.json --timeout 300
 
       - name: Publish summary

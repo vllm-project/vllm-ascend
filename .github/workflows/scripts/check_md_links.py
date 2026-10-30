@@ -62,7 +62,7 @@ class Settings:
     request_timeout: float = 15
     connect_timeout: float = 5
     total_timeout: float = 1200
-    retry_delay: float = 5
+    retry_delay: float = 10
     excludes: tuple[str, ...] = ("docs/source/zh",)
 
 
@@ -169,7 +169,7 @@ class Link:
     sources: list[str]
     status: str = "pending"
     message: str = ""
-    accepted: bool = False
+    accepted: bool = False  # Accepted by CI; not necessarily verified.
     attempts: int = 0
     history: list[dict] = field(default_factory=list)
 
@@ -332,6 +332,15 @@ class LinkChecker:
                 if link.status == "pending" or link.retryable:
                     status = "rate_limited" if link.status == "rate_limited" else "unverified"
                     self.finish(link, status, f"overall check deadline exceeded; last result: {link.message}")
+        for link in links:
+            # Only a final HTTP 429 is non-blocking, not other errors or unchecked URLs.
+            if link.status == "rate_limited" and link.history[-1].get("code") == 429:
+                self.finish(
+                    link,
+                    "rate_limited",
+                    f"{link.message}; URL remains unverified (non-blocking warning)",
+                    accepted=True,
+                )
         return links
 
 
@@ -349,11 +358,19 @@ def write_reports(directory: Path, links: list[Link], elapsed: float):
         "| --- | ---: |",
     ]
     summary.extend(f"| {status} | {count} |" for status, count in sorted(counts.items()))
-    summary.extend(["", "Unaccepted results fail the check.", ""])
+    summary.extend(
+        [
+            "",
+            "HTTP 429 results are non-blocking warnings; these URLs remain unverified. "
+            "Other unaccepted results fail the check.",
+            "",
+        ]
+    )
     for link in links:
-        if not link.accepted:
+        if not link.accepted or link.status == "rate_limited":
+            label = f"warning: {link.status}" if link.accepted else link.status
             summary.append(
-                f"- {link.status}: <code>{escape(link.url)}</code> — <code>{escape(link.message)}</code> "
+                f"- {label}: <code>{escape(link.url)}</code> — <code>{escape(link.message)}</code> "
                 f"(<code>{escape(', '.join(link.sources))}</code>)"
             )
     (directory / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
