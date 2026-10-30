@@ -324,7 +324,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return batch_desc, dp_sync_state
 
-        dispatch_and_sync_with_sp._ascend_sp_token_padding = True
+        setattr(dispatch_and_sync_with_sp, "_ascend_sp_token_padding", True)
         vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_and_sync_with_sp
 
     @property
