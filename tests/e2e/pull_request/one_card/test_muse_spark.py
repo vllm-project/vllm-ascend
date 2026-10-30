@@ -99,9 +99,9 @@ class MuseSparkWorker:
         return True
 
 
-def _write_model(destination) -> None:
+def _write_model(destination, config: dict[str, Any] = TEXT_CONFIG) -> None:
     destination.mkdir()
-    (destination / "config.json").write_text(json.dumps(TEXT_CONFIG))
+    (destination / "config.json").write_text(json.dumps(config))
 
 
 def _generate(runner: VllmRunner) -> list[tuple[list[int], list[dict]]]:

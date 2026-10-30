@@ -3,7 +3,8 @@
 """Muse Spark Open under expert parallelism on two NPUs.
 
 The reduced config and the dummy-weight harness come from the one-card test;
-only the parallel layout differs. What this adds over that test:
+the parallel layout differs, and the expert hidden size is widened to what the
+MC2 dispatch kernel accepts. What this adds over that test:
 
 * the experts are really sharded (``ep_size == 2``, half the experts per rank),
 * the MoE communication method the selector lands on is recorded, and the one
@@ -36,6 +37,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 TENSOR_PARALLEL_SIZE = 2
+# The MC2 dispatch kernel wants the expert hidden size in [1024, 8192]
+# (``npu_moe_distribute_dispatch_v2`` fails tiling below it), so the latent
+# width the one-card test uses is too narrow here. The released model sits at
+# 4096. Widening it makes the pooler expand rather than reduce, which the code
+# does not care about and no assertion here reads.
+EP_TEXT_CONFIG = TEXT_CONFIG | {"moe_hidden_size": 1024, "moe_intermediate_size": 1024}
 # TEXT_CONFIG is the on-disk config dict, so its values are untyped.
 NUM_EXPERTS = cast(int, TEXT_CONFIG["num_local_experts"])
 EXPERTS_PER_RANK = NUM_EXPERTS // TENSOR_PARALLEL_SIZE
@@ -72,7 +79,7 @@ class MuseSparkExpertParallelWorker:
 @wait_until_npu_memory_free()
 def test_muse_spark_expert_parallel_shards_and_replays(tmp_path):
     model = tmp_path / "model"
-    _write_model(model)
+    _write_model(model, EP_TEXT_CONFIG)
     with VllmRunner(
         str(model),
         load_format="dummy",
