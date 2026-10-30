@@ -82,6 +82,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     vllm_version_is,
@@ -1393,6 +1394,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
+        # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
+        if enable_sfa(config) and not self.use_flashmla:
+            return
         if not config.use_v2_model_runner and (
             hasattr(config.model_config.hf_config, "compress_ratios")
             or get_ascend_config().sparse_kv_offload_config.enabled

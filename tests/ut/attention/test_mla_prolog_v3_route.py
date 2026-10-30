@@ -1554,9 +1554,29 @@ def test_wide_draft_forward_uses_regular_projection_for_fused_cache():
 def test_dense_writer_prepares_weights_with_sparse_target(monkeypatch, use_v2_runner):
     impl = _make_post_load_impl(monkeypatch)
     impl.vllm_config.use_v2_model_runner = use_v2_runner
+    impl.vllm_config.parallel_config.decode_context_parallel_size = 1
     impl.vllm_config.model_config.hf_text_config.index_topk = 2048
+    impl.use_flashmla = True
+    impl._flashmla_writer_buffers = None
     assert enable_sfa(impl.vllm_config)
 
     impl.process_weights_after_loading(torch.bfloat16)
 
     assert impl._prolog_v3_weights is not None
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_fia_draft_skips_unused_prolog_weights_with_sparse_target(monkeypatch, use_v2_runner):
+    impl = _make_post_load_impl(monkeypatch)
+    config = impl.vllm_config
+    config.use_v2_model_runner = use_v2_runner
+    config.model_config.hf_text_config.index_topk = 2048
+    config.parallel_config.decode_context_parallel_size = 1
+    assert enable_sfa(config)
+    assert not impl.use_flashmla and not impl.enable_mlapo
+    cache = (torch.empty(2, BLOCK_SIZE, 1, 4), torch.empty(2, BLOCK_SIZE, 1, 2))
+    assert not impl._cache_requires_prolog_v3_writer(cache)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is None
