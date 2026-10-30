@@ -274,8 +274,8 @@ def reload_experts_from_disk(
     Ascend keeps expert weights in runtime layout (transposed, NZ-cast, per-slot
     lists, derived quant scales), so ``model.load_weights`` cannot write them
     back. Only experts landing in this rank's physical block are reloaded, into
-    the slot from ``eplb_state.logical_to_physical_map``; the call must follow
-    ``rebuild_model_expert_maps``.
+    the slot from ``eplb_state.logical_to_physical_map`` after
+    ``_commit_eplb_maps``.
     """
     if not reassignments:
         return 0

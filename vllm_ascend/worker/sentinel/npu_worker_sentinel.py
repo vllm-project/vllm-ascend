@@ -19,7 +19,6 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.sentinel.eplb_redistribute import (
     mark_dead_expert_slots_inplace,
-    rebuild_model_expert_maps,
     redistribute_expert_placement,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
@@ -196,7 +195,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         reassignments = redistribute_expert_placement(p2l, num_logical, num_local_experts)
         # p2l was updated in place; the commit derives l2p/lrc from it.
         _commit_eplb_maps(eplb_model_state, p2l.cpu())
-        rebuild_model_expert_maps(model_runner.model, p2l, num_local_experts)
+        # Keep the model-side expert map: slot ownership is unchanged, and the
+        # map is physical-id indexed, so p2l (logical ids) must not be written into it.
 
         if reassignments:
             reload_experts_from_disk(model_runner.model, self.worker.vllm_config, reassignments)
