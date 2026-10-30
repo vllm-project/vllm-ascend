@@ -137,6 +137,18 @@ RUN echo -e "\n===== Component Version Info =====" && \
     echo "triton-ascend:" && python3 -c "import triton; print(triton.__version__)" 2>/dev/null || echo "triton-ascend get version failed" && \
     echo "memcache_hybrid:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('memcache_hybrid'))" 2>/dev/null || echo "memcache_hybrid get version failed" && \
     echo "memfabric_hybrid:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('memfabric_hybrid'))" 2>/dev/null || echo "memfabric_hybrid get version failed" && \
-    echo "mooncake-transfer-engine:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('mooncake-transfer-engine'))" 2>/dev/null || echo "mooncake-transfer-engine get version failed" && \echo "flash-linear-attention-npu(FLA):" && python3 -c "import importlib.metadata; print(importlib.metadata.version('flash-linear-attention-npu'))" 2>/dev/null || echo "flash-linear-attention-npu get version failed" && \
+    echo "mooncake-transfer-engine:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('mooncake-transfer-engine'))" 2>/dev/null || echo "mooncake-transfer-engine get version failed" && \
+    echo "flash-linear-attention-npu(FLA):" && \
+    python3 -c "
+    import importlib.metadata
+    for pkg in ['flash-linear-attention-npu-a2','flash-linear-attention-npu-a3','flash-linear-attention-npu-a5']:
+        try:
+            print(importlib.metadata.version(pkg))
+            break
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    else:
+        print('flash-linear-attention-npu get version failed')
+    " && \
     echo "================================="
 CMD ["/bin/bash"]
