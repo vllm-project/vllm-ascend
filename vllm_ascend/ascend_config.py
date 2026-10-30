@@ -976,7 +976,7 @@ class AscendConfig:
             raise ValueError(
                 "UNO requires the gated draft adapter path. Set "
                 '"uno_lora_path" in additional_config (for example '
-                "-O additional_config='{\"uno_lora_path\": \"/path/to/adapter\"}')."
+                '-O additional_config=\'{"uno_lora_path": "/path/to/adapter"}\').'
             )
         if not os.path.isdir(self.uno_lora_path):
             raise ValueError(f"uno_lora_path does not exist or is not a directory: {self.uno_lora_path}")
@@ -999,7 +999,8 @@ class AscendConfig:
         ):
             if value > 1:
                 raise ValueError(
-                    f"UNO does not support {name} > 1 (got {value}). UNO drafts on the full target model in a single query pass."
+                    f"UNO does not support {name} > 1 (got {value}). "
+                    "UNO drafts on the full target model in a single query pass."
                 )
 
         if getattr(spec_config, "enable_adaptive_verification", False):

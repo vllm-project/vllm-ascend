@@ -266,7 +266,7 @@ def probe_b2_fia_query_len(model: str, k: int) -> None:
         print(f"       FIA accepted TND qlen={num_q}, seq_lens={seq_lens} -> {tuple(out.shape)}")
 
     def b2_attention_assert_present():
-        from vllm_ascend.attention.attention_v1 import AscendAttentionV1Backend  # noqa: F401
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend  # noqa: F401
 
         assert k + 1 <= 16, f"K={k} implies decode_threshold={k + 1} > 16, which attention_v1.py asserts. Lower K."
         print(f"       decode_threshold = {k + 1} <= 16")

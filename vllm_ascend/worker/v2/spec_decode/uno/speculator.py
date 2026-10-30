@@ -23,12 +23,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -42,7 +43,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -54,8 +56,6 @@ from vllm_ascend.worker.v2.spec_decode.uno.lora import (
     draft_lora_mapping,
 )
 from vllm_ascend.worker.v2.spec_decode.uno.prepare import prepare_uno_inputs
-
-logger = init_logger(__name__)
 
 # LoRA id UNO registers its gate adapter under. High enough that a user adapter
 # id collision is practically impossible; the target-side wrapper below still
@@ -70,8 +70,14 @@ UNO_USER_LORA_ERROR = (
 
 # Ascend attention backends UNO is validated on. A backend must be listed here
 # and must build the draft's uniform-batch decode metadata; anything else is
-# refused at startup rather than failing inside the attention kernel.
-UNO_ASCEND_ATTN_BACKENDS: tuple[str, ...] = ("ASCEND", "ASCEND_MLA")
+# refused at startup rather than failing inside the attention kernel. The names
+# are taken from the backends themselves: AscendAttentionBackend.get_name()
+# reports "CUSTOM", so a hand-written allowlist of backend class names would
+# reject the default GQA configuration the docs ship.
+UNO_ASCEND_ATTN_BACKENDS: tuple[str, ...] = (
+    AscendAttentionBackend.get_name(),
+    AscendMLABackend.get_name(),
+)
 
 
 def uno_device_refusal(device: torch.device) -> str | None:
@@ -184,6 +190,7 @@ class AscendUnoSpeculator(DraftModelSpeculator):
         self.sample_col = torch.arange(self.k, dtype=torch.int32, device=device).repeat(self.max_num_reqs)
         self._step = 0
         self.num_eager_proposals = 0
+        self.num_prefill_skips = 0
 
     # ---- LoRA routing -----------------------------------------------------
 
@@ -224,12 +231,23 @@ class AscendUnoSpeculator(DraftModelSpeculator):
                 return
             num_reqs, num_tokens = shape
             uno_id = self.lora_request.lora_int_id
+            # The draft block is a uniform decode-like batch: every row carries
+            # its own adapter index and the block has no ragged sequence groups.
+            # Marking it ``is_prefill=False`` routes it through the per-token
+            # (bgmv) kernels and skips the per-step prefill metadata build
+            # (ragged start/length scans plus H2D copies) that the
+            # sequence-grouped path needs every step.
+            # The prompt/sampler mapping is per request, not per token: the
+            # Punica metadata stores it directly as ``_sampler_indices`` and
+            # sizes ``indices_len[1]`` from it, so handing it the draft token
+            # count would leave the sampler mapping over-long and shift every
+            # following index by the extra rows.
             set_active_adapters(
                 {self.lora_request},
                 LoRAMapping(
                     draft_lora_mapping(num_tokens, num_reqs, self.k, uno_id),
-                    base_prompt_mapping(num_tokens),
-                    is_prefill=True,
+                    base_prompt_mapping(num_reqs),
+                    is_prefill=False,
                 ),
             )
 
@@ -327,7 +345,6 @@ class AscendUnoSpeculator(DraftModelSpeculator):
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Stage 1 drafts eagerly: no draft ACL graph on Ascend yet."""
         self.cudagraph_manager = None
-        self._graph_attn_metadata = {}
         if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             logger.info_once(
                 "UNO drafts eagerly on Ascend: the draft pass does not capture a graph yet. "
@@ -430,6 +447,18 @@ class AscendUnoSpeculator(DraftModelSpeculator):
         n = input_batch.num_reqs
         if n == 0:
             return self.draft_tokens[:0]
+
+        # A mid-prefill chunk emits no logits row, so nothing sampled in this
+        # step could be verified next step: the whole draft block would be spent
+        # on rows nobody reads, and chunked prefill is what dominates TTFT for
+        # long prompts. Skipping keeps the returned block well formed (zeros),
+        # so a speculative proposal can never leak a stale token: a draft is
+        # only ever accepted when it matches the target distribution.
+        if not (dummy_run or is_profile) and _batch_is_prefill_only(input_batch):
+            self.num_prefill_skips += 1
+            self.draft_tokens[:n].zero_()
+            return self.draft_tokens[:n]
+
         count = n * self.k
         self._copy_request_inputs(n, input_batch.idx_mapping, temperature, seeds)
 
@@ -450,6 +479,12 @@ class AscendUnoSpeculator(DraftModelSpeculator):
         assert isinstance(ascend_config, dict)
         mask_token_id = ascend_config.get("uno_mask_token_id")
         noise_high = mask_token_id if mask_token_id is not None else self.vocab_size
+        # ``slot_mappings`` is indexed per KV-cache group, not per layer:
+        # ``build_slot_mappings_by_layer`` below fans the single group row out
+        # to every layer of that group. ``set_attn`` already refuses anything
+        # but one homogeneous full-attention group, so writing row 0 covers the
+        # whole model; copying it into other rows would be wrong for a model
+        # whose groups have different block sizes.
         prepare_uno_inputs(
             self.input_buffers,
             self.block_tables.slot_mappings[0],
@@ -493,6 +528,23 @@ class AscendUnoSpeculator(DraftModelSpeculator):
             else:
                 self.num_eager_proposals += 1
         return self.draft_tokens[:n]
+
+
+def _batch_is_prefill_only(input_batch: InputBatch) -> bool:
+    """True when no request in the batch will emit a logits row this step.
+
+    A request only samples once its computed prefill tokens reach its prefill
+    length. While it is still consuming prompt chunks there is neither a bonus
+    token nor anything to verify, so a draft block built here cannot be used.
+    Decode requests have ``num_computed_prefill_tokens == prefill_len`` and are
+    therefore never classified as prefill-only.
+    """
+    scheduled = input_batch.num_scheduled_tokens
+    if scheduled.size == 0:
+        return False
+    computed = input_batch.num_computed_prefill_tokens_np
+    prefill_len = input_batch.prefill_len_np
+    return not bool(np.any((computed + scheduled) >= prefill_len))
 
 
 def _eager_desc(num_reqs: int, num_tokens: int):

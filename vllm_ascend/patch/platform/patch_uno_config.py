@@ -124,7 +124,7 @@ def _patch_uno_post_init() -> None:
     """Gate 2: let ``__post_init__`` accept UNO and populate its fields.
 
     The UNO branch returns early instead of running upstream's drafter setup,
-    which assumes a draft checkpoint and would reject or mis-parse ``"uno"``.
+    which assumes a draft checkpoint and would reject or fail to parse ``"uno"``.
     The previous implementation is captured at call time and chained, so this
     patch composes with ``patch_speculative_config.py`` regardless of import
     order.

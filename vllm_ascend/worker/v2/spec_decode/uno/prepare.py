@@ -43,6 +43,27 @@ _NOISE_MASK = (1 << 62) - 1
 # vocabulary size (or ``uno_mask_token_id`` when set).
 _NOISE_LOW = 1
 
+# Per-(device, num_reqs, k) row-index constants. Every decode step re-derives
+# the same k-column offset vector and seed/noise mask; at one draft step per
+# engine step that is pure launch overhead. Bounded so a long-lived server with
+# many distinct batch shapes cannot grow it without limit.
+_ROW_PATTERN_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+_ROW_PATTERN_CACHE_LIMIT = 64
+
+
+def _row_pattern(device: torch.device, num_reqs: int, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return cached ``(offsets, is_noise)`` row constants for this batch shape."""
+    key = (device, num_reqs, k)
+    cached = _ROW_PATTERN_CACHE.get(key)
+    if cached is None:
+        offsets = torch.arange(k, dtype=torch.int64, device=device)
+        is_noise = (offsets != 0).repeat(num_reqs)
+        if len(_ROW_PATTERN_CACHE) >= _ROW_PATTERN_CACHE_LIMIT:
+            _ROW_PATTERN_CACHE.clear()
+        cached = (offsets, is_noise)
+        _ROW_PATTERN_CACHE[key] = cached
+    return cached
+
 
 def _mix(x: torch.Tensor) -> torch.Tensor:
     x = ((x ^ (x >> 30)) * _NOISE_MIX_1) & _NOISE_MASK
@@ -143,7 +164,7 @@ def prepare_uno_inputs(
         valid_end = valid_end - num_rejected.long()
     first_pos = input_batch.positions[valid_end - 1] + 1
 
-    offsets = torch.arange(k, dtype=torch.int64, device=buffers.device)
+    offsets, is_noise = _row_pattern(buffers.device, n, k)
     positions = first_pos[:, None] + offsets
 
     # Row 0 replays the last verified token; rows 1..k-1 are noise. When the
@@ -155,7 +176,6 @@ def prepare_uno_inputs(
         next_prefill_tokens.reshape(-1, seeds.shape[0])[0, state_idx],
     )
     buffers.input_ids[:count].copy_(seed_tokens.repeat_interleave(k))
-    is_noise = (offsets != 0).repeat(n)
     req_seeds = (seeds[state_idx] + noise_seed).repeat_interleave(k)
     fill_uno_noise(
         buffers.input_ids[:count],
