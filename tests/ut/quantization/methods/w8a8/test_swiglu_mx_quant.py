@@ -12,24 +12,20 @@ from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as module
 
 
-def make_method(scale_alg, available=True):
+def make_method(scale_alg):
     config = SimpleNamespace(quant_config=SimpleNamespace(), use_v2_model_runner=True)
-    runtime = SimpleNamespace(npu_swiglu_mx_quant=Mock()) if available else SimpleNamespace()
     with (
         patch.object(module, "get_current_vllm_config", return_value=config),
         patch.object(module, "get_ascend_config"),
         patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg),
-        patch.object(module, "torch_npu", runtime),
     ):
         return module.AscendW8A8MXFP8DynamicFusedMoEMethod()
 
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
-@pytest.mark.parametrize("available", [False, True])
-def test_fused_clipped_activation_depends_only_on_scale_algorithm(scale_alg, available):
-    method = make_method(scale_alg, available)
+def test_fused_clipped_activation_depends_only_on_scale_algorithm(scale_alg):
+    method = make_method(scale_alg)
     assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1)
-    assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1)
     assert method.supports_fused_activation(MoEActivation.SILU)
     for activation in (MoEActivation.SWIGLUOAI, MoEActivation.SITU, MoEActivation.GELU, MoEActivation.SWIGLUSTEP):
         assert not method.supports_fused_activation(activation)
@@ -38,8 +34,8 @@ def test_fused_clipped_activation_depends_only_on_scale_algorithm(scale_alg, ava
 def test_enabling_one_model_does_not_change_other_instances():
     enabled = make_method(1)
     other_model = make_method(0)
-    assert enabled.supports_fused_activation("swigluoai_uninterleave")
-    assert not other_model.supports_fused_activation("swigluoai_uninterleave")
+    assert enabled.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+    assert not other_model.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE)
     assert "fused_activations" not in vars(enabled)
     assert "fused_activations" not in vars(other_model)
     assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu"})
@@ -55,7 +51,7 @@ def test_activation_quantization_reuses_cached_scale_algorithm(scale_alg):
         patch.object(module, "get_dynamic_mx_quant_scale_alg", side_effect=AssertionError("unexpected scale lookup")),
         patch.object(module.torch_npu, "npu_dynamic_mx_quant", return_value=(quantized, scales)) as quant,
     ):
-        assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1)
+        assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1)
         result, result_scale = method.apply_act_quant(None, hidden_states)
     quant.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=scale_alg)
     assert result is quantized

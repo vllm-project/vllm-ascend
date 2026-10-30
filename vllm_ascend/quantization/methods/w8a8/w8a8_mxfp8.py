@@ -294,13 +294,13 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
-    def supports_fused_activation(self, activation) -> bool:
+    def supports_fused_activation(self, activation: MoEActivation) -> bool:
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the
         # fused clipped activation. Keep the scale and activation requirements
         # together without changing the supported activations of other models.
         return super().supports_fused_activation(activation) or (
             self._dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL
-            and getattr(activation, "value", activation) == MoEActivation.SWIGLUOAI_UNINTERLEAVE.value
+            and activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
         )
 
     @staticmethod
