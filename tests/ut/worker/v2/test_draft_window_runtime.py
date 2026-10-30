@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerState
+from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwner, DraftWindowOwnerState
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
 from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime, continuing_prefill_rows
 
@@ -1173,7 +1173,7 @@ def test_mla_partial_rotary_copy_failure_keeps_submitted_operands(setup, monkeyp
     metadata = {"draft": SimpleNamespace(external_flashmla=None, decode=SimpleNamespace(cos=cos, sin=sin))}
     original_clone, original_copy = torch.Tensor.clone, torch.Tensor.copy_
     full = canonical.clone()
-    owner = None
+    owner: DraftWindowOwner | None = None
 
     def clone(source, *args, **kwargs):
         if source is sin:
@@ -1182,6 +1182,7 @@ def test_mla_partial_rotary_copy_failure_keeps_submitted_operands(setup, monkeyp
 
     def copy(destination, source, *args, **kwargs):
         if source is cos or source is sin:
+            assert owner is not None
             assert any(value is destination for value in owner.retained)
             assert any(value is source for value in owner.retained)
             if source is sin:

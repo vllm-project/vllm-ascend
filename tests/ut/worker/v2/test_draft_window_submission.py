@@ -36,6 +36,7 @@ def operators(monkeypatch):
     root = Path(__file__).resolve().parents[4]
     path = root / "vllm_ascend/ops/triton/v2/spec_decode/draft_window.py"
     spec = importlib.util.spec_from_file_location("draft_window_submission_contract", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -65,7 +66,7 @@ def invoke(operators, operation, retain):
 
 @pytest.mark.parametrize("operation,outputs", [("plan", 4), ("gather", 2), ("pack", 2)])
 def test_outputs_are_retained_before_dispatch_can_raise(monkeypatch, operators, operation, outputs):
-    held = []
+    held: list[torch.Tensor] = []
 
     class PartialDispatch:
         def __getitem__(self, grid):

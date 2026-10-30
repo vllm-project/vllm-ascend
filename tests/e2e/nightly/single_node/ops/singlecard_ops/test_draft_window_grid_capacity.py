@@ -104,7 +104,7 @@ def test_gather_grid_extent_preserves_arbitrary_tail(tokens):
 
 
 def test_aligned_capacity_changes_reuse_gather_binary():
-    from triton.runtime import driver
+    driver = triton.runtime.driver
 
     keys = torch.zeros((135, 128, 1, 32), device="npu", dtype=torch.bfloat16)
     values = torch.ones_like(keys)

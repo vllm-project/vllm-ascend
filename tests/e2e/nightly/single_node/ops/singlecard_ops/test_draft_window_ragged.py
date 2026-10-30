@@ -26,11 +26,11 @@ TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, case):
     eagle = case != "parallel"
     block, window, heads = 128, 1035 if eagle else 1024, 4
-    ends = (1795, 2177) if eagle else (1151, 1408)
-    widths = (4, 257) if eagle else (3, 5)
-    starts = (640, 0) if eagle else (0, 0)
-    frozen = (640, 1024) if eagle else None
-    native_ends = (1796, ends[1]) if eagle else ends
+    ends: tuple[int, ...] = (1795, 2177) if eagle else (1151, 1408)
+    widths: tuple[int, ...] = (4, 257) if eagle else (3, 5)
+    starts: tuple[int, ...] = (640, 0) if eagle else (0, 0)
+    frozen: tuple[int, ...] | None = (640, 1024) if eagle else None
+    native_ends: tuple[int, ...] = (1796, ends[1]) if eagle else ends
     if case == "interleaved_eagle":
         ends, widths, starts = (1151, 2177, 1795, 1535), (4, 33, 4, 33), (0, 0, 640, 0)
         native_ends, frozen = (1152, 2177, 1796, 1535), (0, 1024, 640, 512)

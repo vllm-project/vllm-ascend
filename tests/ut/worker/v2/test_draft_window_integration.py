@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -40,11 +41,14 @@ def _upstream_root():
     pytest.skip("paired vLLM source is required for real signature and metadata contracts")
 
 
-def _node(path, name, parent=None):
+def _node(path, name, parent=None) -> Any:
     tree = ast.parse(path.read_text())
-    nodes = (
-        tree.body if parent is None else next(node for node in tree.body if getattr(node, "name", None) == parent).body
-    )
+    if parent is None:
+        nodes = tree.body
+    else:
+        owner = next(node for node in tree.body if getattr(node, "name", None) == parent)
+        assert isinstance(owner, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        nodes = owner.body
     return deepcopy(next(node for node in nodes if getattr(node, "name", None) == name))
 
 
@@ -72,6 +76,7 @@ def _read_leaf(monkeypatch):
     name = "_draft_window_read_source_contract"
     path = ROOT / "vllm_ascend/worker/v2/spec_decode/draft_window_read.py"
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
@@ -89,7 +94,7 @@ def contract(request, monkeypatch):
     module = ModuleType("_draft_window_source_contract")
     monkeypatch.setitem(sys.modules, module.__name__, module)
     scope = vars(module)
-    modes = Enum("CUDAGraphMode", ["NONE", "FULL"])
+    CUDAGraphMode = Enum("CUDAGraphMode", ["NONE", "FULL"])
     scope.update(
         torch=torch,
         np=np,
@@ -98,7 +103,7 @@ def contract(request, monkeypatch):
         field=field,
         contextmanager=contextmanager,
         nullcontext=nullcontext,
-        CUDAGraphMode=modes,
+        CUDAGraphMode=CUDAGraphMode,
         AscendAttentionState=SimpleNamespace(ChunkedPrefill=object(), DecodeOnly=object()),
         BatchExecutionDescriptor=SimpleNamespace,
         disable_target_pcp_for_replicated_draft=lambda _: nullcontext(),
@@ -150,7 +155,7 @@ def contract(request, monkeypatch):
     proposal_hook = Mock(return_value=object())
     upstream_scope["_proposal_hook"] = proposal_hook
     _execute([proposal], upstream_scope, proposal_path)
-    base = type(
+    base: Any = type(
         "SignatureCheckedUpstream",
         (),
         {name: upstream_scope[name] for name in ("_build_attn_metadata", "propose")},
@@ -214,7 +219,7 @@ def contract(request, monkeypatch):
     obj.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     return SimpleNamespace(
         obj=obj,
-        mode=modes,
+        mode=CUDAGraphMode,
         scope=scope,
         backend=backend,
         base=base,
@@ -251,7 +256,8 @@ def test_explicit_full_write_mapping_preserves_upstream_signature(contract):
 
 
 def test_callback_final_writer_updates_real_common_cpu_mirrors_and_keeps_full_operands(contract):
-    retained, called = [], []
+    retained: list[Any] = []
+    called: list[Any] = []
     read = contract.read
     exact = torch.tensor([21], dtype=torch.int32)
     view = read.materialize_direct_prefix(
@@ -398,6 +404,7 @@ def test_current_dense_eagle_uses_upstream_unfused_selection(contract):
         if isinstance(node, ast.AnnAssign)
         and getattr(node.target, "id", None) == "supports_draft_decode_metadata_update"
     )
+    assert flag.value is not None
     assert ast.literal_eval(flag.value) is False
     dense = _node(ROOT / "vllm_ascend/attention/attention_v1.py", "AscendAttentionMetadataBuilder")
     assert not any(
@@ -444,7 +451,7 @@ def test_eagle_set_attn_installs_runtime_only_after_backend_selection(contract, 
         contract.scope[name] = type(name, (), {})
     module = ModuleType("vllm_ascend.worker.v2.spec_decode.draft_window_runtime")
     runtime = Mock(return_value=object())
-    module.DraftWindowRuntime = runtime
+    module.__dict__["DraftWindowRuntime"] = runtime
     monkeypatch.setitem(sys.modules, module.__name__, module)
     policy = object()
     if enabled:
@@ -638,6 +645,7 @@ def test_dspark_mla_reuses_prepared_exact_cpu_without_another_transfer(contract,
         name = f"vllm_ascend.worker.v2.spec_decode.draft_window_{suffix}"
         path = ROOT / f"vllm_ascend/worker/v2/spec_decode/draft_window_{suffix}.py"
         spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)

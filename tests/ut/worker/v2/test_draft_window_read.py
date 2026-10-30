@@ -45,7 +45,8 @@ class TestCanonicalRead(unittest.TestCase):
         self.assertEqual(self.table.tolist(), torch.arange(24).reshape(3, 8).tolist())
 
     def test_owned_start_transfer_retains_actual_source_and_destination(self):
-        retained, copied = [], []
+        retained: list[torch.Tensor] = []
+        copied: list[tuple[torch.Tensor, torch.Tensor]] = []
         original_copy = torch.Tensor.copy_
 
         def copy(destination, source, *args, **kwargs):

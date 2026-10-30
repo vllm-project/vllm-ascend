@@ -7,6 +7,7 @@ that an engine/backend joins all of its secondary-stream readers.
 """
 
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 import torch
@@ -41,8 +42,8 @@ def test_private_kernel_outputs_survive_exception_after_real_enqueue(monkeypatch
 
     pool = DraftWindowOwnerPool(1)
     stream = torch.npu.Stream()
-    held_outputs = []
-    diagnostic_events = []
+    held_outputs: list[torch.Tensor] = []
+    diagnostic_events: list[Any] = []
     kernel_name = {
         "plan": "_plan_draft_window",
         "gather": "_gather_draft_kv_fp32",
@@ -218,6 +219,7 @@ def pending_native_reader(pool):
     before observation this fixture is inconclusive. Keep every allocation
     alive and synchronize only this test's stream during cleanup.
     """
+    completion: ObservedNativeCompletion
     matrix_size = 4096
     delay_operations = 128
     stream = torch.npu.Stream()

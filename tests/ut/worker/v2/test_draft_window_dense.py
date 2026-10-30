@@ -110,9 +110,9 @@ def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_widt
     keys, values = gather_dense_draft_kv(read, cache, cache, output_dtype=output_dtype)
     assert keys.dtype == values.dtype == (output_dtype or cache.dtype)
     assert torch.isfinite(keys).all() and torch.isfinite(values).all()
-    for row, expected in enumerate(reference):
-        torch.testing.assert_close(keys[row, : len(expected)], expected.to(keys.dtype), rtol=0, atol=0)
-        visible = len(expected)
+    for row, expected_values in enumerate(reference):
+        torch.testing.assert_close(keys[row, : len(expected_values)], expected_values.to(keys.dtype), rtol=0, atol=0)
+        visible = len(expected_values)
         for q in range(query_width):
             allowed = min(visible, visible - query_width + q + 1) if causal else visible
             assert not read.mask[row, 0, q, :allowed].any()

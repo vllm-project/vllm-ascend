@@ -53,7 +53,7 @@ def buffers(held, capacity):
 
 @pytest.mark.parametrize("capacity", [1152, 64000])
 def test_sequential_attention_has_bounded_private_operands(capacity):
-    held = []
+    held: list[object] = []
     read, keys, values, query = make_read(capacity, held)
     # Compile outside the measured allocation-contract section. No timed
     # throughput claim; retaining the read is required for its whole lifetime.
@@ -73,7 +73,7 @@ def test_sequential_attention_has_bounded_private_operands(capacity):
 
 
 def test_standalone_gather_outputs_remain_independent():
-    held = []
+    held: list[object] = []
     read, keys, values, _ = make_read(1152, held)
     values.fill_(1)
     first = gather_dense_draft_kv(read, keys, values, output_dtype=torch.float32)[1]
@@ -86,7 +86,7 @@ def test_standalone_gather_outputs_remain_independent():
 
 
 def test_queued_attention_consumes_before_same_stream_overwrite():
-    held = []
+    held: list[object] = []
     stream = torch.npu.Stream()
     with torch.npu.stream(stream):
         read, keys, values, query = make_read(1152, held)

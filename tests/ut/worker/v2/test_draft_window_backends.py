@@ -24,7 +24,9 @@ class DenseBackend:
 
 
 class DenseBuilder:
-    pass
+    sliding_window: int | None
+    sinks: object | None
+    use_bnsd_kv_cache: bool
 
 
 class DenseSubclass(DenseBuilder):
@@ -36,6 +38,8 @@ class CompressedBuilder:
 
 
 class FullSpec:
+    sliding_window: int | None
+
     def __init__(self, block_size=256, tokens_per_state=1):
         self.block_size = block_size
         self.tokens_per_state = tokens_per_state
@@ -413,7 +417,7 @@ def test_actual_cp_builder_remains_missing_even_when_requested_flag_is_false(typ
 
 
 class MLABuilder:
-    flashmla_state = None
+    flashmla_state: object | None = None
 
 
 class MLASpec(FullSpec):
