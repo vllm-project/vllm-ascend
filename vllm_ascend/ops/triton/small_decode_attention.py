@@ -35,6 +35,7 @@ def _decode_attention_partial(
     VALUE_BLOCK_STRIDE: tl.constexpr,
     STATS_STRIDE: tl.constexpr,
 ):
+    tl.static_assert(TILE == BLOCK_SIZE)
     columns = tl.arange(0, HEAD_DIM)
     lanes = tl.arange(0, TILE)
     for task in range(tl.program_id(0), NUM_TOKENS * NUM_HEADS * SPLITS, tl.num_programs(0)):
@@ -48,17 +49,15 @@ def _decode_attention_partial(
         maximum = tl.full((), float("-inf"), tl.float32)
         denominator = tl.full((), 0.0, tl.float32)
         accumulator = tl.full((HEAD_DIM,), 0.0, tl.float32)
+        offsets = (lanes * NUM_KV_HEADS + kv_head)[:, None] * HEAD_DIM + columns[None, :]
         # Interleave sequence tiles across splits, keeping softmax in FP32.
         for start in range(split * TILE, seq_len, TILE * SPLITS):
             positions = start + lanes
             block = tl.load(
-                block_table_ptr + token * TABLE_STRIDE + positions // BLOCK_SIZE,
-                mask=positions < seq_len,
-                other=0,
+                block_table_ptr + token * TABLE_STRIDE + start // BLOCK_SIZE,
             ).to(tl.int64)
-            offsets = ((positions % BLOCK_SIZE) * NUM_KV_HEADS + kv_head)[:, None] * HEAD_DIM + columns[None, :]
             keys = tl.load(
-                key_ptr + block[:, None] * KEY_BLOCK_STRIDE + offsets,
+                key_ptr + block * KEY_BLOCK_STRIDE + offsets,
                 mask=(positions < seq_len)[:, None],
                 other=0,
             ).to(tl.float32)
@@ -68,7 +67,7 @@ def _decode_attention_partial(
             correction = tl.exp(maximum - next_maximum)
             probabilities = tl.exp(scores - next_maximum)
             values = tl.load(
-                value_ptr + block[:, None] * VALUE_BLOCK_STRIDE + offsets,
+                value_ptr + block * VALUE_BLOCK_STRIDE + offsets,
                 mask=(positions < seq_len)[:, None],
                 other=0,
             ).to(tl.float32)
