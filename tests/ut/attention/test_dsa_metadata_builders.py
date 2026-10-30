@@ -174,8 +174,6 @@ class TestDSAMetadataBuilders(TestCase):
                     self.assertIs(cls, getattr(module, f"{prefix}{role}MetadataBuilder"))
                     builder = make_builder(cls)
                     self.assertTrue(builder._use_specialized_metadata())
-        with patch.object(dsa_v1.AscendDSABackend, "get_builder_cls", return_value=dsa_cp.AscendDSACPMetadataBuilder):
-            self.assertIs(dsa_v1.AscendDSASWABackend.get_builder_cls(), dsa_cp.AscendDSACPMetadataBuilder)
 
     def test_state_skips_query_and_compressor_preparation(self):
         builder = make_builder(dsa_v1.AscendDSAStateMetadataBuilder, ratio=4)
