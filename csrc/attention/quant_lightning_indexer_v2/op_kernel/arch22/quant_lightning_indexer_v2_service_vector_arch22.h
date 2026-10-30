@@ -346,13 +346,20 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::CleanInvalidOutput(int64_t invalidS1
 }
 
 
-// 64 元素分块封装: 规避 Level-2 大 count 的 vmax/vmin/vabs 等指令异常
+// Level-0 vector repeats avoid large Level-2 counts and per-repeat dispatch overhead.
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecMaxPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                                        const LocalTensor<float> &src1, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Max(dst[off], src0[off], src1[off], 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Max(dst[off], src0[off], src1[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -361,8 +368,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecMinPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                                        const LocalTensor<float> &src1, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Min(dst[off], src0[off], src1[off], 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Min(dst[off], src0[off], src1[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -371,8 +385,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecAbs(const LocalTensor<float> &dst, const LocalTensor<float> &src,
                                                    int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Abs(dst[off], src[off], 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Abs(dst[off], src[off], mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -381,8 +402,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecMinsScalar(const LocalTensor<float> &dst,
                                                           const LocalTensor<float> &src, float v, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Mins(dst[off], src[off], v, 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Mins(dst[off], src[off], v, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -391,8 +419,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecMaxsScalar(const LocalTensor<float> &dst,
                                                           const LocalTensor<float> &src, float v, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Maxs(dst[off], src[off], v, 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Maxs(dst[off], src[off], v, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -402,8 +437,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecSubPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                                        const LocalTensor<float> &src1, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Sub(dst[off], src0[off], src1[off], 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Sub(dst[off], src0[off], src1[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -412,8 +454,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecAddsScalar(const LocalTensor<float> &dst,
                                                           const LocalTensor<float> &src, float v, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Adds(dst[off], src[off], v, 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Adds(dst[off], src[off], v, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -422,8 +471,15 @@ template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::VecMulPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                                        const LocalTensor<float> &src1, int32_t n)
 {
-    for (int32_t off = 0; off < n; off += 64) {
-        Mul(dst[off], src0[off], src1[off], 64);
+    {
+        int32_t off = 0;
+        while (off < n) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(n - off, mask, repeatTimes);
+            Mul(dst[off], src0[off], src1[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
 }
@@ -554,7 +610,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessCandBlockTopk(const QLIV2Comm
     // (禁止标量 SetValue: 标量写不受 PipeBarrier<PIPE_V> 围栏, 与后续 V 管道读存在确定性竞态
     //  (实测 innerS1Idx=1 行的填充被 SortAll 抢跑覆盖); 禁止 s32->f32 Cast (v220 无此组合)。
     //  改为纯 int32 向量算术: idx' = idx - (idx+1)*isPad, isPad = clamp(idx - thr, 0, 1),
-    //  thr = base + realBlockNum - 1; 所有指令 count=blockNumPad (64 对齐), 按 64 分块避免 mask 寄存器限制。
+    //  thr = base + realBlockNum - 1; 所有指令覆盖 blockNumPad (64 对齐), 用 Level-0 repeatTimes 批量下发。
     //  scratch 用 mode=1 独占区 [14336,15360) (mode=2 的 isOutI32 已随 R11 leak 改造删除),
     //  避开主路径 tmpSortBuf [4096,12288), 消除跨迭代残留读的隐患)
     LocalTensor<int32_t> idxScr = tmp[14336].template ReinterpretCast<int32_t>();      // 等差源
@@ -565,28 +621,70 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessCandBlockTopk(const QLIV2Comm
     ArithProgression<int32_t>(idxScr, static_cast<int32_t>(tileBlockBase), 1, blockNumPad);
     Duplicate(thrI, tileBlockBase + realBlockNum - 1, blockNumPad);
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Sub(offI[off], idxScr[off], thrI[off], 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Sub(offI[off], idxScr[off], thrI[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Maxs(offI[off], offI[off], 0, 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Maxs(offI[off], offI[off], 0, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Mins(offI[off], offI[off], 1, 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Mins(offI[off], offI[off], 1, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Adds(tI[off], idxScr[off], 1, 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Adds(tI[off], idxScr[off], 1, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Mul(tI[off], tI[off], offI[off], 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Mul(tI[off], tI[off], offI[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
-    for (int32_t off = 0; off < blockNumPad; off += 64) {
-        Sub(blkIdx[off], idxScr[off], tI[off], 64);
+    {
+        int32_t off = 0;
+        while (off < blockNumPad) {
+            uint64_t mask = 0;
+            uint8_t repeatTimes = 0;
+            QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+            Sub(blkIdx[off], idxScr[off], tI[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+            off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+        }
     }
     PipeBarrier<PIPE_V>();
     // pad 块 score 归一为 -inf 位型: 覆盖 [realBlockNum, blockNumPad), 含 stale 区 [blockNum, blockNumPad)
@@ -597,24 +695,59 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessCandBlockTopk(const QLIV2Comm
         LocalTensor<int32_t> pRaw = tmp[15360].template ReinterpretCast<int32_t>(); // -isPad
         LocalTensor<int32_t> pNeg = tmp[15616].template ReinterpretCast<int32_t>(); // (score-NINF)*(-isPad)
         LocalTensor<int32_t> scoreI = blkScore.template ReinterpretCast<int32_t>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Duplicate(pRaw[off], -1, 64);
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Duplicate(pRaw[off], -1, mask, repeatTimes, 1, B32_VEC_REPEAT_STRIDE);
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Mul(pRaw[off], pRaw[off], offI[off], 64); // -isPad
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Mul(pRaw[off], pRaw[off], offI[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // -isPad
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Adds(pNeg[off], scoreI[off], 8388608, 64); // score - NINF_bits (NINF=0xFF800000=-8388608)
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Adds(pNeg[off], scoreI[off], 8388608, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // score - NINF_bits (NINF=0xFF800000=-8388608)
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Mul(pNeg[off], pNeg[off], pRaw[off], 64);
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Mul(pNeg[off], pNeg[off], pRaw[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams());
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Add(scoreI[off], scoreI[off], pNeg[off], 64); // pad 块 -> -inf 位型
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Add(scoreI[off], scoreI[off], pNeg[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // pad 块 -> -inf 位型
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
     }
@@ -629,51 +762,128 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessCandBlockTopk(const QLIV2Comm
         LocalTensor<int32_t> pB = offI;
         LocalTensor<int32_t> pFlag = tI;
         LocalTensor<int32_t> scoreI = blkScore.template ReinterpretCast<int32_t>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            // idxScr 为全局块号, pin 也必须用全局 id (tileBlockBase + pinLocal) 比较
-            Adds(pRaw[off], idxScr[off], -(tileBlockBase + pinLocal), 64); // 0 于 pin 块
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                // idxScr 为全局块号, pin 也必须用全局 id (tileBlockBase + pinLocal) 比较
+                Adds(pRaw[off], idxScr[off], -(tileBlockBase + pinLocal), mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // 0 于 pin 块
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
         Duplicate(pNeg, 0, blockNumPad);
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Sub(pNeg[off], pNeg[off], pRaw[off], 64); // -(idx-pinLocal)
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Sub(pNeg[off], pNeg[off], pRaw[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // -(idx-pinLocal)
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Maxs(pA[off], pRaw[off], 0, 64);
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Maxs(pA[off], pRaw[off], 0, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Mins(pA[off], pA[off], 1, 64); // 1 若 idx > pin
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Mins(pA[off], pA[off], 1, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // 1 若 idx > pin
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Maxs(pB[off], pNeg[off], 0, 64);
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Maxs(pB[off], pNeg[off], 0, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams());
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Mins(pB[off], pB[off], 1, 64); // 1 若 idx < pin
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Mins(pB[off], pB[off], 1, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // 1 若 idx < pin
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Add(pFlag[off], pA[off], pB[off], 64); // isNotPin (0/1, 互斥)
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Add(pFlag[off], pA[off], pB[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // isNotPin (0/1, 互斥)
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Adds(pFlag[off], pFlag[off], -1, 64); // -1 于 pin, 0 其余
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Adds(pFlag[off], pFlag[off], -1, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // -1 于 pin, 0 其余
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Adds(pRaw[off], scoreI[off], -2139095040, 64); // score - 0x7F800000 (复用 pRaw)
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Adds(pRaw[off], scoreI[off], -2139095040, mask, repeatTimes, QLIV2ServiceVec::B32RepeatParams()); // score - 0x7F800000 (复用 pRaw)
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Mul(pRaw[off], pRaw[off], pFlag[off], 64); // (score-PINF)*flag
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Mul(pRaw[off], pRaw[off], pFlag[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // (score-PINF)*flag
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
-        for (int32_t off = 0; off < blockNumPad; off += 64) {
-            Add(scoreI[off], scoreI[off], pRaw[off], 64); // pin -> +inf 位型
+        {
+            int32_t off = 0;
+            while (off < blockNumPad) {
+                uint64_t mask = 0;
+                uint8_t repeatTimes = 0;
+                QLIV2ServiceVec::VecRepeatPlan(blockNumPad - off, mask, repeatTimes);
+                Add(scoreI[off], scoreI[off], pRaw[off], mask, repeatTimes, QLIV2ServiceVec::B32BinaryRepeatParams()); // pin -> +inf 位型
+                off += static_cast<int32_t>(repeatTimes) * B32_VEC_ELM_NUM;
+            }
         }
         PipeBarrier<PIPE_V>();
     }
