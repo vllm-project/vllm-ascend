@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+
 from __future__ import annotations
 
 import math
@@ -1827,6 +1828,14 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     spec = vllm_config.speculative_config
     if spec is not None and model_config is spec.draft_model_config:
         model_config = spec.target_model_config
+    if model_config is not None and model_config.architecture in (
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+    ):
+        # Qwen4Exp PLE is managed by its model-specific implementation, not
+        # the DeepSeek V4.1 Engram runtime.
+        vllm_config.engram_config = None
+        return
     if engram_config is None:
         if (
             model_config is None
