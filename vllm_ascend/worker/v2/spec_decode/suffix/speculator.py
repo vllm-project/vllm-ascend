@@ -166,7 +166,8 @@ def _corpus_draft(
     # Hash the trailing tokens newest-first, as ingestion does.
     hv = tl.zeros((), tl.int64)
     for d in tl.static_range(4):
-        tok = tl.load(row + seq_len - 1 - d, mask=seq_len - 1 - d >= 0, other=0)
+        _tp_d = tl.where(seq_len - 1 - d < 0, 0, seq_len - 1 - d)
+        tok = tl.load(row + _tp_d, mask=seq_len - 1 - d >= 0, other=0)
         hv = (hv ^ tok.to(tl.int64)) * HASH_MUL
         if d == 1:
             bucket2 = _bucket(hv, NUM_BUCKETS)
@@ -183,12 +184,15 @@ def _corpus_draft(
     # addresses into [0, corpus_len) so stale/corrupt entries can never emit
     # an out-of-range D-cache address.
     _cpos = tl.where((cpos < 0) | (cpos >= corpus_len), 0, cpos)
-    src_pos = _cpos[:, None] - 1 - d_iota[None, :]
-    src_pos = tl.where(src_pos < 0, 0, src_pos)
+    raw_src_pos = _cpos[:, None] - 1 - d_iota[None, :]
+    src_pos = tl.where(raw_src_pos < 0, 0, raw_src_pos)
     src_pos = tl.where(src_pos >= corpus_len, corpus_len - 1, src_pos)
     src = tl.load(
         corpus_ptr + src_pos,
-        mask=(vals[:, None] >= 0) & (cpos[:, None] >= 1) & (d_iota[None, :] < MAX_DEPTH),
+        mask=(vals[:, None] >= 0)
+        & (cpos[:, None] >= 1)
+        & (raw_src_pos >= 0)
+        & (d_iota[None, :] < MAX_DEPTH),
         other=-1,
     )
     miss = (src != tail[None, :]).to(tl.int32)
