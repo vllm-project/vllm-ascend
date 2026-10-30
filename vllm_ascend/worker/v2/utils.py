@@ -216,15 +216,20 @@ def torch_npu_graph_wrapper(*args, **kwargs):
 
 
 def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
-    """Validate and cache V4.1 source RoPE tables on compressor builders."""
-    # Lazy import avoids the model/cache registration cycle.
+    """Prepare V4.1 RoPE and stable PCP buffer owners before capture."""
+    # Lazy imports avoid the model/cache registration cycle.
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41PCPMetadataBuilder
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 
+    pcp_builders = []
     for groups in runner.attn_groups:
         for attn_group in groups:
             for builder in attn_group.metadata_builders:
                 if isinstance(builder, AscendDSAV41MetadataBuilder):
                     builder.prepare_source_rope()
+                if isinstance(builder, AscendDSAV41PCPMetadataBuilder):
+                    pcp_builders.append(builder)
+    AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(pcp_builders)
 
 
 def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> None:

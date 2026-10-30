@@ -1830,13 +1830,11 @@ def test_a_window_that_drifts_between_the_spec_and_the_config_is_rejected(runtim
     """The write side pads out the spec's window and this mask floors on the text
     config's. Both are read from the model today, so they agree -- but they are
     two sources, and a drift would pad one window while bounding another, which
-    shows up as precision rather than as a failure. The builder refuses it."""
+    shows up as precision rather than as a failure. Initialization refuses it."""
     builder = _swa_builder(runtime)
     runtime.model_config.hf_text_config.sliding_window = REPLAY_WINDOW + 1
-    common = _replay_common([REPLAY_START], query_lens=[REPLAY_SEQ_LEN - REPLAY_START], seq_lens=[REPLAY_SEQ_LEN])
-
     with pytest.raises(AssertionError):
-        builder.build(0, common)
+        AscendDSAV41MetadataBuilder(builder.kv_cache_spec, [], runtime, torch.device("cpu"))
 
 
 def test_only_the_request_that_replays_is_floored(runtime):

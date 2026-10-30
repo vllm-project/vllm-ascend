@@ -462,7 +462,7 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
-    common_v41_batch_metadata: dict[str, Any] = {}
+    common_v41_batch_metadata: dict[str | tuple[str, int], Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
     formatted_slot_mappings = None
@@ -585,7 +585,13 @@ def build_attn_metadata(
                     num_actual_reqs=num_actual_reqs,
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
-                    common_v41_batch_metadata=common_v41_batch_metadata,
+                    # Model-specific overrides can differ between cache groups.
+                    # Keep optimized construction, but isolate their batch caches.
+                    common_v41_batch_metadata=(
+                        common_v41_batch_metadata
+                        if model_specific_attn_metadata is None
+                        else common_v41_batch_metadata.setdefault(("model_specific", i), {})
+                    ),
                     # Upstream capture prepares metadata with runtime mode
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
