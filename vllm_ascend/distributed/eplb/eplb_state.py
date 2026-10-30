@@ -19,13 +19,20 @@ from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    in_the_same_node_as,
+)
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalize, PrepareAndFinalizeWithAllGather
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
@@ -99,6 +106,67 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         )
         self._set_local_expert_range(expert_load_view)
         self.refresh_expert_replica_routing_table()
+
+    def record_load(
+        self,
+        expert_tokens: torch.Tensor | None,
+        group_list_type: int,
+        *,
+        topk_ids: torch.Tensor,
+        num_source_tokens: int,
+        is_sequence_parallel: bool,
+        prepare_finalize: PrepareAndFinalize,
+    ) -> None:
+        """Record this layer's MRV2 load after FFN and before output finalization."""
+        local_load = None
+        if _eplb_ops.use_allgather_eplb(True):
+            assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
+            num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+            is_padding = self.allgather_source_is_padding
+            if is_padding is None:
+                is_padding = getattr(get_forward_context(), "is_padding", None)
+            token_mask = _eplb_ops.make_allgather_mask(
+                num_source_tokens,
+                num_unpadded_tokens,
+                self.should_record_tensor,
+                is_padding=is_padding,
+                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+            )
+            assert isinstance(prepare_finalize, PrepareAndFinalizeWithAllGather)
+            token_mask = prepare_finalize.all_gather_eplb_mask(token_mask)
+            local_load = _eplb_ops.count_allgather_tokens(
+                topk_ids, token_mask, self.local_expert_start, self.local_expert_count
+            )
+            assert self.allgather_record_tensor is not None
+            torch.maximum(
+                self.allgather_record_tensor,
+                token_mask.any().to(torch.int32),
+                out=self.allgather_record_tensor,
+            )
+        if expert_tokens is None:
+            raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
+        expert_load_view = self.expert_load_view
+        record_enabled = self.should_record_tensor
+        if local_load is not None:
+            expert_tokens = local_load
+            assert self.allgather_record_tensor is not None
+            record_enabled = self.allgather_record_tensor > 0
+            group_list_type = 1
+        if expert_load_view is None or record_enabled is None:
+            raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
+        if expert_tokens.numel() != self.local_expert_count:
+            raise RuntimeError(
+                "MoE expert count does not match local EPLB experts: "
+                f"{expert_tokens.numel()} != {self.local_expert_count}"
+            )
+        torch.ops.vllm.ascend_eplb_record_expert_tokens(
+            expert_tokens,
+            expert_load_view,
+            record_enabled,
+            group_list_type,
+            self.local_expert_start,
+        )
 
     def refresh_expert_replica_routing_table(self) -> None:
         logical_to_physical_map = self.logical_to_physical_map

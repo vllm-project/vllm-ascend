@@ -28,9 +28,7 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState, refres
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
-from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 from vllm_ascend.utils import is_950
@@ -160,22 +158,15 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             num_tokens = torch.tensor(EPLB_ROWS, device=device)
             state.num_unpadded_tokens_tensors = [num_tokens]
             state.allgather_source_is_padding = padding
-            layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
-            layer.router = router
-            layer._use_v2_model_runner = True
-            layer.dynamic_eplb = False
-            layer.moe_config = SimpleNamespace(
-                is_sequence_parallel=False, ep_rank=rank, num_local_experts=EPLB_LOCAL_EXPERTS
-            )
-            make_mask = layer._make_eplb_token_mask
+            gather_mask = prepare.all_gather_eplb_mask
             mask = None
 
-            def capture_mask(num_source_tokens, prepare_finalize):
+            def capture_mask(source_mask):
                 nonlocal mask
-                mask = make_mask(num_source_tokens, prepare_finalize)
+                mask = gather_mask(source_mask)
                 return mask
 
-            layer._make_eplb_token_mask = capture_mask
+            prepare.all_gather_eplb_mask = capture_mask
 
             def forward():
                 prepared = prepare.prepare(hidden, logits)
@@ -191,14 +182,12 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                 )
                 # Identity experts isolate dispatch/combine ownership from FFN numerics.
                 output = dispatcher.token_combine(dispatched.hidden_states, dispatched.combine_metadata)
-                layer._record_eplb_load(
-                    FusedExpertsResult(
-                        routed_out=output,
-                        expert_tokens=dispatched.group_list,
-                        group_list_type=dispatched.group_list_type,
-                    ),
+                state.record_load(
+                    dispatched.group_list,
+                    dispatched.group_list_type,
                     topk_ids=physical,
                     num_source_tokens=EPLB_ROWS,
+                    is_sequence_parallel=False,
                     prepare_finalize=prepare,
                 )
                 assert mask is not None

@@ -496,13 +496,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         as hidden states and router logits. Other inputs follow the DP-then-PCP
         communication layout.
         """
-        return self._all_gather_rows(input_ids)
-
-    def all_gather_eplb_mask(self, token_mask: torch.Tensor) -> torch.Tensor:
-        # Use a supported collective dtype; zero padding remains ineligible.
-        return self._all_gather_rows(token_mask.to(torch.int32)).to(torch.bool)
-
-    def _all_gather_rows(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self._use_ep_sequence_parallel():
             return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_ids)
 
@@ -523,6 +516,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             input_ids = get_pcp_group().all_gather(input_ids, 0)
 
         return input_ids
+
+    def all_gather_eplb_mask(self, token_mask: torch.Tensor) -> torch.Tensor:
+        # Match input-id row alignment with a supported collective dtype.
+        return self.all_gather_input_ids(token_mask.to(torch.int32)).to(torch.bool)
 
     def finalize(
         self,
