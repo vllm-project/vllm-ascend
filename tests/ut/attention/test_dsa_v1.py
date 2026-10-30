@@ -2772,6 +2772,7 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
             num_actual_reqs=None,
             cos=torch.ones(5),
             sin=torch.zeros(5),
+            formatted_slot_mapping=builder.slot_mapping[:5],
         )
         if deferred:
             for task in builder.take_device_metadata_tasks():
