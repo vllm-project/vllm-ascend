@@ -370,7 +370,8 @@ def test_ingestion_is_deterministic():
 @pytest.mark.xfail(
     _IS_NPU,
     reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
-    raises=(RuntimeError, ValueError),
+    raises=RuntimeError,
+    match=r"(?i)mlir|compile|ascend",
 )
 def test_adaptive_verification_confidences():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
@@ -489,7 +490,8 @@ def test_document_counter_rollover_restarts_the_index():
 @pytest.mark.xfail(
     _IS_NPU,
     reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
-    raises=(RuntimeError, ValueError),
+    raises=RuntimeError,
+    match=r"(?i)mlir|compile|ascend",
 )
 def test_reused_slot_does_not_inherit_verification_stats():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
