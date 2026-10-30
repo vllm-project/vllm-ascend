@@ -8,6 +8,7 @@ from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -54,6 +55,11 @@ def mrv2_environment():
 
 
 @pytest.fixture(scope="module")
+def draft_model_path() -> str:
+    return snapshot_download(DRAFT_MODEL, local_files_only=False)
+
+
+@pytest.fixture(scope="module")
 def greedy_reference(mrv2_environment):
     with VllmRunner(TARGET_MODEL, **RUNNER_KWARGS) as runner:
         outputs = runner.model.generate(
@@ -76,11 +82,11 @@ def greedy_reference(mrv2_environment):
     "draft_sample_method,temperature",
     [("greedy", 0.0), ("probabilistic", 0.0), ("probabilistic", 0.8)],
 )
-def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference, record_property):
+def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference, draft_model_path, record_property):
     # A block of eight contains one anchor and at most seven draft tokens.
     speculative_config = {
         "method": "dflash",
-        "model": DRAFT_MODEL,
+        "model": draft_model_path,
         "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
         "draft_tensor_parallel_size": 2,
         "enforce_eager": True,
