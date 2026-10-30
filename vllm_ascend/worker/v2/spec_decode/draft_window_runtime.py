@@ -21,6 +21,7 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_plan import compute_draft_wi
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import DraftWindowPolicyDecision
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource, materialize_direct_prefix
 
+
 class _NPUCompletion:
     def __init__(self) -> None:
         # Construction and recording both execute under the owner pool's
@@ -65,8 +66,16 @@ class DraftWindowRuntime:
         self.static_k = speculator.num_speculative_steps if self.method == "eagle3" else None
         if self.static_k is not None and policy.effective_window_size < 2 * self.static_k + 1:
             raise ValueError("Eagle3 draft_window_size must cover first-pass query width plus the proposal horizon")
-        if self.method == "eagle3" and speculator.use_fused_multi_step_decode:
-            raise NotImplementedError("Eagle3 Draft Window requires per-step metadata preparation")
+        if self.method == "eagle3":
+            # Main moved the capability to DraftModelSpeculator and renamed
+            # it; the release lane still uses the fused-decode flag.
+            updates_metadata_in_place = (
+                speculator.supports_decode_metadata_update
+                if hasattr(speculator, "supports_decode_metadata_update")
+                else speculator.use_fused_multi_step_decode
+            )
+            if updates_metadata_in_place:
+                raise NotImplementedError("Eagle3 Draft Window requires per-step metadata preparation")
         # The model config inherits the Target flag. All three Ascend
         # speculators also force their graph managers to NONE for the explicit
         # speculative override, allowing Target Graph with Draft eager.

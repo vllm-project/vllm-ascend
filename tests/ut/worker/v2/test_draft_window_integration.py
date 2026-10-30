@@ -54,6 +54,20 @@ def _execute(nodes, scope, filename):
     exec(compile(tree, str(filename), "exec"), scope)
 
 
+def _upstream_ar_attention_method(name):
+    path = _upstream_root() / "v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py"
+    klass = _node(path, "TargetDependentARSpeculator")
+    if any(getattr(node, "name", None) == name for node in klass.body):
+        return path, _node(path, name, "TargetDependentARSpeculator")
+    # Main shares attention initialization and capability selection with
+    # DraftModelSpeculator. Extract the actual inherited method, not a stub.
+    assert any(isinstance(base, ast.Name) and base.id == "DraftModelSpeculator" for base in klass.bases)
+    path = _upstream_root() / "v1/worker/gpu/spec_decode/speculator.py"
+    if name == "_configure_fused_multi_step_decode":
+        name = "_configure_decode_metadata_update"
+    return path, _node(path, name, "DraftModelSpeculator")
+
+
 def _read_leaf(monkeypatch):
     name = "_draft_window_read_source_contract"
     path = ROOT / "vllm_ascend/worker/v2/spec_decode/draft_window_read.py"
@@ -389,9 +403,9 @@ def test_current_dense_eagle_uses_upstream_unfused_selection(contract):
         isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "supports_draft_decode_metadata_update"
         for node in dense.body
     )
-    path = upstream / "v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py"
     scope = dict(contract.scope, logger=SimpleNamespace(info_once=Mock()))
-    _execute([_node(path, "_configure_fused_multi_step_decode", "TargetDependentARSpeculator")], scope, path)
+    path, configure = _upstream_ar_attention_method("_configure_fused_multi_step_decode")
+    _execute([configure], scope, path)
     contract.obj.num_speculative_steps = 8
     contract.obj.attn_groups = [
         [
@@ -401,15 +415,19 @@ def test_current_dense_eagle_uses_upstream_unfused_selection(contract):
             )
         ]
     ]
-    scope["_configure_fused_multi_step_decode"](contract.obj)
-    assert contract.obj.use_fused_multi_step_decode is False
+    scope[configure.name](contract.obj)
+    capability = (
+        contract.obj.supports_decode_metadata_update
+        if configure.name == "_configure_decode_metadata_update"
+        else contract.obj.use_fused_multi_step_decode
+    )
+    assert capability is False
 
 
 @pytest.mark.parametrize("contract", ["autoregressive"], indirect=True)
 @pytest.mark.parametrize("enabled", [False, True])
 def test_eagle_set_attn_installs_runtime_only_after_backend_selection(contract, monkeypatch, enabled):
-    path = _upstream_root() / "v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py"
-    node = _node(path, "set_attn", "TargetDependentARSpeculator")
+    path, node = _upstream_ar_attention_method("set_attn")
     node.body = ast.parse("return _set_attn_hook(self, locals())").body
     hook = Mock()
     scope = dict(contract.scope, _set_attn_hook=hook)

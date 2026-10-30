@@ -116,6 +116,19 @@ def test_native_swa_warning_uses_only_certified_narrowed_draft_groups(
         assert "may reduce" in args[0]
 
 
+@pytest.mark.parametrize("current_capability,legacy_flag", [(True, False), (False, True)])
+def test_eagle_window_checks_current_decode_metadata_update_capability(setup, current_capability, legacy_flag):
+    _, spec, _, _ = setup
+    spec.supports_decode_metadata_update = current_capability
+    spec.use_fused_multi_step_decode = legacy_flag
+    policy = resolve_draft_window_policy(requested_window_size=1024, method="eagle3")
+    if current_capability:
+        with pytest.raises(NotImplementedError, match="per-step metadata"):
+            DraftWindowRuntime(spec, policy)
+    else:
+        assert DraftWindowRuntime(spec, policy).method == "eagle3"
+
+
 def batch(*, rows=(1, 3), computed=(8, 24), prompt=(16, 16), scheduled=(7, 3), drafts=(3, 2)):
     return SimpleNamespace(
         num_reqs=len(rows),
