@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
-from functools import wraps
 from typing import Any
 
 import torch
@@ -23,7 +22,6 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
@@ -79,37 +77,6 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             else:
                 set_draft_graph_params(self.capture_sizes)
 
-    def _wrap_static_kernel_warmup(self, forward_fn: Callable) -> Callable:
-        compilation_config = get_ascend_config().ascend_compilation_config
-        if not compilation_config.enable_static_kernel or self.cudagraph_mode not in (
-            CUDAGraphMode.FULL,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ):
-            return forward_fn
-
-        # npugraph_ex ships only with the NPU runtime; keep this module
-        # importable on CPU for unit tests and tooling.
-        from npugraph_ex._acl_concrete_graph.static_kernel import compile_static_kernel
-
-        @wraps(forward_fn)
-        def warmup(*args, **kwargs):
-            output = forward_fn(*args, **kwargs)
-            if not torch.npu.is_current_stream_capturing():
-                # The backend remembers compiled input shapes, but draft
-                # profiling may omit attention and prefill/decode can share
-                # shapes with different attention metadata. Trace the full
-                # routine after its normal warmup, before graph capture.
-                # The graph manager rebuilds inputs and metadata afterwards.
-                compile_static_kernel(
-                    forward_fn,
-                    *args,
-                    config={"force_eager": True, "static_kernel_compile": True},
-                    **kwargs,
-                )
-            return output
-
-        return warmup
-
     def capture(
         self,
         forward_fn: Callable,
@@ -122,7 +89,6 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     ) -> None:
         """Capture ACL graphs for autoregressive speculative decoding."""
 
-        forward_fn = self._wrap_static_kernel_warmup(forward_fn)
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             if self.is_draft_model_prefill:
                 super().capture(

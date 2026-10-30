@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import sys
-from contextlib import contextmanager, nullcontext
-from types import ModuleType, SimpleNamespace
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -148,7 +147,6 @@ def test_capture_draft_prefill_delegates_to_parent():
     attn_groups = object()
     kv_cache_config = object()
     with (
-        patch.object(manager, "_wrap_static_kernel_warmup", side_effect=lambda fn: fn),
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
             return_value=nullcontext(),
@@ -198,7 +196,6 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
         runner(CUDAGraphMode.FULL)
 
     with (
-        patch.object(manager, "_wrap_static_kernel_warmup", side_effect=lambda fn: fn),
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
             return_value=nullcontext(),
@@ -368,102 +365,3 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
     graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
-
-
-MODULE = "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph"
-STATIC_KERNEL_MODULE = "npugraph_ex._acl_concrete_graph.static_kernel"
-
-
-@contextmanager
-def _static_kernel_stub(compile_static_kernel):
-    """Stand in for the NPU-only hook that the graph manager imports lazily."""
-    module = ModuleType(STATIC_KERNEL_MODULE)
-    module.compile_static_kernel = compile_static_kernel
-    with patch.dict(sys.modules, {STATIC_KERNEL_MODULE: module}):
-        yield
-
-
-@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY])
-def test_static_compile_traces_complete_routine_after_warmup(mode):
-    """Static compilation runs after the normal warmup and never during capture."""
-    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.cudagraph_mode = mode
-    config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=True))
-    calls: list[str] = []
-    outputs = [object(), object(), object()]
-    metadata = {"attention": object()}
-
-    def forward(num_reqs, *, attn_metadata):
-        assert num_reqs == 3 and attn_metadata is metadata
-        output = outputs[len([x for x in calls if x == "forward"])]
-        calls.append("forward")
-        return output
-
-    def compile_routine(function, *args, config, **kwargs):
-        assert calls == ["forward"]
-        assert function is forward
-        assert config == {"force_eager": True, "static_kernel_compile": True}
-        calls.append("static_compile")
-        function(*args, **kwargs)
-
-    compile_static = MagicMock(side_effect=compile_routine)
-    with (
-        patch(f"{MODULE}.get_ascend_config", return_value=config),
-        patch(f"{MODULE}.torch.npu.is_current_stream_capturing", return_value=False) as capturing,
-        _static_kernel_stub(compile_static),
-    ):
-        wrapped = manager._wrap_static_kernel_warmup(forward)
-        assert wrapped(3, attn_metadata=metadata) is outputs[0]
-        assert calls == ["forward", "static_compile", "forward"]
-        # Inside capture the routine must run without recompiling.
-        capturing.return_value = True
-        assert wrapped(3, attn_metadata=metadata) is outputs[2]
-
-    compile_static.assert_called_once()
-    assert calls == ["forward", "static_compile", "forward", "forward"]
-
-
-@pytest.mark.parametrize(
-    ("enabled", "mode"),
-    [
-        (False, CUDAGraphMode.FULL_DECODE_ONLY),
-        (True, CUDAGraphMode.PIECEWISE),
-        (True, CUDAGraphMode.NONE),
-    ],
-)
-def test_static_warmup_preserves_other_capture_modes(enabled, mode):
-    """Only full-graph capture with static kernels enabled wraps the forward."""
-    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.cudagraph_mode = mode
-    config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=enabled))
-
-    def forward():
-        return None
-
-    compile_static = MagicMock()
-    with (
-        patch(f"{MODULE}.get_ascend_config", return_value=config),
-        _static_kernel_stub(compile_static),
-    ):
-        assert manager._wrap_static_kernel_warmup(forward) is forward
-
-    compile_static.assert_not_called()
-
-
-def test_static_warmup_propagates_compilation_errors():
-    """A failed static compilation must not be hidden behind a silent fallback."""
-    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-    config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=True))
-
-    def forward():
-        return None
-
-    compile_static = MagicMock(side_effect=RuntimeError("compile failed"))
-    with (
-        patch(f"{MODULE}.get_ascend_config", return_value=config),
-        patch(f"{MODULE}.torch.npu.is_current_stream_capturing", return_value=False),
-        _static_kernel_stub(compile_static),
-        pytest.raises(RuntimeError, match="compile failed"),
-    ):
-        manager._wrap_static_kernel_warmup(forward)()

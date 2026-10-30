@@ -32,6 +32,7 @@ from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
+from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
@@ -73,11 +74,19 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
     uniform_decode_query_len = num_spec_tokens + 1
     max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
-    return [
-        x
-        for x in vllm_config.compilation_config.cudagraph_capture_sizes
-        if max_num_tokens >= x >= uniform_decode_query_len
-    ]
+    compilation_config = vllm_config.compilation_config
+    capture_sizes = set(compilation_config.cudagraph_capture_sizes)
+    if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
+        # V2 uniform decode capture rounds token counts up to the query length.
+        # With MTP5, for example, configured size 56 captures 60 tokens. Keep
+        # the raw sizes as well for routines that do not perform this rounding.
+        max_capture_size = compilation_config.max_cudagraph_capture_size
+        capture_sizes.update(
+            rounded
+            for size in compilation_config.cudagraph_capture_sizes
+            if (rounded := round_up(size, uniform_decode_query_len)) <= max_capture_size
+        )
+    return sorted(x for x in capture_sizes if max_num_tokens >= x >= uniform_decode_query_len)
 
 
 def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
@@ -277,6 +286,9 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
+        if ascend_compilation_config.enable_static_kernel:
+            # Serialized FX artifacts embed the static compilation shape filter.
+            factors["static_kernel_batch_sizes"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
