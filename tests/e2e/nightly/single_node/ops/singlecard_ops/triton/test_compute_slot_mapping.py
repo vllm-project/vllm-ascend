@@ -7,7 +7,7 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
+from vllm_ascend.ops.triton.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
 from vllm_ascend.worker.v2.block_table import (

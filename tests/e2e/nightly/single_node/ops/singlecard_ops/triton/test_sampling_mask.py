@@ -11,8 +11,8 @@ from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 
 _HAS_COMPACT_IDS = "token_ids" in SamplingMaskTensors._fields
 

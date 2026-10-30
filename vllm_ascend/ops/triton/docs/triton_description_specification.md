@@ -1,7 +1,7 @@
 > [!NOTE]
 > **Filling Instructions**
 >
-> - Place the document under `vllm_ascend/ops/triton/docs`, named after the operator. If a same-named document already exists, add a suffix to distinguish it.
+> - Place V1-only operator documents under `vllm_ascend/ops/triton/v1/docs` and all other operator documents under `vllm_ascend/ops/triton/docs`, named after the operator. If a same-named document already exists, add a suffix to distinguish it.
 > - Fill in strictly following the template. For items that do not apply, use "N/A"; do not leave them blank or missing.
 
 # Operator name

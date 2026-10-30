@@ -152,7 +152,7 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
 @patch.object(kw, "HAS_TRITON", True)
 def test_register_v1_sampling_warmup_registers_four_kernel_families():
     from tests.ut.model_executor.warmup.helpers import make_mock_ascend_config
-    from vllm_ascend.ops.triton import bincount, penalty, reject_sample
+    from vllm_ascend.ops.triton.v1 import bincount, penalty, reject_sample
 
     spec = make_mock_spec_config(num_speculative_tokens=3)
     config = make_mock_vllm_config(speculative_config=spec)

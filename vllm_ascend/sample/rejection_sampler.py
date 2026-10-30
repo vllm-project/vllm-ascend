@@ -21,7 +21,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.triton.reject_sample import (
+from vllm_ascend.ops.triton.v1.reject_sample import (
     _REJECTION_RANDOM_SAMPLE_BLOCK_VERIFY_KERNEL,
     _REJECTION_RANDOM_SAMPLE_KERNEL,
     _SAMPLE_RECOVERED_TOKENS_KERNEL,

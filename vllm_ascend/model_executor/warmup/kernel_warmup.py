@@ -44,10 +44,10 @@ def register_v1_sampling_warmup(vllm_config: VllmConfig) -> None:
     v2 runner (which never constructs the v1 sampling stack) free of these
     kernels.
     """
-    from vllm_ascend.ops.triton.bincount import _TOKEN_BIN_COUNTS_AND_MASK_KERNEL
-    from vllm_ascend.ops.triton.penalty import _APPLY_ALL_PENALTIES_KERNEL
-    from vllm_ascend.ops.triton.reject_sample import register_rejection_warmup
-    from vllm_ascend.ops.triton.spec_decode.utils import (
+    from vllm_ascend.ops.triton.v1.bincount import _TOKEN_BIN_COUNTS_AND_MASK_KERNEL
+    from vllm_ascend.ops.triton.v1.penalty import _APPLY_ALL_PENALTIES_KERNEL
+    from vllm_ascend.ops.triton.v1.reject_sample import register_rejection_warmup
+    from vllm_ascend.ops.triton.v1.spec_decode.utils import (
         _PREPARE_INPUTS_PADDED_KERNEL,
     )
 

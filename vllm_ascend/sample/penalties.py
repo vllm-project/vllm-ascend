@@ -7,7 +7,7 @@ import torch
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 
-from vllm_ascend.ops.triton.penalty import apply_penalties_triton
+from vllm_ascend.ops.triton.v1.penalty import apply_penalties_triton
 
 
 def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int, device: torch.device) -> torch.Tensor:
