@@ -54,10 +54,7 @@ def define_env(env):
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")
     if config is not None:
-        config.extra["i18n"] = {
-            language: dict(strings)
-            for language, strings in UI_STRINGS.items()
-        }
+        config.extra["i18n"] = {language: dict(strings) for language, strings in UI_STRINGS.items()}
 
     @env.macro
     def include_code(file_path, start_after=None, end_before=None, language="python"):
