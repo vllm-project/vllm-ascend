@@ -64,6 +64,13 @@ precision_only_e2e:
   partitions:
     - a3-1
     - a5-1
+  # Temporary routing check. Remove this list after the single-card
+  # assignment has been verified. These files are appended to every
+  # precision recommendation and also scheduled on a full-suite run.
+  verification_tests:
+    - tests/e2e/nightly/single_node/ops/singlecard_ops/test_qfa_c8_paged_layout.py
+    - tests/e2e/nightly/single_node/ops/singlecard_ops/test_grouped_matmul_swiglu_quant.py
+    - tests/e2e/nightly/single_node/ops/singlecard_ops/test_dequant_swiglu_quant.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never

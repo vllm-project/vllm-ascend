@@ -1920,6 +1920,31 @@ class TestSelector:
         return ", ".join(result[:5]) + ("..." if len(changed_files) > 5 else "")
 
 
+def _load_verification_operator_tests() -> list[str]:
+    """Read precision_only_e2e.verification_tests without requiring PyYAML.
+
+    The recommend job installs regex only. The list is a temporary check and
+    uses the same entries as test_config.yaml.
+    """
+    config_path = Path(__file__).with_name("test_config.yaml")
+    tests: list[str] = []
+    collecting = False
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("verification_tests:"):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if stripped.startswith("- "):
+            tests.append(stripped[2:].strip().strip("\"'"))
+            continue
+        if stripped == "" or stripped.startswith("#"):
+            continue
+        break
+    return tests
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Coverage-based precision test selector (line, function, file granularity)"
@@ -2239,6 +2264,17 @@ def main():
 
     # ===== Output results =====
     test_names = [s[0] for s in base_selected]
+    # Temporary verification paths from test_config.yaml. Remove
+    # precision_only_e2e.verification_tests after the single-card assignment
+    # has been checked. This PR changes the selection pipeline, so CI runs the
+    # full suite and would otherwise ignore the recommendation file.
+    verify_operator_tests = _load_verification_operator_tests()
+    for operator_test in verify_operator_tests:
+        if operator_test not in test_names:
+            test_names.append(operator_test)
+    if verify_operator_tests:
+        print(f"\n=== Verification Operator Tests ({len(verify_operator_tests)}) ===")
+        print(verify_operator_tests)
     if test_names:
         print(f"\n=== Recommended Test Cases ({len(test_names)} tests) ===")
         print(test_names)

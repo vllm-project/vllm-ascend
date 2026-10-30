@@ -71,6 +71,14 @@ def test_all_tests_skips_operator_directory(monkeypatch, capsys):
 
     groups = _groups_from_stdout(capsys)
     assert _runners_for(groups, _OPS_TEST) == set()
+    meta = select_tests.yaml.safe_load(
+        select_tests.Path(".github/workflows/scripts/test_config.yaml").read_text(encoding="utf-8")
+    )
+    for operator_test in select_tests._load_verification_operator_tests(meta):
+        assert _runners_for(groups, operator_test) == {
+            "linux-aarch64-a3-1",
+            "linux-aarch64-a5-1",
+        }
 
 
 def test_explicit_e2e_does_not_schedule_operator_directory(monkeypatch, capsys):

@@ -102,11 +102,13 @@ class PrecisionOnlyE2E:
 
     ``root`` is outside the ``--all-tests`` scan. ``partitions`` are existing
     logical partitions; a recommended path under ``root`` is placed in each
-    of them.
+    of them. ``verification_tests`` are temporary paths added so a pipeline
+    change can still exercise that assignment.
     """
 
     root: str = ""
     partitions: tuple[PartitionKey, ...] = ()
+    verification_tests: tuple[str, ...] = ()
 
 
 PartitionKey = str
@@ -248,7 +250,22 @@ def _load_precision_only_e2e(
     unknown = sorted({partition for partition in partitions if partition not in partition_config})
     if unknown:
         raise ValueError("precision_only_e2e references undefined logical partition(s): " + ", ".join(unknown))
-    return PrecisionOnlyE2E(root=root, partitions=tuple(partitions))
+    raw_tests = raw.get("verification_tests") or []
+    if not isinstance(raw_tests, list) or not all(isinstance(test, str) and test for test in raw_tests):
+        raise ValueError("precision_only_e2e.verification_tests must be a list of test paths")
+    return PrecisionOnlyE2E(
+        root=root,
+        partitions=tuple(partitions),
+        verification_tests=tuple(_as_posix_path(test) for test in raw_tests),
+    )
+
+
+def _load_verification_operator_tests(meta: dict) -> list[str]:
+    """Load the temporary operator paths forced into recommendation runs."""
+    raw = (meta.get("precision_only_e2e") or {}).get("verification_tests") or []
+    if not isinstance(raw, list) or not all(isinstance(test, str) and test for test in raw):
+        raise ValueError("precision_only_e2e.verification_tests must be a list of test paths")
+    return [_as_posix_path(test) for test in raw]
 
 
 def _is_precision_only_e2e_path(path: str, root: str) -> bool:
@@ -925,6 +942,8 @@ def main():
                     f"Warning: Path does not exist: {root}",
                     file=sys.stderr,
                 )
+        for operator_test in precision_only_e2e.verification_tests:
+            _route_precision_only_e2e_target(operator_test, all_groups, precision_only_e2e)
     else:
         if args.curated not in curated_tests:
             print(
