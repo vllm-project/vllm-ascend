@@ -129,6 +129,18 @@ def qsa_fia_attention(
         if batch_size != 1
         else min(QSA_FIA_QUERY_TILE, max(1, QSA_FIA_MASK_BUDGET_BYTES // mask_kv_length))
     )
+    mask_workspace = None
+    if query.device.type == "npu":
+        # One process-local allocation is shared by all QSA layers and reused
+        # across every query tile and scheduler step.
+        from vllm_ascend.ops.triton.qwen4_exp.fia import get_qsa_fia_mask_workspace
+
+        mask_workspace = get_qsa_fia_mask_workspace(
+            query.device,
+            QSA_FIA_QUERY_TILE,
+            QSA_FIA_MASK_BUDGET_BYTES,
+            (compact_indices.shape[1] - 2 + 7) // 8 * 8,
+        )
     for start in range(0, query.shape[0], query_tile):
         end = min(start + query_tile, query.shape[0])
         visible = visible_lens[start:end]
@@ -137,7 +149,7 @@ def qsa_fia_attention(
             from vllm_ascend.ops.triton.qwen4_exp.fia import build_qsa_fia_mask, copy_qsa_fia_output
 
             atten_mask, has_selection = build_qsa_fia_mask(
-                compact_indices[start:end], visible, kv_length, mask_kv_length
+                compact_indices[start:end], visible, kv_length, mask_kv_length, mask_workspace
             )
         else:
             selected = expand_qsa_selected_tokens(compact_indices[start:end], visible.clamp(0, kv_length))

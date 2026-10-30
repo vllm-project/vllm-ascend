@@ -25,16 +25,23 @@ class QSARequest:
 
     @property
     def use_fia(self) -> bool:
-        """Whether this Prefill chunk fits the total KV limit."""
+        """Whether this Prefill chunk starts below the FIA KV limit."""
         return self.is_prefill and self.fia_query_end > self.query_start
 
     @property
     def fia_query_end(self) -> int:
-        """Route to FIA when historical KV plus this query is at most 24K."""
+        """Keep a chunk crossing 24K on FIA; switch subsequent chunks."""
         if not self.is_prefill:
             return self.query_start
-        # kv_length already includes the current query tokens.
-        if self.kv_length <= QSA_FIA_MAX_LOGICAL_KV_LENGTH:
+        query_length = self.query_end - self.query_start
+        # Scheduler seq_lens already includes the current query chunk.
+        total_logical_kv_length = self.kv_length
+        fits_fia_limit = total_logical_kv_length <= QSA_FIA_MAX_LOGICAL_KV_LENGTH
+        crosses_fia_limit = (
+            total_logical_kv_length > QSA_FIA_MAX_LOGICAL_KV_LENGTH
+            and total_logical_kv_length - query_length < QSA_FIA_MAX_LOGICAL_KV_LENGTH
+        )
+        if fits_fia_limit or crosses_fia_limit:
             return self.query_end
         return self.query_start
 
@@ -44,13 +51,31 @@ class QSARequest:
         return self.fia_query_end if self.is_prefill else self.query_start
 
 
+@dataclass(frozen=True)
+class QSARequestPlan:
+    """Precomputed operator routing shared by every QSA layer in one step."""
+
+    requests: tuple[QSARequest, ...]
+    fia_requests: tuple[QSARequest, ...]
+    gbsa_spans: tuple[tuple[int, int], ...]
+
+    def __getitem__(self, index: int) -> QSARequest:
+        return self.requests[index]
+
+    def __iter__(self):
+        return iter(self.requests)
+
+    def __len__(self) -> int:
+        return len(self.requests)
+
+
 def build_qsa_request_plan(
     query_start_loc_cpu: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
     num_actual_tokens: int,
     is_prefilling_cpu: torch.Tensor,
-) -> tuple[QSARequest, ...]:
-    """Use scheduler phase flags, including one-token prefills and MTP decodes."""
+) -> QSARequestPlan:
+    """Classify mixed-batch rows once for reuse by every QSA layer."""
     if any(t.device.type != "cpu" for t in (query_start_loc_cpu, seq_lens_cpu, is_prefilling_cpu)):
         raise ValueError("QSA dispatch requires scheduler CPU metadata")
     starts = query_start_loc_cpu.tolist()
@@ -66,7 +91,18 @@ def build_qsa_request_plan(
             requests.append(
                 QSARequest(request_index, start, end, int(lengths[request_index]), bool(phases[request_index]))
             )
-    return tuple(requests)
+    requests_tuple = tuple(requests)
+    fia_requests = tuple(request for request in requests_tuple if request.use_fia)
+    gbsa_spans: list[tuple[int, int]] = []
+    for request in requests_tuple:
+        start = request.gbsa_query_start
+        if start >= request.query_end:
+            continue
+        if gbsa_spans and gbsa_spans[-1][1] == start:
+            gbsa_spans[-1] = (gbsa_spans[-1][0], request.query_end)
+        else:
+            gbsa_spans.append((start, request.query_end))
+    return QSARequestPlan(requests_tuple, fia_requests, tuple(gbsa_spans))
 
 
 def dispatch_qsa_attention(
@@ -81,12 +117,12 @@ def dispatch_qsa_attention(
     logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
-    request_plan: tuple[QSARequest, ...] | None,
+    request_plan: QSARequestPlan | None,
 ) -> torch.Tensor:
     # None is the decode-only metadata sentinel, including graph capture.
     # This branch contains no host length decisions or FIA launches; device KV
     # lengths, positions and page tables may change between graph replays.
-    if request_plan is None or not any(request.is_prefill for request in request_plan):
+    if request_plan is None:
         return qsa_gbsa_attention(
             query,
             key_cache,
@@ -99,9 +135,7 @@ def dispatch_qsa_attention(
             output,
         )
 
-    for request in request_plan:
-        if not request.use_fia:
-            continue
+    for request in request_plan.fia_requests:
         rows = slice(request.query_start, request.fia_query_end)
         fia_kv_length = request.kv_length
         visible_lens = torch.minimum(
@@ -128,19 +162,10 @@ def dispatch_qsa_attention(
             block_table=table,
         )
 
-    # Every Decode row and each Prefill chunk exceeding the total-KV
+    # Every Decode row and each Prefill chunk starting at/above the logical-KV
     # limit uses GBSA. Coalesce consecutive rows without gathering/copying K/V or
     # changing the original request IDs used to address block tables and lengths.
-    gbsa_spans: list[tuple[int, int]] = []
-    for request in request_plan:
-        start = request.gbsa_query_start
-        if start >= request.query_end:
-            continue
-        if gbsa_spans and gbsa_spans[-1][1] == start:
-            gbsa_spans[-1] = (gbsa_spans[-1][0], request.query_end)
-        else:
-            gbsa_spans.append((start, request.query_end))
-    for start, end in gbsa_spans:
+    for start, end in request_plan.gbsa_spans:
         rows = slice(start, end)
         qsa_gbsa_attention(
             query[rows],
