@@ -20,8 +20,14 @@ on CUDA or ROCm with its PyTorch reference:
   the end of the MLP stage instead, on the rows the combine is about to weigh.
   That is the same function, because the norm reads one row at a time.
 
-Quantized checkpoints, expert parallelism, sequence-parallel MoE and the
-DSpark draft are not supported yet.
+Expert parallelism works, because the per-route norm is a single shared
+row-wise norm: normalizing a rank's local rows is the same function as
+normalizing per route, exactly as it is without expert parallelism. The fused
+dispatch/MLP/combine operator (``enable_fused_mc2``) is the one MoE path that
+cannot express it, and is rejected.
+
+Quantized checkpoints, EPLB, sequence-parallel MoE and the DSpark draft are
+not supported yet.
 """
 
 from collections.abc import Callable
@@ -30,6 +36,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -51,6 +58,7 @@ from vllm.models.muse_spark.common.omni import (
     register_omni_processor,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -282,24 +290,46 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
 
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
-        # vLLM builds the EP group over all TP x PCP x DP ranks of every MoE
-        # model; only enable_expert_parallel shards the experts across it.
-        if parallel_config.enable_expert_parallel:
-            raise NotImplementedError("Muse Spark on Ascend does not support expert parallelism yet.")
-        # The reference experts are replicated on every rank.
-        self.ep_size = 1
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         if self.is_sequence_parallel:
             raise NotImplementedError("Muse Spark on Ascend does not support sequence-parallel MoE yet.")
+        # The per-route norm lives at the end of the MLP stage, which the fused
+        # dispatch/MLP/combine operator does not expose. Until that norm can run
+        # inside the fused kernel, the fused path would silently drop it.
+        if get_ascend_config().enable_fused_mc2 == 1:
+            raise NotImplementedError(
+                "Muse Spark on Ascend does not support enable_fused_mc2 yet: that path fuses "
+                "dispatch, the MLP stage and the combine into a single operator, leaving nowhere "
+                "to apply the per-expert output norm."
+            )
+        if parallel_config.enable_eplb:
+            raise NotImplementedError("Muse Spark on Ascend does not support EPLB yet.")
+
+        # vLLM builds the EP group over all TP x PCP x DP ranks of every MoE
+        # model; only enable_expert_parallel shards the experts across it, so
+        # the bookkeeping below reads the flag rather than the group size.
+        self.use_ep = parallel_config.enable_expert_parallel
+        ep_group = get_ep_group()
+        self.ep_group = ep_group.device_group
+        self.ep_rank = ep_group.rank_in_group if self.use_ep else 0
+        self.ep_size = self.ep_group.size() if self.use_ep else 1
 
         self.layer_idx = layer_idx
         self.top_k = config.num_experts_per_tok
         self.num_experts = config.num_local_experts
         self.n_routed_experts = config.num_local_experts
         self.n_logical_experts = config.num_local_experts
+        # EPLB is rejected above, so there are no redundant experts to place.
         self.n_redundant_experts = 0
         self.n_physical_experts = self.n_logical_experts
-        self.n_local_physical_experts = self.n_physical_experts
+        if self.n_physical_experts % self.ep_size:
+            raise ValueError(
+                f"Muse Spark on Ascend needs the {self.n_physical_experts} experts to divide "
+                f"evenly across the {self.ep_size}-rank expert-parallel group."
+            )
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
         self.n_shared_experts = config.num_shared_experts
 
         self.router_dtype = ROUTER_DTYPE

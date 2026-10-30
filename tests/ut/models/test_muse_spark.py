@@ -275,7 +275,7 @@ def test_quantized_checkpoints_are_rejected_before_construction():
         muse_spark.AscendMuseSpark1xForCausalLM.__init__(model, vllm_config=vllm_config)
 
 
-def _moe_vllm_config(*, enable_expert_parallel: bool) -> SimpleNamespace:
+def _moe_vllm_config(*, enable_expert_parallel: bool, enable_eplb: bool = False) -> SimpleNamespace:
     text_config = SimpleNamespace(
         hidden_size=16,
         num_local_experts=4,
@@ -292,6 +292,7 @@ def _moe_vllm_config(*, enable_expert_parallel: bool) -> SimpleNamespace:
         model_config=SimpleNamespace(hf_text_config=text_config, dtype=torch.float32),
         parallel_config=SimpleNamespace(
             enable_expert_parallel=enable_expert_parallel,
+            enable_eplb=enable_eplb,
             use_sequence_parallel_moe=False,
         ),
     )
@@ -303,11 +304,6 @@ class _StubLinear(nn.Module):
     def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.empty(output_size, input_size), requires_grad=False)
-
-
-def test_reference_moe_rejects_expert_parallelism():
-    with pytest.raises(NotImplementedError, match="expert parallelism"):
-        muse_spark.AscendMuseSpark1xMoE(_moe_vllm_config(enable_expert_parallel=True), layer_idx=1)
 
 
 class _FakeRoutedExperts(nn.Module):
@@ -323,35 +319,73 @@ class _FakeRunner(nn.Module):
         self.routed_experts.quant_method = _bare_moe_method()
 
 
-def _build_moe():
-    """Build the MoE with the factory and the vLLM linears stubbed.
+def _ep_group(world_size: int, rank: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(device_group=SimpleNamespace(size=lambda: world_size), rank_in_group=rank)
+
+
+def _build_moe(*, vllm_config=None, ep_world_size: int = 1, ep_rank: int = 0, enable_fused_mc2: int = 0):
+    """Build the MoE with the factory, the vLLM linears and the groups stubbed.
 
     Returns the layer and the keyword arguments the factory was called with.
     """
+    if vllm_config is None:
+        vllm_config = _moe_vllm_config(enable_expert_parallel=False)
     factory = patch.object(muse_spark, "FusedMoEFactory", side_effect=lambda **kwargs: _FakeRunner())
     with (
         factory as fused_moe,
         patch.object(muse_spark, "GateLinear", _StubLinear),
         patch.object(muse_spark, "ReplicatedLinear", _StubLinear),
+        patch.object(parallel_state, "_EP", _ep_group(ep_world_size, ep_rank)),
+        patch.object(
+            muse_spark,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        ),
     ):
-        moe = muse_spark.AscendMuseSpark1xMoE(
-            _moe_vllm_config(enable_expert_parallel=False),
-            layer_idx=1,
-            prefix="model.layers.1.mlp",
-        )
+        moe = muse_spark.AscendMuseSpark1xMoE(vllm_config, layer_idx=1, prefix="model.layers.1.mlp")
     return moe, fused_moe.call_args.kwargs
 
 
 def test_moe_builds_under_tensor_parallelism_without_ep():
     # vLLM builds the EP group over the TP ranks of every MoE model, so TP=2
     # yields a two-rank EP group even with expert parallelism disabled.
-    two_rank_ep_group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
-
-    with patch.object(parallel_state, "_EP", two_rank_ep_group):
-        moe, _ = _build_moe()
+    moe, _ = _build_moe(ep_world_size=2)
 
     assert moe.ep_size == 1
     assert moe.n_local_physical_experts == moe.n_physical_experts == 4
+
+
+def test_moe_shards_the_experts_across_the_expert_parallel_group():
+    """The per-route norm is row-wise, so a rank normalizing its own rows is
+    still normalizing per route. Only the expert bookkeeping changes."""
+    moe, _ = _build_moe(
+        vllm_config=_moe_vllm_config(enable_expert_parallel=True),
+        ep_world_size=2,
+        ep_rank=1,
+    )
+
+    assert moe.use_ep
+    assert moe.ep_size == 2
+    assert moe.n_physical_experts == 4
+    assert moe.n_local_physical_experts == 2
+    assert (moe.physical_expert_start, moe.physical_expert_end) == (2, 4)
+
+
+def test_moe_rejects_an_expert_count_that_does_not_divide_across_the_ep_group():
+    with pytest.raises(ValueError, match="divide"):
+        _build_moe(vllm_config=_moe_vllm_config(enable_expert_parallel=True), ep_world_size=3)
+
+
+def test_moe_rejects_the_fused_dispatch_mlp_combine_path():
+    """That operator has no MLP-stage boundary, so it would drop the norm."""
+    with pytest.raises(NotImplementedError, match="enable_fused_mc2"):
+        _build_moe(vllm_config=_moe_vllm_config(enable_expert_parallel=True), ep_world_size=2, enable_fused_mc2=1)
+
+
+def test_moe_rejects_eplb():
+    """Redundant experts would break the fixed n_redundant_experts = 0 bookkeeping."""
+    with pytest.raises(NotImplementedError, match="EPLB"):
+        _build_moe(vllm_config=_moe_vllm_config(enable_expert_parallel=True, enable_eplb=True), ep_world_size=2)
 
 
 def test_moe_builds_the_experts_on_the_ascend_fused_path():
