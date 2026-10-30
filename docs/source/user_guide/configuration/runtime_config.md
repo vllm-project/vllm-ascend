@@ -121,7 +121,11 @@ Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
 Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
 stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
-``SamplingParams.logprobs``). Tables are per-tokenizer; `rc4_gb` is shared.
+``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
+logits by stride. The pair is copied on the token-id copy stream and read in
+``get_output`` for both sync and async scheduling. rc4 ``feed`` runs on the
+action queue, one sampled token per step. Tables are per-tokenizer; `rc4_gb`
+is shared.
 Prefer shadow/`report` first — strict-tier holdout false-positive rate can
 exceed 0.1% on some corpora.
 

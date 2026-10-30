@@ -82,6 +82,27 @@ def _flatten_sampled_token_ids(sampled_token_ids: Any) -> list[list[int]]:
     return []
 
 
+def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
+    """Last valid sampled id per row, kept on the sampled-id device.
+
+    Empty rows stay ``-1``. No host copy.
+    """
+    ids = sampled_token_ids.detach()
+    if ids.numel() == 0:
+        return ids.reshape(-1).to(dtype=torch.int64)
+    if ids.dim() == 1:
+        return ids.to(dtype=torch.int64)
+    if ids.dim() != 2:
+        raise ValueError(f"sampled token ids must be 1-D or 2-D, got shape={tuple(ids.shape)}")
+    if ids.shape[-1] == 1:
+        return ids.reshape(-1).to(dtype=torch.int64)
+    valid = ids >= 0
+    lengths = valid.sum(dim=-1)
+    last = (lengths - 1).clamp(min=0)
+    chosen = ids.gather(1, last.unsqueeze(1)).reshape(-1).to(dtype=torch.int64)
+    return torch.where(lengths > 0, chosen, torch.full_like(chosen, -1))
+
+
 def top1_and_chosen_logprobs(
     logits: torch.Tensor,
     token_ids: torch.Tensor,
@@ -320,6 +341,46 @@ class RareCharsDetector(ConfigBackedDetector):
                 token_id=token_ids_for_rows[scored_i],
                 top1=top1_list[scored_i],
                 chosen=chosen_list[scored_i],
+                log_leader=log_leader,
+            )
+            if alert is not None:
+                alerts.append(alert)
+        return alerts
+
+    def feed_precomputed(
+        self,
+        *,
+        req_ids: list[str],
+        token_ids: list[int],
+        top1_logprobs: list[float],
+        chosen_logprobs: list[float],
+    ) -> list[Incident]:
+        """Feed rc4 from host pairs. Caller runs this off the sample return path."""
+        if not self._precheck():
+            return []
+        n = min(len(req_ids), len(token_ids), len(top1_logprobs), len(chosen_logprobs))
+        if n <= 0:
+            return []
+        try:
+            engine = self._ensure_engine()
+        except Exception as exc:
+            logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
+            return []
+        runner = self._runner
+        log_leader = runner_tp_rank(runner) == 0
+        alerts: list[Incident] = []
+        for i in range(n):
+            req_id = req_ids[i]
+            token_id = int(token_ids[i])
+            if not req_id or token_id < 0:
+                continue
+            alert = self._fold_one(
+                engine=engine,
+                req_id=req_id,
+                req_idx=i,
+                token_id=token_id,
+                top1=float(top1_logprobs[i]),
+                chosen=float(chosen_logprobs[i]),
                 log_leader=log_leader,
             )
             if alert is not None:

@@ -510,7 +510,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             "check_rare_chars",
             lambda: self.check_rare_chars_from_stash(
                 sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
-                req_ids=result.req_ids_output_copy,
             ),
         )
         # Hook 3: mark_finished
@@ -576,7 +575,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self,
         *,
         sampled_token_ids: Any,
-        req_ids: list[str] | None = None,
     ) -> None:
         """After-sample: ``rare_chars`` from stashed pre-sample logits.
 
@@ -597,55 +595,152 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         logits = take_pre_sample_logits(self.runner)
         if logits is None:
             return
+        self._schedule_rare_collect(logits, sampled_token_ids)
 
-        top1_lp, chosen_lp = self._narrow_collect_top1_chosen(logits, sampled_token_ids)
-        for alert in self.detectors.check_rare_chars(
-            logits=logits,
-            sampled_token_ids=sampled_token_ids,
-            req_ids=req_ids,
-            top1_logprobs=top1_lp,
-            chosen_logprobs=chosen_lp,
-        ):
-            self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
+    def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
+        """Queue (top1, chosen) on the token-id copy stream. Do not feed rc4 here.
 
-    def _narrow_collect_top1_chosen(
-        self,
-        logits: Any,
-        sampled_token_ids: Any,
-    ) -> tuple[Any, Any]:
-        """Sampler-side narrow collect: ``(top1, chosen)`` from raw logits.
-
-        Returns ``(None, None)`` on failure so ``rare_chars`` can fall back to
-        its own portable collect path.
+        Sampled ids stay on device. The v35 kernels read the stashed logits by
+        stride, including when the row order is already ``0..B-1``. Output rank
+        only. Sync and async scheduling both materialize the pair in
+        ``get_output``.
         """
+        from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
+
+        if not is_async_output_rank():
+            return
+        import torch
+
+        from vllm_ascend.observability.runtime_guard.detector.rare_chars import device_chosen_token_ids
+
+        if not isinstance(logits, torch.Tensor) or not isinstance(sampled_token_ids, torch.Tensor):
+            logger.warning("[runtime_guard: rare_chars] collect skipped: logits or sampled ids are not tensors")
+            return
+        if logits.numel() == 0 or logits.dim() != 2:
+            return
         try:
-            import torch
+            chosen = device_chosen_token_ids(sampled_token_ids)
+            if chosen.numel() != logits.shape[0]:
+                logger.warning(
+                    "[runtime_guard: rare_chars] collect skipped: sampled rows %s != logits rows %s",
+                    chosen.numel(),
+                    logits.shape[0],
+                )
+                return
+            from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
 
-            from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
-                _flatten_sampled_token_ids,
-                top1_and_chosen_logprobs,
-            )
-
-            if not isinstance(logits, torch.Tensor) or logits.numel() == 0:
-                return None, None
-            rows = _flatten_sampled_token_ids(sampled_token_ids)
-            n = min(len(rows), int(logits.shape[0]))
-            token_ids_for_rows: list[int] = []
-            row_to_req: list[int] = []
-            for i in range(n):
-                ids = rows[i]
-                if not ids:
-                    continue
-                token_ids_for_rows.append(int(ids[-1]))
-                row_to_req.append(i)
-            if not token_ids_for_rows:
-                return None, None
-            row_idx = torch.tensor(row_to_req, dtype=torch.long, device=logits.device)
-            logits_rows = logits.index_select(0, row_idx)
-            tid_t = torch.tensor(token_ids_for_rows, dtype=torch.long, device=logits.device)
-            return top1_and_chosen_logprobs(logits_rows, tid_t)
+            packed = compute_top1_and_chosen_logprobs(logits, chosen, packed=True)
+            if not isinstance(packed, torch.Tensor):
+                logger.warning("[runtime_guard: rare_chars] collect skipped: kernel did not return a packed tensor")
+                return
+            self._queue_rare_pair_d2h(packed)
         except Exception:
-            return None, None
+            logger.exception("[runtime_guard: rare_chars] collect failed")
+
+    def _queue_rare_pair_d2h(self, packed: Any) -> None:
+        """Copy ``[rows, 2]`` on ``output_copy_stream`` after the token-id copy."""
+        import torch
+        from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
+
+        self._drop_unconsumed_rare_pair()
+        runner = self.runner
+        copy_stream = getattr(runner, "output_copy_stream", None)
+        main_stream = getattr(runner, "main_stream", None)
+        if copy_stream is None or main_stream is None:
+            cpu = packed.detach().float().cpu()
+            self._pending_rare_pair = (cpu, None)
+            runner._rg_rare_pair_hold = packed
+            return
+        cpu = torch.empty(packed.shape, dtype=torch.float32, device="cpu", pin_memory=True)
+        event = torch.cuda.Event(blocking=True)
+        with copy_stream_ctx(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            cpu.copy_(packed, non_blocking=True)
+            event.record(copy_stream)
+        runner._rg_rare_pair_hold = packed
+        self._pending_rare_pair = (cpu, event)
+
+    def _drop_unconsumed_rare_pair(self) -> None:
+        pending = getattr(self, "_pending_rare_pair", None)
+        if pending is None:
+            return
+        _cpu, event = pending
+        if event is not None:
+            event.synchronize()
+        self._pending_rare_pair = None
+        if getattr(self, "runner", None) is not None:
+            self.runner._rg_rare_pair_hold = None
+
+    def consume_rare_pairs(self, output: Any) -> None:
+        """After token-id ``get_output``: wait for the pair copy and enqueue rc4."""
+        pending = getattr(self, "_pending_rare_pair", None)
+        self._pending_rare_pair = None
+        hold = getattr(self.runner, "_rg_rare_pair_hold", None)
+        self.runner._rg_rare_pair_hold = None
+        if pending is None:
+            return
+        cpu, event = pending
+        if event is not None:
+            event.synchronize()
+        del hold
+        try:
+            rows = cpu.tolist()
+        except Exception:
+            logger.exception("[runtime_guard: rare_chars] pair D2H materialize failed")
+            return
+        req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
+        sampled = getattr(output, "sampled_token_ids", None) or []
+        n = min(len(rows), len(req_ids), len(sampled))
+        token_ids: list[int] = []
+        top1: list[float] = []
+        chosen: list[float] = []
+        kept_ids: list[str] = []
+        for i in range(n):
+            pair = rows[i]
+            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                continue
+            step_ids = sampled[i] if isinstance(sampled[i], (list, tuple)) else [sampled[i]]
+            valid = [int(t) for t in step_ids if int(t) >= 0]
+            if not valid:
+                continue
+            kept_ids.append(req_ids[i])
+            token_ids.append(valid[-1])
+            top1.append(float(pair[0]))
+            chosen.append(float(pair[1]))
+        if kept_ids:
+            self._enqueue_rare_chars_feed(kept_ids, token_ids, top1, chosen)
+
+    def _enqueue_rare_chars_feed(
+        self,
+        req_ids: list[str],
+        token_ids: list[int],
+        top1: list[float],
+        chosen: list[float],
+    ) -> None:
+        """Rc4 ``feed`` on ActionQueue. ``get_output`` only submits."""
+
+        def _cpu_job() -> None:
+            try:
+                detector = self.detectors.get("rare_chars")
+                if detector is None:
+                    return
+                for alert in detector.feed_precomputed(
+                    req_ids=req_ids,
+                    token_ids=token_ids,
+                    top1_logprobs=top1,
+                    chosen_logprobs=chosen,
+                ):
+                    self._handle_alert(alert, detector=detector)
+            except Exception:
+                logger.exception("[runtime_guard: rare_chars] queued feed failed")
+
+        queue = self.action_executor.action_queue
+        ok = bool(queue.submit(_cpu_job, heavy=True))
+        if not ok:
+            logger.warning(
+                "[runtime_guard: rare_chars] queued feed dropped (queue full or stopping); req_ids=%s",
+                req_ids,
+            )
 
     def check_after_sample(
         self,
