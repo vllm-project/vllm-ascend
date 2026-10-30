@@ -652,6 +652,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
 
+    def _get_fia_mask_params(
+        self, attn_metadata: AscendMetadata, device: torch.device
+    ) -> tuple[torch.Tensor | None, int, int, int]:
+        if not attn_metadata.causal:
+            if self.sliding_window is None:
+                return None, 0, SWA_INT_MAX, SWA_INT_MAX
+            # Match upstream FlashAttention's non-causal window (W-1, W-1).
+            # FIA band mode uses a cached compressed triangular template; its
+            # pre/next offsets, rather than the template alone, define visibility.
+            # Warmup creates the shared mask before ACL graph capture.
+            mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
+            radius = self.sliding_window - 1
+            return mask, 4, radius, radius
+        return (
+            attn_metadata.attn_mask,
+            4 if self.sliding_window else 3,
+            self.sliding_window or SWA_INT_MAX,
+            0 if self.sliding_window else SWA_INT_MAX,
+        )
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -667,10 +687,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
@@ -976,10 +993,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         else:
             if not attn_metadata.causal:
+                attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
+                    atten_mask=attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -988,7 +1007,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    sparse_mode=0,
+                    sparse_mode=sparse_mode,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
                 )
             elif self.sliding_window is not None:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(

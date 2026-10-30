@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.config.compilation import CUDAGraphMode
+import torch
+from vllm.forward_context import BatchDescriptor, create_forward_context, override_forward_context
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -107,37 +108,40 @@ def _selector_walk_kernel_ascend(
 class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     """DFlash2 speculative drafter on Ascend NPUs.
 
-    Every Ascend-specific behavior is inherited from AscendDFlashSpeculator:
+    The common Ascend behavior is inherited from AscendDFlashSpeculator:
     the NPU attention-metadata building (build_draft_attn_metadatas), the
     aclgraph manager wiring (init_cudagraph_manager), KV-cache/slot bookkeeping
     (set_attn), and the propose wrapper. Placing DFlash2Speculator first in
-    the MRO makes its ``__init__`` (selector buffers and the always-allocated
-    full-vocab draft logits) and its ``_generate_draft`` override win: the
+    the MRO makes its ``__init__`` (selector buffers) and its
+    ``_generate_draft`` override win: the
     candidate top-k, selector scoring, sequential path walk, and draft-logits
     scatter run instead of plain DFlash drafting -- including inside the
-    aclgraph capture, which captures ``self._generate_draft``.
+    aclgraph capture, which captures ``self._generate_draft``. Only selector
+    scoring receives a local compilation context after the model forward exits.
     """
 
     # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
 
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # V2 passes the runner's cudagraph mode to the draft speculator
-        # without consulting the spec-level enforce_eager. Honor it here:
-        # with enforce_eager the draft runs eagerly while the target keeps
-        # its own cudagraph mode (e.g. FULL_DECODE_ONLY). This also works
-        # around a dynamo fullgraph capture failure in the draft's RoPE
-        # (fake-tensor shape mismatch on the NPU meta kernels).
-        if self.speculative_config.enforce_eager:
-            cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            raise NotImplementedError(
-                "dflash2 does not currently support graph mode; "
-                "please enable enforce_eager. This is because the "
-                "_selector_walk_kernel_ascend operator must be reimplemented "
-                "due to NPU hardware constraints and cannot reuse the upstream "
-                "vLLM implementation. Graph mode will be supported in a future "
-                "release."
-            )
-        super().init_cudagraph_manager(cudagraph_mode)
+    def _score_candidates(
+        self,
+        candidate_ids: torch.Tensor,
+        unary_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        # Upstream closes _run_model's context before scoring. The selector's
+        # compiled graph wrapper still needs one, even though it has no
+        # attention or distributed layers. Its dynamic axis counts requests,
+        # not the flattened draft tokens used by the backbone.
+        selector = self.model.model.candidate_selector
+        forward_context = create_forward_context(
+            None,
+            selector.vllm_config,
+            batch_descriptor=BatchDescriptor(num_tokens=candidate_ids.shape[0]),
+        )
+        # Keep the inner graph mode NONE: the outer DFlash ACL graph captures
+        # the compiled selector. Creating the context directly also avoids
+        # target-MoE DP synchronization or attention metadata in this local head.
+        with override_forward_context(forward_context):
+            return super()._score_candidates(candidate_ids, unary_logits, hidden_states)
