@@ -73,6 +73,14 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+def _get_fia_sparse_params(sliding_window: int | None, causal: bool) -> tuple[int, int, int]:
+    if sliding_window is not None:
+        # vLLM symmetrizes (window - 1, 0) for non-causal draft attention.
+        window = sliding_window if causal else sliding_window - 1
+        return 4, window, 0 if causal else window
+    return (3 if causal else 0), SWA_INT_MAX, (0 if causal else SWA_INT_MAX)
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -364,6 +372,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        if not common_attn_metadata.causal and getattr(self.kv_cache_spec, "sliding_window", None) is not None:
+            # Band mode uses a compressed triangular template; pre/next_tokens
+            # determine the two window boundaries, including future queries.
+            attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -668,9 +680,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
@@ -771,6 +781,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key.contiguous()
             value = value.contiguous()
 
+        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
+
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_V2_WORKSPACE_KEY,
@@ -787,9 +799,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
                 num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
+                sparse_mode=sparse_mode,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
                 learnable_sink=self.sinks,
             ),
             use_max_workspace,
@@ -808,9 +820,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "actual_seq_kvlen": actual_seq_lengths_kv,
                 "num_key_value_heads": self.num_kv_heads,
                 "num_query_heads": self.num_heads,
-                "sparse_mode": 4 if self.sliding_window is not None else 3,
-                "pre_tokens": self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                "next_tokens": 0,
+                "sparse_mode": sparse_mode,
+                "pre_tokens": pre_tokens,
+                "next_tokens": next_tokens,
                 "softmax_scale": self.scale,
                 "learnable_sink": self.sinks,
                 "workspace": workspace,
@@ -948,14 +960,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value = value.contiguous()
 
         # Get workspace from cache or calculate it if not present.
+        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(self.sliding_window, attn_metadata.causal)
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
-            if self.sliding_window is not None:
-                sparse_mode = 4
-            else:
-                sparse_mode = 3
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key.contiguous(),
@@ -963,8 +972,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
                 atten_mask=attn_metadata.attn_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
@@ -975,7 +984,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if not attn_metadata.causal:
+            if not attn_metadata.causal and self.sliding_window is None:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1004,8 +1013,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    pre_tokens=self.sliding_window,
-                    next_tokens=0,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
                     sparse_mode=4,
                 )
             else:
