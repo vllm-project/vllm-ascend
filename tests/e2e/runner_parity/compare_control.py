@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from compare import compare_precision
+from tests.e2e.runner_parity.compare import compare_precision
 
 
 def main():
