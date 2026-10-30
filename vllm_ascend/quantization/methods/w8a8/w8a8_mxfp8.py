@@ -176,6 +176,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         data_ptr never changes across RL weight reloads.
         """
 
+        if getattr(layer, "_deepgemm_v41_shared_linear", False):
+            # The V4.1 MegaMoE adapter packs shared FP8 weights with routed
+            # weights, regardless of module post-load traversal order.
+            return
+
         # Check if already transformed to avoid double transformation
         if getattr(layer, "_mxfp8_transformed", False):
             return
@@ -671,6 +676,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         return params_dict
 
     def process_weights_after_loading(self, layer):
+        if getattr(layer, "_deepgemm_v41_shared_linear", False):
+            # Preserve checkpoint block scales for the fused MegaMoE packer.
+            return
         if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
         else:
