@@ -1303,6 +1303,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.use_flashmla = False
             impl.use_pcp = use_pcp
             impl.use_dcp = False
+            impl.dcp_q_replicate_enabled = False
             impl.supports_prolog_v3_writer = lambda: True
             layer.impl = impl
             layer.indexer = None

@@ -74,7 +74,12 @@ def test_mla_cache_spec_matches_bidirectional_query_metadata(monkeypatch):
         patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", return_value=SimpleNamespace(mla_attn=attention)
     ) as initialize:
         Glm5DSparkMLAAttention.__init__(
-            model, vllm_config=SimpleNamespace(cache_config=object()), config=config, prefix="draft.layers.0.self_attn"
+            model,
+            vllm_config=SimpleNamespace(
+                cache_config=object(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+            ),
+            config=config,
+            prefix="draft.layers.0.self_attn",
         )
     assert initialize.call_args.kwargs.get("non_causal_multi_token_decode", False) is True
     assert model.attn is attention

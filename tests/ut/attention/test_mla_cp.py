@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import unittest
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 import torch
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import mla_cp
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
@@ -26,6 +28,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     DecodeMLAPreprocessResult,
 )
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
@@ -846,3 +849,100 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         ("main_wait", "done"),
         "merge",
     ]
+
+
+class TestMLADCPQReplication(unittest.TestCase):
+    @staticmethod
+    def _make_impl(dcp=2, rank=0):
+        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+        impl.num_heads = 2
+        impl.dcp_size = dcp
+        impl.dcp_rank = rank
+        impl.use_dcp = dcp > 1
+        impl.use_pcp = False
+        impl.is_pcp_decode_sharded = False
+        impl.speculative_config = None
+        impl.dcp_q_replicate_enabled = True
+        impl.q_projection_heads = 2 * dcp
+        impl.qk_nope_head_dim = 3
+        impl.qk_rope_head_dim = 2
+        impl.qk_head_dim = 5
+        impl.kv_lora_rank = 2
+        impl.v_head_dim = 3
+        impl.num_kv_heads = 1
+        impl.enable_mlapo = impl.fa_quant_layer = False
+        impl.use_mla_rope = impl.enable_kv_nz = False
+        return impl
+
+    def test_direct_and_low_rank_preprocess_projects_prefill_and_decode_separately(self):
+        for q_rank in (None, 4):
+            with self.subTest(q_rank=q_rank):
+                self._check_split_projection(q_rank)
+
+    def _check_split_projection(self, q_rank):
+        dcp, rank = 2, 1
+        decode_tokens, prefill_tokens = 4, 3
+        torch.manual_seed(31)
+        impl = self._make_impl(dcp=dcp, rank=rank)
+        impl.layerwise_kv_cache_hook = None
+        num_tokens = decode_tokens + prefill_tokens
+        hidden = torch.randn(num_tokens, 6)
+        kv = torch.randn(num_tokens, 4)
+        impl.q_lora_rank = q_rank
+        impl.fused_qkv_a_proj = (lambda x: (torch.cat((x[:, :4], kv), -1),)) if q_rank else None
+        impl.q_a_layernorm = lambda x: x * 2
+        impl.kv_a_proj_with_mqa = lambda x: (kv,)
+        q_c = hidden if q_rank is None else hidden[:, :4] * 2
+        weight = torch.randn(impl.q_projection_heads * 5, q_c.shape[-1])
+
+        class Projection:
+            group_size = dcp
+            rank_in_group = rank
+            _local_view = AscendDCPGroupColumnParallelLinear._local_view
+
+            def __call__(self, x):
+                return project(x)
+
+        project = Mock(side_effect=lambda x: (torch.nn.functional.linear(x, weight),))
+        impl.q_proj = Projection()
+        impl.W_UK_T = torch.randn(impl.q_projection_heads, 3, 2)
+        impl.rope_single = lambda x, cos, sin: x
+        impl._dcp_all_gather_fragments = Mock(side_effect=AssertionError("Unexpected Q gather"))
+        impl.exec_kv_decode = Mock(return_value=tuple(torch.zeros(decode_tokens, 1, 2) for _ in range(4)))
+        impl.exec_kv_prefill = Mock(return_value=(torch.zeros(prefill_tokens, 1, 2), torch.zeros(prefill_tokens, 2)))
+        impl.kv_b_proj = lambda x: (torch.zeros(prefill_tokens, 12),)
+        impl._get_num_prefill_kv_tokens = lambda _: prefill_tokens
+        metadata = SimpleNamespace(
+            external_flashmla=None,
+            causal=True,
+            num_decodes=2,
+            num_prefills=1,
+            num_decode_tokens=decode_tokens,
+            num_actual_tokens=num_tokens,
+            slot_mapping=torch.arange(num_tokens),
+            decode=SimpleNamespace(cos=None, sin=None, actual_seq_lengths_q=[1, 4]),
+            prefill=SimpleNamespace(cos=None, sin=None),
+        )
+        with (
+            patch.object(mla_cp, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False)),
+            patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
+            patch.object(mla_v1, "notify_kv_cache_written"),
+        ):
+            decode, prefill, _ = impl._mla_preprocess("layer", hidden, None, metadata)
+        expected_inputs = [q_c[:decode_tokens], q_c[decode_tokens:num_tokens]]
+        self.assertEqual(project.call_count, 2)
+        for actual_call, expected_input in zip(project.call_args_list, expected_inputs):
+            torch.testing.assert_close(actual_call.args[0], expected_input)
+        projected = torch.nn.functional.linear(q_c, weight).view(num_tokens, impl.q_projection_heads, 5)
+        expected = torch.einsum("thp,hpl->thl", projected[:decode_tokens, :, :3], impl.W_UK_T)
+        torch.testing.assert_close(decode.ql_nope, expected)
+        torch.testing.assert_close(decode.q_pe, projected[:decode_tokens, :, 3:])
+        self.assertIs(impl.exec_kv_decode.call_args.kwargs["return_current_kv"], True)
+        torch.testing.assert_close(impl.exec_kv_decode.call_args.args[0], kv[:decode_tokens])
+        local = projected[decode_tokens:num_tokens, rank * 2 : (rank + 1) * 2]
+        torch.testing.assert_close(prefill.q_nope, local[..., :3])
+        torch.testing.assert_close(prefill.q_pe, local[..., 3:])
+        torch.testing.assert_close(
+            impl.exec_kv_prefill.call_args.args[4], metadata.slot_mapping[decode_tokens:num_tokens]
+        )
+        impl._dcp_all_gather_fragments.assert_not_called()
