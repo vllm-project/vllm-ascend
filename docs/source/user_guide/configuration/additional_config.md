@@ -49,6 +49,7 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
+| `enable_small_decode_attention`     | bool | `False` | Experimental vector Attention for single-request BF16 decode with 16 Q heads, 8 KV heads, head dimension 128 and `max_model_len <= 1024`. See [Small decode Attention](#small-decode-attention-experimental). |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
@@ -386,3 +387,44 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+### Small decode Attention (experimental)
+
+`enable_small_decode_attention` selects a Triton vector Attention implementation
+for a single decoding request with BF16 inputs, 16 query heads, 8 KV heads,
+head dimension 128, and 128-token cache blocks. The configured `max_model_len`
+must be at most 1024: capture-time dispatch uses this bound because sequence
+lengths grow during graph replay. Prefill, larger batches or contexts, sliding
+windows, attention sinks, quantized KV caches, speculative decoding, batch
+invariance, context parallelism, KV sharing and KV transfer retain the existing
+implementation. The switch is disabled by default.
+
+For example, to evaluate Qwen3-0.6B on Ascend 910B2:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --dtype bfloat16 --max-model-len 1024 \
+  --additional-config '{"enable_small_decode_attention": true}'
+```
+
+The operator reads persistent device sequence lengths and block tables, splits
+the sequence across vector cores and merges FP32 softmax partials. This removes
+per-layer FIA host parameter updates for the selected decode shape. It supports
+the non-dense block strides of combined K/V pages without copying the cache.
+
+FP32 reductions have a different rounding order from FIA. Numerical reference
+tests pass within BF16 tolerances, but greedy outputs can differ when candidate
+logits are close. This is an experimental performance option, not a promise of
+bitwise output equivalence or unchanged task accuracy. Evaluate representative
+requests before adopting it; broader model-quality evaluation is still needed.
+
+Run the operator tests and an alternating graph microbenchmark with:
+
+```bash
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_small_decode_attention.py -q
+python benchmarks/benchmark_small_decode_attention.py --output small_decode_timings.json
+```
+
+Compare complete requests with the switch off and on using identical model,
+context bound, graph mode, warmup and concurrency settings. Microbenchmark
+speedups alone do not establish end-to-end gains, and the single-request result
+does not imply a throughput improvement at larger batches.
