@@ -31,6 +31,7 @@ def make_speculator():
     spec.replicated_pcp = False
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
+    spec.use_flashmla = False
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
@@ -116,7 +117,17 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
     assert spec.attn_backends == {"draft": draft_backend}
 
 
-def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
+@pytest.mark.parametrize(
+    "choices,expected", [((True,), True), ((False,), False), ((True, True), True), ((True, False), False), ((), False)]
+)
+def test_dspark_flashmla_selection_requires_all_mla_groups(monkeypatch, choices, expected):
+    monkeypatch.setattr(shared, "_get_graph_update_backend", lambda _: AscendMLABackend)
+    spec = initialize_attention(monkeypatch, AscendMLABackend, flashmla_choices=choices)
+    assert spec.attn_architecture == "MLA"
+    assert spec.use_flashmla is expected
+
+
+def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend, flashmla_choices=(False,)):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
     monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
@@ -134,7 +145,18 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
-    draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
+    draft_groups = [
+        [],
+        [
+            SimpleNamespace(
+                backend=draft_backend,
+                get_metadata_builder=lambda _, enabled=enabled: SimpleNamespace(
+                    flashmla_state=object() if enabled else None
+                ),
+            )
+            for enabled in flashmla_choices
+        ],
+    ]
 
     def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
         assert target_attn_groups is target_groups

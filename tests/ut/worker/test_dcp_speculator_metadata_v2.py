@@ -84,6 +84,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
         spec.model_state = object()
     spec.attn_architecture = architecture
+    if kind == "dspark":
+        spec.use_flashmla = False
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
     # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.

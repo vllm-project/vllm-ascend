@@ -82,7 +82,6 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     vllm_version_is,
@@ -1082,7 +1081,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
-        if not supports_component_major_mla_pd(config) or enable_sfa(config):
+        if not supports_component_major_mla_pd(config):
             return False
         return get_flashmla_ops() is not None
 
@@ -1394,8 +1393,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
-        if enable_sfa(config):
-            return
         if not config.use_v2_model_runner and (
             hasattr(config.model_config.hf_config, "compress_ratios")
             or get_ascend_config().sparse_kv_offload_config.enabled
