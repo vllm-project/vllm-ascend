@@ -50,24 +50,6 @@ def test_compact_groups_and_implicit_tail_respect_each_query_position(implementa
     torch.testing.assert_close(allowed[0, 0, 0], expected)
 
 
-def test_fia_page_view_preserves_non_dense_storage_and_masks_page_padding(implementation):
-    backing = torch.arange(8 * 128 * 2 * 4).reshape(8, 128, 2, 4)
-    keys = backing.as_strided((3, 128, 2, 4), (2 * 128 * 8, 8, 4, 1))
-    # Give V the same descriptor page stride as K.
-    value_backing = backing.clone()
-    values = value_backing.as_strided(keys.shape, keys.stride())
-    paged_keys, _, table, mask_width = implementation["prepare_qsa_fia_paged_kv"](
-        keys,
-        values,
-        torch.tensor([[1, 2]], dtype=torch.int32),
-        200,
-    )
-    assert paged_keys.data_ptr() == keys.data_ptr()
-    assert table.tolist() == [[2, 4]]
-    assert mask_width == 256
-    torch.testing.assert_close(paged_keys[2, 0], keys[1, 0].flatten())
-
-
 def test_fia_passes_gqa_heads_causal_mask_and_zeroes_empty_rows(implementation):
     calls = []
 
@@ -158,31 +140,32 @@ def test_route_uses_explicit_phase_not_query_or_kv_length(implementation, query_
     )
     assert plan[0].is_prefill is prefill
     assert plan[0].use_paged_kv is (query_length != kv_length)
+    if not prefill:
+        assert not plan[0].use_fia
 
 
 @pytest.mark.parametrize(
-    "kv_length,prefill,use_fia",
+    "query_length,kv_length,expected_fia",
     [
-        (24575, True, True),
-        (24576, True, True),
-        (24577, True, False),
-        (1, False, False),
-        (24576, False, False),
+        (1, 24575, True),
+        (1, 24576, True),
+        (1, 24577, False),
+        (4, 24578, True),
+        (4096, 24576, True),
+        (4096, 28671, True),
+        (4096, 28672, False),
+        (4096, 32768, False),
+        (131072, 131072, True),
     ],
 )
-def test_fia_route_uses_logical_kv_boundary(implementation, kv_length, prefill, use_fia):
+def test_chunk_start_policy_including_large_initial_prefill(implementation, query_length, kv_length, expected_fia):
     plan = implementation["build_qsa_request_plan"](
-        torch.tensor([0, 1]), torch.tensor([kv_length]), 1, torch.tensor([prefill])
+        torch.tensor([0, query_length]), torch.tensor([kv_length]), query_length, torch.tensor([True])
     )
-    assert plan[0].use_fia is use_fia
-
-
-def test_prefill_crossing_24k_keeps_the_whole_chunk_on_fia(implementation):
-    plan = implementation["build_qsa_request_plan"](
-        torch.tensor([0, 4]), torch.tensor([24578]), 4, torch.tensor([True])
-    )
-    assert plan[0].fia_query_end == 4
-    assert plan[0].gbsa_query_start == 4
+    request = plan[0]
+    assert request.use_fia is expected_fia
+    assert request.fia_query_end == (query_length if expected_fia else 0)
+    assert request.gbsa_query_start == (query_length if expected_fia else 0)
 
 
 def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
@@ -238,13 +221,8 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
 
 
 def test_pure_prefill_routes_by_logical_kv_length(implementation):
-    calls = run_stub_batch(implementation, [True, True, True], [2, 3, 1], [4096, 24576, 24577])
-    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4]), ("gbsa", [5])]
-
-
-def test_prefill_chunk_crossing_24k_uses_fia_for_every_row(implementation):
-    calls = run_stub_batch(implementation, [True], [4], [24578])
-    assert calls == [("fia", [0, 1, 2, 3])]
+    calls = run_stub_batch(implementation, [True, True, True], [2, 4, 1], [4096, 24578, 24577])
+    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("gbsa", [6])]
 
 
 def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):

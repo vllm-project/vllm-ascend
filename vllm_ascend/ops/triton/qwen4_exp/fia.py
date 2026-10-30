@@ -4,6 +4,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+QSA_FIA_MASK_WORD_TILE = 4096
+
 
 @triton.jit(do_not_specialize=["kv_length", "mask_words", "word_stride"])
 def _prepare_qsa_mask_words_kernel(
@@ -48,8 +50,11 @@ def _prepare_qsa_mask_words_kernel(
     tl.store(scatter_indices + row * UPDATE_WIDTH + columns, target.to(tl.int64), columns < UPDATE_WIDTH)
     tl.store(updates + row * UPDATE_WIDTH + columns, value, columns < UPDATE_WIDTH)
     tl.store(has_selection + row, selected)
-    word = tl.arange(0, WORD_BLOCK)
-    tl.store(words + row * word_stride + word, 0x01010101, word < word_stride)
+    # Bound on-chip vectors independently of KV length. Q tiling bounds the
+    # global mask allocation, but cannot bound a single row's UB requirements.
+    for word_start in range(0, word_stride, WORD_BLOCK):
+        word = word_start + tl.arange(0, WORD_BLOCK)
+        tl.store(words + row * word_stride + word, 0x01010101, word < word_stride)
 
 
 @triton.jit
@@ -105,7 +110,7 @@ def build_qsa_fia_mask(
         GROUPS=groups,
         UPDATE_WIDTH=update_width,
         BLOCK=triton.next_power_of_2(update_width),
-        WORD_BLOCK=triton.next_power_of_2(word_stride),
+        WORD_BLOCK=min(QSA_FIA_MASK_WORD_TILE, triton.next_power_of_2(word_stride)),
     )
     words.scatter_(1, indices, updates)
     # Ascend's little-endian int32 representation is four bool bytes. This is
