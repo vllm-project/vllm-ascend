@@ -1,0 +1,4 @@
+pr: null
+entries:
+  - category: bugfix
+    text: Fixed DFlash2 probabilistic selector sampling to preserve seed high bits and use upstream step mixing, draft stream separation, and stable FP32 Gumbel noise. Seeded outputs change from the previous Ascend selector implementation.
