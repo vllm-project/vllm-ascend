@@ -307,6 +307,62 @@ def test_hixl_waits_for_buffer_consumption_before_private_stream_read(monkeypatc
     session.close()
 
 
+@pytest.mark.parametrize("has_reads", [False, True])
+def test_hixl_waits_only_for_consumed_event_across_layer_batches(monkeypatch, has_reads):
+    session, models, engine = _shared_models(monkeypatch)
+    session.initialize(models)
+    communicator = models["main"]
+    stream = MagicMock()
+    stream.synchronize.side_effect = AssertionError("must not wait for later EPLB stream work")
+    communicator.set_stream(stream)
+    event = MagicMock()
+    communicator.set_consumed_event(event)
+    session._confirm_all_ranks = MagicMock(wraps=session._confirm_all_ranks)
+    original_transfer = engine.transfer_async
+
+    def transfer(*args):
+        assert event.synchronize.call_count > len(engine.transfers)
+        return original_transfer(*args)
+
+    engine.transfer_async = transfer
+    for _ in range(2):
+        communicator.set_transfer_context(np.arange(4), layer_idx=1)
+        if has_reads:
+            communicator.add_recv([_Tensor(2000, session._device, (4,), 16)], 1, 3)
+        communicator.execute()
+
+    assert event.synchronize.call_count == 2
+    assert len(engine.transfers) == 2 * int(has_reads)
+    assert session._confirm_all_ranks.call_count == 2
+    stream.synchronize.assert_not_called()
+    communicator.set_consumed_event(None)
+    session.close()
+
+
+def test_hixl_consumed_event_failure_prevents_reads_and_retains_storage(monkeypatch):
+    session, models, engine = _shared_models(monkeypatch)
+    session.initialize(models)
+    communicator = models["main"]
+    storage_refs = list(session._storage_refs)
+    handles = list(session._registered_handles)
+    failure = RuntimeError("buffer consumption failed")
+    communicator.set_consumed_event(MagicMock(synchronize=MagicMock(side_effect=failure)))
+    communicator.set_transfer_context(np.arange(4), layer_idx=1)
+    communicator.add_recv([_Tensor(2000, session._device, (4,), 16)], 1, 3)
+    session._confirm_all_ranks = MagicMock(wraps=session._confirm_all_ranks)
+
+    with pytest.raises(RuntimeError, match="buffer consumption failed") as error:
+        communicator.execute()
+
+    assert error.value is failure
+    assert engine.transfers == []
+    session._confirm_all_ranks.assert_called_once_with(failure, "transfer")
+    assert session._error is failure and not session._usable
+    assert session._storage_refs == storage_refs
+    assert session._registered_handles == handles
+    assert not engine.deregistered and not engine.finalized
+
+
 @pytest.mark.parametrize(
     "ranges, expected",
     [

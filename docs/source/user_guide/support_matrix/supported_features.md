@@ -22,7 +22,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Guided Decoding               | 🟢 Functional    | [vllm-ascend#177][guided_decoding]                                     |
 | Tensor Parallel               | 🟢 Functional    | Make TP >4 work with graph mode.                                        |
 | Pipeline Parallel             | 🟢 Functional    | See [Pipeline Parallelism][pipeline_parallel]. An end-to-end tutorial is planned. |
-| Expert Parallel               | 🟢 Functional    | Supports MRv1 legacy EPLB and MRv2 asynchronous EPLB with the upstream default policy; see [EPLB][eplb]. |
+| Expert Parallelism               | 🟢 Functional    | Supports MRv1 legacy EPLB and MRv2 asynchronous EPLB with the Ascend STAIR policy as the default; see [EPLB][eplb]. |
 | Data Parallel                 | 🟢 Functional    | Data Parallel support for Qwen3 MoE.                                   |
 | Prefill Decode Disaggregation | 🟢 Functional    | Functional, xPyD is supported.                                         |
 | Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
@@ -30,7 +30,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Runtime Guard                 | 🔵 Experimental  | Detect / report / dump_kv; see [Runtime Guard][runtime_guard].          |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
-| KVPP                          | 🔵 Experimental  | Non-hybrid MLA/SFA models in eager mode; see [KVPP][kvpp] for supported combinations. |
+| KVPP                          | 🔵 Experimental  | Non-hybrid MLA/SFA models with eager or PIECEWISE execution; see [KVPP][kvpp] for supported combinations. |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.

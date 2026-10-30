@@ -158,6 +158,29 @@ class TestAscendConfig(TestBase):
         config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+            with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
+                clear_ascend_config()
+                config = VllmConfig()
+                config.model_config.is_moe = True
+                config.additional_config = {
+                    "finegrained_tp_config": {
+                        "oproj_tensor_parallel_size": otp_size,
+                        "mlp_tensor_parallel_size": mlp_size,
+                    },
+                    "scheduler_config": {"recompute_scheduler_enable": False},
+                }
+                if otp_size > 1 or mlp_size > 0:
+                    with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
+                        init_ascend_config(config)
+                else:
+                    result = init_ascend_config(config)
+                    self.assertFalse(result.scheduler_config.recompute_scheduler_enable)
+                    self.assertEqual(result.finegrained_tp_config.oproj_tensor_parallel_size, otp_size)
+
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
         config = self._make_sparse_li_c8_config(
             {
@@ -1391,7 +1414,7 @@ class TestUpstreamConfigCompatibility(TestBase):
         vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-        for field, value in (("hidden_size", 896), ("intermediate_size", 4096), ("num_experts_per_tok", 33)):
+        for field, value in (("hidden_size", 896), ("intermediate_size", 4224), ("num_experts_per_tok", 33)):
             with self.subTest(field=field), patch.object(text_config, field, value):
                 self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         for world_size in (1, 3):
@@ -1400,7 +1423,11 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        # The intermediate-size check is a plain range + alignment rule now, so
+        # 6144-wide first projections are accepted for every architecture.
         text_config.moe_intermediate_size = 3072
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 4608
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
@@ -1483,7 +1510,7 @@ class TestUpstreamConfigCompatibility(TestBase):
                 self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
                     ("hidden_size", 3584),
-                    ("moe_intermediate_size", 3072),
+                    ("moe_intermediate_size", 4608),
                     ("moe_intermediate_size", None),
                     ("num_experts_per_tok", 33),
                 ):

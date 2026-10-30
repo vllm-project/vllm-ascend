@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
-from vllm_ascend._310p.sample.sampler import (
+from vllm_ascend._310p.worker.v2.sample_utils import (
     _prepare_cpu_generators_310p,
     _random_sample_310p,
 )

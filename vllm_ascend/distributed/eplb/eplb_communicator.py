@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
@@ -22,6 +23,8 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
+
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _HIXL_MAX_REGISTERED_REGIONS = 4000
@@ -141,8 +144,15 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             request.wait()
 
         with stream if stream is not None else contextlib.nullcontext():
-            for dst_tensor, cpu_tensor in recv_staging:
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+            for dst_tensor, src_tensor in recv_staging:
+                if dst_tensor.device.type == "npu" and torch_npu.get_npu_format(dst_tensor) == ACL_FORMAT_FRACTAL_NZ:
+                    # Ascend950 cannot copy CPU tensors directly into NZ storage.
+                    # TODO: Remove this workaround once copy_ supports H2D
+                    # copies into NZ storage on Ascend950.
+                    src_tensor = torch_npu.npu_format_cast(
+                        src_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
+                    )
+                dst_tensor.copy_(src_tensor, non_blocking=True)
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -472,6 +482,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._all_expert_weights = all_expert_weights
         self._expert_buffer = expert_buffer
         self._stream: torch.Stream | None = None
+        self._consumed_event: torch.Event | None = None
         self._session: _HixlSession | None = None
         self._remote_send_meta: dict[int, _ExpertMetadata] = {}
         self._expert_to_src_row: list[dict[int, int]] | None = None
@@ -559,6 +570,10 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._require_session()._set_hixl_context()
         self._stream = stream
 
+    def set_consumed_event(self, event: torch.Event | None) -> None:
+        """Set the recorded buffer-consumption dependency for one layer."""
+        self._consumed_event = event
+
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
         self._require_session()
         if self._pending_reads:
@@ -607,12 +622,16 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         phase_started_at = time.perf_counter()
         local_error: Exception | None = None
         try:
-            # HIXL's private streams cannot honor the consumed-event wait on
-            # the EPLB stream. Finish that wait before a READ overwrites the
-            # shared buffer with the next layer's weights.
+            # HIXL's private streams bypass the EPLB stream's consumed-event
+            # wait. Finish consumption before a READ reuses the buffer, without
+            # waiting for unrelated work subsequently queued on the EPLB stream.
             with gpu_sync_allowed():
-                stream = self._stream if self._stream is not None else torch.accelerator.current_stream()
-                stream.synchronize()
+                if self._consumed_event is not None:
+                    self._consumed_event.synchronize()
+                else:
+                    # First layer and callers without a consumption event.
+                    stream = self._stream if self._stream is not None else torch.accelerator.current_stream()
+                    stream.synchronize()
             session._start_transfers(self._pending_reads)
         except Exception as error:
             local_error = error

@@ -24,6 +24,7 @@ from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -55,7 +56,6 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -92,15 +92,16 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -113,8 +114,22 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
+# in kv_cache_utils, so importing the main-only module breaks worker startup.
+if vllm_version_is("0.32.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -126,6 +141,21 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+# if true, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
+
+
+class _V1ModelRunnerFactory:
+    """Import the V1 model runner only when one is actually constructed."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+
+        return NPUModelRunner(*args, **kwargs)
+
+
+NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -157,6 +187,10 @@ class NPUWorker(WorkerBase):
         apply_v2_model_runner_config_patch()
         sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
+
+        from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
+
+        patch_kda_recoverssm(vllm_config)
 
         # Register ops when worker init.
         from vllm_ascend import ops
@@ -304,6 +338,7 @@ class NPUWorker(WorkerBase):
         self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
+        global_te.unregister_buffer()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -317,6 +352,9 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes,
         )
 
+    def disconnect_kv_transfer_peers(self) -> None:
+        global_te.disconnect_all_peers()
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:
@@ -328,6 +366,8 @@ class NPUWorker(WorkerBase):
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+        if tags is None or "kv_cache" in tags:
+            global_te.reregister_buffer()
 
         # Do not access or consume saved weights when only the KV pool wakes.
         wake_weights = tags is None or "weights" in tags
@@ -746,22 +786,23 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
-        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
+        # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
+        # physical storage across all groups. Their budgets must not take the
+        # generic per-layer scale, including when the runner uses sparse SFA.
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-            if any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in specs):
+            if any(
+                getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41", "glm5_next"} for spec in specs
+            ):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
-        # preserve that contract for hybrid attention/Mamba models while still
-        # exposing contiguous per-layer views to its existing backends. Do not
+        # allocation. For block-compact layouts, Ascend can
+        # preserve that contract for attention/Mamba and eligible full/sliding
+        # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -774,14 +815,20 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        shares_attention_pool = False
+        if getattr(self, "use_v2_model_runner", False):
+            # Load V2 helpers only for V2 workers; V1 retains private allocation
+            # and must keep its original multi-group budget scaling.
+            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+
+            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and (has_mamba or is_step_model)
-            and layout.is_layer_compact
+            and (has_mamba or is_step_model or shares_attention_pool)
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)
@@ -844,7 +891,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -870,7 +917,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
@@ -913,11 +960,20 @@ class NPUWorker(WorkerBase):
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
-
             context = nullcontext()  # type: ignore
 
-        with context, set_current_vllm_config(self.vllm_config):
+        # vLLM #57516 reclaims cached memory inside `load_model` via
+        # `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable
+        # memory pool `torch.npu.empty_cache()` trips "captures_underway.empty()",
+        # so neutralize it while weights load on both supported lanes; the pool
+        # is reclaimed by sleep()/wake_up().
+        empty_cache_context: AbstractContextManager[Any]
+        if self.vllm_config.model_config.enable_sleep_mode:
+            empty_cache_context = patch("torch.npu.empty_cache", lambda: None)
+        else:
+            empty_cache_context = nullcontext()
+
+        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
@@ -1135,6 +1191,24 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        if vllm_version_is("0.32.0"):
+            # v0.32.0's engine core never issues this RPC, and the upstream
+            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
+            # helpers do not exist on that lane.
+            return None
+        else:
+            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+                _find_simple_cpu_offload_connector,
+            )
+
+            if not has_kv_transfer_group():
+                return None
+            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+            if connector is None:
+                return None
+            return connector.get_aligned_num_cpu_blocks()
+
     def _get_layerwise_kv_cache_memory_info(
         self,
         kv_cache_spec: dict[str, KVCacheSpec],
@@ -1149,7 +1223,7 @@ class NPUWorker(WorkerBase):
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
         target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
+        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0

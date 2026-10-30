@@ -9,8 +9,8 @@ import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from tests.ut.distributed.ascend_store.test_segmented_cache_transfer import make_database, make_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import SharedBlockData
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import SharedBlockData
 
 
 def components(scale, padding, dtype, tokens=2, nope=8, rope=1):
@@ -102,13 +102,15 @@ def test_5760_token_block_128_token_kernel_bf16(mode):
 @pytest.mark.parametrize("count", [1, 2, 3, 5, 6])
 @pytest.mark.parametrize("padding", [0, 3])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_legacy_partial_block(count, padding, dtype):
-    roundtrip("legacy", 3, padding, dtype, token_count=count)
+@pytest.mark.parametrize("mode", ["bulk", "legacy"])
+def test_partial_block(mode, count, padding, dtype):
+    roundtrip(mode, 3, padding, dtype, token_count=count)
 
 
 @pytest.mark.parametrize("offset,count", [(1, 1), (1, 3), (2, 3), (3, 3), (5, 1), (0, 0)])
-def test_legacy_token_interval(offset, count):
-    roundtrip("legacy", 3, 3, torch.bfloat16, token_count=count, token_offset=offset)
+@pytest.mark.parametrize("mode", ["bulk", "legacy"])
+def test_token_interval(mode, offset, count):
+    roundtrip(mode, 3, 3, torch.bfloat16, token_count=count, token_offset=offset)
 
 
 @pytest.mark.parametrize("mode", ["gva", "block_key", "legacy"])

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
@@ -11,7 +12,9 @@ from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
-def test_decoder_replay_enabled_with_prefix_caching():
+@pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -24,10 +27,11 @@ def test_decoder_replay_enabled_with_prefix_caching():
         topk_lengths_buffer=torch.zeros(8),
     )
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=True),
+        cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+            data_parallel_size=dp_size,
             decode_context_parallel_size=1,
             use_ubatching=False,
         ),
@@ -92,10 +96,56 @@ def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
     assert buffer[:4, 0].tolist() == [0, 4, 5, 0]
 
 
+def test_pcp_replay_empty_owner_runs_padded_rows_without_scattering(monkeypatch):
+    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    buffer = torch.arange(4).reshape(4, 1)
+
+    def run_layers(hidden, mix, positions):
+        assert hidden.shape[0] == 2
+        assert not hidden.count_nonzero()
+        assert not mix.count_nonzero()
+        assert not positions.count_nonzero()
+        return hidden + 1, mix
+
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [buffer])
+    replay.rows = torch.empty(0, dtype=torch.int64)
+    replay.num_actual_rows = 0
+    replay.num_padded_rows = 2
+    replay.context_factory = nullcontext
+    hidden, mix = replay(torch.arange(4).float().reshape(4, 1), torch.ones(4, 1), torch.arange(4))
+    assert not hidden.count_nonzero()
+    assert not mix.count_nonzero()
+    assert buffer[:2, 0].tolist() == [0, 0]
+
+
 def test_replay_without_rows_keeps_inputs():
     hidden = torch.arange(6)
     replay = replay_mod.AscendDecoderReplayLayers(2, lambda *states: states, [])
     assert replay(hidden, None) == (hidden, None)
+
+
+def test_untrimmed_replica_enters_decoder_context_without_gathering():
+    entered = []
+
+    @contextmanager
+    def decoder_context():
+        entered.append(True)
+        yield
+        entered.append(False)
+
+    hidden = torch.arange(6)
+
+    def run_layers(*states):
+        assert entered == [True]
+        assert states[0] is hidden
+        return states
+
+    buffer = torch.arange(6)
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [buffer])
+    replay.context_factory = decoder_context
+    assert replay(hidden, None) == (hidden, None)
+    assert entered == [True, False]
+    assert torch.equal(buffer, torch.arange(6))
 
 
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):

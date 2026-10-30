@@ -72,6 +72,7 @@ def test_environment_override_wins(monkeypatch, env_value):
             kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
         ),
         SimpleNamespace(additional_config={"enable_kvpp": True}),
+        SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
         SimpleNamespace(additional_config={"enable_reduce_sample": False}),
         SimpleNamespace(additional_config={"enable_reduce_sample": "false"}),
         SimpleNamespace(additional_config={"enable_reduce_sample": True}),
@@ -86,6 +87,10 @@ def test_environment_override_wins(monkeypatch, env_value):
                 kv_connector="AscendStoreConnector",
                 kv_connector_extra_config={"backend": "memcache"},
             )
+        ),
+        SimpleNamespace(ec_transfer_config=object()),
+        SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
         ),
     ],
     ids=[
@@ -105,6 +110,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "gemma4-hf-config",
         "mooncake-pd",
         "kvpp",
+        "encoder-decoder",
         "reduce-sample-disabled",
         "reduce-sample-string-false",
         "reduce-sample-enabled",
@@ -115,6 +121,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "dynamic-eplb",
         "kv-pool-connector",
         "kv-pool-memcache",
+        "vl-encoder-disaggregation",
+        "vl-encoder-only",
     ],
 )
 def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
@@ -135,11 +143,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         ),
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
-        SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
-        SimpleNamespace(ec_transfer_config=object()),
-        SimpleNamespace(
-            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
-        ),
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(additional_config={"enable_dsa_cp": True}),
@@ -156,9 +159,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "dflash2-graph",
         "pooling-runner",
         "pooling-model",
-        "encoder-decoder",
-        "vl-encoder-disaggregation",
-        "vl-encoder-only",
         "vl-encoder-graph",
         "draft-window-size",
         "enable-dsa-cp",
