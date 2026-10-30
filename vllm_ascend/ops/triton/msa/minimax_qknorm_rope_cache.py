@@ -1,41 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""MiniMax-M3 packed QKV/index normalization, RoPE and paged cache insertion.
+"""MiniMax-M3 QK normalization, NeoX RoPE and paged cache insertion.
 
-Inputs can be a packed [Q, K, V, index Q, index K] projection or separate
-main/index projections. Each program processes one token, vectorizing Q/K
-and index Q/K together along contiguous head rows. K/V and index K go directly
-to independent cache slots; only the queries are materialized. Negative slots
-and graph-padding tokens never update a cache.
+Packed or separate main/index projections produce Q and index Q. Programs
+process tokens cyclically and reuse FP32 Gemma normalization scales. All
+input rows produce queries; only actual tokens with nonnegative slots
+write K/V or index K directly into their independent paged caches.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
+from vllm_ascend.ops.triton.triton_utils import (
+    extract_slice,
+    get_vectorcore_num,
+    init_device_properties_triton,
+    insert_slice,
+)
 
 FP8_E4M3_MAX = 448.0
 
 
 @triton.jit
-def _norm_rope(
+def _norm_rope_with_scale(
     input_ptr,
-    weight_ptr,
+    scale,
     cos_sin_ptr,
     HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ROTARY_DIM: tl.constexpr,
     EPS: tl.constexpr,
-    other_weight_ptr,
-    SPLIT_HEADS: tl.constexpr,
 ):
     cols = tl.arange(0, HEAD_DIM)
     heads = tl.arange(0, HEADS)
     x = tl.load(input_ptr + heads[:, None] * HEAD_DIM + cols[None, :]).to(tl.float32)
-    weight = tl.load(weight_ptr + cols).to(tl.float32)
-    other_weight = tl.load(other_weight_ptr + cols).to(tl.float32)
-    weight = tl.where(heads[:, None] < SPLIT_HEADS, weight[None, :], other_weight[None, :])
-    x = x * tl.rsqrt(tl.sum(x * x, 1) / HEAD_DIM + EPS)[:, None] * (1.0 + weight)
+    x = x * tl.rsqrt(tl.sum(x * x, 1) / HEAD_DIM + EPS)[:, None] * scale
     x = x.to(input_ptr.dtype.element_ty).to(tl.float32)
     half: tl.constexpr = ROTARY_DIM // 2
     cos = tl.load(cos_sin_ptr + tl.arange(0, half)).to(tl.float32)
@@ -49,7 +48,7 @@ def _norm_rope(
 
 # Request-dependent bounds must not specialize on their value or alignment.
 # Head dimensions and layout strides below are fixed for a warmed deployment.
-@triton.jit(do_not_specialize=["NUM_SLOTS"])
+@triton.jit(do_not_specialize=["NUM_SLOTS", "NUM_TOKENS"])
 def _minimax_qknorm_rope_cache_kernel(
     packed,
     index_packed,
@@ -67,6 +66,7 @@ def _minimax_qknorm_rope_cache_kernel(
     slots,
     index_slots,
     NUM_SLOTS,
+    NUM_TOKENS,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
     IQ_HEADS: tl.constexpr,
@@ -92,39 +92,60 @@ def _minimax_qknorm_rope_cache_kernel(
     INDEX_FP8: tl.constexpr,
     FP8_E4M3_MAX: tl.constexpr,
 ):
-    token = tl.program_id(0).to(tl.int64)
-    position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
-    cs = cos_sin + position * COS_SIN_STRIDE
-    dim = tl.arange(0, HEAD_DIM)
-    row = packed + token * INPUT_STRIDE
-    qk = _norm_rope(row, q_weight, cs, Q_HEADS + KV_HEADS, HEAD_DIM, ROTARY_DIM, EPS, k_weight, Q_HEADS)
-    q = extract_slice(qk, (0, 0), (Q_HEADS, HEAD_DIM), (1, 1))
-    offsets = token * Q_HEADS * HEAD_DIM + tl.arange(0, Q_HEADS)[:, None] * HEAD_DIM + dim[None, :]
-    tl.store(query + offsets, q)
-    slot = tl.load(slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
-    if slot >= 0:
-        k = extract_slice(qk, (Q_HEADS, 0), (KV_HEADS, HEAD_DIM), (1, 1))
-        k = k.to(packed.dtype.element_ty).to(tl.float32)
-        v = tl.load(row + (Q_HEADS + KV_HEADS) * HEAD_DIM + tl.arange(0, KV_HEADS)[:, None] * HEAD_DIM + dim[None, :])
-        if CACHE_FP8:
-            k = tl.minimum(tl.maximum(k, -FP8_E4M3_MAX), FP8_E4M3_MAX)
-            v = tl.minimum(tl.maximum(v.to(tl.float32), -FP8_E4M3_MAX), FP8_E4M3_MAX)
-        k_offset = slot // BLOCK_SIZE * K_BLOCK + slot % BLOCK_SIZE * K_TOKEN
-        v_offset = slot // BLOCK_SIZE * V_BLOCK + slot % BLOCK_SIZE * V_TOKEN
-        tl.store(key_cache + k_offset + tl.arange(0, KV_HEADS)[:, None] * K_HEAD + dim[None, :], k)
-        tl.store(value_cache + v_offset + tl.arange(0, KV_HEADS)[:, None] * V_HEAD + dim[None, :], v)
-    row = index_packed + token * INDEX_INPUT_STRIDE + INDEX_OFFSET
-    iqk = _norm_rope(row, iq_weight, cs, IQ_HEADS + 1, HEAD_DIM, ROTARY_DIM, EPS, ik_weight, IQ_HEADS)
-    if INDEX_FP8:
-        iqk = tl.minimum(tl.maximum(iqk, -FP8_E4M3_MAX), FP8_E4M3_MAX)
-    iq = extract_slice(iqk, (0, 0), (IQ_HEADS, HEAD_DIM), (1, 1))
-    offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
-    tl.store(index_query + offsets, iq)
-    slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
-    if slot >= 0:
-        ik = extract_slice(iqk, (IQ_HEADS, 0), (1, HEAD_DIM), (1, 1))
-        offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
-        tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
+    program = tl.program_id(0).to(tl.int64)
+    programs = tl.num_programs(0).to(tl.int64)
+    weight_dim = tl.arange(0, HEAD_DIM)
+    q_weight_value = tl.load(q_weight + weight_dim).to(tl.float32)
+    k_weight_value = tl.load(k_weight + weight_dim).to(tl.float32)
+    iq_weight_value = tl.load(iq_weight + weight_dim).to(tl.float32)
+    ik_weight_value = tl.load(ik_weight + weight_dim).to(tl.float32)
+    qk_weight = tl.where(
+        tl.arange(0, Q_HEADS + KV_HEADS)[:, None] < Q_HEADS,
+        q_weight_value[None, :],
+        k_weight_value[None, :],
+    )
+    iqk_weight = tl.where(
+        tl.arange(0, IQ_HEADS + 1)[:, None] < IQ_HEADS,
+        iq_weight_value[None, :],
+        ik_weight_value[None, :],
+    )
+    qk_scale = 1.0 + qk_weight
+    iqk_scale = 1.0 + iqk_weight
+    for token in range(program, NUM_TOKENS, programs):
+        position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
+        cs = cos_sin + position * COS_SIN_STRIDE
+        dim = tl.arange(0, HEAD_DIM)
+        row = packed + token * INPUT_STRIDE
+        qk = _norm_rope_with_scale(row, qk_scale, cs, Q_HEADS + KV_HEADS, HEAD_DIM, ROTARY_DIM, EPS)
+        q = extract_slice(qk, (0, 0), (Q_HEADS, HEAD_DIM), (1, 1))
+        offsets = token * Q_HEADS * HEAD_DIM + tl.arange(0, Q_HEADS)[:, None] * HEAD_DIM + dim[None, :]
+        tl.store(query + offsets, q)
+        slot = tl.load(slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
+        if slot >= 0:
+            k = extract_slice(qk, (Q_HEADS, 0), (KV_HEADS, HEAD_DIM), (1, 1))
+            k = k.to(packed.dtype.element_ty).to(tl.float32)
+            v = tl.load(
+                row + (Q_HEADS + KV_HEADS) * HEAD_DIM + tl.arange(0, KV_HEADS)[:, None] * HEAD_DIM + dim[None, :]
+            )
+            if CACHE_FP8:
+                k = tl.minimum(tl.maximum(k, -FP8_E4M3_MAX), FP8_E4M3_MAX)
+                v = tl.minimum(tl.maximum(v.to(tl.float32), -FP8_E4M3_MAX), FP8_E4M3_MAX)
+            k_offset = slot // BLOCK_SIZE * K_BLOCK + slot % BLOCK_SIZE * K_TOKEN
+            v_offset = slot // BLOCK_SIZE * V_BLOCK + slot % BLOCK_SIZE * V_TOKEN
+            tl.store(key_cache + k_offset + tl.arange(0, KV_HEADS)[:, None] * K_HEAD + dim[None, :], k)
+            tl.store(value_cache + v_offset + tl.arange(0, KV_HEADS)[:, None] * V_HEAD + dim[None, :], v)
+        row = index_packed + token * INDEX_INPUT_STRIDE + INDEX_OFFSET
+        iqk = _norm_rope_with_scale(row, iqk_scale, cs, IQ_HEADS + 1, HEAD_DIM, ROTARY_DIM, EPS)
+        if INDEX_FP8:
+            iqk = tl.minimum(tl.maximum(iqk, -FP8_E4M3_MAX), FP8_E4M3_MAX)
+        iq = extract_slice(iqk, (0, 0), (IQ_HEADS, HEAD_DIM), (1, 1))
+        offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
+        tl.store(index_query + offsets, iq)
+        slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
+        if slot >= 0:
+            ik = extract_slice(iqk, (IQ_HEADS, 0), (1, HEAD_DIM), (1, 1))
+            offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
+            tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
 
 
 def minimax_qknorm_rope_cache(
@@ -188,9 +209,10 @@ def minimax_qknorm_rope_cache(
     index_query = torch.empty((num_tokens, num_index_heads * head_dim), device=packed.device, dtype=index_cache.dtype)
     if num_tokens == 0:
         return query, index_query
-    # Each program reads one position, then loads its cos/sin row as vectors.
-    # No intermediate gather tensor or per-token scalar insertion loop.
-    _minimax_qknorm_rope_cache_kernel[(num_tokens,)](
+    init_device_properties_triton()
+    # Each program owns tokens congruent to its id modulo this grid.
+    num_programs = min(num_tokens, get_vectorcore_num())
+    _minimax_qknorm_rope_cache_kernel[(num_programs,)](
         packed,
         index_packed,
         cos_sin_cache,
@@ -207,6 +229,7 @@ def minimax_qknorm_rope_cache(
         slot_mapping,
         index_slot_mapping,
         num_actual_tokens,
+        num_tokens,
         num_q_heads,
         num_kv_heads,
         num_index_heads,
