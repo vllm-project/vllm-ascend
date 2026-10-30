@@ -87,16 +87,11 @@ def offline_refs():
     tok = llm.get_tokenizer()
     try:
         texts = [
-            tok.apply_chat_template(
-                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
-            )
+            tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
             for _, p in ONLINE_CASES
         ]
         outs = llm.generate(texts, SamplingParams(temperature=0, max_tokens=64))
-        refs = {
-            lang: (o.outputs[0].text, len(o.outputs[0].token_ids))
-            for (lang, _), o in zip(ONLINE_CASES, outs)
-        }
+        refs = {lang: (o.outputs[0].text, len(o.outputs[0].token_ids)) for (lang, _), o in zip(ONLINE_CASES, outs)}
     finally:
         del llm
         gc.collect()
@@ -108,12 +103,19 @@ def served(offline_refs):
     """Start vllm serve only after the offline engine is released."""
     proc = subprocess.Popen(
         [
-            "vllm", "serve", MODEL,
-            "--port", str(PORT),
-            "--served-model-name", SERVED_NAME,
-            "--dtype", "bfloat16",
-            "--max-model-len", "4096",
-            "--gpu-memory-utilization", "0.8",
+            "vllm",
+            "serve",
+            MODEL,
+            "--port",
+            str(PORT),
+            "--served-model-name",
+            SERVED_NAME,
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "4096",
+            "--gpu-memory-utilization",
+            "0.8",
             "--enforce-eager",
         ],
         stdout=subprocess.PIPE,
@@ -142,9 +144,7 @@ def _online_chat(base_url: str, prompt: str, temperature: float, seed=None, max_
     )
     if seed is not None:
         kwargs["seed"] = seed
-    resp = client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}], **kwargs
-    )
+    resp = client.chat.completions.create(messages=[{"role": "user", "content": prompt}], **kwargs)
     return resp.choices[0].message.content, resp.usage.completion_tokens
 
 
@@ -160,9 +160,7 @@ def test_online_greedy_matches_offline_prefix(served, offline_refs):
         on_text, on_len = _online_chat(served, prompt, temperature=0)
         off_text, off_len = offline_refs[lang]
         eq = 0
-        for a, b in zip(
-            tok(off_text).input_ids[:PREFIX_N], tok(on_text).input_ids[:PREFIX_N]
-        ):
+        for a, b in zip(tok(off_text).input_ids[:PREFIX_N], tok(on_text).input_ids[:PREFIX_N]):
             if a != b:
                 break
             eq += 1
