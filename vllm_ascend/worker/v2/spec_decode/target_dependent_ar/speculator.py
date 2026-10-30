@@ -40,6 +40,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v2_b1 import AscendB1Metadata, b1_verify_graph_params
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
@@ -709,7 +710,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         seq_lens_cpu = self._get_seq_lens_cpu(num_reqs_padded)
         if num_reqs is None:
             num_reqs = num_reqs_padded
-        next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
+        # Gemma4 MTP is Q-only and never appends KV entries, so all of its
+        # draft steps read the target cache at the same length; Eagle and
+        # standard MTP advance one cached position per step.
+        step_offset = step if self.advance_draft_positions else 0
+        next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step_offset)
+        if not self.advance_draft_positions:
+            # Graph-capture warmups run before any real batch fills the CPU
+            # mirror, so it is still zero there. FIA rejects a row whose query
+            # length exceeds its KV length, so keep the real (non-padded) rows
+            # valid; a live sequence always has at least one cached position.
+            # Pad rows stay zero, as every other draft step expects.
+            next_seq_lens_cpu[:num_reqs].clamp_(min=1)
 
         dcp_local_seq_lens_cpu = None
         if self.use_dcp:
@@ -749,9 +761,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         block_table = next(iter(draft_attn_metadata.values())).block_tables
+        # One graph task is registered per layer, so every layer needs its own
+        # parameter set. bind() merges these over the captured kwargs without
+        # filtering, and the captured op decides the names: B1 paged-verify
+        # tasks take block_table/actual_seq_kvlen (+ atten_mask), while FIA TND
+        # tasks take the cumulative query lengths.
         if is_draft_model_prefill:
             prefill_fia_params: list[dict[str, Any]] = []
             for layer_name, metadata in draft_attn_metadata.items():
+                if isinstance(metadata, AscendB1Metadata):
+                    layer_params = b1_verify_graph_params(layer_name, metadata)
+                    prefill_fia_params.append({"layer_name": layer_name, **layer_params})
+                    continue
                 is_mla = isinstance(metadata, AscendMLAMetadata)
                 prefill_metadata = metadata.decode if is_mla else metadata
                 assert prefill_metadata is not None
@@ -770,23 +791,34 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
+        fia_params = []
+        # Gemma4 MTP keeps sequence lengths fixed across draft steps (Q-only,
+        # shared target KV); Eagle/standard MTP adds one position per step.
+        step_offset = 1 if self.advance_draft_positions else 0
         for step in range(1, self.num_speculative_steps):
+            delta = step * step_offset
             seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                min(int(seq_len) + delta, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            for layer_name in self.draft_attn_layer_names:
-                fia_params.append(
-                    {
-                        "layer_name": layer_name,
+            for layer_name, metadata in draft_attn_metadata.items():
+                if isinstance(metadata, AscendB1Metadata):
+                    # Decode steps run one query per request, so the captured
+                    # all-visible placeholder mask stays correct and only the
+                    # per-step KV lengths and block table are rebound.
+                    layer_params = {
+                        "block_table": metadata.block_tables,
+                        "actual_seq_kvlen": seq_lens,
+                    }
+                else:
+                    layer_params = {
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "actual_seq_qlen": query_start_loc,
                         "actual_seq_kvlen": seq_lens,
                         "block_table": block_table,
                     }
-                )
+                fia_params.append({"layer_name": layer_name, **layer_params})
         return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
