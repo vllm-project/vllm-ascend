@@ -14,11 +14,18 @@
 
 """Ascend V2 model-runner state for Qwen4Exp."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.models.qwen4_exp.decode_queue import QwenDecodeQueueCapability
 
 
 class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
@@ -30,6 +37,19 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     attention metadata and stores it on the state for FULL aclgraph replay
     (``update_full_graph_params`` reads ``model_state.attn_metadata``).
     """
+
+    def get_decode_queue_capability(self, runner: Any) -> QwenDecodeQueueCapability | None:
+        """Offer model-consumer knowledge to the shared queue controller."""
+        if (
+            type(self) is not AscendQwen4ExpModelState
+            or getattr(runner, "model_state", None) is not self
+            or getattr(getattr(runner, "model_config", None), "architecture", None)
+            not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        ):
+            return None
+        from vllm_ascend.models.qwen4_exp.decode_queue import QwenDecodeQueueCapability
+
+        return QwenDecodeQueueCapability()
 
 
 __all__ = ["AscendQwen4ExpModelState"]

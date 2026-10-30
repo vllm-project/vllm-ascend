@@ -357,27 +357,29 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ### 9.3 Model Runner V2 Decode Submission
 
 The following `--additional-config` boolean options default to `false`
-(disabled). They apply only to Qwen3.8 Flash Next target architectures
-`Qwen4ExpForCausalLM` and `Qwen4ExpForConditionalGeneration`. Other models retain
-their original path even when both options are `true`.
+(disabled). The shared controller requires an explicit model-state capability;
+models without one retain their original path even when both options are `true`.
+Qwen3.8 Flash Next currently supplies this capability for target architectures
+`Qwen4ExpForCausalLM` and `Qwen4ExpForConditionalGeneration`. Its model-owned
+implementation validates the target/draft attention consumers before admission.
 
 | Option | Behavior |
 | --- | --- |
-| `enable_qwen_mrv2_early_queue` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
-| `enable_qwen_mrv2_mm_decode_early_queue` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding option. |
+| `enable_decode_early_queue` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
+| `enable_mm_decode_early_queue` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding option. |
 
 Set the first option to `true` to enable text and stable PD decode submission.
 To enable the completed-prompt multimodal extension as well, include both keys
 in the existing `--additional-config` JSON:
 
 ```bash
---additional-config '{"enable_qwen_mrv2_early_queue":true,"enable_qwen_mrv2_mm_decode_early_queue":true}'
+--additional-config '{"enable_decode_early_queue":true,"enable_mm_decode_early_queue":true}'
 ```
 
 Early submission replaces the CPU corrected-length wait with a device-stream
 wait. Exact positions, accepted counts, KV slots, recurrent state, and weight
-offload dependencies remain unchanged. It requires the supported Qwen MRV2 model
-and backend types, fixed positive MTP K, DCP1/PCP1, a uniform local FULL decode
+offload dependencies remain unchanged. It requires the model-owned capability
+and supported backend consumers, fixed positive MTP K, DCP1/PCP1, a uniform local FULL decode
 batch, and a matching same-stream snapshot. Stable Mooncake pull-consumer decode
 also requires completed KV receipt and an exact readiness certificate. Pending
 transfers, new or changing requests, unsupported connectors, active encoder work,
