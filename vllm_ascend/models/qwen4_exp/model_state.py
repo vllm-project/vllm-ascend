@@ -55,9 +55,7 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         finally:
             config.ple_layer_ids = ple_layer_ids
 
-        self.uses_ngram_embedding = bool(ple_layer_ids) and (
-            get_pp_group().is_first_rank
-        )
+        self.uses_ngram_embedding = bool(ple_layer_ids) and (get_pp_group().is_first_rank)
         if not self.uses_ngram_embedding:
             self.ngram_context_len = 0
             self.ngram_eos_token_id = 0

@@ -214,15 +214,9 @@ def _get_recurrent_state_flat_indices(
     lens = (qsl[1:] - qsl[:-1]).clamp(min=0, max=num_slots)
     bounds = lens.cumsum(0)
     starts = bounds - lens
-    token_ids = torch.arange(
-        total_tokens, device=state_indices.device, dtype=qsl.dtype
-    )
-    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp(
-        max=num_seqs - 1
-    )
-    flat_indices = seq_ids * num_slots + (
-        token_ids - starts[seq_ids]
-    ).clamp(min=0, max=num_slots - 1)
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp(max=num_seqs - 1)
+    flat_indices = seq_ids * num_slots + (token_ids - starts[seq_ids]).clamp(min=0, max=num_slots - 1)
     metadata.recurrent_state_flat_indices = flat_indices
     return flat_indices
 
