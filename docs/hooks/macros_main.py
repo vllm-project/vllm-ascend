@@ -13,16 +13,16 @@ from pathlib import Path
 # override templates, hence the detour through config.extra.
 UI_STRINGS = {
     "en": {
-        "banner_preview": "You are viewing the latest developer preview docs.",
+        "banner_preview": "You are currently viewing the documentation for the official release version (v0.30.0). ",
         "banner_link": "Click here",
-        "banner_suffix": "to view docs for the latest stable release ({version}).",
+        "banner_suffix": "to access the latest developer preview documentation.",
         "btn_report": "report issue",
         "aria_report": "Report a documentation issue",
     },
     "zh": {
-        "banner_preview": "您正在查看最新的开发者预览版文档。",
+        "banner_preview": "您正在查看正式发布版本(v0.30.0)的文档。",
         "banner_link": "点击此处",
-        "banner_suffix": "查看最新稳定版（{version}）的文档。",
+        "banner_suffix": "可访问最新的开发者预览版文档。",
         "btn_report": "反馈问题",
         "aria_report": "报告文档问题",
     },
