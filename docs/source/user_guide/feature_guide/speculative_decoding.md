@@ -363,19 +363,60 @@ A few important things to consider when using DFlash2 draft models:
     VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
       --tensor-parallel-size 2 \
       --max-model-len 2048 \
+      --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8, "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[9]}' \
+      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 requires an eager draft**: DFlash2 on model runner V2
-   does not yet support graph mode for the draft. Set `"enforce_eager": true`
-   in `speculative_config`; the target model keeps its own graph mode (e.g.
-   `FULL_DECODE_ONLY`).
+2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
+   or false. The draft backbone and candidate selector retain the configured
+   Dynamo compilation path. Candidate scoring uses its own request-shaped
+   forward context and compilation cache namespace, while the outer draft ACL
+   graph captures the compiled operations, candidate TopK, path sampling, and
+   proposal-cache updates. Set `"enforce_eager": true`
+   to compare against eager drafting. Validate graph/eager equivalence and
+   request reuse on the intended NPU configuration before deployment.
+
+   Non-causal draft layers with sliding-window size `W` use FIA band mode
+   (`sparse_mode=4`) with a cached compressed mask and
+   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
+   window. Both eager execution and graph capture preserve this window;
+   layers without a window retain full attention. This replaces the earlier
+   workaround that ignored non-causal sliding windows, including in eager
+   execution. The compressed mask is a band-mode template, not a causal
+   restriction on draft tokens.
+
+   The focused NPU test covers draft lengths 4, 5, and 6, window boundaries,
+   and replay with changed KV lengths and block tables. It compares against
+   eager execution and an independent dense reference:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py
+   ```
+
+   The QK/RoPE fusion pass skips target/draft dimension combinations that
+   cannot form a valid fusion pattern; the unfused operations still compile
+   and execute. The paired-Q/K RoPE compilation and graph replay test is:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash2_rope.py
+   ```
+
+   The model-level acceptance test exercises both eager drafting and
+   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
+   ```
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size
    1 with `num_speculative_tokens = 8`.
+   For `num_speculative_tokens` of 4, 5, or 6, use multiples of 5, 6, or 7,
+   respectively. Choose a draft length supported by the checkpoint.
 
 4. **The draft must use the target's unquantized LM head**: the candidate
    top-k is taken over the full-vocabulary logits, so a reduced draft

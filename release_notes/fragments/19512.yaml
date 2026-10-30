@@ -1,0 +1,8 @@
+pr: 19512
+entries:
+  - category: feature
+    text: Enabled full ACL graph capture for DFlash2 drafting on Model Runner V2 while retaining backbone and candidate-selector compilation, including candidate selection and proposal-cache updates. Set enforce_eager to true to retain eager drafting.
+  - category: bugfix
+    text: Fixed non-causal DFlash FIA attention in eager execution and ACL graphs to preserve configured symmetric sliding windows using band mode with a compressed mask. Layers without a window retain full attention.
+  - category: bugfix
+    text: Fixed DFlash2 candidate scoring running outside its required compilation context.

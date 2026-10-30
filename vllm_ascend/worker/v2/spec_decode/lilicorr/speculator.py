@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
     LiLiCorrSpeculator,
 )
@@ -14,6 +15,21 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 
 class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
     """Keep upstream LiLiCorr scoring and reuse Ascend DFlash2 runtime guards."""
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # Keep LiLiCorr's eager-only guard local now that DFlash2 supports graphs.
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            raise NotImplementedError(
+                f"{self._speculator_name} does not currently support graph mode; "
+                "please enable enforce_eager. This is because the "
+                "_selector_walk_kernel_ascend operator must be reimplemented "
+                "due to NPU hardware constraints and cannot reuse the upstream "
+                "vLLM implementation. Graph mode will be supported in a future "
+                "release."
+            )
+        super().init_cudagraph_manager(cudagraph_mode)
 
     def load_draft_model(
         self,
