@@ -147,7 +147,7 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         ascend910b1) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 ;; \
     esac && \
 # Install flash-linear-attention-npu
-    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a5/${FLA_WHL}" && \
+    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a3/${FLA_WHL}" && \
     if [[ -n "${GIT_PROXY}" ]]; then \
       wget --quiet --proxy="${GIT_PROXY}" "${URL}" -O "/tmp/${FLA_WHL}"; \
     else \
