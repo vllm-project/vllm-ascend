@@ -17,9 +17,9 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
     assert backend.get_builder_cls() is model_kda.AscendGDNHostMetadataBackend.get_builder_cls()
 
 
-@pytest.mark.parametrize("pcp_rank", [0, 1])
+@pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
 @pytest.mark.parametrize("has_prefill", [False, True])
-def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank, has_prefill):
+def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_size, pcp_rank, has_prefill):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
@@ -35,8 +35,8 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.in_proj_qkvbfg_a = project
     layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
     layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
-    # The gated norm now runs inside the KDA custom op, which writes into `out`.
-    layer.o_norm = SimpleNamespace(forward_oot=lambda output, gate, *, out: out)
+    # The gated norm runs directly inside the unified custom op.
+    layer.o_norm = lambda output, gate: output
     layer.o_proj = lambda x: (x, None)
     seen = []
 
@@ -51,17 +51,18 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
         hidden_restore_idx=torch.tensor([0, 1, 4, 5, 6, 7, 2]),
         padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
     )
-    metadata = SimpleNamespace(pcp_context=pcp_context)
+    uses_pcp_prefill = pcp_size > 1 and has_prefill
+    metadata = SimpleNamespace(pcp_context=pcp_context if pcp_size > 1 else None)
     monkeypatch.setattr(
         model_kda,
         "get_forward_context",
         lambda: SimpleNamespace(attn_metadata={"layer": metadata}, no_compile_layers={"layer": layer}),
     )
-    gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
+    gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]]).expand(-1, 2).clone()
     pcp_group = SimpleNamespace(
-        world_size=2,
+        world_size=pcp_size,
         rank_in_group=pcp_rank,
-        all_gather=lambda x, dim: gathered if has_prefill else pytest.fail("decode must not gather PCP tokens"),
+        all_gather=lambda x, dim: gathered if uses_pcp_prefill else pytest.fail("batch must not gather PCP tokens"),
     )
     layer.pcp_group = pcp_group
     layer.pcp_size = pcp_group.world_size
@@ -69,14 +70,129 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
 
     # The KDA custom op is registered against the NPU dispatch key, so a CPU
     # runner cannot dispatch it. Call its implementation directly instead.
-    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_pcp_forward", model_kda.glm5next_kda_pcp_forward)
 
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
 
-    assert seen == (list(range(7)) if has_prefill else local_input[:, 0].tolist())
-    expected = ([0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]) if has_prefill else seen
+    assert seen == (list(range(7)) if uses_pcp_prefill else local_input[:, 0].tolist())
+    expected = ([0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]) if uses_pcp_prefill else seen
     assert output[:, 0].tolist() == expected
+    assert torch.count_nonzero(output[:, 1]) == 0
+
+
+@pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("local_tokens", [4, 8])
+@pytest.mark.parametrize("execution", ["export", "compile"])
+def test_exported_kda_pcp_uses_live_metadata_after_metadata_free_trace(
+    monkeypatch, pcp_size, pcp_rank, local_tokens, execution
+):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_projection_size = layer.head_dim = 2
+    layer.local_num_heads = 1
+    layer.pcp_size, layer.pcp_rank = pcp_size, pcp_rank
+    events = []
+
+    def project(x):
+        return torch.cat((x[:, :1], torch.zeros(x.shape[0], 10)), dim=-1), None
+
+    layer.in_proj_qkvbfg_a = project
+    layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+
+    def norm(output, gate):
+        events.append(("norm", output.shape[1]))
+        return output * 2
+
+    def output_projection(x):
+        events.append(("o_proj", x.shape[0]))
+        return x + 3, None
+
+    layer.o_proj = output_projection
+    layer.o_norm = norm
+    seen = []
+
+    def run_kda(qkv_proj_states, g1, beta, core_attn_out):
+        seen.append(qkv_proj_states.shape[0])
+        core_attn_out.zero_()
+        core_attn_out[0, :, 0, 0].copy_(qkv_proj_states[:, 0])
+
+    layer._forward = run_kda
+    context = SimpleNamespace(attn_metadata=None, no_compile_layers={"layer": layer})
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    gathered = torch.arange(2 * local_tokens, dtype=torch.float32)[:, None].expand(-1, 2).clone()
+    gather_calls = []
+
+    def gather(x, dim):
+        gather_calls.append(x.shape[0])
+        return gathered
+
+    layer.pcp_group = SimpleNamespace(all_gather=gather)
+    local = gathered[pcp_rank * local_tokens : (pcp_rank + 1) * local_tokens]
+    positions = torch.arange(local_tokens)
+    # CPU implementations exercise the real custom-op bodies; export uses
+    # their fake implementations while the profiling metadata is absent.
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    try:
+        library.impl("glm5next_kda_pcp_forward", model_kda.glm5next_kda_pcp_forward)
+        exported = torch.export.export(layer, (local, positions)).module()
+        custom_ops = [
+            node.target
+            for node in exported.graph.nodes
+            if node.op == "call_function" and str(node.target).startswith("vllm.")
+        ]
+        assert custom_ops == [torch.ops.vllm.glm5next_kda_pcp_forward.default]
+        assert not gather_calls
+        assert not events
+        run = exported if execution == "export" else torch.compile(layer, backend="eager", fullgraph=True)
+        # The first compiled invocation has no metadata; later calls reuse the
+        # same graph after switching the runtime prefill/decode metadata.
+        warmup_output = run(local, positions)
+        warmup_expected = warmup_output.clone()
+        assert not gather_calls
+        assert seen == [local_tokens]
+        assert events == [("norm", local_tokens), ("o_proj", local_tokens)]
+        events.clear()
+
+        # One padded token and a nontrivial restore order are introduced only
+        # after tracing, as happens on the first real PCP prefill request.
+        restore = torch.arange(2 * local_tokens - 1).flip(0)
+        padded = torch.cat((restore.flip(0), torch.zeros(1, dtype=torch.int64)))
+        context.attn_metadata = {
+            "layer": SimpleNamespace(
+                pcp_context=SimpleNamespace(
+                    global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([True])),
+                    hidden_restore_idx=restore,
+                    padded_gather_idx=padded,
+                )
+                if pcp_size > 1
+                else None
+            )
+        }
+        output = run(local, positions)
+        torch.testing.assert_close(warmup_output, warmup_expected)
+        indices = padded[pcp_rank * local_tokens : (pcp_rank + 1) * local_tokens]
+        expected = gathered[restore][indices, 0] if pcp_size > 1 else local[:, 0]
+        torch.testing.assert_close(output[:, 0], expected * 2 + 3)
+        expected_rows = 2 * local_tokens - 1 if pcp_size > 1 else local_tokens
+        assert seen[-1] == expected_rows
+        assert events == [("norm", expected_rows), ("o_proj", expected_rows)]
+        assert gather_calls == ([local_tokens] if pcp_size > 1 else [])
+        prefill_output = output
+        prefill_expected = output.clone()
+
+        if pcp_size > 1:
+            context.attn_metadata["layer"].pcp_context.global_batch.is_prefilling_np.fill_(False)
+        output = run(local, positions)
+        torch.testing.assert_close(prefill_output, prefill_expected)
+        torch.testing.assert_close(output[:, 0], local[:, 0] * 2 + 3)
+        assert seen[-1] == local_tokens
+        assert events[-2:] == [("norm", local_tokens), ("o_proj", local_tokens)]
+        assert gather_calls == ([local_tokens] if pcp_size > 1 else [])
+    finally:
+        library._destroy()
 
 
 @pytest.mark.parametrize("recover", [False, True])

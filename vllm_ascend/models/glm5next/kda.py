@@ -408,6 +408,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        # Allocate in the compiled graph so downstream captures retain the
+        # same output address when this split op executes on each invocation.
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.glm5next_kda_pcp_forward(hidden_states, output, self.prefix)
+        return output
+
+    def _forward_with_pcp(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor) -> None:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
@@ -451,16 +458,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        # Metadata and recurrent cache updates must execute on every invocation,
-        # including when Dynamo traces a profiling run without metadata.
-        torch.ops.vllm.glm5next_kda_forward(
+        # Keep the layer's dispatch outside piecewise graph compilation.
+        self._forward(
             qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
-            g2=g2,
             core_attn_out=core_attn_out,
-            layer_name=self.prefix,
         )
+        core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         output = self.o_proj(core_attn_out)[0]
         if has_pcp_prefill:
@@ -469,10 +474,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
             local_start = self.pcp_rank * local_num_tokens
             local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
-            output = output[local_indices]
-        return output
+            # Restore directly into the graph-owned output rather than
+            # allocating an indexed tensor and then copying it again.
+            torch.index_select(output, 0, local_indices, out=output_buffer)
+        else:
+            output_buffer.copy_(output)
 
-    @eager_break_during_capture
     def _forward(
         self,
         qkv_proj_states: torch.Tensor,
@@ -719,38 +726,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         maybe_save_kv_layer_to_connector("", [])
 
 
-def glm5next_kda_forward(
-    qkv_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    g2: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
+@eager_break_during_capture
+def glm5next_kda_pcp_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
-    layer._forward(qkv_proj_states, g1, beta, core_attn_out)
-    # Triton kernel_side_table indices belong to this process. Keep the gated
-    # norm inside the custom op so serialized FX/AOT graphs do not retain them.
-    # Piecewise replay retains the address of this caller-owned buffer. A
-    # newly allocated norm result would leave the next captured segment
-    # reading the profile run's output instead of this invocation's values.
-    layer.o_norm.forward_oot(core_attn_out, g2, out=core_attn_out)
+    layer._forward_with_pcp(hidden_states, output)
 
 
-def glm5next_kda_forward_fake(
-    qkv_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    g2: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
+def glm5next_kda_pcp_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
     return
 
 
 direct_register_custom_op(
-    op_name="glm5next_kda_forward",
-    op_func=glm5next_kda_forward,
-    mutates_args=["core_attn_out"],
-    fake_impl=glm5next_kda_forward_fake,
+    op_name="glm5next_kda_pcp_forward",
+    op_func=glm5next_kda_pcp_forward,
+    mutates_args=["output"],
+    fake_impl=glm5next_kda_pcp_forward_fake,
 )
