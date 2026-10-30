@@ -30,7 +30,7 @@ class EngramModel(torch.nn.Module):
     def prime_engram_v2_graph_inputs(self, num_tokens):
         return self.buffers_for_graph
 
-    def prepare_engram_graph_inputs(self, num_tokens):
+    def prepare_engram_graph_inputs(self, num_tokens, *, cg_mode=None):
         return self.buffers_for_graph
 
     def forward(self, **kwargs):
@@ -49,7 +49,8 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1))
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1)),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
     )
     return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
@@ -145,6 +146,64 @@ def test_eager_hook_forwards_lookup_events(state):
     assert result["engram_pending"] is events
     state.prepare_engram()
     state.model.prepare_engram_inputs.assert_called_once()
+
+
+def test_piecewise_stages_current_batch_without_a_pending_producer(state, monkeypatch):
+    state._cg_mode = CUDAGraphMode.PIECEWISE
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda n: 4))
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=Mock())
+    monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", kernel)
+    reqs = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    query = state._engram_piecewise_inputs["engram_query_start_loc"]
+    valid = state._engram_piecewise_inputs["engram_valid_token_count"]
+    for dummy in (False, True, False):
+        current = batch()
+        current.is_dummy = dummy
+        state._engram_inputs = {"stale": True}
+        result = state.prepare_inputs(current, reqs)
+        assert state._engram_inputs is None
+        assert "engram_lookups" not in result
+        assert result["engram_query_start_loc"] is query
+        assert result["engram_valid_token_count"] is valid
+        assert query.tolist() == ([0] * 5 if dummy else [0, 1, 3, 3, 3])
+        assert valid.item() == (0 if dummy else 3)
+        state.model(**result)
+        state.prepare_engram()
+    state.model.prepare_engram_inputs.assert_not_called()
+
+
+@pytest.mark.parametrize("state", [2], indirect=True)
+def test_piecewise_pcp_coordinates_keep_addresses_and_mask_local_padding(state, monkeypatch):
+    state._cg_mode = CUDAGraphMode.PIECEWISE
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda n: 4))
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=Mock())
+    monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", kernel)
+    reqs = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    current = batch()
+    global_batch = batch()
+    global_batch.num_tokens = 6
+    global_batch.query_start_loc = torch.tensor([0, 2, 6], dtype=torch.int32)
+    state.pcp_context = SimpleNamespace(global_batch=global_batch, local_token_indices=torch.tensor([0, 4, 5]))
+    bound = state.prepare_engram_dummy_inputs(2, 8)
+    addresses = {key: bound[key].data_ptr() for key in state._piecewise_graph_inputs(8)}
+    for dummy in (False, True, False):
+        current.is_dummy = dummy
+        inputs = state.prepare_engram_inputs(current, reqs)
+        assert {key: inputs[key].data_ptr() for key in addresses} == addresses
+        assert inputs["engram_valid_token_count"].item() == (0 if dummy else 6)
+        indices = inputs["engram_token_indices"]
+        if not dummy:
+            assert indices[:3].tolist() == [0, 4, 5]
+        assert torch.all(indices[3:] == inputs["engram_input_ids"].numel() - 1)
+        assert state._engram_inputs is None
 
 
 @pytest.mark.parametrize("state", [1, 2, 4], indirect=True)

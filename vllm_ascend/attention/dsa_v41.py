@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -56,16 +56,43 @@ from vllm_ascend.worker.device_metadata import (
 V41_METADATA_BUFFER_SIZE = 1024
 
 
-@eager_break_during_capture
 def dsa_v41_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    """Execute V4.1 attention behind an explicit graph side-effect boundary."""
+    """Keep MRV2 projections in the graph, with dynamic cache work outside."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
+    if (
+        getattr(attn, "piecewise_projections", False)
+        and forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        and forward_context.attn_metadata is not None
+    ):
+        attn.v41_impl.forward_piecewise(attn, hidden_states, output, layer_name)
+    else:
+        _dsa_v41_forward_eager(hidden_states, output, layer_name)
+
+
+@eager_break_during_capture
+def _dsa_v41_forward_eager(hidden_states, output, layer_name):
+    attn = get_forward_context().no_compile_layers[layer_name]
     attn.v41_impl.forward(attn, None, hidden_states, output)
+
+
+@eager_break_during_capture
+def _dsa_v41_attention(hidden_states, q, qr, kv, index_q, weights, source_kv, source_scores, output, layer_name):
+    # Resolve the current batch here. Capturing a metadata object would freeze
+    # request counts, RoPE views and C2 ring shapes from the dummy batch.
+    context = get_forward_context()
+    attn = context.no_compile_layers[layer_name]
+    impl = attn.v41_impl
+    metadata = impl._get_layer_metadata(context.attn_metadata)
+    projected = DeepseekV41ProjectedInputs(q, qr, kv, index_q, weights, source_kv, source_scores)
+    q, qr, prepared = impl._preprocess(attn, hidden_states, hidden_states, metadata, metadata, projected=projected)
+    result = impl._attend(attn, hidden_states, metadata, q, qr, prepared)
+    output.zero_()
+    output[: result.shape[0]].copy_(result)
 
 
 def dsa_v41_forward_fake(
@@ -244,6 +271,19 @@ class DeepseekV41PreparedIndexer:
     quantize_done: Any = None
 
 
+@dataclass
+class DeepseekV41ProjectedInputs:
+    """Padded, graph-owned projections consumed with current batch metadata."""
+
+    q: torch.Tensor
+    qr: torch.Tensor
+    kv: torch.Tensor
+    index_q: torch.Tensor | None
+    index_weights: torch.Tensor | None
+    source_kv: torch.Tensor | None
+    source_scores: torch.Tensor | None
+
+
 def compressed_slot_mapping(slot_mapping: torch.Tensor, ratio: int) -> torch.Tensor:
     """Convert original-token physical slots to completed compressed slots.
 
@@ -399,7 +439,7 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
-    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
+    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata, *, projected=None):
         query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
         cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
         if not query_hidden.shape[0]:
@@ -407,7 +447,11 @@ class AscendDSAV41Impl:
             return None, None, None
         cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
         kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
-        if self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
+        if projected is not None:
+            q, qr, kv = (tensor[: query_hidden.shape[0]] for tensor in (projected.q, projected.qr, projected.kv))
+            self._apply_rotary(attn, kv, kv_cos, kv_sin)
+            self._write_swa_cache(attn, cache_metadata.swa, kv.squeeze(1))
+        elif self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
             q, qr = self.multistream_preprocess(
                 attn,
                 query_hidden,
@@ -425,7 +469,14 @@ class AscendDSAV41Impl:
                 self._write_swa_cache(attn, cache_metadata.swa, kv)
         self._apply_rotary(attn, q, cos, sin)
         # Consume local Query RoPE before compression can reuse source tables.
-        prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
+        if projected is not None and projected.index_q is not None:
+            assert projected.index_weights is not None
+            index_q = projected.index_q[: query_hidden.shape[0]]
+            weights = projected.index_weights[: query_hidden.shape[0]]
+            attn.indexer.apply_query_rope(index_q, cos, sin)
+            prepared_indexer = DeepseekV41PreparedIndexer(query=index_q, weights=weights)
+        else:
+            prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
         if self.role.is_kv_source and cache_hidden.shape[0]:
             self._write_compressed_source(
                 attn,
@@ -435,6 +486,7 @@ class AscendDSAV41Impl:
                 kv_sin,
                 cache_metadata,
                 prepared_indexer=prepared_indexer,
+                projected=projected,
             )
         else:
             self._quantize_indexer_query(attn, prepared_indexer, query_metadata)
@@ -556,6 +608,7 @@ class AscendDSAV41Impl:
         metadata,
         *,
         prepared_indexer=None,
+        projected=None,
     ):
         compressor = attn.compressor
         compressor_metadata = metadata.compressor
@@ -563,7 +616,11 @@ class AscendDSAV41Impl:
         ratio = self.role.compress_ratio
         if ratio == 1:
             self._quantize_indexer_query(attn, prepared_indexer, metadata)
-            latent = compressor(hidden_states)
+            if projected is None:
+                latent = compressor(hidden_states)
+            else:
+                assert projected.source_kv is not None
+                latent = projected.source_kv[: hidden_states.shape[0]]
             # C1 source positions are the current token positions. Reuse the
             # query RoPE selected by the SWA metadata builder instead of
             # indexing the global table a second time.
@@ -575,12 +632,17 @@ class AscendDSAV41Impl:
             state_metadata = compressor_metadata.state
             if state_metadata.c2_metadata_group_id is not None:
                 wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
-            hidden_states_fp32 = hidden_states.float()
+            hidden_states_fp32 = hidden_states.float() if projected is None else None
             # Finish the input cast before query quantization starts on the
             # auxiliary stream, so the WKV matmul can overlap that quantization.
             self._quantize_indexer_query(attn, prepared_indexer, metadata)
-            kv = compressor.wkv(hidden_states_fp32)
-            score = compressor.wgate(hidden_states_fp32)
+            if projected is None:
+                kv = compressor.wkv(hidden_states_fp32)
+                score = compressor.wgate(hidden_states_fp32)
+            else:
+                assert projected.source_kv is not None and projected.source_scores is not None
+                kv = projected.source_kv[: hidden_states.shape[0]]
+                score = projected.source_scores[: hidden_states.shape[0]]
             latent = compressor.pool_projected(kv, score, state_metadata)
             source_cos = state_metadata.c2_source_cos
             source_sin = state_metadata.c2_source_sin
@@ -776,6 +838,11 @@ class AscendDSAV41Impl:
         q, qr, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
+        attention_output = self._attend(attn, hidden_states, metadata, q, qr, prepared_indexer)
+        self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
+        return output
+
+    def _attend(self, attn, hidden_states, metadata, q, qr, prepared_indexer):
         num_tokens = metadata.swa.num_actual_tokens
         if num_tokens:
             positions = metadata.positions[:num_tokens]
@@ -788,7 +855,35 @@ class AscendDSAV41Impl:
         else:
             heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
-        self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
+        return attention_output
+
+    def forward_piecewise(self, attn, hidden_states, output, layer_name):
+        """Capture padded projections around a current-batch attention break.
+
+        Like upstream MRV2, attention no longer ejects the whole module from
+        the graph. Ascend's cache publication and ring compressor still need
+        current request metadata, so their dynamic work stays in the break.
+        CP retains the wider boundary for its batch-dependent collectives.
+        """
+        qr = attn.q_norm(attn.wq_a(hidden_states))
+        q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+        kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
+        index_q = weights = source_kv = source_scores = None
+        if self.role.has_long_context and self.role.is_index_source:
+            index_q = attn.indexer.project_query(qr)
+            weights = attn.indexer.project_weights(hidden_states)
+        if self.role.is_kv_source:
+            if self.role.compress_ratio == 1:
+                source_kv = attn.compressor(hidden_states)
+            else:
+                source_hidden = hidden_states.float()
+                source_kv = attn.compressor.wkv(source_hidden)
+                source_scores = attn.compressor.wgate(source_hidden)
+        attention_output = torch.empty_like(q)
+        _dsa_v41_attention(
+            hidden_states, q, qr, kv, index_q, weights, source_kv, source_scores, attention_output, layer_name
+        )
+        self._project_output(attn, attention_output, hidden_states, None, projected=output)
         return output
 
 

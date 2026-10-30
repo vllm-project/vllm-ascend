@@ -526,7 +526,7 @@ class AscendModelState(DefaultModelState):
         self.kv_cache_config = kv_cache_config
         self.pcp_context = pcp_context
         build_metadata: Callable[..., Any] = build_attn_metadata
-        if self.device_metadata is not None:
+        if self.device_metadata is not None and cudagraph_mode != CUDAGraphMode.PIECEWISE:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         self.attn_metadata = build_metadata(

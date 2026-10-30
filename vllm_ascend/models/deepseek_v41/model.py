@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture, is_breakable_cudagraph_enabled
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -764,6 +765,9 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             index_k_source_prefix=self.index_k_source_prefix,
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
+        self.piecewise_projections = (
+            vllm_config.use_v2_model_runner and is_breakable_cudagraph_enabled() and not enable_dsa_cp()
+        )
         context = vllm_config.compilation_config.static_forward_context
         context[self.v41_layer_name] = self
 
@@ -1081,6 +1085,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # context's batch descriptor; V2 preparation runs outside any forward
         # context, so it keys by the padded token count (the FULL graph bucket).
         self._engram_graph_events = {}
+        self._engram_piecewise_events = {}
         self._engram_prepare_stream = None
         self._engram_capture_stream = None
         self._engram_capture_events = None
@@ -1117,7 +1122,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
 
-    def prepare_engram(
+    def compute_engram_hashes(
         self,
         input_ids,
         positions,
@@ -1128,14 +1133,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         *,
         token_indices=None,
         force_dummy=False,
-        output_buffers=None,
-        ready_events=None,
-        output_tokens=None,
+        valid_token_count=None,
         mask_output_buffer=None,
         mask_ready_event=None,
-        valid_token_count=None,
+        output_tokens=None,
     ):
-        """Hash on device with upstream NgramHashState, then look up head shards.
+        """Compute device hashes and the keep mask with upstream NgramHashState.
 
         Calls without the device metadata (dummy runs) participate with empty
         hashes. History is the current chunk, then the runner's prompt
@@ -1143,7 +1146,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         """
         config = self.config
         if not self.has_engram:
-            return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
+            return None, torch.empty(0, dtype=torch.bool, device=positions.device)
         device = positions.device
         hash_state = self.engram_hash
         hashing = (
@@ -1219,10 +1222,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             publish_mask()
         else:
             publish_mask()
+        return hashes, mask
+
+    def lookup_engram(self, hashes, *, output_buffers=None, ready_events=None, output_tokens=None):
+        """Lookup/communication only; callers own hashing and stream ordering."""
+        config = self.config
+        device = self.engram_rotation.device
         lookups = {}
         tables = [self.layers[layer_id].engram.embed_tokens for layer_id in config.engram_layer_ids]
-        if participates:
-            assert hashes is not None
+        if hashes is not None:
             # One DP gather feeds every layer sharing the split table.
             gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
             for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
@@ -1259,7 +1267,116 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     lookups[layer_id] = output_buffers[layer_id]
                 if ready_events is not None:
                     ready_events[layer_id].record(torch.npu.current_stream())
+        return lookups
+
+    def prepare_engram(
+        self,
+        input_ids,
+        positions,
+        lookback_token_ids=None,
+        query_start_loc=None,
+        slot_mapping=None,
+        block_table=None,
+        *,
+        token_indices=None,
+        force_dummy=False,
+        output_buffers=None,
+        ready_events=None,
+        output_tokens=None,
+        mask_output_buffer=None,
+        mask_ready_event=None,
+        valid_token_count=None,
+    ):
+        """Preserve the FULL/NONE producer with separate hash and lookup stages."""
+        hashes, mask = self.compute_engram_hashes(
+            input_ids,
+            positions,
+            lookback_token_ids,
+            query_start_loc,
+            slot_mapping,
+            block_table,
+            token_indices=token_indices,
+            force_dummy=force_dummy,
+            valid_token_count=valid_token_count,
+            mask_output_buffer=mask_output_buffer,
+            mask_ready_event=mask_ready_event,
+            output_tokens=output_tokens,
+        )
+        if not self.has_engram:
+            return {}, mask
+        lookups = self.lookup_engram(
+            hashes,
+            output_buffers=output_buffers,
+            ready_events=ready_events,
+            output_tokens=output_tokens,
+        )
         return lookups, mask if mask_output_buffer is None else mask_output_buffer
+
+    @eager_break_during_capture
+    def start_engram_prefetch(self, hashes, output_buffers, ready_events, output_tokens):
+        """Replay lookup/communication eagerly after the captured hash segment.
+
+        The caller binds persistent rows/events before capture. This boundary
+        writes in place and returns no newly allocated tensor to the graph.
+        """
+        if not self._engram_overlap_enabled or not is_breakable_cudagraph_enabled():
+            self.lookup_engram(hashes, output_buffers=output_buffers, output_tokens=output_tokens)
+            return
+        main = torch.npu.current_stream()
+        if self._engram_prepare_stream is None:
+            self._engram_prepare_stream = torch.npu.Stream(device=hashes.device)
+        stream = self._engram_prepare_stream
+        stream.wait_stream(main)
+        if hashes.device.type == "npu":
+            hashes.record_stream(stream)
+        try:
+            with torch.npu.stream(stream):
+                self.lookup_engram(
+                    hashes,
+                    output_buffers=output_buffers,
+                    ready_events=ready_events,
+                    output_tokens=output_tokens,
+                )
+        except Exception:
+            main.wait_stream(stream)
+            raise
+
+    def piecewise_engram_inputs(
+        self,
+        input_ids,
+        positions,
+        lookback_token_ids,
+        query_start_loc,
+        valid_token_count,
+        *,
+        token_indices=None,
+        output_tokens=None,
+    ):
+        """Capture hashes/mask; replay eager prefetch before decoder consumers."""
+        hashes, mask = self.compute_engram_hashes(
+            input_ids,
+            positions,
+            lookback_token_ids,
+            query_start_loc,
+            valid_token_count=valid_token_count,
+            token_indices=token_indices,
+        )
+        if hashes is None:
+            # Memory profiling can precede KV allocation. Real capture binds
+            # the cache first; device valid_token_count handles dummy replays.
+            hash_state = self.engram_hash
+            assert hash_state is not None
+            hashes, mask = hash_state.dummy_hashes(input_ids)
+            if token_indices is not None:
+                hashes = hashes.index_select(0, token_indices)
+                mask = mask.index_select(0, token_indices)
+        num_tokens = positions.shape[0] if output_tokens is None else output_tokens
+        binding = self.prepare_engram_graph_inputs(num_tokens, prime=False, cg_mode=CUDAGraphMode.PIECEWISE)
+        self.start_engram_prefetch(hashes, binding["engram_lookups"], binding.get("engram_pending"), num_tokens)
+        # The mask is already produced on the main stream in the first graph
+        # segment; only the layer rows need eager consumer waits.
+        binding["engram_mask"] = mask
+        return binding
 
     def _can_overlap_engram_preparation(self) -> bool:
         """Preparation runs outside capture; consumers support eager and FULL."""
@@ -1432,12 +1549,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         ``prepare_engram_graph_inputs``) and the overlap check read the
         context. The V2 state defers lookup until the forward context exists and
         passes ``cg_mode`` explicitly: FULL steps reuse bucket-keyed ExternalEvents,
-        NONE steps get per-step plain events, unknown/other modes stay
-        synchronous because compiled regions must not trace stream control
-        ops. ``slot_mapping``/``block_table`` stay ``None`` under the V2
+        NONE steps get per-step plain events. MRV2 PIECEWISE instead computes
+        hashes in forward and starts lookup at its eager prefetch boundary.
+        Other compiled modes stay synchronous because compiled regions must
+        not trace stream control ops.
+        ``slot_mapping``/``block_table`` stay ``None`` under the V2
         runner, whose hashing is slotless.
         """
-        graph_inputs = self.prepare_engram_graph_inputs(padded_tokens, prime=False)
+        graph_inputs = self.prepare_engram_graph_inputs(padded_tokens, prime=False, cg_mode=cg_mode)
         if not graph_inputs["engram_lookups"]:
             return graph_inputs
         num_tokens = positions.shape[0] if token_indices is None else token_indices.numel()
@@ -1452,7 +1571,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # V2 passes the step mode explicitly and retains capture bucket
             # event keys after entering the forward context. None
             # means unknown, which stays synchronous.
-            overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
+            overlap = self._engram_overlap_enabled and cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
             if overlap and cg_mode == CUDAGraphMode.FULL:
                 mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
                 graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
@@ -1509,7 +1628,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             raise
         return graph_inputs
 
-    def prepare_engram_graph_inputs(self, padded_tokens=None, *, prime=True):
+    def prepare_engram_graph_inputs(self, padded_tokens=None, *, prime=True, cg_mode=None):
         """Capture fixed-address buffers without CPU history or routing work."""
         if not self.has_engram:
             return {"engram_lookups": {}, "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool)}
@@ -1517,6 +1636,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             raise ValueError("Engram token count exceeds the output buffer capacity")
         buffers, mask_buffer = self._get_engram_input_buffers()
         result = {"engram_lookups": buffers, "engram_mask": mask_buffer}
+        if cg_mode == CUDAGraphMode.PIECEWISE and self._engram_overlap_enabled and is_breakable_cudagraph_enabled():
+            # Replay calls the eager wait boundaries with these same ordinary
+            # events. Replacing them each step would leave captured consumers
+            # waiting on an old producer. FULL ExternalEvents stay separate.
+            events = self._engram_piecewise_events.get(padded_tokens)
+            if events is None:
+                events = {layer: torch.npu.Event() for layer in self.config.engram_layer_ids}
+                self._engram_piecewise_events[padded_tokens] = events
+            result.update(engram_pending=events)
+            return result
         if self._can_overlap_engram_preparation() and is_forward_context_available():
             context = get_forward_context()
             if context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -1715,8 +1844,8 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             cg_mode=cg_mode,
         )
 
-    def prepare_engram_graph_inputs(self, padded_tokens=None):
-        return self.model.prepare_engram_graph_inputs(padded_tokens)
+    def prepare_engram_graph_inputs(self, padded_tokens=None, *, cg_mode=None):
+        return self.model.prepare_engram_graph_inputs(padded_tokens, cg_mode=cg_mode)
 
     def prime_engram_v2_graph_inputs(self, padded_tokens):
         return self.model.prime_engram_v2_graph_inputs(padded_tokens)
@@ -1748,8 +1877,35 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_mask_ready_event=None,
         engram_query_start_loc=None,
         engram_valid_token_count=None,
+        engram_input_ids=None,
+        engram_positions=None,
+        engram_token_indices=None,
     ):
-        if engram_query_start_loc is not None:
+        mode = get_forward_context().cudagraph_runtime_mode if is_forward_context_available() else CUDAGraphMode.NONE
+        # Upstream v0.32 MRV2 invokes FULL capture with runtime mode NONE
+        # inside an ordinary device graph. Breakable PW capture uses PIECEWISE.
+        full_graph = mode == CUDAGraphMode.FULL or (
+            mode == CUDAGraphMode.NONE and torch.npu.is_current_stream_capturing()
+        )
+        if engram_query_start_loc is not None and not full_graph:
+            graph_inputs = self.model.piecewise_engram_inputs(
+                input_ids if engram_input_ids is None else engram_input_ids,
+                positions if engram_positions is None else engram_positions,
+                lookback_token_ids,
+                engram_query_start_loc,
+                engram_valid_token_count,
+                token_indices=engram_token_indices,
+                output_tokens=positions.shape[0],
+            )
+            return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                lookback_token_ids=lookback_token_ids,
+                **graph_inputs,
+            )
+        if engram_query_start_loc is not None and self.supports_engram_graph_producer:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count
             ) as graph_inputs:

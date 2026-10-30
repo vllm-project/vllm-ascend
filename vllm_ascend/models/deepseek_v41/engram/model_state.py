@@ -72,10 +72,9 @@ class EngramModelState(AscendModelState):
     The engram n-gram hash needs the ids of the ``depth`` tokens preceding
     each request's chunk start. The runner keeps the full token history on
     device, so the window is gathered there every step. Lookup rows are then
-    produced inside the forward context on the model's auxiliary stream:
-    ``prepare_engram_inputs`` (with this step's ``cg_mode``) publishes
-    persistent buffers plus ready events the model waits on (see
-    ``DeepseekV41Model``).
+    produced inside the model's forward context. PIECEWISE receives fixed
+    input coordinates and captures hash/mask before an eager prefetch boundary.
+    FULL and NONE retain their existing producer and event protocols.
     """
 
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
@@ -102,17 +101,20 @@ class EngramModelState(AscendModelState):
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
+        self._engram_piecewise_inputs: dict[str, torch.Tensor] | None = None
+        self._engram_pcp_inputs: dict[int, dict[str, torch.Tensor]] = {}
         if depth > 0:
             model.register_forward_pre_hook(self._prepare_engram_before_forward, with_kwargs=True)
             # Persistent so a captured graph can read it on replay.
             self.lookback_token_ids = torch.full((self.max_num_reqs, depth), -1, dtype=torch.int32, device=device)
+            self._engram_piecewise_inputs = {
+                # Separate from FIA's max_reqs+2 query buffer: its padding
+                # row must not become a real Engram request/history row.
+                "engram_query_start_loc": torch.zeros(self.max_num_reqs + 1, dtype=torch.int32, device=device),
+                "engram_valid_token_count": torch.zeros(1, dtype=torch.int32, device=device),
+            }
             if getattr(model, "supports_engram_graph_producer", False):
-                self._engram_graph_inputs = {
-                    # Separate from FIA's max_reqs+2 query buffer: its padding
-                    # row must not become a real Engram request/history row.
-                    "engram_query_start_loc": torch.zeros(self.max_num_reqs + 1, dtype=torch.int32, device=device),
-                    "engram_valid_token_count": torch.zeros(1, dtype=torch.int32, device=device),
-                }
+                self._engram_graph_inputs = self._engram_piecewise_inputs
 
     def add_request(self, req_index: int, new_req_data) -> None:
         super().add_request(req_index, new_req_data)
@@ -273,23 +275,46 @@ class EngramModelState(AscendModelState):
                 BLOCK_DEPTH=triton.next_power_of_2(depth),
             )
         model_inputs["lookback_token_ids"] = window
-        if self._engram_graph_inputs is not None and self._cg_mode == CUDAGraphMode.FULL:
-            graph_inputs = self._engram_graph_inputs
+        piecewise = self._cg_mode == CUDAGraphMode.PIECEWISE
+        if piecewise or (self._engram_graph_inputs is not None and self._cg_mode == CUDAGraphMode.FULL):
+            # Only input coordinates are staged here. Model forward captures
+            # hash/mask and registers the PIECEWISE lookup replay boundary.
+            self._engram_inputs = None
+            graph_inputs = (
+                self._piecewise_graph_inputs(input_batch.num_tokens_after_padding)
+                if piecewise
+                else self._engram_graph_inputs
+            )
+            assert graph_inputs is not None
             query = graph_inputs["engram_query_start_loc"]
             valid_tokens = 0 if dummy else batch.num_tokens
             query.fill_(valid_tokens)
             if not dummy:
                 query[: batch.num_reqs + 1].copy_(batch.query_start_loc[: batch.num_reqs + 1])
             graph_inputs["engram_valid_token_count"].fill_(valid_tokens)
+            if "engram_input_ids" in graph_inputs:
+                for name, source in (("engram_input_ids", batch.input_ids), ("engram_positions", batch.positions)):
+                    target = graph_inputs[name]
+                    target.zero_()
+                    if not dummy:
+                        if batch.num_tokens >= target.numel():
+                            raise ValueError("PCP Engram input exceeds the captured token bucket")
+                        target[: batch.num_tokens].copy_(source[: batch.num_tokens])
+                indices = graph_inputs["engram_token_indices"]
+                # Padding selects a masked row at the end of global input.
+                indices.fill_(graph_inputs["engram_input_ids"].numel() - 1)
+                if not dummy:
+                    if token_indices is None:
+                        indices[: input_batch.num_tokens].copy_(
+                            torch.arange(input_batch.num_tokens, device=indices.device)
+                        )
+                    else:
+                        indices[: token_indices.numel()].copy_(token_indices)
             model_inputs.update(graph_inputs)
-            # FULL replay runs its own producers. No Python-side hash/lookup
-            # and no ExternalEvent records may precede it on this route.
+            # Both graph paths run their own producers. Input preparation
+            # must not submit hash/lookup or prime ExternalEvents here.
             return model_inputs
-        # TODO: Support breakable PIECEWISE by refreshing lookups under the
-        # forward context before replay, which bypasses the model pre-hook.
-        # Align capture bindings with that path so replay does not retain
-        # dummy graph-producer coordinates.
-        # DP lookup needs the forward context, which is not established yet.
+        # FULL fallback and NONE retain the existing forward-context producer.
         self._engram_inputs = {
             "input_ids": batch.input_ids[: batch.num_tokens],
             "positions": batch.positions[: batch.num_tokens],
@@ -303,6 +328,25 @@ class EngramModelState(AscendModelState):
         model_inputs.update(self.model.prepare_engram_graph_inputs(input_batch.num_tokens_after_padding))
         return model_inputs
 
+    def _piecewise_graph_inputs(self, num_tokens: int) -> dict[str, torch.Tensor]:
+        assert self._engram_piecewise_inputs is not None
+        result = dict(self._engram_piecewise_inputs)
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size > 1:
+            if num_tokens not in self._engram_pcp_inputs:
+                assert self.lookback_token_ids is not None
+                device = self.lookback_token_ids.device
+                # One extra masked row makes local padding safe even when
+                # every global input token is valid.
+                capacity = num_tokens * pcp_size + 1
+                self._engram_pcp_inputs[num_tokens] = {
+                    "engram_input_ids": torch.zeros(capacity, dtype=torch.int32, device=device),
+                    "engram_positions": torch.zeros(capacity, dtype=torch.int64, device=device),
+                    "engram_token_indices": torch.zeros(num_tokens, dtype=torch.int64, device=device),
+                }
+            result.update(self._engram_pcp_inputs[num_tokens])
+        return result
+
     def prepare_engram_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         self._engram_inputs = None
         model_inputs: dict[str, Any] = {}
@@ -311,11 +355,13 @@ class EngramModelState(AscendModelState):
             # The captured graph reads this buffer; replays refill it in place.
             window.fill_(-1)
             model_inputs["lookback_token_ids"] = window
-            if self._engram_graph_inputs is not None:
-                for buffer in self._engram_graph_inputs.values():
+            if self._engram_piecewise_inputs is not None:
+                graph_inputs = self._piecewise_graph_inputs(num_tokens)
+                for buffer in graph_inputs.values():
                     buffer.zero_()
-                model_inputs.update(self._engram_graph_inputs)
-                return model_inputs
+                model_inputs.update(graph_inputs)
+                if self._engram_graph_inputs is not None:
+                    return model_inputs
             prime_engram = getattr(self.model, "prime_engram_v2_graph_inputs", None)
             if prime_engram is not None:
                 model_inputs.update(prime_engram(num_tokens))
@@ -325,7 +371,7 @@ class EngramModelState(AscendModelState):
         kwargs.update(self.prepare_engram())
 
     def prepare_engram(self) -> dict[str, Any]:
-        """Refresh buffers once inside eager forward or before FULL replay."""
+        """Refresh buffers once inside the forward context before consumption."""
         if self._engram_inputs is None:
             return {}
         model_inputs = self.model.prepare_engram_inputs(**self._engram_inputs)
