@@ -40,9 +40,8 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kpool_indexer
 from vllm_ascend.ops.triton.v2.mamba.aligned_indices import compute_aligned_state_indices
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState

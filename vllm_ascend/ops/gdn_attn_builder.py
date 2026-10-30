@@ -762,6 +762,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         batch: tuple[int, int, int, int, int, torch.Tensor | None],
     ) -> GDNAttentionMetadata | None:
         return None
+
     def _get_decode_layout_key(
         self,
         common: CommonAttentionMetadata,
