@@ -26,10 +26,10 @@ def make_method(scale_alg, available=True):
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
 @pytest.mark.parametrize("available", [False, True])
-def test_fused_clipped_activation_requires_ceil_scale_and_api(scale_alg, available):
+def test_fused_clipped_activation_depends_only_on_scale_algorithm(scale_alg, available):
     method = make_method(scale_alg, available)
-    assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1 and available)
-    assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1 and available)
+    assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1)
+    assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1)
     assert method.supports_fused_activation(MoEActivation.SILU)
     for activation in (MoEActivation.SWIGLUOAI, MoEActivation.SITU, MoEActivation.GELU, MoEActivation.SWIGLUSTEP):
         assert not method.supports_fused_activation(activation)
@@ -43,9 +43,9 @@ def test_enabling_one_model_does_not_change_other_instances():
     assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu"})
 
 
-@pytest.mark.parametrize("scale_alg,available", [(1, True), (0, True), (1, False)])
-def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, available):
-    method = make_method(scale_alg, available)
+@pytest.mark.parametrize("scale_alg", [0, 1])
+def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
+    method = make_method(scale_alg)
     packed = torch.randn(4, 128, dtype=torch.bfloat16)
     quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
     scales = torch.ones(4, 1, 2, dtype=torch.uint8)
@@ -68,7 +68,7 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, available):
         assert apply_moe_mlp(inputs, method) == ("result", None)
     method.apply_gmm1.assert_called_once_with(inputs)
     method.apply_gmm2.assert_called_once_with(inputs, quantized, scales)
-    if scale_alg == 1 and available:
+    if scale_alg == 1:
         fused.assert_called_once_with(
             packed,
             activate_left=True,

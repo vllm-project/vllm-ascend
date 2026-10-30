@@ -293,11 +293,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the
-        # fused clipped activation. Other models and older runtimes retain
+        # fused clipped activation. Other models retain
         # their existing activation and quantization implementations.
-        if get_dynamic_mx_quant_scale_alg(vllm_config) == DynamicMXQuantScaleAlg.CEIL and hasattr(
-            torch_npu, "npu_swiglu_mx_quant"
-        ):
+        if get_dynamic_mx_quant_scale_alg(vllm_config) == DynamicMXQuantScaleAlg.CEIL:
             self.fused_activations = self.fused_activations | {MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}
 
     @staticmethod
