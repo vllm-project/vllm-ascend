@@ -103,6 +103,7 @@ def test_connector_lifecycle_is_forwarded():
     inner = SimpleNamespace(
         pre_forward=Mock(),
         finish_forward=Mock(),
+        finalize_step=Mock(),
         post_forward=Mock(return_value=output),
         no_forward=Mock(return_value=output),
         set_disabled=Mock(),
@@ -111,17 +112,51 @@ def test_connector_lifecycle_is_forwarded():
     copy = Mock()
     wrapped = MambaCopyKVConnector(inner, copy)
     wrapped.finish_forward()
+    wrapped.finalize_step()
     assert wrapped.post_forward({"done"}, wait_for_save=False) is output
     tokenless_step = object()
     assert wrapped.no_forward(tokenless_step) is output
     wrapped.set_disabled(True)
     wrapped.reset_capture_state()
     inner.finish_forward.assert_called_once_with()
+    inner.finalize_step.assert_called_once_with()
     inner.post_forward.assert_called_once_with({"done"}, wait_for_save=False)
     inner.no_forward.assert_called_once_with(tokenless_step)
     inner.set_disabled.assert_called_once_with(True)
     inner.reset_capture_state.assert_called_once_with()
     copy.assert_not_called()
+
+
+def test_mtp_deferred_finalize_saves_after_draft():
+    events = []
+    output = object()
+
+    class Inner:
+        def post_forward(self, finished_req_ids, defer_finalize=False):
+            assert finished_req_ids == {"done"}
+            assert defer_finalize
+            events.append("collect_results")
+            return output
+
+        def finalize_step(self):
+            events.append("save_and_clear_metadata")
+
+    copy = Mock()
+    wrapped = MambaCopyKVConnector(Inner(), copy)
+    assert wrapped.post_forward({"done"}, defer_finalize=True) is output
+    assert events == ["collect_results"]
+    events.append("draft")
+    wrapped.finalize_step()
+    assert events == ["collect_results", "draft", "save_and_clear_metadata"]
+    copy.assert_not_called()
+
+
+def test_finalize_step_propagates_save_failure():
+    inner = SimpleNamespace(finalize_step=Mock(side_effect=RuntimeError("save failed")))
+    wrapped = MambaCopyKVConnector(inner, Mock())
+    with pytest.raises(RuntimeError, match="save failed"):
+        wrapped.finalize_step()
+    inner.finalize_step.assert_called_once_with()
 
 
 def test_wrappers_keep_runner_state_independent():

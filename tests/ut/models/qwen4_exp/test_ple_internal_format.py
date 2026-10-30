@@ -212,7 +212,9 @@ def test_ple_internal_format_is_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
     output = torch.tensor([2.0])
     original = Mock(return_value=output)
-    layer = object()
+    layer = SimpleNamespace(prefix="layers.1.ple")
+    wait = Mock()
+    monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", wait)
     inputs = torch.tensor([1.0])
     residual = torch.tensor([2.0])
     outer_residual = torch.tensor([3.0])
@@ -222,6 +224,7 @@ def test_ple_internal_format_is_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert wrapped(layer, inputs, residual, outer_residual) is output
     original.assert_called_once_with(layer, inputs, residual, outer_residual)
     assert updates == [False, True]
+    wait.assert_called_once_with(layer.prefix)
 
 
 def test_ple_internal_format_is_restored_on_error(
@@ -232,7 +235,8 @@ def test_ple_internal_format_is_restored_on_error(
     monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
 
     original = Mock(side_effect=RuntimeError("expected short-conv failure"))
-    layer = object()
+    layer = SimpleNamespace(prefix="layers.1.ple")
+    monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
     inputs = torch.tensor([1.0])
     wrapped = ple._wrap_ple_short_conv(original)
 
