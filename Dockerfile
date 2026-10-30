@@ -145,6 +145,17 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     # python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     # rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
     # python3 -m pip cache purge
+
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    git clone https://github.com/MinghuasLab/flash-attention-npu.git /tmp/flash-attention-npu && \
+    cd /tmp/flash-attention-npu && \
+    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git submodule update --init --recursive && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    python3 setup.py install && \
+    cd /workspace && \
+    rm -rf /tmp/flash-attention-npu
 # Print component versions
 RUN echo -e "\n===== Component Version Info =====" && \
     echo "CANN:" && (cat /usr/local/Ascend/ascend-toolkit/version.info 2>/dev/null || cat /usr/local/Ascend/latest/version.info 2>/dev/null || echo "CANN version file not found") && \
