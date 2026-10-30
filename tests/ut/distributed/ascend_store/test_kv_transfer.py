@@ -21,6 +21,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -47,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
@@ -1201,6 +1203,150 @@ class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 2)
         mock_exists.assert_not_called()
         sync_event.synchronize.assert_called_once()
+
+
+# Verify the ordinary receiver preserves key/address/failure alignment for zero, shifted and wrapped ranks.
+@pytest.mark.parametrize("rank", [0, 1, 2, 4])
+def test_receiver_rotation_for_tp_rank(rank):
+    selected_rank = rank
+    original = None
+    for rank in dict.fromkeys((0, selected_rank)):
+        store = FakeStore()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=rank,
+            tp_size=8,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        request = ReqMeta(
+            req_id="rotation",
+            token_len_chunk=48,
+            block_ids=[5, 7, 9],
+            block_hashes=[b"a", b"b", b"c"],
+            load_spec=LoadSpec(0, 48, True, token_len=48),
+        )
+
+        def get(keys, addresses, sizes, store=store):
+            store.get_calls.append((list(keys), list(addresses), list(sizes)))
+            return [int(key.endswith("@62")) for key in keys]
+
+        store.get = get
+        thread.request_queue.put(request)
+        thread._handle_request(request)
+        actual = store.get_calls[0]
+        if rank == 0:
+            original = actual
+        else:
+            offset = rank % 3
+            assert actual == tuple(values[offset:] + values[:offset] for values in original)
+        assert thread._invalid_block_ids == {7}
+        assert thread.get_and_clear_finished_requests() == {"rotation"}
+        assert thread.request_queue.unfinished_tasks == 0
+
+
+# Verify every key-layer TP partition preserves transfer arrays and final-layer completion.
+@pytest.mark.parametrize("rank", [0, 1, 2, 3])
+def test_key_layer_rotation_for_tp_partition(rank):
+    selected_rank = rank
+    baseline = {}
+    for rank in dict.fromkeys((0, selected_rank)):
+        store = FakeStore()
+        database = FakeTokenDatabase()
+        database.set_group_buffers({0: [1000, 2000]}, {0: [16, 16]}, group_num_layers={0: 2})
+        thread = KVCacheStoreKeyLayerRecvingThread(
+            m_store=store,
+            token_database=database,
+            block_size=16,
+            tp_rank=rank,
+            tp_size=4,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            num_layers=2,
+            layer_load_finished_events=[threading.Event(), threading.Event()],
+            layer_save_finished_events=[threading.Event(), threading.Event()],
+        )
+        request = ReqMeta("layered", block_ids=[5, 7, 9, 11], block_hashes=[b"a", b"b", b"c", b"d"], is_last_chunk=True)
+        for layer in (0, 1):
+            task = LayerTransferTask(layer_id=layer, block_ranges=[LayerBlockRange(request, 0, 4)])
+            load = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=layer)
+            thread.request_queue.put(load)
+            thread._handle_request(load)
+            (keys, addresses, sizes) = store.get_calls[-1]
+            if rank == 0:
+                baseline[layer] = (keys, addresses, sizes)
+            assert (keys, addresses, sizes) == tuple(values[rank:] + values[:rank] for values in baseline[layer])
+            expected_hashes = ["61", "62", "63", "64"]
+            assert len(keys) == 4
+            assert len(addresses) == 4
+            assert len(sizes) == 4
+            expected = expected_hashes[rank:] + expected_hashes[:rank]
+            assert all(chunk_hash in key for (chunk_hash, key) in zip(expected, keys))
+            assert thread.get_and_clear_finished_requests() == ({"layered"} if layer == 1 else set())
+            assert thread.layer_load_finished_events[layer].is_set()
+        assert thread.request_queue.unfinished_tasks == 0
+
+
+# Execute both normal sentinel shutdown and backend-exception termination through run().
+@pytest.mark.parametrize("fail", [False, True], ids=["none-sentinel", "backend-error"])
+def test_receiving_thread_run_termination(fail):
+    store = FakeStore()
+    thread = KVCacheStoreRecvingThread(
+        m_store=store, token_database=FakeTokenDatabase(), block_size=16, tp_rank=1, ready_event=threading.Event()
+    )
+    if fail:
+        store.get = MagicMock(side_effect=RuntimeError("backend get failed"))
+        thread.request_queue.put(
+            ReqMeta(
+                req_id="failure",
+                token_len_chunk=16,
+                block_ids=[5],
+                block_hashes=[b"a"],
+                load_spec=LoadSpec(0, 16, True, token_len=16),
+            )
+        )
+    else:
+        thread.request_queue.put(None)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert thread.ready_event.is_set()
+    assert thread.request_queue.unfinished_tasks == 0
+    if fail:
+        with pytest.raises(RuntimeError, match="asynchronous transfer"):
+            thread.raise_if_failed()
+    else:
+        thread.raise_if_failed()
+
+
+# Verify absent and per-block error results mark the correct buffers without losing queue completion.
+@pytest.mark.parametrize("result,expected", [(None, {5, 7}), ([0, 1], {7})])
+def test_receiver_backend_failed_results_preserve_block_ids(result, expected):
+    store = FakeStore()
+    store.get = MagicMock(return_value=result)
+    receiver = KVCacheStoreRecvingThread(
+        m_store=store,
+        token_database=FakeTokenDatabase(),
+        block_size=16,
+        tp_rank=0,
+        ready_event=threading.Event(),
+    )
+    request = ReqMeta(
+        "failed-result",
+        token_len_chunk=32,
+        block_ids=[5, 7],
+        block_hashes=[b"a", b"b"],
+        load_spec=LoadSpec(0, 32, True, token_len=32),
+    )
+    receiver.request_queue.put(request)
+    receiver._handle_request(request)
+    assert receiver._invalid_block_ids == expected
+    assert receiver.get_and_clear_finished_requests() == {"failed-result"}
+    assert receiver.request_queue.unfinished_tasks == 0
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):

@@ -24,6 +24,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -59,6 +61,58 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
+
+
+@pytest.mark.parametrize("name,value", [("COPY_L2G", 0), ("COPY_G2L", 1), ("COPY_G2H", 2), ("COPY_H2G", 3)])
+# Verify MmcDirect names and wire values remain bidirectionally consistent.
+def test_memcache_copy_direction_wire_values(name, value):
+    direction = MmcDirect[name]
+    assert direction.value == value
+    assert MmcDirect(value) is direction
+    assert len(MmcDirect) == 4
+
+
+@pytest.mark.parametrize("device_id", [0, 1])
+@patch.object(MemcacheBackend, "ensure_initialized")
+@patch.object(memcache_module.torch.npu, "set_device")
+# Verify set_device binds the selected NPU without initializing the store.
+def test_memcache_binds_captured_device_without_initializing_store(set_device, initialize, device_id):
+    backend = MemcacheBackend.__new__(MemcacheBackend)
+    backend.device_id = device_id
+    backend.set_device()
+    set_device.assert_called_once_with(device_id)
+    initialize.assert_not_called()
+
+
+@pytest.mark.parametrize("contribute_memory", [False, True])
+@patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "1", "ASCEND_GLOBAL_RESOURCE_CONFIG": ""})
+@patch.object(mooncake_module, "global_te")
+@patch.object(mooncake_module.torch.npu, "set_device")
+@patch.object(mooncake_module, "get_global_rank", return_value=0)
+@patch.object(mooncake_module, "get_ip", return_value="10.0.0.7")
+@patch.object(sys.modules["mooncake.store"], "MooncakeDistributedStore", create=True)
+# Verify fabric-memory setup avoids a private transfer engine in both memory modes.
+def test_mooncake_fabric_setup_never_creates_private_transfer_engine(
+    store_class, get_ip, get_rank, set_device, engine, contribute_memory
+):
+    config = _make_mooncake_store_config(global_segment_size=1024, local_buffer_size=512)
+    store = store_class.return_value
+    store.setup.return_value = 0
+    with (
+        patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+        patch.object(mooncake_module.torch.npu, "current_device", return_value=0),
+    ):
+        backend = MooncakeBackend(MagicMock(), contribute_memory=contribute_memory)
+    assert backend.store is store
+    assert backend._use_fabric_mem
+    assert backend._store_initialized
+    store.setup.assert_called_once()
+    engine.get_transfer_engine.assert_not_called()
+    kwargs = store.setup.call_args.kwargs
+    assert kwargs["local_buffer_size"] == 0
+    assert kwargs["global_segment_size"] == (config.global_segment_size if contribute_memory else 0)
+    assert "engine" not in kwargs
+    assert backend.local_seg == "10.0.0.7"
 
 
 def _format_log_call(call):
