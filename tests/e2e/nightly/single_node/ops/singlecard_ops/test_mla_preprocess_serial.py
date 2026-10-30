@@ -10,6 +10,7 @@ import torch_npu  # noqa: F401
 from vllm_ascend.ops.mla_preprocess_serial import (
     mla_preprocess_serial,
     prepare_mla_preprocess_serial_weights,
+    prepare_mla_preprocess_single_token_weights,
 )
 from vllm_ascend.utils import enable_custom_op
 
@@ -19,9 +20,13 @@ KV_RANK = 512
 Q_NOPE = 128
 ROPE_DIM = 64
 BLOCK_SIZE = 128
-TOKEN_COUNTS = (1, 16, 64, 128, 256, 257, 512, 1023, 1024)
-HEAD_COUNTS = (16, 32, 128)
-CASES = tuple((t, h, False, 1) for t in TOKEN_COUNTS for h in HEAD_COUNTS) + (
+TOKEN_COUNTS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+HEAD_COUNTS = (8, 16, 32, 64, 128)
+# Retain all27 original business points while adding realistic decode/TP sizes.
+BUSINESS_SHAPES = tuple((t, h) for t in TOKEN_COUNTS for h in HEAD_COUNTS) + tuple(
+    (t, h) for t in (257, 1023) for h in (16, 32, 128)
+)
+CASES = tuple((t, h, False, 1) for t, h in BUSINESS_SHAPES) + (
     (1, 32, True, 2),
     (2, 16, True, 2),
     (64, 32, True, 2),
@@ -154,3 +159,47 @@ def test_mla_preprocess_serial_invalid_input(invalid):
         message = "cos and sin"
     with pytest.raises(ValueError, match=message):
         mla_preprocess_serial(*values)
+
+
+@pytest.mark.parametrize(
+    "heads,no_rope,cache_stride", [(h, False, 1) for h in HEAD_COUNTS] + [(32, True, 2), (128, False, 2)]
+)
+@pytest.mark.parametrize("graph", [False, True])
+def test_mla_preprocess_single_token_weights(heads, no_rope, cache_stride, graph):
+    inputs, bases = _make_inputs(1, heads, no_rope, cache_stride)
+    down, up, key = prepare_mla_preprocess_serial_weights(inputs[1], inputs[2], inputs[3])
+    single = prepare_mla_preprocess_single_token_weights(down, up)
+    for original, prepared in zip((down, up), single):
+        assert prepared.shape == original.shape and prepared.dtype == original.dtype
+        assert torch.equal(prepared.cpu().contiguous().view(torch.int16), original.cpu().contiguous().view(torch.int16))
+    values = (inputs[0], down, up, key, *inputs[4:])
+
+    def run():
+        return mla_preprocess_serial(*values, single_token_weights=single)
+
+    if graph:
+        run()
+        torch.npu.synchronize()
+        capture = torch.npu.NPUGraph()
+        with torch.npu.graph(capture):
+            actual = run()
+    for update in (0, 0.125) if graph else (0,):
+        if update:
+            inputs[0].add_(update)
+        for base, sentinel in zip(bases, (-3.25, -4.5)):
+            base.fill_(sentinel)
+        expected, written = _reference(inputs, heads)
+        if graph:
+            capture.replay()
+        else:
+            actual = run()
+        torch.npu.synchronize()
+        assert actual[2] is inputs[9] and actual[3] is inputs[10]
+        for value, golden in zip(actual[:2], expected[:2]):
+            _assert_close(value, golden)
+        for value, golden in zip(actual[2:], expected[2:]):
+            _assert_close(value.cpu()[written], golden[written])
+            assert torch.equal(value.cpu()[~written], golden.to(torch.bfloat16)[~written])
+        if cache_stride > 1:
+            for base, sentinel in zip(bases, (-3.25, -4.5)):
+                assert base[1::2].cpu().eq(sentinel).all()

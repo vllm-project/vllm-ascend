@@ -1,89 +1,272 @@
-# Serial MLA Preprocess
+# Serial MLA Preprocess on A3
 
-This experimental BF16/no-quant/split-ND fallback prepares query tensors
-and updates the compressed KV cache for Multi-head Latent Attention.
-C stages use only two public `torch.matmul` calls and one `torch.bmm`.
-V stages use Ascend C through `op_host`/`op_kernel`, generated ACLNN,
-`EXEC_NPU_CMD` and Torch PrivateUse1/Meta registrations. There are no
-custom Cube kernels. The installed Torch-NPU/CANN backend chooses Matmul.
+This BF16/no-quant/split-ND fallback prepares query tensors and updates the
+compressed KV cache. C uses two public `torch.matmul` calls and one public
+`torch.bmm`; V uses independent Ascend C through op_host/op_kernel, ACLNN,
+EXEC_NPU_CMD and Torch PrivateUse1/Meta. There are no custom Cube kernels.
+Original fused compute/tiling/golden/disassembly was not inspected.
 
-The implementation follows CANNBot API, tiling and precision guidance,
-pinned to `393564ae43f304426db2c206e361cd43b2811413`. The original fused
-operator was used only as a binary black box. ATVOSS experiments are not
-part of this implementation. SuperKernel is disabled.
+The default path retains M20 ND weights and behavior. An explicit optional
+single-token weight preparation uses public Torch-NPU NZ conversion at load
+time. Only T=1 selects those extra weights. No Vector kernel/tiling, schema,
+Meta implementation, environment variable or global weight cache is added.
+SuperKernel remains disabled. This is standalone operator evidence, not
+model-serving or complete-ABI acceptance.
 
-## Data flow
+## Data flow and interface
 
 ```mermaid
 flowchart TD
-    X["x: T x D"] --> C1["C1: torch.matmul down projection"]
-    C1 --> V1["V1: NormCache: Q/KV RMSNorm, K RoPE, cache write"]
-    V1 --> CACHE["In-place split ND caches"]
-    V1 --> C2["C2: torch.matmul Q up projection"]
-    C2 --> B{"T = 1?"}
-    B -->|yes| VP["V2: QPrepare: Q-nope extraction and Q RoPE"]
-    VP --> C3S["C3: torch.bmm"]
-    C3S --> VIEW["view: H x 1 x 512 to 1 x H x 512"]
-    B -->|no| PK["V2: QPack: T x H x P to H x T x P"]
-    PK --> C3["C3: torch.bmm"]
-    C3 --> VF["V3: QFinalize: output layout and Q RoPE"]
+    ND["Default ND down/up weights"] --> SELECT{"T=1 and extra weights supplied?"}
+    NZ["Load-time optional KN-NZ down/up weights"] --> SELECT
+    SELECT --> C1["torch.matmul: down"]
+    X["x: T,D"] --> C1
+    C1 --> V1["NormCache: Q/KV RMSNorm, K RoPE, cache writes"]
+    V1 --> C2["torch.matmul: Q up"]
+    C2 --> B{"T=1?"}
+    B -->|yes| VP["QPrepare: Q-nope and Q RoPE"]
+    VP --> C3S["torch.bmm; output layout is a view"]
+    B -->|no| PK["QPack: T,H,P to H,T,P"]
+    PK --> C3["torch.bmm"]
+    C3 --> VF["QFinalize: layout and Q RoPE"]
     C2 --> VF
-    VIEW --> QN["q_nope: T x H x 512"]
-    VF --> QN
-    VF --> QR["q_rope: T x H x 64"]
-    VP --> QR
 ```
 
-Calls execute serially on the current stream. T>1 executes three C and
-three V kernels. T=1 executes three C and two V kernels; its singleton
-token dimension allows the final output layout to be a view.
-
-Only four Vector interfaces are registered: NormCache, QPrepare, QPack
-and QFinalize. QPrepare is the mutually exclusive T=1 V2 path. Legacy
-QNorm, KvCache and QLayout interfaces have been removed.
-
-QFinalize groups at most two adjacent tokens for its bounded UB tile.
-QPack uses two bound queue buffers. Vector tiling uses platform Vector
-core information and the runtime work size; C tiling is owned by Torch.
-
-## Inputs and outputs
+T>1 runs3 C and3 V stages; T=1 runs3 C and2 V stages. Four Vector interfaces
+are registered: NormCache, QPrepare, QPack, QFinalize. QPrepare is mutually
+exclusive with QPack/QFinalize. All run serially on the current stream;
+Torch chooses the matrix kernels and their tiling.
 
 | Argument | Shape and meaning |
 | --- | --- |
-| `x` | BF16 NPU `[T,D]` |
-| `weight_down` | Persistent BF16 ND `[L+576,D]`, rows `[KV,K-rope,Q]` |
-| `weight_up` | Persistent BF16 ND `[H*(P+64),L]` |
-| `weight_key` | Persistent BF16 ND `[H,P,512]` |
-| `gamma_q`, `gamma_kv` | BF16 `[L]`, `[512]` |
-| `cos`, `sin` | Paired BF16 `[T,64]`, or both absent |
-| `slots` | NPU int32 `[T]`; negative slots preserve cache contents |
-| `cache`, `cache_rope` | BF16 `[blocks,128,1,512]`, `[blocks,128,1,64]` |
+| x | BF16 NPU `[T,D]` |
+| weight_down | Default persistent BF16 ND `[L+576,D]`, rows `[KV,K-rope,Q]` |
+| weight_up | Default persistent BF16 ND `[H*(P+64),L]` |
+| weight_key | Persistent BF16 ND `[H,P,512]` |
+| gamma_q, gamma_kv | BF16 `[L]`, `[512]` |
+| cos, sin | Paired BF16 `[T,64]`, or both absent |
+| slots | INT32 `[T]`; negative slots preserve cache contents |
+| cache, cache_rope | BF16 `[blocks,128,1,512]`, `[blocks,128,1,64]` |
+| single_token_weights | Keyword-only optional pair of prepared down/up tensors; default None |
+| Returned queries | `q_nope [T,H,512]`, `q_rope [T,H,64]` |
 
-Returns `(q_nope, q_rope, cache, cache_rope)`, with query shapes
-`[T,H,512]` and `[T,H,64]`. Cache outputs alias their input tensors.
-Only the cache block dimension may have a larger physical stride.
-Valid nonnegative slots must be unique and within cache capacity.
-RMS epsilon is `1e-5`; RMSNorm and RoPE use FP32 intermediates.
+Cache outputs alias their inputs. Only the cache block axis may have physical
+stride padding. Nonnegative slots must be unique and within capacity.
+RMS epsilon is1e-5; Norm/RoPE intermediates are FP32.
 
-`prepare_mla_preprocess_serial_weights(wdqkv, wuq, wuk)` runs once at
-model load. Its inputs use logical down rows `[Q,KV,K-rope]` and key
-`[H,512,P]`; it preserves BF16 values while preparing the layouts above.
-This logical-weight API differs from the original blocked/NZ weight ABI.
-Persistent weight preparation is outside the timed call. Every runtime
-layout kernel remains part of the performance measurement.
+`prepare_mla_preprocess_serial_weights(wdqkv,wuq,wuk)` still returns exactly
+three tensors and preserves the old API. Inputs use logical down rows
+`[Q,KV,K-rope]` and key `[H,512,P]`. The new helper accepts its down/up outputs:
 
-## Build and device test
+```python
+from vllm_ascend.ops.mla_preprocess_serial import (
+    mla_preprocess_serial,
+    prepare_mla_preprocess_serial_weights,
+    prepare_mla_preprocess_single_token_weights,
+)
 
-The root CMake glob includes the C++ wrapper. `csrc/build_aclnn.sh` lists
-the four operators in the A3 build. For a matching vLLM/Torch-NPU/CANN
-development environment, build through the repository installation path:
-
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-COMPILE_CUSTOM_KERNELS=1 SOC_VERSION=ascend910_93 pip install -e . --no-build-isolation
+down, up, key = prepare_mla_preprocess_serial_weights(wdqkv, wuq, wuk)
+single = prepare_mla_preprocess_single_token_weights(down, up)
+outputs = mla_preprocess_serial(
+    x, down, up, key, gamma_q, gamma_kv, cos, sin, slots, cache, cache_rope,
+    single_token_weights=single,
+)
 ```
 
-To build only the four custom ACLNN Vector operators:
+The caller explicitly holds both weight versions and rebuilds them when
+weights change. The optional helper prepares contiguous RHS `[K,N]`, converts
+it to FRACTAL_NZ29, then returns a logical `[N,K]` transposed view. Forward's
+existing `.t()` restores the RHS view. BF16 logical values are checked bit
+exact. For T>1 the supplied extra pair is ignored; default None preserves
+the previous path. No explicit format conversion is added to forward.
+After replacing prepared tensors or their device addresses, recapture any
+Graph that consumes them; an existing replay retains its captured addresses.
+
+Extra logical weight storage is `2*(D*(L+576)+L*H*(P+64))` bytes:33.375–100.875
+MiB for the tested H8–128, excluding allocator overhead. Preparation and
+transient preparation storage are outside steady Graph timing. All runtime
+projections, layouts, Norm/RoPE and cache updates remain inside the full call.
+
+## CANNBot tiling experiments and selected scope
+
+CANNBot generic core-shrink, DMA batching and transpose-fusion guidance was
+consulted at revision393564ae43f304426db2c206e361cd43b2811413. A5 MicroAPI
+templates are not imported into A3. Platform queries provide AIV capability;
+the original fused tiling is never a source.
+
+Retained V tiling uses one NormCache token task, grouped-head QPrepare,
+bounded8192-element double-buffered QPack and up-to2-token/128-cell QFinalize.
+The following additional V strategies were measured and rejected:
+
+| Trial | Strategy | Paired M20/new result and decision |
+| --- | --- | --- |
+| MLA01 | Split small-T Finalize heads for more AIV tasks | 0.960–1.000x in8 probes; REJECT |
+| MLA02 | Balance Pack token groups when head parallelism is low | 0.934–0.999x in6 probes; REJECT |
+| MLA04 | Separate small-T Q norm and KV/cache tasks | 0.918–1.038x; protected regression; REJECT |
+| MLA05 | Finalize64-cell double buffer at same total UB budget | 0.989–1.002x; no reliable gain; REJECT |
+| MLA06 | Fill128-cell tiles across more tokens at few heads | 0.986–1.004x; no reliable gain; REJECT |
+
+All probes passed independent precision/cache gates. More tasks did not
+reliably improve full-call latency, so these branches are not retained.
+
+MLA07 compared six public weight-format policies. NZ key/all paths passed
+eager checks but failed Graph capture through aclop BatchMatMul; they have no
+speed result. Unconditionally using KN-NZ down/up passed61 precision/Graph
+points and met0.8x at57, but regressed protected points by up to9.3% against
+M20. That general policy is REJECTED. MLA08 confines the optional choice to
+the existing structural T=1 path, with no per-shape winner table.
+
+MLA09 additionally tested down-only KN-NZ while up aliases ND, reducing extra
+logical storage to28.875MiB. It passed61 checks,146 UTs and the14 False-option
+checks, but was slower than the both-weight option at most small heads in the
+paired five-head probe. The apparent H128 recovery did not repeat in full-range
+confirmation. It is REJECTED as a performance/storage tradeoff, not a numerical
+failure. No head-specific winner table is introduced; MLA08 is retained.
+
+## Expanded shapes and accuracy
+
+The61 business points retain all original27. Fixed dimensions are D7168,
+Q latent L1536,Q-nope P128,KV512,RoPE64. Local H8/16/32/64/128 are compatible
+subdivisions of128 global heads; no TP/model-serving run is claimed.
+T counts flattened active tokens, not necessarily one sequence.
+
+* Main grid: T1/2/4/8/16/32/64/128/256/512/1024 times H8/16/32/64/128.
+* Protected prior points: T257/1023 times H16/32/128.
+* Timed inputs: BF16/no quantization/split ND cache, block128, stride1,
+  supplied RoPE, valid unique nonnegative slots.
+* T>1024 is excluded because the installed fused ABI previously rejected it.
+  FP16, quantization, combined/NZ cache and serving remain unvalidated.
+
+The single device UT passed146 cases: original132 plus14 optional T=1 eager/
+Graph cases across all five head counts and no-RoPE/negative-slot/stride2
+variants. It verifies bit-exact prepared weights, Graph reads updated inputs,
+numerical outputs, cache aliasing, untouched cache and physical padding.
+Independent CPU FP32 BF16 acceptance is atol=rtol=2^-6,matched>=0.99,max_abs<=1.
+
+The14 optional cases also pass in an isolated process explicitly setting
+allow_internal_format=False. Native option readback is `disable` before and
+after those tests. The product never writes this option. The public attribute
+has no getter in this package and returns None; it is not the state readback.
+
+## Graph measurement and workload-sorted results
+
+Same A3 Ascend910_9362,CANN9.2.0,Torch2.10.0+cpu and
+Torch-NPU2.10.0.post7.dev20261020. All three implementations are compared in
+the same process on the same inputs. Graph captures20 complete calls; NPU
+events bracket one replay and divide elapsed time by20. Two groups each use25
+replays, discard5 and retain20, alternating order. Speed is the smaller
+group-mean ratio. The event interval includes Graph runtime gaps, not pure
+kernel sum. Weight preparation and CPU reference are outside timing.
+
+Workload MACs is `T*D*(L+576)+T*L*H*(P+64)+T*H*P*512`; FLOPs is2*MACs.
+It describes projection work and excludes vector/cache traffic. Rows sort by
+MACs then T/H, not by observed latency. Costs can reverse locally with shape,
+runtime placement and Torch dispatch. Times below average the two group means;
+speed ratios remain conservative per-group values.
+
+Same-capture default M20: 0.736–1.227x fused, 51/61 >=0.8x. Optional T1: 0.738–1.237x, 53/61 >=0.8x. Eight optional-path points remain below0.8x; there is no full-range performance pass.
+
+Remaining points: t2-h64 (0.764x), t4-h32 (0.774x), t128-h128 (0.771x), t256-h128 (0.738x), t512-h128 (0.761x), t1024-h64 (0.750x), t1023-h128 (0.739x), t1024-h128 (0.778x).
+
+| T | Local H | GMAC | Fused us | M20 us | Optional T1 us | Fused/optional | M20/optional |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 8 | 0.018022 | 36.442 | 43.215 | 31.809 | 1.144x | 1.357x |
+| 1 | 16 | 0.020906 | 39.604 | 45.365 | 35.224 | 1.123x | 1.287x |
+| 1 | 32 | 0.026673 | 45.110 | 57.115 | 46.426 | 0.971x | 1.230x |
+| 2 | 8 | 0.036045 | 39.347 | 45.358 | 45.412 | 0.864x | 0.999x |
+| 1 | 64 | 0.038207 | 53.806 | 63.713 | 58.844 | 0.913x | 1.083x |
+| 2 | 16 | 0.041812 | 42.812 | 46.675 | 46.705 | 0.916x | 0.998x |
+| 2 | 32 | 0.053346 | 45.621 | 57.023 | 56.812 | 0.803x | 1.003x |
+| 1 | 128 | 0.061276 | 108.320 | 100.260 | 100.078 | 1.081x | 1.001x |
+| 4 | 8 | 0.072090 | 41.646 | 45.361 | 45.211 | 0.921x | 1.001x |
+| 2 | 64 | 0.076415 | 54.393 | 71.873 | 71.029 | 0.764x | 1.012x |
+| 4 | 16 | 0.083624 | 42.516 | 46.294 | 46.232 | 0.919x | 1.001x |
+| 4 | 32 | 0.106693 | 45.430 | 58.576 | 58.665 | 0.774x | 0.998x |
+| 2 | 128 | 0.122552 | 104.801 | 114.811 | 114.261 | 0.917x | 1.004x |
+| 8 | 8 | 0.144179 | 42.579 | 43.928 | 43.686 | 0.975x | 1.005x |
+| 4 | 64 | 0.152830 | 54.731 | 67.318 | 63.048 | 0.867x | 1.067x |
+| 8 | 16 | 0.167248 | 42.689 | 47.301 | 47.522 | 0.898x | 0.995x |
+| 8 | 32 | 0.213385 | 47.679 | 59.223 | 59.036 | 0.807x | 1.003x |
+| 4 | 128 | 0.245105 | 113.795 | 108.232 | 105.981 | 1.073x | 1.021x |
+| 16 | 8 | 0.288358 | 43.463 | 35.615 | 35.441 | 1.225x | 1.004x |
+| 8 | 64 | 0.305660 | 55.602 | 65.174 | 64.698 | 0.859x | 1.007x |
+| 16 | 16 | 0.334496 | 47.277 | 39.842 | 39.511 | 1.196x | 1.008x |
+| 16 | 32 | 0.426770 | 51.143 | 46.793 | 45.911 | 1.114x | 1.019x |
+| 8 | 128 | 0.490209 | 106.588 | 108.530 | 108.040 | 0.987x | 1.004x |
+| 32 | 8 | 0.576717 | 51.649 | 42.079 | 42.243 | 1.222x | 0.996x |
+| 16 | 64 | 0.611320 | 60.402 | 60.134 | 59.315 | 1.018x | 1.013x |
+| 32 | 16 | 0.668991 | 55.535 | 45.483 | 44.885 | 1.237x | 1.013x |
+| 32 | 32 | 0.853541 | 57.048 | 52.263 | 51.885 | 1.098x | 1.006x |
+| 16 | 128 | 0.980419 | 122.835 | 117.106 | 118.456 | 1.037x | 0.988x |
+| 64 | 8 | 1.153434 | 56.913 | 49.687 | 49.659 | 1.144x | 1.000x |
+| 32 | 64 | 1.222640 | 70.866 | 71.835 | 72.299 | 0.980x | 0.993x |
+| 64 | 16 | 1.337983 | 57.683 | 52.610 | 52.348 | 1.102x | 1.005x |
+| 64 | 32 | 1.707082 | 61.531 | 67.391 | 62.068 | 0.991x | 1.086x |
+| 32 | 128 | 1.960837 | 128.271 | 131.177 | 136.500 | 0.939x | 0.960x |
+| 128 | 8 | 2.306867 | 67.734 | 60.913 | 60.474 | 1.120x | 1.007x |
+| 64 | 64 | 2.445279 | 78.048 | 85.683 | 84.478 | 0.924x | 1.014x |
+| 128 | 16 | 2.675966 | 69.266 | 65.516 | 65.673 | 1.055x | 0.997x |
+| 128 | 32 | 3.414163 | 84.857 | 77.386 | 76.071 | 1.115x | 1.017x |
+| 64 | 128 | 3.921674 | 154.611 | 161.299 | 164.426 | 0.940x | 0.981x |
+| 256 | 8 | 4.613734 | 97.119 | 90.681 | 90.470 | 1.073x | 1.002x |
+| 128 | 64 | 4.890558 | 97.655 | 111.570 | 115.691 | 0.844x | 0.964x |
+| 256 | 16 | 5.351932 | 108.099 | 106.101 | 101.753 | 1.062x | 1.043x |
+| 257 | 16 | 5.372838 | 157.993 | 129.137 | 127.826 | 1.235x | 1.010x |
+| 256 | 32 | 6.828327 | 131.152 | 129.660 | 131.668 | 0.995x | 0.985x |
+| 257 | 32 | 6.855000 | 180.374 | 157.431 | 158.300 | 1.139x | 0.994x |
+| 128 | 128 | 7.843348 | 164.094 | 215.793 | 212.887 | 0.771x | 1.014x |
+| 512 | 8 | 9.227469 | 154.228 | 142.937 | 142.141 | 1.085x | 1.006x |
+| 256 | 64 | 9.781117 | 162.842 | 196.959 | 192.583 | 0.845x | 1.023x |
+| 512 | 16 | 10.703864 | 165.910 | 162.486 | 161.223 | 1.029x | 1.008x |
+| 512 | 32 | 13.656654 | 193.702 | 201.452 | 206.119 | 0.940x | 0.977x |
+| 256 | 128 | 15.686697 | 252.054 | 340.847 | 341.567 | 0.738x | 0.998x |
+| 257 | 128 | 15.747973 | 371.027 | 370.738 | 372.847 | 0.995x | 0.994x |
+| 1024 | 8 | 18.454938 | 252.366 | 269.514 | 269.696 | 0.936x | 0.999x |
+| 512 | 64 | 19.562234 | 262.224 | 312.407 | 314.128 | 0.835x | 0.994x |
+| 1023 | 16 | 21.386822 | 280.558 | 309.131 | 310.870 | 0.902x | 0.994x |
+| 1024 | 16 | 21.407728 | 279.350 | 296.828 | 296.054 | 0.943x | 1.002x |
+| 1023 | 32 | 27.286634 | 353.981 | 417.264 | 411.404 | 0.860x | 1.014x |
+| 1024 | 32 | 27.313308 | 355.135 | 420.411 | 418.450 | 0.849x | 1.005x |
+| 512 | 128 | 31.373394 | 440.827 | 581.402 | 578.846 | 0.761x | 1.004x |
+| 1024 | 64 | 39.124468 | 501.729 | 658.976 | 668.336 | 0.750x | 0.986x |
+| 1023 | 128 | 62.685512 | 855.109 | 1161.245 | 1156.740 | 0.739x | 1.004x |
+| 1024 | 128 | 62.746788 | 859.946 | 1101.779 | 1105.489 | 0.778x | 0.996x |
+
+At T1,H8/16/32/64 paired M20/optional speed is1.357/1.287/1.230/1.083x.
+H128 is1.001x in the main capture and0.976x in the swapped-capture repeat;
+its benefit is unresolved. T>1 uses the original ND path and adds no device
+work, but independent Graph measurements range0.960–1.086x. Three apparent
+regressions remain visible. Targeted swapped-order and identical-function
+controls also vary; these data do not establish universal zero regression or
+attribute timing differences to added device work. No better repeat replaces
+the primary61 rows. The different floor counts are observed counts, not proof
+that all threshold crossings were caused by the optional T1 weights.
+
+## Actual task counts and C diagnostics
+
+Four single-shape msprof captures each retain the last20 of25 complete Graph
+calls. T1 at H8/32/128 has5 tasks; T512/H8 has6. No extra runtime TransData
+task is observed. T1 C1/C2 use the public MatmulWeightNz route, whose actual
+kernel is still MatMulV2. T>1 uses the old Matmul route. There is no evidence
+of a V2-to-V3 switch or task-count reduction causing the speedup; only the
+public weight-format selection's observed benefit is established. Internal
+tiling and finer scheduling mechanisms remain unproven.
+
+C means three Torch matrix task durations; V means owned Vector durations.
+Their fraction is not Cube pipeline utilization, and profiler time is separate
+from the independent Graph metric above.
+
+| Case | C task us | Owned V us | Kernel sum us | C fraction |
+| --- | ---: | ---: | ---: | ---: |
+| t1-h8 | 29.944 | 7.209 | 37.153 | 80.60% |
+| t1-h32 | 40.121 | 14.438 | 54.559 | 73.54% |
+| t1-h128 | 85.296 | 11.250 | 96.546 | 88.35% |
+| t512-h8 | 107.230 | 66.367 | 173.597 | 61.77% |
+
+## Build and test
+
+No new Vector/schema/build integration is needed for the optional helper.
+The original A3 vendor build remains:
 
 ```bash
 cd csrc
@@ -91,205 +274,14 @@ bash build.sh --pkg --soc=ascend910_93 --vendor_name=mla_serial \
   --ops=mla_serial_norm_cache,mla_serial_q_prepare,mla_serial_q_pack,mla_serial_q_finalize -j8
 ```
 
-This builds a vendor package; it does not build the Torch extension.
-Install/source the generated vendor environment before loading the
-extension. The repository installation path handles both stages.
-
-There is one self-contained device test file in the repository NPU
-single-card operator directory. It contains its own independent FP32 CPU
-oracle and does not depend on manual helpers, profiler scripts or the
-original fused operator:
+This builds the Vector vendor package; standard repository installation also
+builds the Torch wrapper. Source the vendor environment before loading it.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_mla_preprocess_serial.py
 ```
 
-The test covers all 27 business shapes in eager and actual Graph replay,
-plus no-RoPE, negative-slot, cache-stride and invalid-input cases.
-BF16 acceptance requires `atol=rtol=2^-6`, matched fraction at least 0.99
-and maximum absolute error at most 1. Untouched cache and physical stride
-padding must match exactly.
-
-The focused A3 validation rebuilt all four ACLNN operators and compiled the
-production wrapper/adapter with the production registration fragments.
-The single device test passed all 64 cases without skips. A full repository
-extension build and model serving remain unvalidated.
-
-## Tested shape matrix
-
-Performance covers the Cartesian product below: **9 token counts x 3
-head counts = 27 shapes**. Every point uses BF16, no quantization, split
-ND caches with cache block-stride multiplier 1, supplied RoPE and valid
-nonnegative slots.
-Fixed dimensions are D=7168, Q latent L=1536, Q-nope P=128, KV rank=512
-and RoPE dimension=64.
-
-| Dimension | Tested values |
-| --- | --- |
-| Active tokens T | 1, 16, 64, 128, 256, 257, 512, 1023, 1024 |
-| Local heads H | 16, 32, 128 |
-| `x` | `[T,7168]` |
-| Persistent `weight_down` | `[2112,7168]` |
-| Persistent `weight_up` | `[H*192,1536]` |
-| Persistent `weight_key` | `[H,128,512]` |
-| `gamma_q`, `gamma_kv` | `[1536]`, `[512]` |
-| `cos`, `sin`; `slots` | `[T,64]` each; `[T]` |
-| Cache; RoPE cache | `[B,128,1,512]`; `[B,128,1,64]`, with B covering slots |
-| C1: down projection | `[T,7168] @ [7168,2112] -> [T,2112]` |
-| V1: normalized Q latent | `[T,1536]` |
-| C2: Q up projection | `[T,1536] @ [1536,H*192] -> [T,H*192]` |
-| V2: packed Q-nope | `[H,T,128]` |
-| C3: Q-nope projection | `[H,T,128] @ [H,128,512] -> [H,T,512]` |
-| Final queries | `q_nope [T,H,512]`, `q_rope [T,H,64]` |
-
-T is the flattened active-token count, including bounded prefill/chunked
-prefill cases through 1024. It is not a sequence-length-only axis and
-does not establish full model prefill coverage. H is local to this call;
-no TP configuration or model serving was validated by this matrix.
-For T=1, QPrepare emits Q RoPE before C3; its Q-nope input and output
-layouts can use singleton-token views without QFinalize.
-
-Function/accuracy coverage is broader than performance coverage:
-
-| Device test family | Cases | Performance measured? |
-| --- | ---: | --- |
-| The 27 business shapes, eager and Graph | 54 | Yes, the 27 normal-mode shapes |
-| No RoPE + cache stride 2 + negative slot, eager and Graph | 8 | No |
-| Invalid dtype or unpaired cos/sin | 2 | No |
-| Total | 64 | |
-
-The four extra boundary shapes are `(T,H) = (1,32), (2,16), (64,32),
-(257,128)`. No-RoPE, strided-cache and negative-slot behavior are checked
-together at these points. They are not additional performance modes.
-
-## Historical M20 performance
-
-The tables below reanalyze the existing M20-THREEWAY measurements from
-2026-10-20, before packaging cleanup. The active Ascend C kernel/tiling
-sources and Torch pipeline are unchanged; cleanup removes unused
-registrations and test helpers. This documentation update does not
-collect new NPU timings or establish fresh performance acceptance of
-the cleaned package. Historical measurement source commit:
-`b7841a355d46ed07a9af5811dd13c339ba2d1b2f`.
-
-Environment: A3 Ascend910_9362, CANN 9.1.0, driver 26.1.1,
-Torch 2.10.0+cpu and torch_npu 2.10.0.post4. The original fused operator
-is the installed binary black box. SuperKernel is disabled for M20.
-Both implementations use the same logical inputs and persistent weight
-policy; load-time weight preparation and Graph capture are excluded.
-
-### Primary metric: Graph replay
-
-Per the updated evaluation requirement, **Graph replay is the primary
-performance metric**. The existing measurement is unprofiled synchronized
-batch wall time: `perf_counter_ns` surrounds 10 consecutive
-`GraphRunner` calls, each executing one `graph.replay()`, followed by
-`torch.npu.synchronize()`. Divide the elapsed time by 10. There are 10
-warmup calls and 20 measured batches per implementation per order; two
-balanced orders were collected. A pre-batch synchronization is outside
-the timer; the final synchronization is inside.
-
-This boundary includes Python replay submission, any submission gaps,
-device execution and the amortized final synchronization. It is not a
-device-event-only Graph duration or the sum of kernel times. In particular,
-the roughly 290 us floor for small shapes is visible in this host-timed
-measurement; a Graph speed ratio near 1 does not imply equal kernel work.
-
-The latency columns average the two order means. For each order,
-`speed = original_mean / M20_mean`; Min speed is the smaller of the two
-ratios. A point meets the target only if both orders reach 0.8, equivalent
-to M20 latency no greater than 1.25 times the original in each order.
-No workload-weighted model aggregate is inferred from these 27 points.
-
-**Historical Graph replay: 24/27 shapes meet 0.8. Full-range acceptance
-remains unmet.** The failures are H=128 at T=512, 1023 and 1024.
-
-| T | H | Original Graph us | M20 Graph us | Min speed | Meets 0.8 |
-| ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | 16 | 296.827 | 289.955 | 1.0196 | PASS |
-| 1 | 32 | 297.262 | 291.190 | 1.0188 | PASS |
-| 1 | 128 | 313.742 | 293.219 | 1.0660 | PASS |
-| 16 | 16 | 297.716 | 289.769 | 1.0241 | PASS |
-| 16 | 32 | 297.909 | 291.586 | 1.0182 | PASS |
-| 16 | 128 | 328.346 | 299.789 | 1.0871 | PASS |
-| 64 | 16 | 303.462 | 290.471 | 1.0444 | PASS |
-| 64 | 32 | 303.485 | 291.814 | 1.0385 | PASS |
-| 64 | 128 | 326.350 | 311.139 | 1.0430 | PASS |
-| 128 | 16 | 298.740 | 291.141 | 1.0238 | PASS |
-| 128 | 32 | 299.699 | 294.994 | 1.0119 | PASS |
-| 128 | 128 | 341.138 | 318.709 | 1.0600 | PASS |
-| 256 | 16 | 307.832 | 292.792 | 1.0487 | PASS |
-| 256 | 32 | 306.428 | 294.129 | 1.0414 | PASS |
-| 256 | 128 | 336.784 | 351.396 | 0.9563 | PASS |
-| 257 | 16 | 299.022 | 295.882 | 1.0041 | PASS |
-| 257 | 32 | 298.923 | 294.769 | 1.0134 | PASS |
-| 257 | 128 | 385.841 | 395.263 | 0.9705 | PASS |
-| 512 | 16 | 298.369 | 294.155 | 1.0131 | PASS |
-| 512 | 32 | 304.057 | 296.075 | 1.0200 | PASS |
-| 512 | 128 | 442.739 | 605.529 | 0.7243 | FAIL |
-| 1023 | 16 | 301.942 | 330.750 | 0.9114 | PASS |
-| 1023 | 32 | 359.883 | 431.359 | 0.8254 | PASS |
-| 1023 | 128 | 850.320 | 1178.788 | 0.7177 | FAIL |
-| 1024 | 16 | 300.761 | 317.228 | 0.9316 | PASS |
-| 1024 | 32 | 363.267 | 441.637 | 0.8198 | PASS |
-| 1024 | 128 | 852.137 | 1128.330 | 0.7501 | FAIL |
-
-### Diagnostic metric: C and V kernel time
-
-C/V decomposition uses a separate full msprof capture of actual Graph
-replay. Sum only per-kernel `Task Duration(us)` from a complete call,
-including all runtime layout work; exclude Task Wait Time, host APIs,
-markers and inter-kernel gaps. Each of two orders kept 20 calls after
-dropping 5 warmup calls. The original is one `MIX_AIC` kernel, so these
-records cannot separate its internal C and V work.
-
-For M20, C is the sum of C1, C2 and C3 (`AI_CORE` tasks); V is the sum
-of NormCache, QPrepare for T=1, or NormCache, QPack and QFinalize for T>1
-(`AI_VECTOR_CORE` tasks). Each stage includes its own memory and scalar
-work. C/(C+V) is a latency share, not Cube instruction utilization.
-Average C and V over the two orders first, then compute the share.
-The audited C+V totals equal the complete M20 kernel sums at every point.
-They must not be substituted for the primary Graph replay latency or
-subtracted from it to infer a precise host-overhead breakdown: the captures
-are separate.
-
-| T | H | C us | V us | C+V us | C/(C+V) |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 16 | 51.220 | 8.683 | 59.903 | 85.50% |
-| 1 | 32 | 57.852 | 12.402 | 70.254 | 82.35% |
-| 1 | 128 | 107.023 | 12.998 | 120.020 | 89.17% |
-| 16 | 16 | 34.601 | 14.504 | 49.105 | 70.46% |
-| 16 | 32 | 43.277 | 17.265 | 60.543 | 71.48% |
-| 16 | 128 | 122.718 | 21.293 | 144.011 | 85.21% |
-| 64 | 16 | 44.788 | 27.303 | 72.091 | 62.13% |
-| 64 | 32 | 50.251 | 31.081 | 81.333 | 61.79% |
-| 64 | 128 | 153.429 | 37.196 | 190.625 | 80.49% |
-| 128 | 16 | 48.663 | 35.783 | 84.446 | 57.63% |
-| 128 | 32 | 56.265 | 35.706 | 91.971 | 61.18% |
-| 128 | 128 | 180.828 | 44.218 | 225.046 | 80.35% |
-| 256 | 16 | 76.613 | 42.787 | 119.400 | 64.16% |
-| 256 | 32 | 90.563 | 42.117 | 132.680 | 68.26% |
-| 256 | 128 | 282.126 | 64.882 | 347.008 | 81.30% |
-| 257 | 16 | 110.501 | 42.331 | 152.833 | 72.30% |
-| 257 | 32 | 134.653 | 42.511 | 177.164 | 76.00% |
-| 257 | 128 | 324.526 | 63.383 | 387.909 | 83.66% |
-| 512 | 16 | 123.518 | 52.928 | 176.446 | 70.00% |
-| 512 | 32 | 153.337 | 58.541 | 211.879 | 72.37% |
-| 512 | 128 | 421.117 | 178.736 | 599.853 | 70.20% |
-| 1023 | 16 | 249.198 | 75.535 | 324.734 | 76.74% |
-| 1023 | 32 | 336.160 | 88.462 | 424.622 | 79.17% |
-| 1023 | 128 | 761.440 | 405.425 | 1166.865 | 65.26% |
-| 1024 | 16 | 236.449 | 75.012 | 311.461 | 75.92% |
-| 1024 | 32 | 348.354 | 87.786 | 436.141 | 79.87% |
-| 1024 | 128 | 716.003 | 406.188 | 1122.191 | 63.80% |
-
-The historical kernel-sum comparison meets 0.8 at 16/27 points. That is
-a separate diagnostic result; the primary Graph replay result is 24/27.
-The underlying local evidence set is `M20-THREEWAY`: `graph-stages.csv`,
-`graph-summary.csv`, `kernel-sum-audit.json`, `wall-forward.json`,
-`wall-reverse.json` and `threeway-results.json`. Raw samples and profiler
-CSV files are retained outside the source branch.
-
-Model dispatch integration, serving performance and full repository
-extension-build validation are separate from the focused operator
-checks. No serving or CI performance claim is made here.
+Focused vendor/wrapper builds, the device UT and Graph/profile gates above
+are separate from full-repository builds, CI or model serving. Raw samples,
+failed experiments and compiler/profile evidence stay in the task archive;
+only this MD, the existing single device UT and Python source are updated.
