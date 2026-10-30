@@ -60,11 +60,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     quant_type = QuantType.NONE
 
-    def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
+    def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
-        self.tid2eid = tid2eid
         self.lora_context = None
         self._lora_routing = None
 
@@ -411,21 +410,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def __init__(
         self,
         *args,
-        tid2eid=None,
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        object.__setattr__(self, "tid2eid", tid2eid)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
-            self._replace_quant_method(
-                AscendUnquantizedFusedMoEMethod(
-                    self.moe_config,
-                    tid2eid=self.tid2eid,
-                )
-            )
+            self._replace_quant_method(AscendUnquantizedFusedMoEMethod(self.moe_config))
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
@@ -584,11 +576,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             return
         delattr(self, name)
         self.register_buffer(name, tensor)
-
-    def _get_quant_method(self, prefix, quant_config, moe_config):
-        if quant_config is None:
-            return super()._get_quant_method(prefix, quant_config, moe_config)
-        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""

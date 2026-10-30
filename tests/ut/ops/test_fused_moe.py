@@ -128,7 +128,6 @@ def _build_apply_layer():
 def _build_unquantized_method(*, dynamic_eplb: bool = False):
     method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     method.dynamic_eplb = dynamic_eplb
-    method.tid2eid = None
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     return method
@@ -164,22 +163,14 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
-def test_ascend_routed_experts_uses_parent_unquantized_method_during_init(monkeypatch):
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    routed_experts.tid2eid = object()
-    moe_config = MagicMock()
-    parent_method = object()
-    parent_get_quant_method = MagicMock(return_value=parent_method)
-    monkeypatch.setattr(
-        routed_experts_module.RoutedExperts,
-        "_get_quant_method",
-        parent_get_quant_method,
-    )
+def test_ascend_routed_experts_uses_upstream_quant_method_resolution():
+    """Ascend must not override how a MoE layer resolves its quant method.
 
-    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
-
-    assert method is parent_method
-    parent_get_quant_method.assert_called_once_with("model.layers.0.mlp", None, moe_config)
+    ``RoutedExperts`` goes through vLLM's ``resolve_quant_method`` exactly like
+    Linear/Embedding layers; the only Ascend-specific step is swapping in the
+    unquantized method when the checkpoint carries no quantization config.
+    """
+    assert "_get_quant_method" not in AscendRoutedExperts.__dict__
 
 
 @pytest.mark.parametrize("quant_config", [None, object()])
@@ -223,42 +214,15 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         ),
     )
 
-    routed_experts = AscendRoutedExperts(tid2eid="tid2eid")
+    routed_experts = AscendRoutedExperts()
 
     assert init_methods == [parent_method]
     if quant_config is None:
         assert routed_experts.quant_method is ascend_method
-        ascend_method_factory.assert_called_once_with(moe_config, tid2eid="tid2eid")
+        ascend_method_factory.assert_called_once_with(moe_config)
     else:
         assert routed_experts.quant_method is parent_method
         ascend_method_factory.assert_not_called()
-
-
-def test_ascend_routed_experts_passes_tid2eid_to_quant_config():
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    routed_experts.tid2eid = object()
-    quant_config = MagicMock()
-    moe_config = MagicMock()
-
-    method = routed_experts._get_quant_method("model.layers.0.mlp", quant_config, moe_config)
-
-    assert method is quant_config.get_quant_method.return_value
-    quant_config.get_quant_method.assert_called_once_with(
-        routed_experts,
-        "model.layers.0.mlp",
-        tid2eid=routed_experts.tid2eid,
-    )
-
-
-def test_ascend_routed_experts_accepts_tid2eid_parameter_before_module_init(monkeypatch):
-    tid2eid = nn.Parameter(torch.zeros(2, 2), requires_grad=False)
-    parent_init = MagicMock(side_effect=RuntimeError("stop after parent init"))
-    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
-
-    with pytest.raises(RuntimeError, match="stop after parent init"):
-        AscendRoutedExperts(tid2eid=tid2eid)
-
-    parent_init.assert_called_once()
 
 
 @pytest.mark.parametrize(("use_v2_model_runner", "legacy_init_calls"), [(True, 0), (False, 1)])

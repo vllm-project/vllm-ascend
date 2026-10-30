@@ -657,7 +657,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -759,7 +759,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
             scheme = create_scheme_for_layer(quant_type, prefix, "moe")
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if quant_type is None:
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")

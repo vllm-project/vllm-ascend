@@ -270,10 +270,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         moe_config: The FusedMoE configuration.
     """
 
-    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig, tid2eid=None) -> None:
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
         super().__init__(moe_config)
         self.quant_method = scheme
-        self.tid2eid = tid2eid
 
     @property
     def is_monolithic(self) -> bool:
