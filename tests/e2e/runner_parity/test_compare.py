@@ -3,9 +3,18 @@
 
 import copy
 import json
+from typing import Any
 
 import pytest
-from compare import compare_precision, compare_provenance, load_upstream_rule, normalize, read_records, token_id
+
+from tests.e2e.runner_parity.compare import (
+    compare_precision,
+    compare_provenance,
+    load_upstream_rule,
+    normalize,
+    read_records,
+    token_id,
+)
 
 
 @pytest.fixture
@@ -88,7 +97,7 @@ def test_different_runtime_configuration_is_rejected(tmp_path):
     for arm, selector in (("v1", "0"), ("v2", "1")):
         root = tmp_path / arm
         root.mkdir()
-        record = {
+        record: dict[str, Any] = {
             "code_hashes": {"runner.py": "same"},
             "ascend_head": "same",
             "vllm_head": "same",
@@ -128,5 +137,5 @@ def test_later_divergence_is_not_hidden_by_matching_first_token(tmp_path, record
     paths = [tmp_path / "v1.jsonl", tmp_path / "v2.jsonl"]
     for path, item in zip(paths, [record, candidate]):
         path.write_text(json.dumps(item) + "\n")
-    report = compare_precision(*paths, upstream_utils)
+    report = compare_precision(paths[0], paths[1], upstream_utils)
     assert report["failed"] == 1, "A matching first token cannot bypass incompatible later distributions"
