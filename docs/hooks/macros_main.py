@@ -54,12 +54,8 @@ def define_env(env):
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")
     if config is not None:
-        stable_version = env.variables["stable_vllm_ascend_version"]
         config.extra["i18n"] = {
-            language: {
-                **strings,
-                "banner_suffix": strings["banner_suffix"].format(version=stable_version),
-            }
+            language: dict(strings)
             for language, strings in UI_STRINGS.items()
         }
 
