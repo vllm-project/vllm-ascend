@@ -425,6 +425,8 @@ class AscendConfig:
         {
             "refresh": false,
             "enable_cpu_binding": true,
+            "enable_qwen_mrv2_early_queue": false,
+            "enable_qwen_mrv2_mm_decode_early_queue": false,
             "multistream_dsv4_dsa_overlap": true,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
@@ -568,6 +570,10 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Qwen3.8 Flash Next MRV2 host submission; both are opt-in. The MM
+    # extension also requires enable_qwen_mrv2_early_queue in the runner.
+    enable_qwen_mrv2_early_queue: bool = False
+    enable_qwen_mrv2_mm_decode_early_queue: bool = False
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.

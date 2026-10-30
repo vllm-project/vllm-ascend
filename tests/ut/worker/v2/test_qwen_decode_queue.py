@@ -4,10 +4,11 @@
 
 import ast
 import importlib.util
-import os
+import json
 import sys
 import unittest
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import Mock, patch
@@ -29,6 +30,7 @@ def load(name: str, path: Path) -> Any:
 
 MM = load("_queue_test_mm", WORKER / "mm_decode_queue.py")
 PD = load("_queue_test_pd", WORKER / "pd_decode_queue.py")
+QUEUE_KEYS = ("enable_qwen_mrv2_early_queue", "enable_qwen_mrv2_mm_decode_early_queue")
 MODE = NS(FULL=object())
 STREAM = NS(wait_event=Mock())
 NAMESPACE: dict[str, Any] = {
@@ -103,16 +105,43 @@ class PinnedSnapshot:
 
 class TestQwenDecodeQueue(unittest.TestCase):
     def test_defaults_and_independent_opt_ins(self):
-        envs = load("_queue_test_envs", ROOT / "vllm_ascend/envs.py")
-        flags = ("VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE", "VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE")
-        with patch.dict(os.environ):
-            for flag in flags:
-                os.environ.pop(flag, None)
-            self.assertEqual(tuple(getattr(envs, flag) for flag in flags), (False, False))
-            for enabled in flags:
-                os.environ[enabled] = "1"
-                self.assertEqual(tuple(getattr(envs, flag) for flag in flags), tuple(flag == enabled for flag in flags))
-                os.environ.pop(enabled)
+        modules: dict[str, Any] = {
+            name: ModuleType(name)
+            for name in (
+                "vllm",
+                "vllm.logger",
+                "vllm.utils",
+                "vllm.utils.math_utils",
+                "vllm_ascend",
+                "vllm_ascend._build_info",
+            )
+        }
+        modules["vllm.logger"].logger = Mock()
+        modules["vllm.utils.math_utils"].cdiv = lambda a, b: (a + b - 1) // b
+        modules["vllm_ascend"].__path__ = [str(ROOT / "vllm_ascend")]
+        modules["vllm_ascend._build_info"].__device_type__ = "A3"
+        spec = importlib.util.spec_from_file_location("_queue_test_config", ROOT / "vllm_ascend/ascend_config.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        modules[spec.name] = module
+        # Keep the actual complete schema loaded while pydantic resolves forward references.
+        with patch.dict(sys.modules, modules):
+            spec.loader.exec_module(module)
+            config_type = module.__dict__["AscendConfig"]
+            defaults = dict(sparse_kv_offload_config=NS(enabled=False), multistream_engram_overlap=False)
+            for payload, expected in (
+                ({}, (False, False)),
+                ({QUEUE_KEYS[0]: True}, (True, False)),
+                ({QUEUE_KEYS[1]: True}, (False, True)),
+                (dict.fromkeys(QUEUE_KEYS, True), (True, True)),
+                (dict.fromkeys(QUEUE_KEYS, "false"), (False, False)),
+            ):
+                with self.subTest(payload=payload):
+                    config = config_type(**defaults, **json.loads(json.dumps(payload)))
+                    self.assertEqual(tuple(getattr(config, key) for key in QUEUE_KEYS), expected)
+            for invalid in (None, ["not a boolean"], "invalid"):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    config_type(**defaults, **{QUEUE_KEYS[0]: invalid})
 
     def test_only_qwen38_targets_can_opt_in_and_mm_requires_text_switch(self):
         supported = ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
@@ -122,10 +151,8 @@ class TestQwenDecodeQueue(unittest.TestCase):
             for text, mm in ((False, False), (True, False), (False, True), (True, True)):
                 with self.subTest(architecture=architecture, text=text, mm=mm):
                     config = NS(architecture=architecture, model="Qwen3.8-Flash-Next")
-                    runner = NS(model_config=config)
-                    envs = NS(VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE=text, VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE=mm)
-                    with patch.dict(NAMESPACE, ascend_envs=envs):
-                        configure(runner)
+                    runner = NS(model_config=config, ascend_config=NS(**dict(zip(QUEUE_KEYS, (text, mm)))))
+                    configure(runner)
                     expected = architecture in supported and text
                     self.assertEqual(runner._qwen_mrv2_early_queue_enabled, expected)
                     self.assertEqual(runner._qwen_mrv2_mm_decode_queue_enabled, expected and mm)

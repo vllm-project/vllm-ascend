@@ -72,15 +72,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Experimental MRV2 Qwen3.8 Flash Next CPU upper-bound path. Default 0;
-    # valid values 0/1; non-sensitive. Device state and D2H fences stay exact.
-    "VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE": lambda: bool(int(os.getenv("VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE", "0"))),
-    # Experimental completed-prompt MM decode extension of EARLY_QUEUE.
-    # Default 0; valid values 0/1; non-sensitive. Requires EARLY_QUEUE and
-    # Qwen3.8 Flash Next with an exact initial prompt-completion certificate.
-    "VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE", "0"))
-    ),
 }
 
 # end-env-vars-definition

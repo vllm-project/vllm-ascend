@@ -356,22 +356,22 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ### 9.3 Model Runner V2 Decode Submission
 
-The following non-sensitive environment switches accept `0` or `1` and default
-to `0` (disabled). They apply only to Qwen3.8 Flash Next target architectures
+The following `--additional-config` boolean options default to `false`
+(disabled). They apply only to Qwen3.8 Flash Next target architectures
 `Qwen4ExpForCausalLM` and `Qwen4ExpForConditionalGeneration`. Other models retain
-their original path even when both switches are set to `1`.
+their original path even when both options are `true`.
 
-| Switch | Behavior |
+| Option | Behavior |
 | --- | --- |
-| `VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
-| `VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding queue switch. |
+| `enable_qwen_mrv2_early_queue` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
+| `enable_qwen_mrv2_mm_decode_early_queue` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding option. |
 
-Set the first switch to `1` before starting workers to enable text and stable PD
-decode submission. To enable the completed-prompt multimodal extension as well:
+Set the first option to `true` to enable text and stable PD decode submission.
+To enable the completed-prompt multimodal extension as well, include both keys
+in the existing `--additional-config` JSON:
 
 ```bash
-export VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE=1
-export VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE=1
+--additional-config '{"enable_qwen_mrv2_early_queue":true,"enable_qwen_mrv2_mm_decode_early_queue":true}'
 ```
 
 Early submission replaces the CPU corrected-length wait with a device-stream

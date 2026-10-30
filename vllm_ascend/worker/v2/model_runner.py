@@ -53,7 +53,6 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -336,9 +335,9 @@ class NPUModelRunner(GPUModelRunner):
             "Qwen4ExpForCausalLM",
             "Qwen4ExpForConditionalGeneration",
         )
-        self._qwen_mrv2_early_queue_enabled = is_qwen38 and ascend_envs.VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE
+        self._qwen_mrv2_early_queue_enabled = is_qwen38 and self.ascend_config.enable_qwen_mrv2_early_queue
         self._qwen_mrv2_mm_decode_queue_enabled = (
-            self._qwen_mrv2_early_queue_enabled and ascend_envs.VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE
+            self._qwen_mrv2_early_queue_enabled and self.ascend_config.enable_qwen_mrv2_mm_decode_early_queue
         )
 
     @property
