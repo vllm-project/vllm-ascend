@@ -417,6 +417,60 @@ def test_eagle_freezes_anchor_across_rejection_and_retains_all_step_reads(setup)
     assert len(completions) == 1
 
 
+@pytest.mark.parametrize("requested", [0, 1, 2, 3, None])
+def test_eagle_scheduled_prefill_and_steps_keep_static_window_geometry(setup, requested):
+    _, spec, canonical, completions = setup
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    consumed = 3 if requested is None else max(1, requested)
+    outputs = []
+    with runtime.proposal_context(spec, batch(), num_speculative_tokens=requested):
+        for step, exact in enumerate(((12, 27), (13, 25), (14, 26))[:consumed]):
+            metadata = common(exact=exact, upper=(16, 31))
+            runtime.metadata_callback(step, 2)(0, metadata)
+            outputs.append(metadata)
+        owner = runtime._owner
+    assert owner is not None and owner.state is DraftWindowOwnerState.SUBMITTED
+    assert runtime.static_k == 3
+    assert len(completions) == 1 and runtime._next_step == consumed
+    # The configured three-step horizon still freezes S=20. A scheduled
+    # zero/short proposal must not silently change the window formula.
+    assert all(metadata.block_table_tensor[1, 0] == canonical[3, 5] for metadata in outputs)
+
+
+@pytest.mark.parametrize("requested", [-1, 4, True])
+def test_eagle_invalid_scheduled_count_cannot_enter_a_window_scope(setup, requested):
+    _, spec, _, completions = setup
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    with (
+        pytest.raises(ValueError, match="configured static K"),
+        runtime.proposal_context(spec, batch(), num_speculative_tokens=requested),
+    ):
+        pytest.fail("invalid count must fail before proposal ownership")
+    assert runtime._owner is None and not completions
+
+
+def test_eagle_zero_drafts_still_requires_the_real_prefill_read(setup):
+    _, spec, _, _ = setup
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    with (
+        pytest.raises(RuntimeError, match="did not consume a read projection"),
+        runtime.proposal_context(spec, batch(), num_speculative_tokens=0),
+    ):
+        pass
+    assert runtime.pool.poisoned
+
+
+def test_eagle_partial_proposal_cannot_omit_a_requested_step(setup):
+    _, spec, _, _ = setup
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    with (
+        pytest.raises(RuntimeError, match="every configured draft step"),
+        runtime.proposal_context(spec, batch(), num_speculative_tokens=2),
+    ):
+        runtime.metadata_callback(0, 2)(0, common())
+    assert runtime.pool.poisoned
+
+
 def test_eagle_terminal_prefill_first_pass_stays_full_then_uses_window(setup):
     _, spec, _, _ = setup
     spec.input_buffers.positions = torch.tensor([15, 26])

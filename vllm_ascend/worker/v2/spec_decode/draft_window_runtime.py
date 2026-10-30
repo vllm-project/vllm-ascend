@@ -235,6 +235,7 @@ class DraftWindowRuntime:
         is_profile: bool = False,
         *,
         context_kv_only: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> Iterator[None]:
         if speculator is not self.speculator:
             raise RuntimeError("Draft Window runtime belongs to another speculator")
@@ -242,6 +243,20 @@ class DraftWindowRuntime:
             raise RuntimeError("Draft Window proposal scope is already active")
         if context_kv_only and self.method not in ("dflash", "dspark"):
             raise ValueError("Context-only Draft KV updates require a parallel drafter")
+        expected_eagle_steps = self.static_k
+        if num_speculative_tokens is not None:
+            if (
+                self.method != "eagle3"
+                or type(num_speculative_tokens) is not int
+                or self.static_k is None
+                or not 0 <= num_speculative_tokens <= self.static_k
+            ):
+                raise ValueError("Eagle3 scheduled draft count must stay within its configured static K")
+            # A zero-draft AR proposal still runs prefill attention to update
+            # KV, unlike the parallel drafter's context-only write branch.
+            # Keep the configured K for window geometry; only completion's
+            # expected number of consumed steps follows this real invocation.
+            expected_eagle_steps = max(1, num_speculative_tokens)
         if dummy_run or is_profile or getattr(input_batch, "is_dummy", False):
             self._bypass = True
             try:
@@ -275,7 +290,7 @@ class DraftWindowRuntime:
                     raise RuntimeError("Context-only Draft KV update unexpectedly consumed a read projection")
                 if not context_kv_only and not self._build_count:
                     raise RuntimeError("Draft Window proposal did not consume a read projection")
-                if self.method == "eagle3" and self._next_step != self.static_k:
+                if self.method == "eagle3" and self._next_step != expected_eagle_steps:
                     raise RuntimeError("Eagle3 proposal did not consume every configured draft step")
             finally:
                 self._owner = None

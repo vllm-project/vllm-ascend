@@ -346,7 +346,11 @@ def test_propose_uses_real_upstream_signature_scope_and_dp_rules(contract, enabl
     @contextmanager
     def proposal_context(speculator, input_batch, dummy_run, is_profile, **kwargs):
         assert (speculator, input_batch, dummy_run, is_profile) == (contract.obj, batch, profiling, profiling)
-        expected = {} if contract.method == "autoregressive" else {"context_kv_only": num_speculative_tokens == 0}
+        expected = (
+            {"num_speculative_tokens": num_speculative_tokens}
+            if contract.method == "autoregressive"
+            else {"context_kv_only": num_speculative_tokens == 0}
+        )
         assert kwargs == expected
         events.append("enter")
         try:
