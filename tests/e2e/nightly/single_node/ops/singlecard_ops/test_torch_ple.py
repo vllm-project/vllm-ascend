@@ -126,25 +126,28 @@ def test_prefill_multiple_requests_across_token_chunks():
     state_indices = torch.tensor([1, 2, 3, NULL_BLOCK_ID], device="npu", dtype=torch.int32)
     has_initial_states = torch.tensor([True, False, True, True], device="npu")
     for dtype in (torch.bfloat16, torch.float16):
-        inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
-        weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-        state = torch.randn(4, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
-        residual = torch.randn_like(inputs)
-        outer_residual = torch.randn_like(inputs)
-        kwargs = dict(
-            inputs=inputs,
-            conv_weights=weights,
-            state_indices=state_indices,
-            outer_residual=outer_residual,
-            mode="prefill",
-            dilation=3,
-            query_start_loc=query_start_loc,
-            has_initial_states=has_initial_states,
-        )
-        expected, actual = residual.clone(), residual.clone()
-        expected_state, actual_state = state.clone(), state.clone()
-        upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
-        ple_conv_torch(**kwargs, residual=actual, conv_state=actual_state)
-        torch.npu.synchronize()
-        assert (expected == actual).float().mean().item() >= 0.999
-        assert torch.equal(expected_state, actual_state)
+        for mapped in (False, True):
+            inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
+            weights = torch.randn(channels, 4, device="npu", dtype=dtype)
+            state = torch.randn(4, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
+            residual = torch.randn_like(inputs)
+            outer_residual = torch.randn_like(inputs)
+            kwargs = dict(
+                inputs=inputs,
+                conv_weights=weights,
+                state_indices=state_indices,
+                outer_residual=outer_residual,
+                mode="prefill",
+                dilation=3,
+                query_start_loc=query_start_loc,
+                has_initial_states=has_initial_states,
+            )
+            if mapped:
+                kwargs["token_indices"] = torch.arange(tokens - 1, -1, -1, device="npu", dtype=torch.int32)
+            expected, actual = residual.clone(), residual.clone()
+            expected_state, actual_state = state.clone(), state.clone()
+            upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
+            ple_conv_torch(**kwargs, residual=actual, conv_state=actual_state)
+            torch.npu.synchronize()
+            assert (expected == actual).float().mean().item() >= 0.999
+            assert torch.equal(expected_state, actual_state)
