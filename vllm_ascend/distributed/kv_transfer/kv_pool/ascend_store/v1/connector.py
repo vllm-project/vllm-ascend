@@ -54,6 +54,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         config = resolve_kv_pool_config(vllm_config, kv_cache_config)
         validate_kv_pool_config(vllm_config, kv_cache_config, config)
         self._use_layerwise = config.use_layerwise
+        self._load_async = config.load_async and not config.use_layerwise
         self.scheduler: KVPoolScheduler | None = None
         self.worker: Worker | None = None
         self.lookup_server: LookupServer | None = None
@@ -258,8 +259,6 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         with self._worker_hook() as worker:
             if self._pending_load_result is not None:
                 raise RuntimeError("Previous Load result has not been fully consumed")
-            # A finished request can still own blocks held by an async Load.
-            # Its late completion lets the Scheduler release those blocks.
             load_result = worker.collect_load_result()
             if load_result.failed_request_ids:
                 failed_locations = sorted(
@@ -270,7 +269,11 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
                     f"{sorted(load_result.failed_request_ids)}; cache group/block failures {failed_locations}"
                 )
             self._pending_load_result = load_result
-            return set(), set(self._pending_load_result.completed_request_ids)
+            # Only async admission makes vLLM wait for finished_recving, including
+            # late completion needed to release a finished request's held blocks.
+            # Synchronous loads already participate in this step's forward.
+            done_recving = set(load_result.completed_request_ids) if self._load_async else set()
+            return set(), done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.worker is not None

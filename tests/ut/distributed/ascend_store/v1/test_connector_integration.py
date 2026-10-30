@@ -38,16 +38,26 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import W
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import worker as worker_module
 
 
-@pytest.mark.parametrize("mode", ("bulk_sync", "bulk_async", "key_range", "gva"))
+@pytest.mark.parametrize(
+    "mode,load_async",
+    (
+        ("bulk_sync", False),
+        ("bulk_async", True),
+        ("key_range", False),
+        ("key_range", True),
+        ("gva", False),
+        ("gva", True),
+    ),
+)
 @pytest.mark.parametrize("load_failure", (False, True))
 def test_connector_round_trip_keeps_local_prefix_and_releases_sources(
-    monkeypatch, configuration_case, mode, load_failure
+    monkeypatch, configuration_case, mode, load_async, load_failure
 ):
     layerwise = mode in ("key_range", "gva")
-    async_load = mode == "bulk_async"
+    async_load = load_async and not layerwise
     backend_name = "memcache" if mode == "gva" else "mooncake"
     topology = make_topology()
-    config = replace(topology.config, backend_name=backend_name, use_layerwise=layerwise, load_async=async_load)
+    config = replace(topology.config, backend_name=backend_name, use_layerwise=layerwise, load_async=load_async)
     topology = replace(topology, config=config)
     sdk = ByteCopySDK({})
     backend = native_backend(backend_name, sdk)
@@ -131,7 +141,8 @@ def test_connector_round_trip_keeps_local_prefix_and_releases_sources(
             worker_connector.wait_for_layer_load(name)
         worker.transfer.executor._write.submit(lambda: None).result(timeout=2)
         worker_connector.wait_for_save()
-        assert worker_connector.get_finished(set()) == (set(), {"consumer"})
+        # Only asynchronous admission leaves vLLM waiting for a receive notification.
+        assert worker_connector.get_finished(set()) == (set(), {"consumer"} if async_load else set())
         assert worker_connector.get_block_ids_with_load_errors() == ({6} if load_failure else set())
         worker_connector.clear_connector_metadata()
         for name, tensor in caches.items():

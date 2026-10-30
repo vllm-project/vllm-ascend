@@ -80,7 +80,9 @@ def test_connector_retains_worker_on_lookup_close_failure_and_can_retry_shutdown
 
 def test_connector_closes_created_worker_if_lookup_server_cannot_start(monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(connector_module, "resolve_kv_pool_config", lambda *_: SimpleNamespace(use_layerwise=False))
+    monkeypatch.setattr(
+        connector_module, "resolve_kv_pool_config", lambda *_: SimpleNamespace(use_layerwise=False, load_async=False)
+    )
     monkeypatch.setattr(connector_module, "validate_kv_pool_config", lambda *_: None)
     monkeypatch.setattr(KVConnectorBase_V1, "__init__", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(

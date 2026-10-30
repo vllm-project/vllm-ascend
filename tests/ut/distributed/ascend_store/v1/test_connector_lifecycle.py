@@ -17,11 +17,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
 )
 
 
-def connect(worker, monkeypatch, *, layerwise=False):
+def connect(worker, monkeypatch, *, layerwise=False, async_load=False):
     connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
     connector.worker = worker
     connector.scheduler = connector.lookup_server = None
     connector._use_layerwise = layerwise
+    connector._load_async = async_load and not layerwise
     connector._pending_load_result = connector._connector_metadata = None
     connector._released_store_job_ids = set()
     monkeypatch.setattr(runner, "get_kv_transfer_group", lambda: connector)
@@ -58,7 +59,7 @@ def test_real_no_forward_finalization_skips_wait_for_save(monkeypatch, layerwise
 
 def test_async_load_finishes_after_clear_and_is_collected_by_next_empty_step(monkeypatch):
     worker, resources, backend = make_worker(async_load=True)
-    connector = connect(worker, monkeypatch)
+    connector = connect(worker, monkeypatch, async_load=True)
     entered, release = threading.Event(), threading.Event()
     load = backend.load
 
