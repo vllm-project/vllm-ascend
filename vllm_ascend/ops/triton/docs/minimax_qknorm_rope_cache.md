@@ -43,7 +43,7 @@
 
 ```bash
 pytest -q tests/ut/models/minimax_m3
-pytest -q tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_qknorm_rope_cache.py
 ```
 
 Unit tests cover the fusion guard, fallback, dummy and fake forwards, separate index projections, and cache-insertion order. NPU tests cover 1 to 8192 tokens, several head layouts, partial and full RoPE, shuffled and negative slots, untouched cache regions, non-contiguous inputs, empty inputs, and graph replay after `positions` or slots change. A3 large-prefill validation additionally samples output/cache correctness and latency at 32768, 65536, 131072, and 262144 tokens. Dynamic-cache cases use 3, 64, 5392, and 8192 blocks. Two FP8 cases are skipped when A5 is not available.
@@ -66,9 +66,9 @@ remain compile-time parameters intentionally. Kernel reuse does not imply that
 ACLGraph capture buckets or captured scalar arguments change automatically.
 
 ```bash
-pytest -sv tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py \
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_qknorm_rope_cache.py \
   -k 'compiled_variant or layout_variants'
-pytest -sv tests/e2e/nightly/single_node/ops/test_minimax_qknorm_rope_cache_performance.py \
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_qknorm_rope_cache_performance.py \
   -o junit_family=legacy --junitxml=/tmp/minimax-qk-performance.xml
 ```
 

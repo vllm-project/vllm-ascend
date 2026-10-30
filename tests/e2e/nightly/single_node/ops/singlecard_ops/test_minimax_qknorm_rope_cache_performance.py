@@ -15,7 +15,7 @@ import statistics
 import pytest
 import torch
 
-from tests.e2e.pull_request.one_card.test_minimax_qknorm_rope_cache import make_compile_case
+from tests.e2e.nightly.single_node.ops.singlecard_ops.test_minimax_qknorm_rope_cache import make_compile_case
 from vllm_ascend.ops.triton.msa import minimax_qknorm_rope_cache as fused_module
 
 WARMUP_ITERATIONS = 5
