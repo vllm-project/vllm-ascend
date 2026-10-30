@@ -8,6 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 
@@ -29,10 +30,10 @@ class TestWorkerFp8DtypeFallback(unittest.TestCase):
         alias = mapping
         cache = ModuleType("vllm.config.cache")
         if registration_api:
-            cache.register_kv_cache_dtype = object()
+            cache.__dict__["register_kv_cache_dtype"] = object()
         modules = {name: ModuleType(name) for name in ("vllm", "vllm.config")}
         modules["vllm.config.cache"] = cache
-        namespace = {
+        namespace: dict[str, Any] = {
             "torch": SimpleNamespace(float8_e4m3fn=native),
             "_torch_utils": SimpleNamespace(STR_DTYPE_TO_TORCH_DTYPE=mapping),
         }
