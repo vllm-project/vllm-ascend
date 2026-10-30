@@ -14,7 +14,7 @@ test_cases:
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "10"
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
     server_cmd:
       - --host
       - 0.0.0.0
