@@ -16,6 +16,8 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
@@ -85,6 +87,91 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, original_weight_shape)
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
+
+    def _make_weight_switch_layer(self):
+        layer = nn.Module()
+        layer.input_size = 128
+        layer.input_size_per_partition = 64
+        layer.output_size = layer.output_size_per_partition = 6
+        layer.weight = nn.Parameter(torch.randn(6, 64).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(0, 128, (6, 2), dtype=torch.uint8), requires_grad=False)
+        self.scheme.process_weights_after_loading(layer)
+        return layer
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_weight_switch_reuses_nd_input_and_restores_local_weight(self, mock_cast):
+        layer = self._make_weight_switch_layer()
+        self.assertFalse(hasattr(layer, "_mxfp8_gather_weight_buf"))
+        local_weight_ptr = layer.weight.data_ptr()
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        mock_cast.reset_mock()
+
+        state = self.scheme.enable_weight_switch(layer, config)
+        weight_part = state.gather_parts["weight"]
+        mock_cast.assert_called_once_with(weight_part.local_tensor, ACL_FORMAT_FRACTAL_ND)
+        self.assertNotEqual(weight_part.gather_input.data_ptr(), local_weight_ptr)
+        self.assertEqual(state.gather_parts["weight_scale"].gather_input.data_ptr(), layer.weight_scale.data_ptr())
+        torch.testing.assert_close(weight_part.gather_input.float(), layer.weight.float())
+
+        def fake_all_gather(gather_input, group, *, output, async_op):
+            self.assertIs(group, config.group)
+            output.copy_(torch.cat((gather_input, gather_input), dim=0))
+            return output, None
+
+        with patch("vllm_ascend.distributed.utils.all_gather_async", side_effect=fake_all_gather):
+            for _ in range(3):
+                self.scheme.all_gather_weight(state, config)
+                self.scheme.wait_weight_all_gather(state)
+                self.scheme.switch_weight(layer, state, use_full_weight=True)
+                torch.testing.assert_close(
+                    layer.weight.float(), torch.cat((weight_part.local_tensor, weight_part.local_tensor)).float()
+                )
+                self.scheme.switch_weight(layer, state, use_full_weight=False)
+                self.assertEqual(layer.weight.data_ptr(), local_weight_ptr)
+
+        # Repeated collectives and state preparation must not repeat NZ -> ND.
+        second_state = self.scheme.enable_weight_switch(layer, config)
+        self.assertIs(second_state.gather_parts["weight"].gather_input, weight_part.gather_input)
+        self.assertEqual(mock_cast.call_count, 1)
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_weight_reload_refreshes_nd_input_in_place(self, mock_cast):
+        layer = self._make_weight_switch_layer()
+        state = self.scheme.enable_weight_switch(layer, WeightSwitchConfig(group=object(), world_size=2, rank=0))
+        gather_input = state.gather_parts["weight"].gather_input
+        gather_ptr = gather_input.data_ptr()
+        local_ptr = layer.weight.data_ptr()
+        mock_cast.reset_mock()
+
+        for _ in range(3):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            new_weight = torch.randn(6, 64).to(torch.float8_e4m3fn)
+            new_scale = torch.randint(0, 128, (6, 2), dtype=torch.uint8)
+            layer.weight.data.copy_(new_weight)
+            layer.weight_scale.data.copy_(new_scale)
+            self.scheme.process_weights_after_loading(layer)
+
+            self.assertEqual(layer.weight.data_ptr(), local_ptr)
+            self.assertEqual(layer._mxfp8_gather_weight_buf.data_ptr(), gather_ptr)
+            torch.testing.assert_close(gather_input.float(), new_weight.T.float(), rtol=0, atol=0)
+            torch.testing.assert_close(layer.weight.float(), new_weight.T.float(), rtol=0, atol=0)
+            torch.testing.assert_close(
+                state.gather_parts["weight_scale"].gather_input, new_scale.reshape(6, 1, 2).transpose(0, 1)
+            )
+        mock_cast.assert_not_called()
+
+    @patch("torch_npu.npu_format_cast")
+    def test_weight_switch_keeps_other_gather_layouts(self, mock_cast):
+        layer = nn.Module()
+        weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+        # A subclass that does not use this method's post-processing must not
+        # acquire a stale communication cache on subsequent weight reloads.
+        self.assertIs(self.scheme.prepare_weight_switch_gather_input(layer, "weight", weight, 0), weight)
+        layer._mxfp8_transformed = True
+        self.assertIs(self.scheme.prepare_weight_switch_gather_input(layer, "weight_scale", weight, 0), weight)
+        torch.testing.assert_close(self.scheme.prepare_weight_switch_gather_input(layer, "weight", weight, 1), weight.T)
+        self.assertFalse(hasattr(layer, "_mxfp8_gather_weight_buf"))
+        mock_cast.assert_not_called()
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())

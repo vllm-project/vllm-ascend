@@ -419,6 +419,22 @@ class WeightSwitchMixin:
         )
         layer.output_partition_sizes = [size // config.world_size for size in layer.output_partition_sizes]
 
+    def prepare_weight_switch_gather_input(
+        self,
+        layer: torch.nn.Module,
+        attr_name: str,
+        local_tensor: torch.Tensor,
+        dim: int,
+    ) -> torch.Tensor:
+        """Prepare the communication layout once, after weight processing.
+
+        Methods that cache a separate tensor must refresh it when weights are
+        reloaded, preserving its address for captured collectives.
+        """
+        if dim == 0:
+            return local_tensor
+        return torch.movedim(local_tensor, dim, 0).contiguous()
+
     def enable_weight_switch(
         self,
         layer: torch.nn.Module,
@@ -461,10 +477,7 @@ class WeightSwitchMixin:
             full_shape_list = list(local_tensor.shape)
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
-            if dim == 0:
-                gather_input = local_tensor
-            else:
-                gather_input = torch.movedim(local_tensor, dim, 0).contiguous()
+            gather_input = self.prepare_weight_switch_gather_input(layer, gather_spec.attr_name, local_tensor, dim)
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
