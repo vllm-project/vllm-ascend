@@ -144,8 +144,12 @@ def test_eager_fallback_keeps_metadata_when_graph_staging_does_not_fit(batch, co
         num_accepted_tokens=accepted,
         recoverssm_commit=commit,
     )
+    m = SimpleNamespace(
+        num_reqs=batch,
+        query_start_loc_cpu=torch.arange(batch + 1, dtype=torch.int32) * 6,
+    )
 
-    builder._build_conv_metadata(SimpleNamespace(num_reqs=batch), metadata, None)
+    builder._build_conv_metadata(m, metadata, None)
 
     assert metadata.spec_state_indices_tensor is states
     assert metadata.spec_query_start_loc is starts
@@ -153,6 +157,7 @@ def test_eager_fallback_keeps_metadata_when_graph_staging_does_not_fit(batch, co
     assert metadata.recoverssm_commit is commit
     conv = metadata.spec_decode_metadata.spec_causal_conv1d
     assert conv.query_start_loc is starts and conv.num_accepted_tokens is accepted
+    assert conv.query_start_loc_cpu.tolist() == starts[: batch + 1].tolist()
     assert torch.equal(conv.cache_indices, states[:, 0])
     for buffer in (builder.spec_state_indices_tensor, builder.spec_query_start_loc, builder.num_accepted_tokens):
         assert bool((buffer == 99).all())

@@ -300,6 +300,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
             cache_indices=torch.tensor([0, 1], dtype=torch.int32),
             num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32),
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
     )
@@ -320,8 +321,8 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
 
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
-    layer.rearrange_mixed_qkv.side_effect = (
-        lambda x: original(x) if x is None else pytest.fail("decode used inherited QKV concat")
+    layer.rearrange_mixed_qkv.side_effect = lambda x: (
+        original(x) if x is None else pytest.fail("decode used inherited QKV concat")
     )
     with (
         override_forward_context(context),
