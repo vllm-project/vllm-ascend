@@ -270,7 +270,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         # Experimental host-submission optimization. Keep the existing exact
         # D2H producer for every step, including steps that cannot use the bound.
-        self._qwen_mrv2_early_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE
+        self._init_qwen_mrv2_early_queue_flags()
         self._qwen_mrv2_snapshot_generation = 0
         self._qwen_mrv2_snapshot_source_stream = None
         self._qwen_mrv2_allowed_backend_builders: (
@@ -288,7 +288,6 @@ class NPUModelRunner(GPUModelRunner):
             "length_device_wait_enqueued": 0,
         }
         self._qwen_mrv2_early_queue_last_guard: dict[str, object] | None = None
-        self._qwen_mrv2_mm_decode_queue_enabled = ascend_envs.VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE
         self._qwen_mrv2_mm_decode_proof_enabled = self._qwen_mrv2_mm_decode_queue_enabled
         self._qwen_mrv2_mm_decode_state = MMDecodeCertificateState()
         self._qwen_mrv2_mm_decode_epoch = 0
@@ -329,6 +328,18 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+
+    def _init_qwen_mrv2_early_queue_flags(self) -> None:
+        # Qwen3.8 Flash Next uses these registered target architectures. Do not
+        # infer eligibility from a user-provided model path or served name.
+        is_qwen38 = getattr(self.model_config, "architecture", None) in (
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+        )
+        self._qwen_mrv2_early_queue_enabled = is_qwen38 and ascend_envs.VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE
+        self._qwen_mrv2_mm_decode_queue_enabled = (
+            self._qwen_mrv2_early_queue_enabled and ascend_envs.VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE
+        )
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:

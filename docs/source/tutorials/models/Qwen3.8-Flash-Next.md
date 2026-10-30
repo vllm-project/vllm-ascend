@@ -357,13 +357,22 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ### 9.3 Model Runner V2 Decode Submission
 
 The following non-sensitive environment switches accept `0` or `1` and default
-to `1`. No startup exports are required. Set a switch to `0` before starting
-workers to disable its behavior.
+to `0` (disabled). They apply only to Qwen3.8 Flash Next target architectures
+`Qwen4ExpForCausalLM` and `Qwen4ExpForConditionalGeneration`. Other models retain
+their original path even when both switches are set to `1`.
 
 | Switch | Behavior |
 | --- | --- |
 | `VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
 | `VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding queue switch. |
+
+Set the first switch to `1` before starting workers to enable text and stable PD
+decode submission. To enable the completed-prompt multimodal extension as well:
+
+```bash
+export VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE=1
+export VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE=1
+```
 
 Early submission replaces the CPU corrected-length wait with a device-stream
 wait. Exact positions, accepted counts, KV slots, recurrent state, and weight

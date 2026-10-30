@@ -3,4 +3,4 @@ entries:
   - category: feature
     text: Added earlier submission for eligible Qwen3.8 Flash Next Model Runner V2 text, completed-multimodal, and stable Mooncake PD decode. Exact per-step snapshots and device dependencies are preserved; unsupported or changing batches retain synchronized submission.
   - category: config
-    text: Enabled the text and multimodal early-submission switches by default. Set VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE or VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE to 0 to disable the corresponding behavior.
+    text: Both early-submission switches default to 0 (disabled) and apply only to Qwen3.8 Flash Next target architectures; other models retain their original path even when the switches are enabled. Set VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE=1 to opt in; the completed-multimodal extension additionally requires VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE=1.

@@ -36,13 +36,20 @@ NAMESPACE: dict[str, Any] = {
     "torch": NS(npu=NS(current_stream=lambda: STREAM)),
     "SchedulerOutput": object,
     "CUDAGraphMode": MODE,
+    "BatchReqState": object,
+    "BatchExecutionDescriptor": object,
 }
 # Execute the production methods unchanged without importing NPU dependencies.
 runner_tree = ast.parse((WORKER / "model_runner.py").read_text(encoding="utf-8"))
 runner_class = next(
     node for node in runner_tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner"
 )
-methods = {"_update_seq_lens_cpu", "_qwen_mrv2_has_local_uniform_verification"}
+methods = {
+    "_update_seq_lens_cpu",
+    "_qwen_mrv2_has_local_uniform_verification",
+    "_init_qwen_mrv2_early_queue_flags",
+    "_qwen_mrv2_can_queue_decode",
+}
 for method in runner_class.body:
     if isinstance(method, ast.FunctionDef) and method.name in methods:
         tree = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
@@ -95,19 +102,36 @@ class PinnedSnapshot:
 
 
 class TestQwenDecodeQueue(unittest.TestCase):
-    def test_defaults_and_independent_opt_outs(self):
+    def test_defaults_and_independent_opt_ins(self):
         envs = load("_queue_test_envs", ROOT / "vllm_ascend/envs.py")
         flags = ("VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE", "VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE")
         with patch.dict(os.environ):
             for flag in flags:
                 os.environ.pop(flag, None)
-            self.assertEqual(tuple(getattr(envs, flag) for flag in flags), (True, True))
-            for disabled in flags:
-                os.environ[disabled] = "0"
-                self.assertEqual(
-                    tuple(getattr(envs, flag) for flag in flags), tuple(flag != disabled for flag in flags)
-                )
-                os.environ.pop(disabled)
+            self.assertEqual(tuple(getattr(envs, flag) for flag in flags), (False, False))
+            for enabled in flags:
+                os.environ[enabled] = "1"
+                self.assertEqual(tuple(getattr(envs, flag) for flag in flags), tuple(flag == enabled for flag in flags))
+                os.environ.pop(enabled)
+
+    def test_only_qwen38_targets_can_opt_in_and_mm_requires_text_switch(self):
+        supported = ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        other = ("Qwen3_5ForConditionalGeneration", "Qwen3NextForCausalLM", "LlamaForCausalLM", "Qwen4ExpMTP", None)
+        configure = NAMESPACE["_init_qwen_mrv2_early_queue_flags"]
+        for architecture in (*supported, *other):
+            for text, mm in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(architecture=architecture, text=text, mm=mm):
+                    config = NS(architecture=architecture, model="Qwen3.8-Flash-Next")
+                    runner = NS(model_config=config)
+                    envs = NS(VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE=text, VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE=mm)
+                    with patch.dict(NAMESPACE, ascend_envs=envs):
+                        configure(runner)
+                    expected = architecture in supported and text
+                    self.assertEqual(runner._qwen_mrv2_early_queue_enabled, expected)
+                    self.assertEqual(runner._qwen_mrv2_mm_decode_queue_enabled, expected and mm)
+                    if not expected:
+                        # Disabled and unrelated models return before model-specific imports/state.
+                        self.assertFalse(NAMESPACE["_qwen_mrv2_can_queue_decode"](runner, None, None, None))
 
     def test_device_wait_avoids_pinned_read_and_fallback_synchronizes(self):
         for early in (True, False):
