@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
+
 
 def _load_cache_views():
     import math
@@ -62,6 +64,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
 
     namespace = {
         "torch": torch,
+        "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
@@ -149,6 +152,7 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
 
     namespace = {
         "torch": torch,
+        "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
@@ -207,6 +211,7 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 
     namespace = {
         "torch": torch,
+        "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
     }
