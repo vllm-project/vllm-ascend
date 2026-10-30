@@ -3,8 +3,8 @@
 
 import json
 
-from compare import compare_precision, read_records
-from evidence_checks import assert_control_runtime_and_ownership
+from tests.e2e.runner_parity.compare import compare_precision, read_records
+from tests.e2e.runner_parity.evidence_checks import assert_control_runtime_and_ownership
 
 
 def feature_arm(root, runner):
@@ -15,7 +15,7 @@ def test_glm51_mtp_paired_precision(feature_root, upstream_utils):
     paths = [feature_arm(feature_root, arm) / "controlled-precision.jsonl" for arm in ("v1", "v2")]
     for path in paths:
         assert all(row["request"]["speculative_tokens"] == 3 for row in read_records(path).values())
-    report = compare_precision(*paths, upstream_utils)
+    report = compare_precision(paths[0], paths[1], upstream_utils)
     assert report["case_count"] == report["passed"] == 32
     assert report["failed"] == 0
 
