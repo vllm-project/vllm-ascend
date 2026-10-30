@@ -238,6 +238,23 @@ def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
     prepare.assert_not_called()
 
 
+@pytest.mark.parametrize("needs_floor", [None, False, True])
+def test_one_token_prefill_after_one_row_replay_bypasses_decode_graph(needs_floor):
+    runner = _make_runner()
+    replay = Mock() if needs_floor is not None else None
+    if replay is not None:
+        replay.needs_eager_forward.return_value = needs_floor
+    runner.model_state.decoder_replay_state = replay
+    batch_state = _make_batch_state([127], [1], [128])
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, 1)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+    assert gathered.decode_graph_eligible is (needs_floor is not True)
+    assert uniform == (None if needs_floor else 1)
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True])
+    if replay is not None:
+        replay.needs_eager_forward.assert_called_once_with(batch_state.idx_mapping_np, batch_state.is_prefilling_np)
+
+
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     manager = SimpleNamespace(update_stream=None)
