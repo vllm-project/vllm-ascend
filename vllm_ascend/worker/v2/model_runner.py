@@ -598,7 +598,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
-        if self._qwen_mrv2_early_queue_enabled and has_kv_transfer_group():
+        if getattr(self, "_qwen_mrv2_early_queue_enabled", False) and has_kv_transfer_group():
             self.kv_connector = wrap_pd_decode_queue_connector(self.kv_connector, get_kv_transfer_group())
 
         # Only target-model layers determine whether FIA is in use. This flag
@@ -873,7 +873,7 @@ class NPUModelRunner(GPUModelRunner):
             # This also runs on tokenless receive steps, before request slots
             # are retired/reused. The original connector callbacks still run.
             connector.observe_scheduler_output(scheduler_output)
-        if self._qwen_mrv2_mm_decode_proof_enabled and (
+        if getattr(self, "_qwen_mrv2_mm_decode_proof_enabled", False) and (
             scheduler_output.scheduled_new_reqs
             or scheduler_output.scheduled_cached_reqs.resumed_req_ids
             or scheduler_output.finished_req_ids
@@ -1445,7 +1445,7 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
-        if self._qwen_mrv2_early_queue_enabled:
+        if getattr(self, "_qwen_mrv2_early_queue_enabled", False):
             self._qwen_mrv2_snapshot_generation += 1
             self._qwen_mrv2_snapshot_source_stream = default_stream
             self._qwen_mrv2_early_queue_stats["exact_snapshots_recorded"] += 1
@@ -1453,7 +1453,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_connector.decode_queue_state.record_snapshot(
                     self.req_states.req_id_to_index, self._qwen_mrv2_snapshot_generation
                 )
-        if self._qwen_mrv2_mm_decode_proof_enabled:
+        if getattr(self, "_qwen_mrv2_mm_decode_proof_enabled", False):
             self._qwen_mrv2_mm_snapshot_stream = default_stream
             request_indices = self.req_states.req_id_to_index
             keys = self._qwen_mrv2_mm_decode_request_keys(
@@ -1466,7 +1466,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _qwen_mrv2_mm_decode_context(self) -> tuple | None:
         """Inventory CPU consumers for the audited non-realtime MM path."""
-        if not self._qwen_mrv2_mm_decode_proof_enabled:
+        if not getattr(self, "_qwen_mrv2_mm_decode_proof_enabled", False):
             return None
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
 
@@ -1549,7 +1549,7 @@ class NPUModelRunner(GPUModelRunner):
         # This hook follows the original exact fallback, before any embedding
         # gather. It never certifies from optimistic prefill/decode flags.
         if (
-            not self._qwen_mrv2_mm_decode_proof_enabled
+            not getattr(self, "_qwen_mrv2_mm_decode_proof_enabled", False)
             or self.speculator is None
             or self.sync_spec_pp_cpu_counts
             or self._can_skip_spec_cpu_length_sync()
@@ -1627,7 +1627,9 @@ class NPUModelRunner(GPUModelRunner):
             return False
 
     def _qwen_mrv2_certify_pd_decode(self, scheduler_output, batch) -> None:
-        connector = self.kv_connector
+        if not getattr(self, "_qwen_mrv2_early_queue_enabled", False):
+            return
+        connector = getattr(self, "kv_connector", None)
         if (
             not isinstance(connector, PDDecodeQueueKVConnector)
             or self.speculator is None
@@ -1659,7 +1661,7 @@ class NPUModelRunner(GPUModelRunner):
         controls BOTH the producer and consumer. A per-batch optimization must
         not suppress a snapshot needed by the next batch's exact fallback.
         """
-        if not self._qwen_mrv2_early_queue_enabled:
+        if not getattr(self, "_qwen_mrv2_early_queue_enabled", False):
             return False
 
         # Reject other speculators before accessing their model-specific state.

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
@@ -51,6 +52,10 @@ methods = {
     "_qwen_mrv2_has_local_uniform_verification",
     "_init_qwen_mrv2_early_queue_flags",
     "_qwen_mrv2_can_queue_decode",
+    "_qwen_mrv2_mm_decode_context",
+    "_qwen_mrv2_certify_mm_decode",
+    "_qwen_mrv2_certify_pd_decode",
+    "_copy_num_computed_tokens_to_cpu",
 }
 for method in runner_class.body:
     if isinstance(method, ast.FunctionDef) and method.name in methods:
@@ -182,6 +187,50 @@ class TestQwenDecodeQueue(unittest.TestCase):
                 self.assertEqual(calls, [] if early else ["sync", "read"])
                 self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [108 if early else 104])
                 self.assertEqual(STREAM.wait_event.call_args_list, [unittest.mock.call(event)] if early else [])
+
+    def test_disabled_or_uninitialized_queue_hooks_do_not_read_optional_state(self):
+        class IncompleteRunner:
+            @property
+            def kv_connector(self):
+                raise AssertionError("disabled optimization accessed the connector")
+
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                runner = IncompleteRunner()
+                if initialized:
+                    vars(runner).update(_qwen_mrv2_early_queue_enabled=False, _qwen_mrv2_mm_decode_proof_enabled=False)
+                self.assertFalse(NAMESPACE["_qwen_mrv2_can_queue_decode"](runner, None, None, None))
+                self.assertIsNone(NAMESPACE["_qwen_mrv2_mm_decode_context"](runner))
+                self.assertIsNone(NAMESPACE["_qwen_mrv2_certify_mm_decode"](runner, None, None))
+                self.assertIsNone(NAMESPACE["_qwen_mrv2_certify_pd_decode"](runner, None, None))
+
+    def test_disabled_or_uninitialized_queue_still_records_exact_d2h(self):
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                calls = Mock()
+                source, default_stream = object(), object()
+                runner = NS(
+                    _can_skip_spec_cpu_length_sync=lambda: False,
+                    num_computed_tokens_stream=NS(wait_stream=calls.wait_stream),
+                    num_computed_tokens_cpu=NS(copy_=calls.copy),
+                    num_computed_tokens_event=NS(record=calls.record),
+                    req_states=NS(num_computed_tokens=NS(gpu=source)),
+                )
+                if initialized:
+                    vars(runner).update(_qwen_mrv2_early_queue_enabled=False, _qwen_mrv2_mm_decode_proof_enabled=False)
+                torch = NS(
+                    cuda=NS(current_stream=Mock(return_value=default_stream)), npu=NS(stream=lambda _: nullcontext())
+                )
+                with patch.dict(NAMESPACE, torch=torch):
+                    NAMESPACE["_copy_num_computed_tokens_to_cpu"](runner)
+                self.assertEqual(
+                    calls.mock_calls,
+                    [
+                        unittest.mock.call.wait_stream(default_stream),
+                        unittest.mock.call.copy(source, non_blocking=True),
+                        unittest.mock.call.record(),
+                    ],
+                )
 
     def test_uniform_admission_accepts_padding_but_rejects_invalid_rows(self):
         runner = NS(
