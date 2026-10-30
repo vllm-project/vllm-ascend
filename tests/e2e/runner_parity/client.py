@@ -55,7 +55,13 @@ def stream_completion(base_url, body, timeout=1800, error_dir=None):
             if first_visible is None and any(choice.get("text") for choice in choices):
                 first_visible = now
     end = time.perf_counter()
-    if not usage or not usage.get("completion_tokens") or first is None or len(token_ids) != usage["completion_tokens"]:
+    if (
+        not usage
+        or not usage.get("completion_tokens")
+        or first is None
+        or last is None
+        or len(token_ids) != usage["completion_tokens"]
+    ):
         details = {
             "request": payload,
             "usage": usage,
