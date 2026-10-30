@@ -1561,12 +1561,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            if is_forward_context_available():
                 forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding,
-                    hidden_states,
-                )
+                # Supplied masks follow hidden states into SP even when MoE
+                # padding elision is off. Replay consumes this same layout.
+                if envs.VLLM_MOE_SKIP_PADDING or forward_context.is_padding is not None:
+                    forward_context.is_padding = sp_padding_mask(
+                        forward_context.is_padding,
+                        hidden_states,
+                    )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
             token_mask = sp_shard(token_mask)

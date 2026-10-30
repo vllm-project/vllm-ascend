@@ -4,6 +4,7 @@
 """Exercise replay coordination with real DP/PCP collectives on four CPUs."""
 
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as layers_mod
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 
@@ -186,5 +188,65 @@ def test_pcp_dp_replay_collectives(tmp_path):
         _distributed_replay_worker,
         args=(f"file://{tmp_path / 'rendezvous'}",),
         nprocs=DP_SIZE * PCP_SIZE,
+        start_method="fork",
+    )
+
+
+def _sp_replay_worker(rank, init_method):
+    tp_size = 4
+    dist.init_process_group(
+        "gloo", init_method=init_method, rank=rank, world_size=tp_size, timeout=timedelta(seconds=30)
+    )
+
+    def gather(tensor, dim=0):
+        outputs = [torch.empty_like(tensor) for _ in range(tp_size)]
+        dist.all_gather(outputs, tensor.contiguous())
+        return torch.cat(outputs, dim=dim)
+
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(layers_mod, "get_tp_group", lambda: SimpleNamespace(world_size=tp_size, rank_in_group=rank))
+            patch.setattr(layers_mod, "tensor_model_parallel_all_gather", gather)
+            patch.setattr(layers_mod, "enable_dsa_cp", lambda: False)
+            # The original seven rows and the retained suffix both need TP padding.
+            original = torch.arange(8).reshape(8, 1)
+            for retained in ([], [4, 5, 6], [0, 3, 4, 5, 6]):
+                rows = torch.tensor(retained, dtype=torch.int64)
+                width = max(tp_size, ((len(retained) + tp_size - 1) // tp_size) * tp_size)
+                expected = torch.zeros(width, 1, dtype=torch.int64)
+                expected[: len(retained)] = original.index_select(0, rows)
+
+                def run_layers(hidden, mix, positions, ids, expected=expected):
+                    assert torch.equal(hidden, expected.chunk(tp_size)[rank])
+                    assert torch.equal(mix, hidden)
+                    assert torch.equal(ids, hidden[:, 0])
+                    assert torch.equal(positions, expected[:, 0])
+                    return hidden + 10, mix + 20, gather(hidden) + 30
+
+                buffer = original.clone()
+                replay = AscendDecoderReplayLayers(3, run_layers, [buffer])
+                replay.sequence_parallel = True
+                replay.rows = rows
+                replay.num_actual_rows = len(retained)
+                replay.num_padded_rows = width
+                replay.context_factory = nullcontext
+                local = original.chunk(tp_size)[rank]
+                output, mix, aux = replay(local, local, torch.arange(7), local[:, 0])
+                for result, offset in ((gather(output), 10), (gather(mix), 20), (aux, 30)):
+                    restored = torch.zeros_like(result)
+                    restored.index_copy_(0, rows, original.index_select(0, rows) + offset)
+                    assert torch.equal(result, restored)
+                assert aux.shape[0] == 7
+                assert torch.equal(buffer[:width], expected)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="fork inherits the CPU test dependency mocks")
+def test_sp_replay_gather_pad_shard_and_scatter(tmp_path):
+    mp.start_processes(
+        _sp_replay_worker,
+        args=(f"file://{tmp_path / 'sp-rendezvous'}",),
+        nprocs=4,
         start_method="fork",
     )

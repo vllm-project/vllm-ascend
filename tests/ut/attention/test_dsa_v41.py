@@ -15,6 +15,54 @@ from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 TOKENS, TOPK = 4, 512
 
 
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+@pytest.mark.parametrize("compressed", [False, True])
+def test_a5_attention_pads_tp_heads_and_preserves_local_outputs(monkeypatch, num_heads, compressed):
+    q = torch.randn(3, num_heads, 8)
+    sinks = torch.randn(num_heads)
+    indices = torch.zeros(3, 1, 4, dtype=torch.int32)
+    lengths = torch.ones(3, 1, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        swa=SimpleNamespace(
+            ori_sparse_indices=indices,
+            ori_topk_length=lengths,
+            smla_metadata=torch.empty(1),
+            block_table=torch.zeros(1, 1),
+            query_start_loc=torch.tensor([0, 3]),
+            seq_lens=torch.tensor([3]),
+        ),
+        attention=SimpleNamespace(block_table=torch.zeros(1, 1), cache_seq_lens=torch.tensor([1])),
+    )
+    monkeypatch.setattr(a5_indexer, "wait_for_device_metadata", lambda *args: None)
+
+    def attention(query, **kwargs):
+        assert query.shape == (3, 64, 8)
+        assert kwargs["sinks"].shape == (64,)
+        assert torch.equal(query[:, :num_heads], q)
+        assert torch.equal(kwargs["sinks"][:num_heads], sinks)
+        assert not query[:, num_heads:].count_nonzero()
+        assert not kwargs["sinks"][num_heads:].count_nonzero()
+        assert (kwargs["cmp_kv"] is not None) is compressed
+        # A head-local reference makes incorrect sink padding or output
+        # slicing observable while leaving the NPU DSL outside this CPU test.
+        return query + kwargs["sinks"][None, :, None], None
+
+    monkeypatch.setattr(a5_indexer.ops, "mixed_quant_sparse_flash_mla", attention)
+    output = a5_indexer.qsmla(
+        q,
+        torch.empty(1),
+        torch.empty(1) if compressed else None,
+        metadata,
+        indices[:, 0],
+        window_size=4,
+        sinks=sinks,
+        softmax_scale=1.0,
+        compressed_lengths=lengths,
+    )
+    assert output.is_contiguous()
+    torch.testing.assert_close(output, q + sinks[None, :, None])
+
+
 @pytest.mark.parametrize("otp_enabled,pcp_sharding", [(False, None), (False, False), (True, False), (False, True)])
 @pytest.mark.parametrize("num_tokens", [0, 1, 7])
 @pytest.mark.parametrize("provide_output", [False, True])

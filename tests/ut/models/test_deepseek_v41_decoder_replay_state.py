@@ -417,12 +417,66 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert gather_padding.call_count == int(sequence_parallel)
 
 
-def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch, sequence_parallel):
     monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: True)
+    state.layers.sequence_parallel = sequence_parallel
     state.config.parallel_config.tensor_parallel_size = 4
     state.prepare(inputs(), CUDAGraphMode.NONE)
     assert state.layers.num_actual_rows == 5
     assert state.layers.rows.numel() == 8
+
+
+@pytest.mark.parametrize(("tp_size", "padded"), [(2, 6), (4, 8)])
+def test_sp_replay_aligns_execution_width_but_selects_only_valid_rows(state, tp_size, padded):
+    state.layers.sequence_parallel = True
+    state.config.parallel_config.tensor_parallel_size = tp_size
+    state.prepare(inputs(), CUDAGraphMode.NONE)
+    assert state.num_actual_tokens == 5
+    assert state.num_tokens == padded
+    assert state.layers.rows.numel() == 5
+    assert state.layers.num_padded_rows == padded
+
+
+def test_untrimmed_sp_replica_reports_tp_padded_width(synchronized_dp):
+    state = synchronized_dp
+    state.layers.sequence_parallel = True
+    state.config.parallel_config.tensor_parallel_size = 4
+    source = inputs(dummy=True)
+    source.batch.num_tokens_after_padding = 13
+    state.prepare(source, CUDAGraphMode.NONE)
+    assert state.dp_tokens.tolist() == [16, 2]
+    assert state.layers.rows is None
+    assert state.layers.context_factory is not None
+
+
+@pytest.mark.parametrize("local_end,actual", [(8, 0), (16, 3)])
+def test_pcp_sp_replay_aligns_empty_and_tail_owners(state, local_end, actual):
+    state.layers.sequence_parallel = True
+    state.layers.window = 3
+    state.config.parallel_config.tensor_parallel_size = 4
+    batch = SimpleNamespace(
+        num_reqs=1,
+        is_dummy=False,
+        num_tokens_after_padding=8,
+        query_start_loc_np=np.array([0, 8], dtype=np.int32),
+        seq_lens_np=np.array([local_end], dtype=np.int32),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_np=np.array([0, 16], dtype=np.int32),
+        seq_lens_np=np.array([16], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    source = replay_mod.DecoderReplayInputs(
+        batch, (), torch.empty(1, 16), [], torch.zeros(1), SimpleNamespace(global_batch=global_batch)
+    )
+    kept, padded, start = state._pcp_kept_lengths(source)
+    assert kept.tolist() == [actual]
+    assert padded == 4
+    assert start.tolist() == [13]
 
 
 @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])

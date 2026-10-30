@@ -1,0 +1,4 @@
+pr: 20266
+entries:
+  - category: feature
+    text: Enabled DeepSeek V4.1 SWA bounded decoder replay with sequence parallelism on Model Runner V2, including combined PCP and DP execution.
