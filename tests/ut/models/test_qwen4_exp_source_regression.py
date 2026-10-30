@@ -35,9 +35,7 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
     assert "class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer)" in model
     assert "self.mlp = AscendQwen4ExpSparseMoeBlock(" in model
-    assert (
-        "upstream_model.Qwen4ExpDecoderLayer = AscendQwen4ExpDecoderLayer" in model
-    )
+    assert "upstream_model.Qwen4ExpDecoderLayer = AscendQwen4ExpDecoderLayer" in model
     assert "reduce_results=not self.use_sequence_parallel" in model
     assert "already_sequence_parallel=self.use_sequence_parallel" in model
     assert "block_input = sp_all_gather(block_input)" in model
@@ -114,9 +112,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     )
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
-    assert qsa_sources.count(
-        "positions.clamp(0, cache.shape[0] - 1).contiguous()"
-    ) >= 3
+    assert qsa_sources.count("positions.clamp(0, cache.shape[0] - 1).contiguous()") >= 3
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:

@@ -4,7 +4,6 @@ from vllm.model_executor.models.config import (
     Qwen4ExpForConditionalGenerationConfig,
 )
 
-
 _verify_config = Qwen4ExpForConditionalGenerationConfig.verify_and_update_config
 
 
@@ -26,6 +25,4 @@ def _verify_qwen4_exp_config(vllm_config):
         text_config.ple_layer_ids = ple_layer_ids
 
 
-Qwen4ExpForConditionalGenerationConfig.verify_and_update_config = staticmethod(
-    _verify_qwen4_exp_config
-)
+Qwen4ExpForConditionalGenerationConfig.verify_and_update_config = staticmethod(_verify_qwen4_exp_config)

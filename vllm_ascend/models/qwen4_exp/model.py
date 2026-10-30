@@ -18,7 +18,6 @@ from itertools import islice
 
 import torch
 from torch import nn
-
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -99,11 +98,7 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
         )
         local_ngram_ids = sp_shard(ngram_ids)
         embedding = ple_embedding.ngram_embedding
-        output_dtype = (
-            embedding.weight.dtype
-            if embedding.supports_prefetch
-            else embedding.params_dtype
-        )
+        output_dtype = embedding.weight.dtype if embedding.supports_prefetch else embedding.params_dtype
         output = local_ngram_ids.new_empty(
             (local_ngram_ids.shape[0], ple_embedding.embedding_dim),
             dtype=output_dtype,
@@ -167,9 +162,7 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
                 ngram_context,
             )
             embeddings = sp_shard(embeddings)
-        embeddings = self.ple_embedding.ngram_embedding.dequantize(
-            embeddings, hidden_states.dtype
-        )
+        embeddings = self.ple_embedding.ngram_embedding.dequantize(embeddings, hidden_states.dtype)
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
         gated_output, conv_input = upstream_ple.ple_gate(
@@ -188,12 +181,8 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
         # instead of launching a second all-gather before attention.
         gated_output.add_(hidden_states)
         gated_output_size = gated_output.shape[-1]
-        gathered_ple = sp_all_gather(
-            torch.cat((gated_output, conv_input), dim=-1)
-        )[: input_ids.shape[0]]
-        gated_output, conv_input = gathered_ple.split(
-            (gated_output_size, conv_input.shape[-1]), dim=-1
-        )
+        gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))[: input_ids.shape[0]]
+        gated_output, conv_input = gathered_ple.split((gated_output_size, conv_input.shape[-1]), dim=-1)
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             conv_input,
@@ -230,16 +219,12 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         self.config = config
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
-        self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
-        )
+        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         self.ple = None
         ple_layer_ids = config.ple_layer_ids
         if (self.layer_idx + 1) in ple_layer_ids:
             ple_layer_ids_sorted = sorted(set(ple_layer_ids))
-            ple_dense_layer_id_map = {
-                abs_id: idx for idx, abs_id in enumerate(ple_layer_ids_sorted)
-            }
+            ple_dense_layer_id_map = {abs_id: idx for idx, abs_id in enumerate(ple_layer_ids_sorted)}
             ple_dense_layer_id = ple_dense_layer_id_map[self.layer_idx + 1]
             self.ple = AscendQwen4ExpPLELayer(
                 config,
@@ -281,9 +266,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = AscendQwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config, prefix=f"{prefix}.mlp"
-        )
+        self.mlp = AscendQwen4ExpSparseMoeBlock(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
         hc_config = upstream_model.HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -317,9 +300,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         ple_output_is_full_tokens = False
         if self.ple is not None:
             if prev_block_output is not None and prev_injection is not None:
-                hidden_states = attn_hc.combine(
-                    hidden_states, prev_block_output, prev_injection
-                )
+                hidden_states = attn_hc.combine(hidden_states, prev_block_output, prev_injection)
                 prev_block_output = prev_injection = None
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
@@ -337,7 +318,6 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
             )
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
-
 
         if self.use_sequence_parallel:
             if ple_output_is_full_tokens:
@@ -361,11 +341,8 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         if self.use_sequence_parallel:
             attn_out = sp_reduce_scatter(attn_out)
 
-
         mlp_hc = self.mlp_hyper_connection
-        hidden_states, block_input, injection = mlp_hc.combine_and_mix(
-            hidden_states, attn_out, injection
-        )
+        hidden_states, block_input, injection = mlp_hc.combine_and_mix(hidden_states, attn_out, injection)
         mlp_out = self.mlp(
             block_input,
             already_sequence_parallel=self.use_sequence_parallel,
@@ -394,9 +371,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
-        )
+        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
         # specialization used by PLE during FULL_DECODE_ONLY graph capture.
@@ -429,10 +404,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
 
-        if (
-            self.use_sequence_parallel
-            and hidden_states.shape[0] == positions.shape[-1]
-        ):
+        if self.use_sequence_parallel and hidden_states.shape[0] == positions.shape[-1]:
             if is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
@@ -448,9 +420,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             forward_context = get_forward_context()
             is_padding = forward_context.is_padding
             if is_padding is not None and is_padding.shape[0] != hidden_states.shape[0]:
-                mask_input = hidden_states.new_empty(
-                    (is_padding.shape[0], 1), dtype=hidden_states.dtype
-                )
+                mask_input = hidden_states.new_empty((is_padding.shape[0], 1), dtype=hidden_states.dtype)
                 forward_context.is_padding = sp_padding_mask(
                     is_padding,
                     mask_input,
@@ -461,9 +431,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         block_output = None
         injection = None
         last_layer = None
-        for layer_idx, layer in islice(
-            enumerate(self.layers), self.start_layer, self.end_layer
-        ):
+        for layer_idx, layer in islice(enumerate(self.layers), self.start_layer, self.end_layer):
             last_layer = layer
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
@@ -474,12 +442,8 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
             )
-            if deepstack_input_embeds is not None and layer_idx < len(
-                deepstack_input_embeds
-            ):
-                deepstack_embed = deepstack_input_embeds[
-                    f"deepstack_input_embeds_{layer_idx}"
-                ]
+            if deepstack_input_embeds is not None and layer_idx < len(deepstack_input_embeds):
+                deepstack_embed = deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 deepstack_embed = (
                     deepstack_embed.unsqueeze(-2)
                     .expand(
@@ -489,9 +453,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                     )
                     .flatten(-2)
                 )
-                hidden_states = layer.mlp_hyper_connection.combine(
-                    hidden_states, block_output, injection
-                )
+                hidden_states = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
                 block_output = None
                 injection = None
                 if self.use_sequence_parallel:
@@ -500,26 +462,18 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 
         if not pp_group.is_last_rank:
             if last_layer is not None and block_output is not None:
-                hidden_states = last_layer.mlp_hyper_connection.combine(
-                    hidden_states, block_output, injection
-                )
+                hidden_states = last_layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
             if self.use_sequence_parallel:
-                hidden_states = sp_all_gather(hidden_states)[
-                    : positions.shape[-1]
-                ]
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[-1]]
             return IntermediateTensors({"hidden_states": hidden_states})
 
         final_mixer = self.hyper_connection_mixer
         assert final_mixer is not None
-        multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(
-            hidden_states, block_output, injection
-        )
+        multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(hidden_states, block_output, injection)
         if self.use_sequence_parallel:
             full_num_tokens = positions.shape[-1]
             multi_hidden_size = multi_hidden.shape[-1]
-            gathered_hidden = sp_all_gather(
-                torch.cat((multi_hidden, sample_hidden_states), dim=-1)
-            )[:full_num_tokens]
+            gathered_hidden = sp_all_gather(torch.cat((multi_hidden, sample_hidden_states), dim=-1))[:full_num_tokens]
             multi_hidden, sample_hidden_states = gathered_hidden.split(
                 (multi_hidden_size, self.config.hidden_size), dim=-1
             )
