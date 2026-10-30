@@ -4,3 +4,5 @@ entries:
     text: Improved V2 penalty prompt-mask packing with bounded Vector-core tile loops.
   - category: bugfix
     text: Fixed V2 penalty bincount launches exceeding the Ascend program limit for large request histories.
+  - category: bugfix
+    text: Fixed V2 penalty-mask compilation with the default Triton-Ascend 3.6 global-constant rules.

@@ -95,6 +95,23 @@ parameters. Request counts, work counts, strides and vocabulary-word counts
 remain runtime scalars. Backend dtype/value/alignment specialization can still
 produce variants; the measured compilation audit is recorded below.
 
+### Triton 3.6 constant compatibility
+
+The format constants are instantiated with `tl.constexpr(value)`. A Python
+annotation such as `BITS_PER_WORD: tl.constexpr = 32` leaves an ordinary integer
+global, which Triton 3.6 rejects inside JIT functions. Host scratch allocation
+uses `BITS_PER_WORD.value` as its integer dimension. The algorithm, kernel
+signatures, tile sizes and launch grids are unchanged.
+
+With `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS` unset and a fresh task cache, the old
+source reproduced the reported `NameError`; the corrected source passed all
+27 standalone cases on Triton-Ascend 3.6.0 and 3.2.2, including bit31, strides,
+int64 and all three 1M boundaries. Both runs used Ascend910_9362 (A3); they
+establish compiler compatibility and A3 correctness, not fresh A5 execution.
+The current source is SHA256
+`f07e939bd612e813a2055736bd5c1c90eafbaafcb77d6447c27294391be7aca4`.
+Earlier performance/model tables retain their frozen pre-fix source identity.
+
 ## Correctness and regression coverage
 
 CPU wrapper tests exercise real tensor initialization and typed-view aliasing
@@ -371,7 +388,7 @@ penalty requests enter, so its microbenchmark gains need not dominate decode.
 
 ### Validation boundaries
 
-The approved operator source remains SHA256
+The model runs above used the frozen pre-compatibility operator SHA256
 `83b871bc1f77319da7e6d9733c7393606a5ef56a24aabd68aa052baf837a01b3`.
 All 50 product NPU tests passed through normal repository conftests and real
 framework imports in this model runtime. The accepted compiler is the

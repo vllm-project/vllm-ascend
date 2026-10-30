@@ -21,7 +21,7 @@ def penalties(monkeypatch):
             jit=lambda function: MagicMock(name=function.__name__),
             cdiv=lambda value, block: (value + block - 1) // block,
         ),
-        tl=MagicMock(),
+        tl=SimpleNamespace(constexpr=lambda value: SimpleNamespace(value=value)),
     )
     device_utils = ModuleType("vllm_ascend.ops.triton.triton_utils")
     device_utils.__dict__.update(

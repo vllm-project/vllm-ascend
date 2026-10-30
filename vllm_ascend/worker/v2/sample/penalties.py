@@ -25,9 +25,9 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 
 # Fixed tile and packed-mask format; request/work counts remain runtime values.
 WORDS_PER_BLOCK = 128
-BITS_PER_WORD: tl.constexpr = 32
-FLAGS_PER_LOAD: tl.constexpr = 4
-FLAG_PACK_MULTIPLIER: tl.constexpr = 0x01020408
+BITS_PER_WORD = tl.constexpr(32)
+FLAGS_PER_LOAD = tl.constexpr(4)
+FLAG_PACK_MULTIPLIER = tl.constexpr(0x01020408)
 
 
 @triton.jit
@@ -263,7 +263,9 @@ def bincount(
     vector_cores = get_vectorcore_num()
     output_bin_counts[expanded_idx_mapping] = 0
     # Rounded rows keep the final word's unused flag bytes zero and aligned.
-    prompt_flag = torch.zeros(num_requests, num_words * BITS_PER_WORD, dtype=torch.int8, device=prompt_bin_mask.device)
+    prompt_flag = torch.zeros(
+        num_requests, num_words * BITS_PER_WORD.value, dtype=torch.int8, device=prompt_bin_mask.device
+    )
     if num_token_blocks > 0:
         _bincount_kernel[(min(vector_cores, num_requests * num_token_blocks),)](
             expanded_idx_mapping,
