@@ -1459,25 +1459,33 @@
 #       keep mask directly also returns one per tile instead of the finite-logit
 #       count on Triton-Ascend. The upstream row-wise bit packing additionally
 #       lowers to scalar-heavy variable shifts and width-8 reductions.
+#       Speculative decoding also requires a separate mask for each committed
+#       token in the upstream request-major output layout.
 #    How:
 #       Make logits contiguous only when the vocabulary dimension is strided,
 #       cast the keep mask to int32 before reducing it, and use a 4096-element
-#       tile to keep the corrected reduction within the NPU UB limit. Support
-#       both the release three-field bitmask API and the verified-main
-#       four-field compact-ID plus bitmask API with the same packing kernel.
-#       For the four-field API, return a zero-width `token_ids` tensor so its
-#       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
-#       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
-#       weights, and reducing the contiguous 8-row axis so the backend emits
-#       vector transpose, multiply, and reduction instructions.
+#       tile to keep the corrected reduction within the NPU UB limit. Accept
+#       `cu_num_logits` and `rows_per_request` for the upstream request-major
+#       API, reading logits row `cu_num_logits[req_idx] + slot_idx` and writing
+#       output row `req_idx * rows_per_request + slot_idx`. Mask inactive-slot
+#       loads so their masks and counts are zero. Read offsets and sampled counts
+#       on device for graph replay, and skip the kernel launch for empty batches.
+#       Return the five-field `SamplingMaskTensors`, including `rows_per_request`,
+#       with zero-width `token_ids` so upstream `tolists()` uses the exact bitmask
+#       fallback. Pack bits by transposing `[512, 8]` to `[8, 512]`, multiplying
+#       by compile-time bit weights, and reducing the contiguous 8-row axis so
+#       the backend emits vector transpose, multiply, and reduction instructions.
 #    Test:
 #       Regression coverage is in
 #       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
+#       Integrated rejection-sampling and replay on/off RNG coverage is in
+#       `tests/e2e/pull_request/one_card/spec_decode/test_sampling_mask_rejection.py`.
 #    Related PR (if no, explain why):
 #       No. This is a Triton-Ascend compiler compatibility workaround.
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
+#
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
