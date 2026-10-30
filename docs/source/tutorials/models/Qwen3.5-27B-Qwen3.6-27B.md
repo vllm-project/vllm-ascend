@@ -246,3 +246,7 @@ vllm bench serve --model Eco-Tech/Qwen3.6-27B-w8a8 --dataset-name random --rando
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+## Qwen3.5 Known issues
+
+- For vLLM 0.18.0, Qwen3.5 chat templates can be detected as `string` instead of `openai`, which may break multi-turn multimodal tool calls when tool responses contain images. Start vLLM with `--chat-template-content-format openai` when using multimodal tool calls. This workaround is only required for vLLM 0.18.0; vLLM 0.22.0 and later contain the upstream fix.
