@@ -7,6 +7,8 @@ and cleanup. Do not run a full quality dataset as a prerequisite.
 
 ## Collect
 
+Run the module commands below from the vLLM-Ascend repository root.
+
 The exact A5 TP8/EP8 configuration is configs/glm51_a5_tp8.json. It records the
 frozen source revisions, full checkpoint revision and graph configuration. Both
 arms use the same FP8 mapping compatibility fix, now included in this change's
@@ -14,11 +16,11 @@ worker patch. Apply this change to the frozen Ascend source when reproducing
 the recorded image's FP8 mapping behavior. The image ID records the local
 runtime, not a downloadable tag.
 
-    python tests/e2e/runner_parity/serve.py --runner v1 --model /path/to/full/checkpoint
+    python -m tests.e2e.runner_parity.serve --runner v1 --model /path/to/full/checkpoint
 
 Start the first arm with explicit Model Runner V1 selection, then run:
 
-    python tests/e2e/runner_parity/collect.py --runner v1 --inputs inputs.json --output run/v1 --stage precision
+    python -m tests.e2e.runner_parity.collect --runner v1 --inputs inputs.json --output run/v1 --stage precision
 
 Stop the first arm, verify accelerator resources are released, start V2 with the
 same settings, and collect into run/v2 using the same inputs.json. Collect the first performance round explicitly with --stage performance --rounds 1. For alternating
@@ -40,7 +42,7 @@ errors. Sampled text equality is reported, not universally assumed.
 
 ## Compare and validate
 
-    python tests/e2e/runner_parity/compare.py --v1 run/v1 --v2 run/v2 --upstream-utils /vllm/tests/models/utils.py --output run/comparison.json
+    python -m tests.e2e.runner_parity.compare --v1 run/v1 --v2 run/v2 --upstream-utils /vllm/tests/models/utils.py --output run/comparison.json
     pytest --confcutdir=tests/e2e/runner_parity tests/e2e/runner_parity --parity-root run --upstream-utils /vllm/tests/models/utils.py --expected-rounds 1
 
 Use --expected-rounds 3 when three rounds were actually captured. A separate
@@ -87,9 +89,9 @@ The HTTP collector creates and saves inputs.json on its first run. Reuse that
 file unchanged for offline control; do not substitute approximately equivalent
 text. Run each arm in a fresh process/container with the same visible devices:
 
-    python tests/e2e/runner_parity/control.py --runner v1 --model /path/to/full/checkpoint --inputs inputs.json --output control/v1/steps.json --mode graph
-    python tests/e2e/runner_parity/control.py --runner v2 --model /path/to/full/checkpoint --inputs inputs.json --output control/v2/steps.json --mode graph
-    python tests/e2e/runner_parity/compare_control.py --v1 control/v1/controlled-precision.jsonl --v2 control/v2/controlled-precision.jsonl --upstream-utils /vllm/tests/models/utils.py --output control/comparison.json
+    python -m tests.e2e.runner_parity.control --runner v1 --model /path/to/full/checkpoint --inputs inputs.json --output control/v1/steps.json --mode graph
+    python -m tests.e2e.runner_parity.control --runner v2 --model /path/to/full/checkpoint --inputs inputs.json --output control/v2/steps.json --mode graph
+    python -m tests.e2e.runner_parity.compare_control --v1 control/v1/controlled-precision.jsonl --v2 control/v2/controlled-precision.jsonl --upstream-utils /vllm/tests/models/utils.py --output control/comparison.json
 
 Stop the first process and verify NPU release before starting the next. The
 control keeps EngineCore in-process and TP workers in separate processes, so all
