@@ -369,6 +369,7 @@ class TestAscendConfig(TestBase):
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
+        self.assertFalse(ascend_config.li_c8_v1)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
@@ -379,6 +380,24 @@ class TestAscendConfig(TestBase):
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertFalse(ascend_config.rl_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_li_c8_v1(self, mock_fix_incompatible_config):
+        for value, expected in ((True, True), (False, False), ("true", True), ("false", False)):
+            with self.subTest(value=value):
+                clear_ascend_config()
+                test_vllm_config = VllmConfig()
+                test_vllm_config.additional_config = {"li_c8_v1": value}
+                self.assertIs(init_ascend_config(test_vllm_config).li_c8_v1, expected)
+
+        for value in (None, "invalid", 2, {}):
+            with self.subTest(value=value):
+                clear_ascend_config()
+                test_vllm_config = VllmConfig()
+                test_vllm_config.additional_config = {"li_c8_v1": value}
+                with self.assertRaisesRegex(ValueError, "li_c8_v1"):
+                    init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger")

@@ -68,6 +68,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
+| `li_c8_v1`                          | bool | `False` | Use the legacy torch-npu quantized lightning indexer for A5 C8 attention. By default, C8 uses the CANN V2 operator. Does not affect C4 or the unquantized fallback. |
 | `kv_pool_range_debug`               | bool | `false` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
@@ -89,6 +90,20 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+<span id="li_c8_v1"></span>**li_c8_v1**
+
+A5 C8 attention uses `cann_ops_transformer.quant_lightning_indexer` (V2) by default.
+Omit `li_c8_v1` or set it to `false` to use V2. To select the legacy
+`torch_npu.npu_quant_lightning_indexer` operator, add `"li_c8_v1": true` to your
+existing `--additional-config` JSON object. For example:
+
+```bash
+--additional-config '{"enable_dsa_cp": true, "li_c8_v1": true}'
+```
+
+This option only selects the operator when quantized C8 indexing is enabled on A5;
+it does not enable C8 quantization itself. C4 and unquantized indexing are unchanged.
 
 <span id="runtime_guard"></span>**runtime_guard**
 
