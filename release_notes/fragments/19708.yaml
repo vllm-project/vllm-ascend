@@ -1,0 +1,7 @@
+pr: 19708
+entries:
+  - category: feature
+    text: >-
+      Added optional prefill session affinity to the load-balance proxy with
+      --enable-prefill-affinity, keeping multi-turn agent requests on a stable
+      prefill endpoint while preserving load-based decode scheduling.
