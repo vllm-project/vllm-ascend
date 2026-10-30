@@ -1170,13 +1170,14 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
     uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+    has_shared_slot_descriptors = any(descriptor.layer_stride == 0 for descriptor in kv_cache_config.kv_cache_tensors)
     # GLM-Next emits one descriptor for each physical cache slot. Layers
     # listed by a descriptor deliberately alias that slot even when they
     # belong to different scheduler groups (for example MLA and Mamba, or
     # the compressed indexer and its state cache). This differs from the
     # generic main layout, which treats descriptor layers as independent
     # regions within one common backing.
-    if uses_padded_page_layout:
+    if uses_padded_page_layout and has_shared_slot_descriptors:
         slot_layers: set[str] = set()
         for descriptor in kv_cache_config.kv_cache_tensors:
             names = get_kv_cache_tensor_layers(descriptor)
