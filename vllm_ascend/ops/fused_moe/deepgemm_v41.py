@@ -13,18 +13,11 @@ import math
 
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-# Validated configuration: 64 sequences and DSpark 5 use at most 384 Decode tokens.
-# This boundary selects large Prefill for that configuration, not arbitrary schedulers.
-_V41_TARGET_ROUTED_EXPERTS = 384
-_V41_LARGE_PREFILL_TOKEN_THRESHOLD = 512
 
 
 class DeepGemmV41Experts:
@@ -187,19 +180,6 @@ class DeepGemmV41Experts:
         if count > self.max_tokens:
             raise ValueError(f"V4.1 MegaMoE token count {count} exceeds {self.max_tokens}")
 
-        # Bound deferred allocator reuse during the target's large Prefill steps.
-        # Use the global token count so idle DP ranks take the same boundary.
-        max_tokens = _EXTRA_CTX.max_tokens_across_dp
-        if (
-            self.num_experts == _V41_TARGET_ROUTED_EXPERTS
-            and isinstance(max_tokens, int)
-            and max_tokens > _V41_LARGE_PREFILL_TOKEN_THRESHOLD
-            and not _EXTRA_CTX.in_profile_run
-            and not _EXTRA_CTX.capturing
-            and not _EXTRA_CTX.is_draft_model
-            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
-        ):
-            torch.npu.current_stream().synchronize()
         before = torch.npu.current_stream().record_event()
         quantized, scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
         self.buffer.x[:count].copy_(quantized)
