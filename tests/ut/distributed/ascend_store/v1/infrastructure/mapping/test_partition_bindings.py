@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import pool_worker as layerwise_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
     build_gva_remote,
 )
@@ -40,9 +41,9 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
     )
     production._group_pp_byte_offset = lambda group: pool_worker.KVPoolWorker._group_pp_byte_offset(production, group)
     monkeypatch.setattr(
-        pool_worker, "LayerBatchBuilder", lambda _db, size, _layers, **kw: SimpleNamespace(size=size, **kw)
+        layerwise_worker, "LayerBatchBuilder", lambda _db, size, _layers, **kw: SimpleNamespace(size=size, **kw)
     )
-    expected = pool_worker.KVPoolWorker._build_group_layer_builders(production)[0]
+    expected = layerwise_worker.LayerwiseKVPoolWorker._build_group_layer_builders(production)[0]
     shared = dcp_size > 1 and put_step > 1
     topology = SimpleNamespace(
         config=SimpleNamespace(

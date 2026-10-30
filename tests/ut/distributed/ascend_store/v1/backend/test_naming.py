@@ -8,7 +8,8 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from tests.ut.distributed.ascend_store import test_layerwise_keys as legacy_cases
 from tests.ut.distributed.ascend_store.v1.helpers import make_pool_config
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import memcache, mooncake
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys
@@ -27,7 +28,7 @@ def naming_case():
     return config, cache, pool
 
 
-@pytest.mark.parametrize("backend,legacy", ((memcache, memcache_backend), (mooncake, mooncake_layerwise)))
+@pytest.mark.parametrize("backend,legacy", ((memcache, MemcacheBackend), (mooncake, MooncakeBackend)))
 @pytest.mark.parametrize("pp_size", (1, 2))
 @pytest.mark.parametrize("group_count", (1, 2))
 def test_compiled_keys_match_legacy_and_do_not_reread_inputs(backend, legacy, pp_size, group_count, monkeypatch):
@@ -80,7 +81,7 @@ def test_mooncake_identity_normalizes_cache_size_and_group_representation(naming
     config, cache, pool = naming_case
     config.cache_config = CacheConfig(block_size=128, cache_dtype="auto")
     config.speculative_config = SimpleNamespace(compute_hash=lambda: "draft-model")
-    expected = mooncake_layerwise.bind_layerwise_keys(
+    expected = MooncakeBackend.bind_layerwise_keys(
         vllm_config=config,
         kv_cache_config=cache,
         model_name="model",
