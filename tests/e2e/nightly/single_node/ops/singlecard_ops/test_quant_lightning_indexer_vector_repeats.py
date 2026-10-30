@@ -88,6 +88,7 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
         )
         if mode == 1:
             blocks = candidate_output.cpu().reshape(queries, -1)[row]
+            assert ((blocks == -1) | (blocks >= 0)).all()
             blocks = blocks[blocks >= 0].long()
             expected_blocks = (visible + 7) // 8
             assert blocks.unique().numel() == min(expected_blocks, 2048)
