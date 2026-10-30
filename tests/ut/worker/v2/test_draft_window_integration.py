@@ -319,7 +319,8 @@ def test_off_metadata_retains_full_read_and_write_storage(contract):
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("profiling", [False, True])
-def test_propose_uses_real_upstream_signature_scope_and_dp_rules(contract, enabled, profiling):
+@pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+def test_propose_uses_real_upstream_signature_scope_and_dp_rules(contract, enabled, profiling, num_speculative_tokens):
     batch = SimpleNamespace(is_prefilling_np=np.array([False]), num_reqs=1)
     arguments = dict(
         input_batch=batch,
@@ -338,13 +339,15 @@ def test_propose_uses_real_upstream_signature_scope_and_dp_rules(contract, enabl
         skip_attn_for_dummy_run=profiling,
         mm_inputs=object(),
         is_profile=profiling,
-        num_speculative_tokens=3,
+        num_speculative_tokens=num_speculative_tokens,
     )
     events = []
 
     @contextmanager
-    def proposal_context(speculator, input_batch, dummy_run, is_profile):
+    def proposal_context(speculator, input_batch, dummy_run, is_profile, **kwargs):
         assert (speculator, input_batch, dummy_run, is_profile) == (contract.obj, batch, profiling, profiling)
+        expected = {} if contract.method == "autoregressive" else {"context_kv_only": num_speculative_tokens == 0}
+        assert kwargs == expected
         events.append("enter")
         try:
             yield

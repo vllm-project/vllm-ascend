@@ -228,12 +228,20 @@ class DraftWindowRuntime:
 
     @contextmanager
     def proposal_context(
-        self, speculator: Any, input_batch: Any, dummy_run: bool = False, is_profile: bool = False
+        self,
+        speculator: Any,
+        input_batch: Any,
+        dummy_run: bool = False,
+        is_profile: bool = False,
+        *,
+        context_kv_only: bool = False,
     ) -> Iterator[None]:
         if speculator is not self.speculator:
             raise RuntimeError("Draft Window runtime belongs to another speculator")
         if self._owner is not None or self._bypass:
             raise RuntimeError("Draft Window proposal scope is already active")
+        if context_kv_only and self.method not in ("dflash", "dspark"):
+            raise ValueError("Context-only Draft KV updates require a parallel drafter")
         if dummy_run or is_profile or getattr(input_batch, "is_dummy", False):
             self._bypass = True
             try:
@@ -259,7 +267,13 @@ class DraftWindowRuntime:
                     self._native_swa_built.clear()
                 self.pool.begin_native(owner)
                 yield
-                if not self._build_count:
+                # DFlash/DSpark keep context KV current when the scheduler
+                # requests zero drafts. That upstream branch writes KV but
+                # never executes draft attention. Retain completion protection
+                # for its writes without demanding a nonexistent read view.
+                if context_kv_only and self._build_count:
+                    raise RuntimeError("Context-only Draft KV update unexpectedly consumed a read projection")
+                if not context_kv_only and not self._build_count:
                     raise RuntimeError("Draft Window proposal did not consume a read projection")
                 if self.method == "eagle3" and self._next_step != self.static_k:
                     raise RuntimeError("Eagle3 proposal did not consume every configured draft step")

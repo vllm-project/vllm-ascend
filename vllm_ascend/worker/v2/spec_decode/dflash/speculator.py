@@ -317,7 +317,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             sync_state = None
         runtime = getattr(self, "_draft_window_runtime", None)
         with (
-            runtime.proposal_context(self, input_batch, dummy_run, is_profile)
+            runtime.proposal_context(
+                self,
+                input_batch,
+                dummy_run,
+                is_profile,
+                context_kv_only=num_speculative_tokens == 0,
+            )
             if runtime is not None
             else nullcontext(),
             build_attn_metadata_wrapper(),

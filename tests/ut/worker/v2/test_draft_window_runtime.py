@@ -677,6 +677,48 @@ def test_missing_group_cannot_be_silently_dropped(setup, monkeypatch):
     assert runtime.pool.poisoned
 
 
+@pytest.mark.parametrize("method", ["dflash", "dspark"])
+def test_context_only_kv_write_keeps_completion_without_inventing_attention(setup, method):
+    _, spec, canonical, completions = setup
+    policy = resolve_draft_window_policy(requested_window_size=8, method=method)
+    runtime = DraftWindowRuntime(spec, policy)
+    before = canonical.clone()
+    payload = torch.ones(8)
+    with runtime.proposal_context(spec, batch(), context_kv_only=True):
+        owner = runtime._owner
+        assert owner is not None and owner.state is DraftWindowOwnerState.ACTIVE
+        runtime.pool.retain(owner, payload)
+    assert owner.state is DraftWindowOwnerState.SUBMITTED
+    assert owner.completion is completions[-1]
+    assert any(value is payload for value in owner.retained)
+    assert runtime.pool.reclaim_completed() == 0
+    torch.testing.assert_close(canonical, before, rtol=0, atol=0)
+    completions[-1].complete = True
+    assert runtime.pool.reclaim_completed() == 1
+    assert owner.state is DraftWindowOwnerState.RELEASED
+
+
+def test_context_only_scope_cannot_hide_an_actual_draft_read(setup):
+    runtime, spec, _, _ = setup
+    with (
+        pytest.raises(RuntimeError, match="unexpectedly consumed"),
+        runtime.proposal_context(spec, batch(), context_kv_only=True),
+    ):
+        runtime.metadata_callback(spec.num_query_per_req, 2)(0, common())
+    assert runtime.pool.poisoned
+
+
+def test_eagle_cannot_select_parallel_context_only_scope(setup):
+    _, spec, _, _ = setup
+    policy = resolve_draft_window_policy(requested_window_size=8, method="eagle3")
+    runtime = DraftWindowRuntime(spec, policy)
+    with (
+        pytest.raises(ValueError, match="parallel drafter"),
+        runtime.proposal_context(spec, batch(), context_kv_only=True),
+    ):
+        pytest.fail("Eagle3 must not enter a context-only scope")
+
+
 def test_eagle_fused_mode_cannot_bypass_per_step_reads(setup):
     _, spec, _, _ = setup
     spec.use_fused_multi_step_decode = True
