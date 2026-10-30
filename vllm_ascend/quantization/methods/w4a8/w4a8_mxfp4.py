@@ -19,9 +19,11 @@
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -30,6 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.utils import get_mxfp_tp_padding, pair_mxfp_scales
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
 
 from ..base import (
@@ -58,6 +61,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
     supports_weight_switch = True
+    supports_unaligned_tp_groups = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -65,6 +69,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 
     @staticmethod
     def get_weight(input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        if input_size % 2:
+            raise ValueError("MXFP4 requires an even input size because each byte packs two weights.")
         params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
         return params_dict
 
@@ -72,8 +78,15 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
+        scale_groups = (input_size + self.group_size - 1) // self.group_size
+        params_dict["weight_scale"] = torch.empty(output_size, scale_groups, dtype=torch.uint8)
         return params_dict
+
+    def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = getattr(layer, "mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding))
+        return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
 
     def prepare_input_for_overlap(
         self,
@@ -82,7 +95,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     ) -> PreparedLinearInput | None:
         if x.dim() != 2:
             return None
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+        quantized_x, dynamic_scale = self._quantize_input(layer, x)
         return PreparedLinearInput(quantized_x, dynamic_scale, x.dtype)
 
     def apply(
@@ -92,6 +105,14 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        input_shape = None
+        if isinstance(x, torch.Tensor) and x.dim() != 2:
+            # Weight-NZ quant matmul accepts only matrices, while ViT linears
+            # also receive batched activations. Quantize the flattened tokens
+            # and restore the leading dimensions after the projection.
+            input_shape = x.shape
+            x = x.reshape(-1, x.shape[-1])
+
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
             assert x.scale is not None
@@ -101,8 +122,18 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             quantized_x, dynamic_scale = x
             output_dtype = torch.bfloat16
         else:
-            quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            quantized_x, dynamic_scale = self._quantize_input(layer, x)
             output_dtype = x.dtype
+
+        prefix_padding, suffix_padding = getattr(layer, "mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            expected_k = layer.input_size_per_partition + prefix_padding + suffix_padding
+            if quantized_x.shape[-1] != expected_k:
+                raise ValueError("MXFP4 prequantized input must include the layer's TP group padding.")
+
+        # The MXFP4 Weight-NZ kernel requires a matrix-shaped bias.
+        if bias is not None and bias.dim() == 1:
+            bias = bias.unsqueeze(0)
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -117,6 +148,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             group_sizes=[0, 0, self.group_size],
         )
 
+        if input_shape is not None:
+            output = output.reshape(*input_shape[:-1], output.shape[-1])
         return output
 
     def process_weights_after_loading(self, layer):
@@ -132,15 +165,24 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
+        prefix_padding = suffix_padding = 0
+        if isinstance(layer, RowParallelLinear) and layer.tp_size > 1:
+            prefix_padding, suffix_padding = get_mxfp_tp_padding(
+                layer.input_size_per_partition, self.group_size, layer.tp_rank
+            )
+        layer.mxfp4_tp_padding = (prefix_padding, suffix_padding)
+        padded_weight = layer.weight.data
+        if prefix_padding or suffix_padding:
+            # FP4 is packed along K; zero bytes represent pairs of zero weights.
+            padded_weight = F.pad(padded_weight, (prefix_padding // 2, suffix_padding // 2))
         layer.weight.data = torch_npu.npu_format_cast(
-            layer.weight.data,
+            padded_weight,
             ACL_FORMAT_FRACTAL_NZ,
             customize_dtype=torch.float8_e4m3fn,
             input_dtype=torch_npu.float4_e2m1fn_x2,
         )
         layer.weight.data = layer.weight.data.transpose(-1, -2)
-        n, k = layer.weight_scale.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
+        layer.weight_scale.data = pair_mxfp_scales(layer.weight_scale.data).transpose(-3, -2)
         layer._mxfp4_transformed = True
 
     def restore_weights_for_rl_loading(self, layer):
