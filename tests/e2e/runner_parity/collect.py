@@ -12,7 +12,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from client import post_json, stream_completion
+from tests.e2e.runner_parity.client import post_json, stream_completion
 
 SEED = 1024
 MODEL = "glm51-runner-parity"
