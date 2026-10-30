@@ -39,7 +39,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.attention_v2_b1 import AscendB1Metadata, b1_verify_graph_params
+from vllm_ascend.attention.attention_v2_b1 import AscendB1Metadata, b1_decode_graph_params, b1_verify_graph_params
 from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
@@ -886,11 +886,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 if isinstance(metadata, AscendB1Metadata):
                     # Decode steps run one query per request, so the captured
                     # all-visible placeholder mask stays correct and only the
-                    # per-step KV lengths and block table are rebound.
-                    layer_params = {
-                        "block_table": metadata.block_tables,
-                        "actual_seq_kvlen": seq_lens,
-                    }
+                    # per-step KV lengths and block table are rebound. FULL
+                    # cudagraph mode captured the layer as PagedAttention, so
+                    # the helper emits context_lens instead of actual_seq_kvlen.
+                    layer_params = b1_decode_graph_params(metadata, seq_lens)
                 else:
                     layer_params = {
                         "actual_seq_lengths": query_start_loc,
