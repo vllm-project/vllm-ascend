@@ -1,55 +1,55 @@
 # AscendStore v1 架构与基础设施设计
 
-AscendStore 将模型计算产生的 KV 缓存保存到外部存储，让后续请求按内容复用已有数据。v1 的业务层负责决定本次请求要查询、加载或保存什么，再组合基础设施提供的可达性计算、布局映射、消息通信、执行协调和资源管理能力完成操作。
+AscendStore 将模型计算产生的 KV 缓存保存到外部存储，让后续请求按内容复用已有数据。Scheduler 根据请求进度与缓存分配形成命令，Worker 执行 Lookup、Load、Store 并交回结果。业务层组合基础设施提供的恢复点计算、映射、通信、执行和资源管理能力。
 
-这套划分保留两条清楚的业务主线：Scheduler 根据请求与缓存分配形成命令，Worker 根据命令选择对象、组织传输并处理结果。可复用的计算和机制集中在 Infrastructure 中，但请求归属、对象发布条件和来源释放判断仍由业务层负责。
-
-本文说明各部分的职责、协作关系与关键约束。文中的地址和布局示例均以字节为单位。
+本文先说明整体边界，再展开 Worker 的组合关系与三条业务数据流。地址、长度和布局示例均以字节为单位。执行器中的 **write 表示写入本地 KV，对应 Load；read 表示读取本地 KV，对应 Store**。
 
 ## 1. 总体架构
 
-![AscendStore v1 分层架构，展示接入、业务、共享契约、基础设施、Backend 适配和第三方后端的职责归属](../../assets/ascendstore_v1/architecture_layers.svg)
+![AscendStore v1 总体职责：Connector 直接装配 Scheduler 与 Worker，业务层组合基础设施并调用 Backend](../../assets/ascendstore_v1/architecture_layers.svg)
 
-vLLM 负责请求调度、缓存分配与模型执行。`AscendStoreV1Connector` 适配框架钩子，在 Scheduler 和 Worker 两种角色下分别实例化。`factory.py` 根据已经解析和校验的配置装配具体组件。
+Connector 在 Scheduler 和 Worker 进程中分别实例化。Lookup 通过独立 RPC 查询；Load / Store 命令与完成信息通过 vLLM Connector 元数据交接，KV 字节经 Backend 传输。
 
-业务层由 Scheduler 和 Worker 构成。Scheduler 持有请求进度、采用的命中范围和缓存分配信息；Worker 使用已经分配好的 KV Tensor，持有本地 Mapping 与执行上下文，并处理传输结果。Bulk 按完整对象传输，Layerwise 将对象的传输分解到物理层。逐层访问又分为 KeyRange 和 GVA：前者按对象 key 与字节范围访问，后者按全局地址访问。
-
-Protocol 是 Connector、Scheduler 与 Worker 共享的业务契约，独立于基础设施目录。它定义传输命令、Lookup 请求与结果及来源释放回执，并负责 Lookup 的编解码、校验与失败时的未命中回退。
-
-基础设施层提供可组合的能力。Configuration 与 Topology 确定静态配置和本地拓扑，RPC 管理字节消息的请求应答与连接生命周期，Coordinator 判断哪些缓存可以支持恢复，Mapping 描述对象身份与字节位置，Execution 安排调用的执行顺序，Resources 管理需要显式释放的资源。业务路径按需组合这些能力，例如 Worker 的 Lookup 使用 Coordinator、Mapping 的命名能力和 Backend。
-
-Backend 适配层位于独立的 `backend/` 目录。它定义整对象、KeyRange 和 GVA 的访问约定，并将其转换为 Mooncake、Memcache 原生客户端调用。第三方后端层包含这些客户端、传输能力与外部存储服务。
-
-Worker 直接调用 Backend 完成读写，Resources 持有 Backend 及其资源句柄。图中按职责分组，不表示逐层转发的调用顺序。
+资源所有权与调用关系分开：Service / Transfer 使用 Backend，Resources 保留客户端、注册句柄及对象会话，直到业务排空并确认内存安全后才释放。
 
 ## 2. 代码结构
 
-以下目录以 `ascend_store/v1/` 为根。目录树展示主要职责，省略包导出文件和部分辅助文件。
+以下目录以 `ascend_store/v1/` 为根，省略包导出和部分辅助文件。
 
 ```text
 v1/
-├── connector.py                 vLLM 钩子适配与两侧角色入口
-├── factory.py                   配置准入后的实例装配
+├── connector.py                 vLLM 钩子适配、配置准入与两侧实例装配
 ├── protocol/
-│   ├── messages.py              共享命令、Lookup 消息与来源释放回执
+│   ├── messages.py              命令、Lookup 消息与来源释放回执
+│   ├── results.py               Load / Store 完成与安全排空结果
 │   └── lookup.py                Lookup 编解码、校验与未命中回退
 ├── scheduler/
-│   ├── scheduler.py             Lookup 采用、分配确认、每步命令规划
-│   ├── lookup.py                请求侧命中候选与重算范围处理
-│   ├── state.py                 请求与规划进度
+│   ├── scheduler.py             命中采用、分配确认、每步命令规划
+│   ├── lookup.py                请求侧恢复候选与实际加载范围
+│   ├── state.py                 请求、分配与规划进度
 │   └── source_leases.py         需要额外保护的 Store 来源引用
 ├── worker/
-│   ├── base.py                  每步业务上下文、批次、完成与来源释放
-│   ├── bulk/                   整对象 Load / Store
-│   ├── layerwise/              逐层业务；KeyRange / GVA 两种访问方式
-│   └── transfer/               对象行、请求归属、批次与结果证据
+│   ├── worker.py                KV 绑定、钩子适配、业务生命周期
+│   ├── service/
+│   │   ├── lookup.py            查询与恢复证据
+│   │   ├── load.py              Load 选块、组批与目标结果
+│   │   └── store.py             Store 候选、writer、发布与来源结果
+│   ├── transfer/
+│   │   ├── bulk.py              整对象参数与传输
+│   │   └── layerwise.py         KeyRange / GVA 参数、逐层传输与收尾
+│   └── data/
+│       ├── context.py          KV 绑定期间稳定的 TransferContext
+│       ├── batch.py            LoadBatch / StoreBatch 与逐层传输计划
+│       ├── selection.py        入选对象及其目标或来源归属
+│       └── keys.py             查询 / 加载所需的唯一对象索引
 ├── infrastructure/
-│   ├── configuration.py        静态配置、缓存事实与分区约束
-│   ├── topology.py             分区类型、本地 rank 与缓存层绑定
-│   ├── rpc.py                  字节帧请求应答、超时与连接 / 线程生命周期
-│   ├── coordinator.py          单组 / 多组缓存的恢复条件与选择掩码
-│   ├── mapping.py              Key / Local / Remote 数据与 Layer 段区间关系
-│   ├── execution.py            串行执行器与一步内的逐层时序协调
+│   ├── configuration.py        静态配置解析与支持检查
+│   ├── topology.py             本地 rank、缓存组、物理层与分区
+│   ├── rpc.py                  字节帧请求应答与连接 / 线程生命周期
+│   ├── coordinator.py          恢复条件、共同终点与选块掩码
+│   ├── mapping.py              BlockHashMapping 与 Key / Local / Remote / Layer
+│   ├── executor.py             队列与 BulkExecutor / LayerwiseExecutor
+│   ├── collective.py           CollectiveGroup 与 GroupCompletion
 │   └── resources.py            执行器、对象会话、注册与客户端所有权
 └── backend/
     ├── interfaces.py           整对象、KeyRange、GVA 访问契约
@@ -59,60 +59,70 @@ v1/
     └── memcache/               Memcache 客户端与对象会话适配
 ```
 
-`worker/transfer/` 虽然被不同 Worker 路径复用，仍属于业务侧。它需要知道一行传输属于哪个请求、原始缓存组和 Store job，以及失败应如何回报。这些对象与结果的归属决定了它的业务职责。
+## 3. Worker：业务组合与数据流
 
-## 3. 业务组合
+### 3.1 组合关系与状态归属
 
-### 3.1 请求规划与传输执行
+![Worker 组合架构：三个 Service、Load 和 Store 共用的 Transfer、业务数据与执行基础设施](../../assets/ascendstore_v1/worker_composition.svg)
 
-Scheduler 将外部命中视为候选。只有 vLLM 确认采用并分配目标块后，Scheduler 才拥有生成 Load 命令所需的信息。Store 按本步调度范围、已确认的 token 边界、内容 hash 和保存策略规划，并区分来源就绪状态。生成 Store 命令不代表 KV 已写入完成，Worker 必须等来源就绪后才能读取。
+`LayerTransferPlan` 保存已选对象的执行数据，`_LayerwiseStep` 保存执行器内部控制信息，都不承担额外的业务状态。步骤结束后，已提交任务的闭包仍持有所需控制记录；Service 的 pending 队列则继续持有尚未完成的 Batch，因此解除本步钩子不会丢失跨步操作。
 
-Worker 从命令出发，建立对象行和来源归属，调用可复用能力完成选择、映射和执行，最后将结果还原到请求或 Store job。原始 group ID 始终用于缓存组身份；紧凑的数组下标只用于本次批次内部的索引。压缩候选行不能改变远端 key 的命名空间，也不能丢失失败来源。
+### 3.2 Lookup：只准备查询和恢复证据
 
-### 3.2 Bulk Store
+![Lookup 数据流：选查询范围、建立唯一 Key、查询存在性、还原可用性并求恢复终点](../../assets/ascendstore_v1/lookup_flow.svg)
 
-Worker 按以下顺序组织一次 Bulk Store。
+- 连续 Full Attention 的观察结果只需起点、块大小和命中序列；稀疏或多组路径还保留每个候选的起点、覆盖长度与 hash，以表达不同恢复条件。
+- 一个逻辑块可能对应多个远端分区，各分区的对象都存在才算可用；本地已确认前缀直接作为恢复证据参与计算。
+- Store 的保留策略只决定本次保存哪些块，不能描述外部存储中所有可能存在的恢复点。因此 Lookup 使用自己的候选规则。
 
-1. 从本步 Store 命令取得范围、hash、block 表和来源归属；结合 Coordinator 形成需要保存的候选。
-2. 生成候选 key，根据 Backend 的写前存在性要求筛选对象，并按业务规则处理同批重复写入。
-3. 压缩入选对象，由各组 Mapping 计算地址和长度，再由 Worker 合并为本次 Backend 参数。
-4. 在后台执行路径中先准备参数，在 Backend 真正读取 KV 前等待来源就绪事件。
-5. 调用 Backend，并将每个对象的结果对应回来源；分别判断写入结果和来源是否已停止被读取。
+### 3.3 Load：对象唯一，目标不能丢
 
-Mapping 因而不需要知道某个请求为什么要保存；Executor 不需要解释后端失败码；Backend 不决定一个 vLLM 请求何时完成。业务层组合这些能力，推进本次操作。
+![Load 数据流：按已确定的终点选块、绑定全部目标、登记批次、准备参数并传输和收集](../../assets/ascendstore_v1/load_flow.svg)
 
-### 3.3 职责划分
+- 同一请求不能同时登记两次在途 Load。登记后即使启动失败，Service 仍持有目标归属，关闭时能够继续检查写入是否停止。
+- 单组失败只有在目标写入已结束且框架支持失效重算时才可回退。当前多缓存组的部分加载失败缺少同等回退契约，因此上抛；参数或结果数量错误、写入安全未知也不能当作普通未命中处理。
 
-Infrastructure 可以包含领域规则。Coordinator 必须理解不同缓存类型的恢复条件，Mapping 必须理解对象的分片身份，这些规则构成可复用能力的一部分。共享的 Load / Store 消息契约则由独立的 Protocol 承载。
+### 3.4 Store：先选合格来源，再查询和展开地址
 
-应当留在业务侧的是：本次请求采用哪个候选、哪些对象参与、何时提交、如何解释失败、哪些对象已经满足发布条件，以及何时可以归还来源。基础设施返回计算结果或完成保证，业务层据此推进状态。
+![Store 数据流：登记来源、选择 writer 和候选、Key 去重与存在性过滤、读源传输、发布和来源释放](../../assets/ascendstore_v1/store_flow.svg)
 
-| 需要解决的问题 | 可复用能力 | 业务层仍需完成的决定 |
-| --- | --- | --- |
-| 哪些缓存能支撑恢复 | Coordinator 的范围与掩码计算 | 是否采用命中，如何与本次请求和分配对应 |
-| 数据在哪里 | Mapping 的 key、地址、长度与对象偏移 | 入选对象、writer 选择、跨组组批与结果归属 |
-| 调用怎样执行 | Executor / Session 的队列、预取与等待 | 提交哪个业务操作，如何处理结果及失败 |
-| 资源何时释放 | Resources 的持有、顺序释放和失败保留 | 确认结果、来源安全及允许关闭的时点 |
+- 范围命令从本次保存起点选块；checkpoint 命令使用指定状态块，并补齐恢复该 checkpoint 必需的 companion 块。
+- 多分区需要稳定结果顺序时，排序移动的是已经绑定的 Key 与来源。来源中的命令索引用于将结果交回原请求和 Store job，不需要另建反向索引。
+- 共享汇总要求参与者进入相同轮次。没有数据或准备失败的成员也发送报告，是为了让其他成员能结束本轮，并判断必要 writer 的证据是否齐全。
 
-### 3.4 共享 Protocol
+### 3.5 三条业务与两种传输方式
 
-Protocol 定义 Scheduler 与 Worker 之间的业务交接。Load 命令携带已采用的加载范围与目标块；Store 命令携带可保存范围或精确 checkpoint 来源，并区分来源已就绪和仍需等待的操作。每步命令与完成结果通过 vLLM Connector 机制交接，KV 字节由 Worker 直接调用 Backend 传输。
+三条业务需要的数据不同，不能为了统一流程而全部展开成一套对象行。Lookup 需要逻辑可用性；Load 需要唯一对象及所有目的地；Store 需要唯一 Key 及选中的来源。Bulk / Layerwise 与这个划分正交：两者复用同一 Service 的选块与归属，区别在传输粒度、对象访问方式和时序。
 
-Lookup 通过独立 RPC 通道查询。Scheduler 使用 LookupClient 发出范围、缓存组和内容 hash；Worker 侧的 LookupServer 将消息交给 Worker 查询，返回可恢复终点与尾部对象的 key 边界。Protocol 负责消息校验，并将远端查询失败、通信异常或无效响应解释为本次外部缓存未命中；RPC 只负责字节帧交换，不解释命中语义。
+Layerwise 跨层复用 Selection、成功对象计划和可共享的层参数模板；不在每层重新生成 Key、执行存在性查询或重建请求归属。层地址和范围在对应层需要时求值。GVA 的远端基址来自本次 Backend Session，不能当成永久 Mapping 数据。
 
-来源释放回执表示相关 Worker 已停止读取某个 Store job 的来源，用于归还 Scheduler 持有的引用；它不代表对象已成功发布。
+“数据只准备一次”约束的是重复推导，不是禁止扫描。必须保留的扫描包括 Lookup 合并可用性、Store 根据 exists 结果过滤候选、Layerwise 根据 open 结果投影成功对象，以及完成后的失败与发布汇总。这些阶段有新的输入证据，沿既有身份推进；没有新信息时不应再次拆分、合并或重建归属。
+
+### 3.6 Scheduler 与 Connector 交接
+
+Scheduler 将外部命中视为候选，只有 vLLM 确认采用并分配目标块后才生成 Load 命令。Store 规划区分已就绪来源和本步仍在计算的来源，并为需要额外保护的来源持有引用。原始 group ID 始终表示缓存组身份，紧凑下标仅用于批次内部定位。
+
+Connector 直接装配 Scheduler 和 Worker。异步请求级 Load 当前用于 Bulk；Layerwise 使用同步 Scheduler，通过逐层钩子与计算交叠。Worker 将 begin、加载、层等待、保存和 end 钩子适配到 Service / Transfer，不直接推进底层队列或逐层 Future。
+
+没有 forward 的空步骤也要收集先前提交的异步完成和来源释放回执，再清除元数据。普通步骤结束只解除当前步骤控制关系，不能丢弃跨步 Load / Store 批次。Forward 或钩子异常时中止本步，保留原异常以及已提交任务的安全状态，关闭时继续排空。
+
+Protocol 的 Lookup 适配将查询失败或无效应答转为未命中；RPC 不解释命中语义。Store 来源释放回执表示 Worker 已停止读源，用来归还 Scheduler 的引用，不代表存储成功；异步 Load 完成和失败信息也必须只交付一次。
 
 ## 4. 基础设施
 
-### 4.1 Configuration 与 Topology
+### 4.1 Configuration
 
 Configuration 负责整体静态解析，将执行选项、缓存规格、传输粒度和并行分区整理为 Scheduler 与 Worker 共用的配置。缓存规格与粒度复用 vLLM 的解析结果，Backend 的对象格式要求转化为相应的分区约束。
 
-Topology 基于静态配置，绑定当前 Worker 的实际 rank、缓存组与物理层、对象分片位置及上下文成员关系，为 Mapping 和 Worker 提供本地事实。writer 选举和对象发布由 Worker 根据这些事实决定。
+Connector 先调用 Configuration 完成解析和支持检查，再装配 Scheduler 或 Worker。配置描述两侧共用的规则，不依赖某个 Worker 的进程坐标；不支持的组合在申请 Backend 资源前被拒绝。
 
-初始化时先完成 Configuration 解析，由 Factory 检查支持的组合；Factory 在 Worker 侧绑定 Topology，随后申请 Backend 资源并装配 Worker。静态解析与本地绑定分开，使 Scheduler 无需依赖 Worker 的进程坐标。
+### 4.2 Topology
 
-### 4.2 RPC
+Topology 基于已校验的配置，绑定当前 Worker 的实际 rank、缓存组与物理层、对象分片位置及上下文成员关系，为 Mapping 和 Worker 提供本地事实。writer 选举和对象发布由 StoreService 根据这些事实决定。
+
+Worker 侧先完成 Topology 绑定，再申请 Backend 资源并构造 Worker。Scheduler 使用 Configuration 规划请求，无需创建本地拓扑；不同 Worker 则根据各自进程坐标得到对应的 Topology。
+
+### 4.3 RPC
 
 RPC 提供同步字节帧请求应答，使用 ZMQ REQ / REP。客户端由单一调用线程使用，同一连接一次只进行一个交换；服务端在持有 socket 的线程上串行执行处理回调。Lookup 的业务适配由 Protocol 完成。
 
@@ -120,7 +130,7 @@ RPC 提供同步字节帧请求应答，使用 ZMQ REQ / REP。客户端由单�
 
 服务端的 socket 由服务线程创建、使用和关闭，启动失败通过屏障传回调用方。Connector 关闭时先等待 Lookup 服务退出，再关闭 Worker 及其 Backend 资源；等待超时则保留这些资源，允许稍后重试。服务退出保证处理回调已结束，不保证应答已送达客户端。
 
-### 4.3 Coordinator
+### 4.4 Coordinator
 
 Coordinator 在 Token 轴上统一理解本地与外部 KV 的逻辑可用性，判断共同可恢复终点，并选择各阶段所需的逻辑块。Full Attention 依赖相应历史，滑动窗口依赖终点附近的窗口，状态缓存依赖对应位置的检查点。请求进度由 Scheduler 推进，是否采用命中也由 Scheduler 决定。
 
@@ -134,51 +144,65 @@ Coordinator 在 Token 轴上统一理解本地与外部 KV 的逻辑可用性，
 
 Lookup 的查询候选、外部实际命中和 Load 所需块是不同结果；Store 的稀疏保留规则也不能替代 Lookup 选择，否则会漏掉仍可恢复的终点。恢复终点与尾部对象边界不一致时，`ReachablePrefix` 保留读取所需的尾部 key 边界。
 
-Coordinator 输出逻辑终点与选择掩码，不查询 Backend、不读写 KV 字节，也不计算 Tensor 地址。Worker 执行查询，将选择对应到实际对象行，结合 Mapping 组织传输参数，再交给 Backend 执行。
+Coordinator 输出逻辑终点与选择掩码，不查询 Backend、不读写 KV 字节，也不计算 Tensor 地址。LookupService 执行查询；LoadService / StoreService 将选择与目标或来源绑定，由 Transfer 结合 Mapping 生成 Backend 参数。
 
-### 4.4 Mapping
+### 4.5 Mapping
+
+`BlockHashMapping` 表达逻辑位置、内容 hash 与调用方 Block ID 的关系，供 Load / Store 共用。它处理 hash 粒度、范围切片和尾部边界，不分配块、不查询后端，也不保存请求状态。Lookup 只使用其 hash 范围能力。
 
 Mapping 将对象身份、本地字节与远端位置分别绑定为 Key、Local、Remote 三份数据，Layer 记录物理层到 segment 区间的关系。一个 segment 是可连续复制的本地字节段；各份数据通过一致的分区坐标与段顺序对应。
 
-绑定时利用真实 Tensor view 表达切分并识别连续段，形成可复用的数值布局。运行时按内容 hash、本地 Block ID 和层区间求值，Worker 据此组织 Bulk、KeyRange 或 GVA 参数。对象选择、发布和来源安全仍由 Worker 负责。第 5 章说明具体布局关系。
+绑定时利用真实 Tensor view 表达切分并识别连续段，形成可复用的数值布局。运行时按内容 hash、本地 Block ID 和层区间求值，Transfer 据此组织 Bulk、KeyRange 或 GVA 参数。对象选择、发布和来源安全由 Service 负责。第 5 章说明具体布局关系。
 
-### 4.5 Execution
+### 4.6 Executor
 
-Execution 将跨步执行与单步协调分开：Executor 提供执行队列，Session 只协调当前 step 的逐层时序。结束 Session 不会关闭执行器，也不会等待跨步 Store 完成。
+`executor.py` 将通用队列与执行控制分开。`Executor` 提供单线程 FIFO 队列：启动屏障确认线程初始化完成，提交返回 Future，关闭排空任务并回收线程。Resources 持有这些底层队列；`BulkExecutor` 和 `LayerwiseExecutor` 组合借用它们，Transfer 不直接操作底层 Executor。
 
-`Executor` 提供一个 FIFO 单线程队列。启动屏障确认线程初始化完成，提交返回 Future，关闭等待已提交任务完成并回收线程。任务结果和异常由调用者领取。Load 与 Store 可以使用不同队列，跨队列的依赖通过事件或显式等待建立。
+`BulkExecutor` 负责整体操作的提交以及读源就绪交接。提交 Store 时创建的 `source_ready` 是 `Future[Event]`：Future 等模型钩子交来事件，事件再证明此前的设备写入已完成。Worker 提供记录设备事件的回调，Transfer 在合适的钩子调用执行器完成交接；后台先准备参数，真正读源前再同步该事件。已就绪来源可以在开始本步时记录，普通 Bulk 来源在保存收尾钩子记录。它不是 Layerwise Gate，也不表示 Store 完成；空选集无需等待不存在的读取。
 
-`Session` 协调一步内的逐层执行。模型钩子由一个调用线程推进，后台操作在传入的串行队列上运行。Session 维护 Load 顺序、有界预取窗口、计算开始 gate 和 Store 提交去重；业务回调负责实际传输和结果处理。gate 是一个同步门闩，用于让后台任务等待计算开始条件。
+`LayerwiseExecutor` 收拢本步的逐层调度、预取窗口、计算开始 Gate、Future、read 提交去重与收尾。模型钩子由调用线程推进，后台操作在借用的串行队列上执行；Transfer 提供实际复制与收尾回调。Service 只接收批次结果，不参与逐层推进。
 
-预取分别记录提交位置和领取位置。例如 Load 顺序为 `[2, 5, 9, 12]`，窗口深度为 2，起初提交层 2、5；模型领取层 2 后补交层 9。层 5 在后台完成，只改变它的 Future 状态，领取位置仍由模型钩子推进。同一层的重复钩子保持幂等，完成回调按队列顺序执行一次。
+预取分别记录提交位置和领取位置。例如 write 顺序为 `[2, 5, 9, 12]`，窗口深度为 2，首次等待层 2 时提交层 2、5；下一次等待层 5 时补交层 9。层 5 在后台完成不会自动推进模型的领取位置。相同物理层的重复钩子保持幂等。后续预取等待当前层的计算开始 Gate，源就绪事件则约束 Store 实际读源。当前 KeyRange 多缓存组路径在计算开始回调记录读源就绪，其余按保存钩子记录；重复钩子不会再次提交同一层。Gate、源就绪和复制完成不能互相替代。
 
-Store 钩子在调用线程记录来源就绪事件，再把工作交给队列。后台先准备参数，随后在读 KV 前等待该事件。中止 Load 时解除其等待的 gate，保留仅供 Store 使用的 gate；要求等待时，必须等已提交 Load 及其收尾结束。中止不能打断正在执行的原生操作，操作成功与否仍由业务层读取结果确认。
+结束步骤时执行器停止推进、取消尚在等待的 Gate，并封口 read、安排剩余收尾；已提交任务持有其控制记录直到完成。中止不能打断已经进入原生调用的复制或设备事件等待。`end_step` 不关闭底层队列，也不以本步控制记录解除来宣告跨步 Store 完成。
 
-`end_step` 解除本步回调并结束 Load 协调。跨步 Store 的结果观察、来源保护和最终排空由 Worker 继续管理。
+### 4.7 Resources
 
-### 4.6 Resources
+`Resources` 持有执行器、Backend 对象会话、内存注册句柄和客户端，并保留 KV Tensor 引用。Worker 持有 TransferContext、Service 和 Transfer；逐层控制由 LayerwiseExecutor 持有。
 
-`Resources` 持有执行器、Backend 对象会话、内存注册句柄和客户端，并保留 KV Tensor 引用。Worker 持有 Mapping 与每步 Session。
+绑定时，Resources 先保留 KV Tensor，并按真实 view 的地址跨度计算注册范围；Worker 绑定 TransferContext，从 Tensor 构建分区与段布局并装配 Transfer 和 Service，再由 Resources 注册 buffer、启动执行器。共享 storage 的多个 view 合并覆盖范围，空 view 被跳过。注册范围包含访问跨度中的 padding，Mapping 的段长度只包含有效载荷。
 
-绑定时，Resources 先保留 KV Tensor，并按真实 view 的地址跨度计算注册范围；Worker 调用 Mapping 从 Tensor 构建分区与段布局，再由 Resources 注册 buffer、启动执行器。共享 storage 的多个 view 合并覆盖范围，空 view 被跳过。注册范围包含访问跨度中的 padding，Mapping 的段长度只包含有效载荷。
-
-关闭从 Worker 的业务收尾开始：领取结果，确认 Store 已停止读取来源，再停止执行器。Resources 随后依次关闭对象会话、执行额外清理（例如发布协调组）、释放注册句柄、关闭 Backend，最后放掉 Tensor 引用。
+关闭从 Worker 的业务收尾开始：领取结果，检查 Store 读源与 Load 写目标的安全状态，并排空、停止执行器。只有安全状态已确认，才继续释放底层资源。Resources 随后依次关闭对象会话、执行额外清理（例如发布协调组）、释放注册句柄、关闭 Backend，最后放掉 Tensor 引用。
 
 清理遇到失败即停止后续资源释放，保留句柄和相关引用供重试；全部清理成功后才放掉 Tensor 引用。原生调用异常导致读源状态未知时，Worker 还需保留安全状态；仅有 Future 结束或 Python 线程退出，无法证明设备和客户端已停止访问该内存。
 
-### 4.7 Backend
+### 4.8 Backend
 
 整对象接口用 key 和本地地址段传输完整对象。KeyRange 接口用 key、对象大小和对象内偏移访问部分字节。GVA 接口先通过对象会话取得受保护的远端地址，再按本地地址、远端地址和长度复制。当前 Mooncake Layerwise 使用 KeyRange，Memcache Layerwise 使用 GVA。
 
 Mooncake 的普通 TransferEngine 路径由 v1 Backend 持有进程级引擎和注册表，与旧 Connector 的全局引擎隔离。多个 v1 客户端注册同一地址和大小时共享引用，最后一个注册句柄释放时才注销内存；失败的回滚或注销保留句柄供重试。引擎初始化复用上游 `GlobalTE` 的失败策略，原生初始化失败后需要重启进程。使用 Store 独立引擎或 fabric memory 的路径仍按各自原生契约处理。
 
-Backend 实现原生客户端调用、内存注册、对象保护和结果规范化。Worker 累计各层结果，判断对象完整性，并决定 commit 或 revoke。commit 发布完整对象；revoke 撤销未完成写入。适配器落实这些操作的原生语义。
+Backend 实现原生客户端调用、内存注册、对象保护和结果规范化。Layerwise Transfer 累计各层复制证据，StoreService 判断对象完整性并决定 commit 或 revoke，再由 Transfer 调用 Backend Session。commit 发布完整对象；revoke 撤销未完成写入。适配器落实这些操作的原生语义。
 
 同步 Store 正常返回时，接口保证本地来源读取已经结束，返回的失败码仍可以表示某些对象写入失败。异常缺少这一完成保证，调用者需要保留未知状态。远端发布和本地读源结束分别记录，避免用其中一个状态代替另一个。
 
+### 4.9 Collective
+
+`collective.py` 在同一文件提供 `CollectiveGroup` 与 `GroupCompletion`。前者管理专用 Gloo 组和 `all_gather`，后者接受必要参与者集合，汇总不透明的条目标识与身份，只返回必要参与者全部完成且身份一致的本地条目。
+
+这两个组件不认识 Store、GVA、writer、远端地址或发布策略。StoreService 根据实际拓扑选择 writer，并将 Key 与分配身份交给 GroupCompletion，再解释汇总结果。所有通信成员必须以相同次序进入各轮，包括空报告；通信组必须在在途操作排空后才能关闭。
+
 ## 5. Mapping
 
-### 5.1 三个对象
+### 5.1 逻辑块身份与本地块表
+
+`BlockHashMapping` 先解决“这个逻辑块的内容 hash 与本地 Block ID 是什么”，物理布局再解决“这个 Block ID 的字节在哪里”。两种映射放在同一模块，分别处理逻辑身份与内存位置，不相互代替。
+
+例如缓存块覆盖 128 token，hash 粒度为 64 token，完整前缀的 hash 为 `[h0, h1, h2, h3]`，本地块表为 `[7, 11]`。两个逻辑块分别配成 `(逻辑块 0, h1, Block 7)`、`(逻辑块 1, h3, Block 11)`。若本次范围从 token 128 开始，只输出第二组；若调用方仅保留后缀块表 `[11]`，仍按前缀逻辑位置对齐到第二个块，而不是把它误配到 h1。
+
+Load 的尾部 key 边界可能晚于恢复终点，此时使用命令保留的边界找到真正存储对象的 hash。Store checkpoint 则使用精确状态边界的 hash 与指定来源块。映射只负责配对，业务的保存掩码、writer 策略和请求归属在 Service 中确定。选中块时立即将这些身份绑定，不先展开通用行再拆出 hash 后重新匹配。
+
+### 5.2 物理布局的三份数据
 
 Mapping 用 Key、Local、Remote 三份数据，分别描述对象身份、本地字节和远端位置。
 
@@ -196,7 +220,7 @@ PartitionId 是 Key 与 Local 的共同索引，跨 Group 或绑定实例时仍�
 
 同一 PP 内的 head 分区共享段长度、块步长、Layer 关系和 Remote 偏移，仅本地基址及 Key 身份不同。因此 Key 与 Local 按 PartitionId 索引，Remote 与 Layer 按 PP rank 索引。
 
-### 5.2 三种切分布局
+### 5.3 三种切分布局
 
 TP、PP、CP 分别沿 head、模型层和上下文 token 划分数据，影响对象归属的不同部分。
 
@@ -206,19 +230,17 @@ TP、PP、CP 分别沿 head、模型层和上下文 token 划分数据，影响�
 | PP / layer | 每个对象包含哪些模型层 | 将实际物理层归入目标 PP 区间，只为本地持有的层生成分区 |
 | CP / token | 每个上下文分片包含哪些 token | 本地 Tensor 已完成 DCP 切分，直接保留实际 DCP 身份；按格式确定远端槽位，不再次切本地 token，PCP 也不额外切本地 Tensor |
 
-Layerwise 在已确定的对象内逐层选择 segment，保留其在完整对象中的偏移。它不改变对象的 TP、PP、CP 归属。布局关系可以组合，但生产路径是否开放某种组合，由 Factory 的支持检查决定。
+Layerwise 在已确定的对象内逐层选择 segment，保留其在完整对象中的偏移。它不改变对象的 TP、PP、CP 归属。布局关系可以组合，但生产路径是否开放某种组合，由 Configuration 的支持检查决定。
 
-### 5.3 连续性
+### 5.4 连续性
 
 一个对象的有效载荷可以来自多个不连续的本地范围。连续性决定需要多少个 segment；对象字节顺序决定这些段怎样排列。两者不能靠排序本地地址来统一，也不能把其他 head 或 padding 当作有效载荷复制。
-
-例如 NHD 布局中的两个 token 各有四个 head，每个 head 占 4 字节。选择每个 token 的前两个 head，对应本地 `[0,8)` 与 `[16,24)` 两段；紧凑对象将它们依次保存到 `[0,8)` 与 `[8,16)`。
 
 ![同一对象的两个不连续本地片段在远端紧凑排列](../../assets/ascendstore_v1/tp_head_slices.svg)
 
 块步长与段长度也必须分开。例如每块有效载荷为 32 字节、相邻块起点相距 40 字节时，每次复制 32 字节，寻址仍按 40 字节移动。逐层访问同样保留对象偏移：第二层从对象第 32 字节开始，就不能因本次只传第二层而将偏移重置为 0。
 
-### 5.4 用 Tensor view 建立布局
+### 5.5 用 Tensor view 建立布局
 
 绑定阶段直接使用真实 KV Tensor 的 shape、stride 与 view 表达切分。先按 cache spec 的物理存储行数将 kernel block 归并为 group block，再沿 head 轴形成所需分区。NHD 的块内顺序是 token、head、向量；HND 及 LBHNC 的逐层 view 使用 head 优先的顺序，Mapping 保留各自的逻辑元素顺序。
 
@@ -226,11 +248,11 @@ Layerwise 在已确定的对象内逐层选择 segment，保留其在完整对�
 
 这些 view 操作不复制 KV 数据，也不做布局格式转换。绑定后仅保留基址、块步长、长度和对象偏移等只读数值数组；一致的步长与长度用单元素数组共享。Tensor 的存储生命周期由 Resources 保证，更换底层分配时需要重新绑定。
 
-### 5.5 绑定结果的使用
+### 5.6 绑定结果的使用
 
 绑定生成 Key、Local，并按需生成 Layer 关系；Remote 由所选访问方式单独建立。Bulk 使用 Key 和 Local 传输整对象；KeyRange 为各段计算紧凑对象偏移；GVA 根据 Configuration 与 Topology 的约束，在紧凑段序上加入全局层预留、上下文槽位及对齐。Remote 的对象大小因此可以大于本地有效载荷之和。
 
-运行时，Worker 提供已选内容 hash 和本地 Block ID。对段 $j$，令 $\beta_j$ 为 block 0 基址，$\sigma_j$ 为块步长，$\ell_j$ 为长度，$o_j$ 为对象偏移；$b_i$ 为第 $i$ 条记录的本地 Block ID，$G_i$ 为本次对象会话提供的远端基址。地址、步长、长度和偏移均以字节计，$\Vert$ 表示字符串拼接。
+运行时，Service 提供已绑定 Key 与归属的 Selection，Transfer 根据本地 Block ID 和所需层区间批量计算参数。对段 $j$，令 $\beta_j$ 为 block 0 基址，$\sigma_j$ 为块步长，$\ell_j$ 为长度，$o_j$ 为对象偏移；$b_i$ 为第 $i$ 条记录的本地 Block ID，$G_i$ 为本次对象会话提供的远端基址。地址、步长、长度和偏移均以字节计，$\Vert$ 表示字符串拼接。
 
 $$
 \begin{aligned}
@@ -243,50 +265,57 @@ $$
 
 KeyRange 直接使用 $o_j$；GVA 的 $G_i$ 由有效 Backend 对象会话提供，不属于永久绑定数据。Layerwise 用同一段区间选择 Local 与 Remote；Bulk 使用完整段序列。Lookup 的命名范围单独建立，可以覆盖本 rank 没有本地来源的分区。
 
-Mapping 只求值位置与身份。对象选择、逐层批次复用、Backend 参数组织和结果归属由 Worker 完成；Backend 负责实际复制及对象会话。
+Mapping 只求值位置与身份。Service 负责对象选择与结果归属，Transfer 负责逐层计划复用和 Backend 参数组织；Backend 负责实际复制及对象会话。
 
-## 6. 执行与发布
+## 6. 时序、发布与资源生命周期
 
-### 6.1 对象选择与结果归属
+### 6.1 来源安全与目标安全
 
-Bulk Worker 先生成候选 key，按 Backend 要求完成写前存在性检查和同批写入准入，再展开入选对象的地址。每步已经到达的工作可以合并到一个批次；Worker 保留对象、原始组、请求及 Store job 的对应关系，将后端逐对象结果还原到业务来源。
+Store 的模型写入完成、Backend 停止读源、来源允许回收是不同条件。源就绪事件只允许开始读取；复制结束证据用于确认停止读源；Scheduler 的引用和 Worker 的 fence 再约束后续回收或覆盖。
 
-Layerwise 在各层复用同一批对象选择，并累计每个对象需要的层是否完成。Session 推进层的执行顺序，Worker 判断全部必要层的复制结果，再决定可发布的对象。批次压缩、重复行处理和逐层执行都需要保持同一套对象身份。
+普通 Full Attention 请求存活期间，manager 保留相关缓存块。请求结束或抢占后，Worker 在模型可能复用这些块之前等待相关 Store。对于请求存活期间就可能回收页面的 manager，以及需要保护的 checkpoint 来源，Scheduler 额外持有引用，并等待预期 Worker 的来源释放回执。
 
-### 6.2 来源安全
+正常 Step 只收集已完成结果，必要时等待即将复用来源所涉及的批次。全存在、无候选或未开始 IO 的 Store 也需要完成原始命令的结果与释放交接。原生调用异常且无法确认已停止读源时，保留批次与来源保护，阻止危险复用。Load 对本地目标有对称约束：写入安全未知时不能释放目标资源或将异常当普通未命中。
 
-模型写入完成、Backend 停止读源、来源允许回收是三个连续但不同的条件。Store 钩子记录就绪事件；后台完成参数准备后等待该事件，随后开始读取 KV。复制结束证据用于确认停止读源，Scheduler 的来源引用和 Worker 的 fence 共同约束后续回收或覆盖。
+### 6.2 共享对象发布
 
-普通 FullAttention 请求存活期间，manager 保留相关缓存块。请求结束或抢占后，Worker 在模型可能复用这些块之前等待相关 Store。对于请求存活期间就可能回收页面的 manager，以及需要保护的 checkpoint 来源，Scheduler 额外持有引用，并等待预期 Worker 的来源释放回执。
+Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实际 `ContextRank` 成员关系识别副本，每组副本选择最小 global rank 作为 writer。存在多个对象分片时，使用覆盖相关成员的 CollectiveGroup 汇总；成员集合来自实际拓扑，不凭 rank 算术推定。
 
-正常 Step 收集已完成结果，只等待即将复用来源所涉及的批次。显式排空和关闭处理全部 pending Store。Backend 异常导致读源状态未知时，相关状态继续保留，并阻止危险复用。
+发布前，必要 writer 必须完成各自的必要层，并确认使用相同的远端分配身份（地址与大小）。GroupCompletion 返回一致完成的 Key，StoreService 据此选择 commit。缺少 writer、任一必要层失败或分配身份不一致，都不能发布。非 writer、空结果和打开失败的成员同样参与本轮汇总；预留空间中的空闲槽位不虚构 writer。
 
-### 6.3 共享对象发布
+对象打开失败、复制失败、发布失败和撤销失败分别保留其证据。撤销失败时保留未确认的 Session 所有权供后续清理。远端对象是否发布和本地来源是否停止被读不能互相替代。
 
-Memcache GVA 的共享对象可能由多个 rank 写入。Worker 从实际 `ContextRank` 成员关系出发，按 head 与 DCP 身份识别副本，为每组副本选择最小 global rank 作为 writer。当前共享协调条件包含 DCP 大于 1，且存在重复写入副本或多个 PCP rank；具体参与成员来自实际拓扑。
+### 6.3 绑定、结束与关闭
 
-发布协调由 `worker/layerwise/gva/` 持有，使用覆盖相关成员的专用 Gloo 组。非 writer 和打开对象失败的成员也参与同一轮协调，保证所有参与者按相同次序进入 collective。
+绑定 KV 时，Resources 先保留 Tensor；Worker 建立 TransferContext、Transfer 和 Service，再注册有效跨度并启动执行队列。失败时按已取得的资源逆向清理，不能先丢 Tensor 引用再排空可能访问它的任务。
 
-某个 key 发布前，需要所有必要 writer 完成各自的必要层，并确认它们看到的是同一个远端地址和对象大小。缺少 writer、任一必要层失败、地址或大小不一致，都会使该 key 不能 commit。预留空间中的空闲槽位无需虚构 writer，必要 writer 集合也必须非空。
+结束一步只结束本步控制关系。异步 Load 与跨步 Store 仍由 Service 的 pending 批次持有；空步骤也可以交回它们的完成。Layerwise 必须先停止新增层操作、安排完成回调，再允许批次被最终领取。钩子异常和 forward 异常均触发中止，不能在框架的 finally 收尾路径继续发起正常保存并覆盖原异常。
 
-撤销失败时保留未确认状态及会话所有权；只有原生能力能够确认安全，才能完成清理。复制结果、对象发布和本地来源释放因此分别推进。
+关闭按以下依赖推进：
+
+1. Connector 先关闭 LookupServer，确认服务线程不再调用 Worker；超时则保留 Worker 与 Backend，稍后重试。
+2. Worker 停止接受业务提交，结束或中止当前逐层控制，封口并排空已提交 Load / Store，检查目标写入与来源读取是否都已停止。
+3. Resources 停止执行队列，再关闭 Backend 对象 Session、Collective 等附加资源、内存注册句柄和 Backend 客户端，最后释放 Tensor 引用。
+
+某一步清理失败就保留仍受其依赖的句柄和引用。Future 已结束、线程已退出都不足以证明原生访问已结束；安全未知时不能继续释放底层内存。
 
 ## 7. 关键约束的验证
 
-布局验证检查同一对象在整体与逐层视图中是否表示相同字节，并检查对象身份、顺序和结果归属在各路径间保持一致。
+验证重点是身份、字节、结果与安全边界。测试不以私有辅助函数的调用次数或中间对象形状作为业务正确性的替代。
 
 | 要验证的关系 | 现有测试入口 | 主要检查 |
 | --- | --- | --- |
-| Configuration 的解析、筛选与分区 | `infrastructure/test_configuration.py` | 输入边界、原始组 ID 与顺序、PP 默认分配 |
-| Topology 的本地绑定 | `infrastructure/test_topology.py` | spec family、PP 跨度与实际上下文成员 |
-| Key / Local / Remote 与 Layer 的对应 | `infrastructure/mapping/test_mapping.py` | 分区身份、段序、层区间与输入记录顺序 |
-| Tensor 切分与连续段 | `infrastructure/mapping/test_mapping.py` | NHD / HND / LBHNC、padding、压缩缓存、混合类型与非连续 view 的有效字节 |
-| 整体与逐层传输、TP / PP 双向恢复 | `infrastructure/mapping/test_worker_arguments.py` | 各层重组为完整对象、跨分区恢复与原始组 ID |
-| GVA 对象预留与偏移 | `infrastructure/mapping/test_partition_bindings.py` | PP 层位置、上下文槽位与对齐符合既有分配公式 |
-| 串行执行、预取、领取与收尾顺序 | `infrastructure/test_execution.py` | 队列排空、提交与领取分离、共享 gate 取消、跨步 Store |
-| Lookup 契约与失败回退 | `protocol/test_lookup.py`、`protocol/test_rpc.py` | 消息校验、查询失败或无效响应回退为未命中 |
-| RPC 生命周期与关闭顺序 | `infrastructure/test_rpc.py`、`test_connector.py` | 超时连接重建、服务线程退出、退出前保留 Worker 资源 |
-| 注册与关闭所有权 | `infrastructure/test_resources.py` | 绑定与注册顺序、失败保留、执行器停止前禁止释放 |
-| 共享对象发布 | `worker/layerwise/gva/test_shared_store.py`、`worker/layerwise/gva/test_collective.py` | writer 完备性、非 writer 参与、打开失败及地址分歧 |
+| 配置准入与直接装配 | `test_configuration_support.py`、`test_connector_construction.py` | 不支持组合先拒绝、角色装配、构造失败清理 |
+| Configuration | `infrastructure/test_configuration.py` | 配置解析、原始组身份与分区规则 |
+| Topology | `infrastructure/test_topology.py` | 本地 rank、PP 范围与实际上下文成员 |
+| 逻辑 hash 与 Block ID | `worker/test_block_hash_mapping.py` | 不同粒度、加载起点、尾部边界与调用方块表 |
+| Key / Local / Remote / Layer | `infrastructure/mapping/test_mapping.py`、`test_partition_bindings.py`（同目录） | 分区、非连续 view、段序、对象偏移与预留 |
+| 三条业务的数据流 | `worker/test_data_flow.py`、`test_store_candidates.py`、`test_single_preparation.py`（同目录） | Lookup 新 Key、重复目标、writer 筛选、exists 过滤与归属保留 |
+| 实际参数与字节一致性 | `worker/test_equivalence.py`、`test_layerwise_bytes.py`（同目录） | 对照基准、整对象 / 逐层重组、KeyRange / GVA 字节 |
+| 串行队列与逐层时序 | `infrastructure/test_execution.py`、`test_layerwise_executor.py`、`test_attention_gate.py`（同目录） | 提交 / 领取分离、Gate 取消、封口、重复钩子与收尾 |
+| Lookup 契约与 RPC | `protocol/test_lookup.py`、`infrastructure/test_rpc.py` | 消息校验、失败回退、连接重建与线程退出 |
+| 集成与空步骤 | `test_connector_integration.py`、`test_connector_lifecycle.py` | 异步完成只交付一次、无 forward、异常收尾与关闭顺序 |
+| 注册与关闭所有权 | `infrastructure/test_resources.py`、`worker/test_worker.py` | 绑定与注册顺序、失败保留、内存安全未知时禁止释放 |
+| 共享对象发布 | `worker/test_gva_writers.py`、`infrastructure/test_collective.py` | writer 完备性、空报告、失败及分配身份分歧 |
 
-表中路径相对于 `tests/ut/distributed/ascend_store/v1/`。CPU 单元测试与 Gloo 进程测试分别验证逻辑约束和集体通信顺序；原生 Backend 与 NPU 验证还需覆盖注册范围、读源完成、地址保护和对象发布语义。
+路径相对于 `tests/ut/distributed/ascend_store/v1/`。CPU 字节模拟与单元测试验证数据和状态约束；Gloo 进程测试验证集体通信顺序。原生 Backend / NPU 验证还需覆盖设备事件、注册范围、读写完成、地址保护和发布语义，不能由 CPU 结果代替。

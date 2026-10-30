@@ -42,13 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     StoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    BulkWorker,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise import (
-    GVALayerwiseWorker,
-    KeyRangeLayerwiseWorker,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
 
 
 def make_pool_config(topology=None, backend_name="mooncake", **changes):
@@ -386,27 +380,16 @@ def make_worker(
         requires_exists_before_put=requires_exists_before_put,
     )
     resources = FakeResources(backend, backend_spec, topology)
-    if layerwise:
-        worker_type = (
-            GVALayerwiseWorker if backend_spec.layerwise_access is LayerwiseAccessKind.GVA else KeyRangeLayerwiseWorker
-        )
-        worker = worker_type(
-            topology,
-            resources,
-            coordinator=make_coordinator(topology),
-            store_enabled=store,
-            **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
-            source_ready_event_factory=source_ready_event_factory or FakeEvent,
-        )
-    else:
-        worker = BulkWorker(
-            topology,
-            resources,
-            coordinator=make_coordinator(topology),
-            store_enabled=store,
-            load_async=async_load,
-            source_ready_event_factory=source_ready_event_factory or FakeEvent,
-        )
+    topology = replace(topology, config=replace(topology.config, load_async=async_load))
+    worker = Worker(
+        topology,
+        resources,
+        coordinator=make_coordinator(topology),
+        store_enabled=store,
+        layerwise=layerwise,
+        **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
+        source_ready_event_factory=source_ready_event_factory or FakeEvent,
+    )
     if bind:
         worker.bind_kv_caches({"cache": object()})
     return worker, resources, backend

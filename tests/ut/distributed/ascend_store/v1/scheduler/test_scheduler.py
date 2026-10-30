@@ -31,9 +31,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
-    AsynchronousBulkScheduler,
-    LayerwiseScheduler,
-    SynchronousBulkScheduler,
+    AsynchronousScheduler,
+    SynchronousScheduler,
 )
 
 
@@ -59,7 +58,7 @@ class _RefCountBlockPool(FakeBlockPool):
 
 
 def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
-    for scheduler_type, is_deferred in ((SynchronousBulkScheduler, False), (AsynchronousBulkScheduler, True)):
+    for scheduler_type, is_deferred in ((SynchronousScheduler, False), (AsynchronousScheduler, True)):
         lookup = FakeLookupClient(12)
         scheduler = scheduler_type(make_config(), lookup)
         request = make_request(prompt_tokens=12)
@@ -88,12 +87,12 @@ def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
         assert (published.load_commands[0].start_token, published.load_commands[0].end_token) == (0, 12)
 
 
-@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler, SynchronousScheduler))
 def test_store_publication_respects_load_timing(scheduler_type):
     scheduler = scheduler_type(make_config(store=True), FakeLookupClient(4))
     scheduler.bind_gpu_block_pool(FakeBlockPool())
     request = make_request(prompt_tokens=8, tokens=9)
-    deferred = scheduler_type is AsynchronousBulkScheduler
+    deferred = scheduler_type is AsynchronousScheduler
     assert scheduler.get_num_new_matched_tokens(request, 0) == (4, deferred)
     scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3]), 4)
     step = scheduler.build_step(
@@ -106,23 +105,23 @@ def test_store_publication_respects_load_timing(scheduler_type):
     scheduler.close()
 
 
-def test_layerwise_zero_new_allocation_still_publishes_load() -> None:
+def test_synchronous_local_prefix_does_not_publish_a_redundant_load() -> None:
     lookup = FakeLookupClient(8)
-    scheduler = LayerwiseScheduler(make_config(), lookup)
+    scheduler = SynchronousScheduler(make_config(), lookup)
     request = make_request(prompt_tokens=8, tokens=9)
 
     assert scheduler.get_num_new_matched_tokens(request, 8) == (0, False)
-    assert lookup.queries[0][0] == (0, 8)
+    assert lookup.queries == []
     scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
     step = scheduler.build_step(
         make_output(new=(new_request_data("request", ([1, 2],), 8),), scheduled_tokens={"request": 1})
     )
 
-    assert [(command.start_token, command.end_token) for command in step.load_commands] == [(0, 8)]
+    assert not step.load_commands
 
 
 def test_load_only_resumed_request_publishes_scheduled_load() -> None:
-    scheduler = SynchronousBulkScheduler(make_config(store=False), FakeLookupClient(8))
+    scheduler = SynchronousScheduler(make_config(store=False), FakeLookupClient(8))
     request = make_request(prompt_tokens=8, tokens=10)
     assert scheduler.get_num_new_matched_tokens(request, 0) == (8, False)
     scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3]), 8)
@@ -137,7 +136,7 @@ def test_load_only_resumed_request_publishes_scheduled_load() -> None:
 
 def test_lookup_discards_sub_transfer_chunk() -> None:
     lookup = FakeLookupClient(4)
-    scheduler = SynchronousBulkScheduler(make_config(granularity=8), lookup)
+    scheduler = SynchronousScheduler(make_config(granularity=8), lookup)
     request = make_request(prompt_tokens=4, tokens=5)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
@@ -145,7 +144,7 @@ def test_lookup_discards_sub_transfer_chunk() -> None:
 
 
 def test_new_and_running_publish_monotonic_store_without_new_blocks() -> None:
-    scheduler = SynchronousBulkScheduler(make_config(granularity=8, load=False, store=True), FakeLookupClient())
+    scheduler = SynchronousScheduler(make_config(granularity=8, load=False, store=True), FakeLookupClient())
     pool = FakeBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     request = make_request()
@@ -163,7 +162,7 @@ def test_new_and_running_publish_monotonic_store_without_new_blocks() -> None:
         scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({command.store_job_id: 1}))
 
 
-@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler, SynchronousScheduler))
 def test_resumed_prefill_frontier_survives_multiple_running_chunks(scheduler_type) -> None:
     scheduler = scheduler_type(make_config(load=False, store=True), FakeLookupClient())
     scheduler.bind_gpu_block_pool(FakeBlockPool())
@@ -203,7 +202,7 @@ def test_resumed_prefill_frontier_survives_multiple_running_chunks(scheduler_typ
     assert decode.store.commands == ()
 
 
-@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler, SynchronousScheduler))
 @pytest.mark.parametrize("save_decode", (False, True))
 def test_store_uses_confirmed_hashes_and_current_progress_after_draft_rejection(scheduler_type, save_decode) -> None:
     scheduler = scheduler_type(make_config(load=False, store=True, save_decode=save_decode), FakeLookupClient())
@@ -244,7 +243,7 @@ def test_store_uses_confirmed_hashes_and_current_progress_after_draft_rejection(
 
 
 def test_step_checkpoint_is_source_ready_and_preserves_exact_source() -> None:
-    scheduler = SynchronousBulkScheduler(
+    scheduler = SynchronousScheduler(
         make_config(groups=(0, 1), align_groups=frozenset((1,)), load=False, store=True),
         FakeLookupClient(),
     )
@@ -290,7 +289,7 @@ def test_step_checkpoint_is_source_ready_and_preserves_exact_source() -> None:
 def test_finished_and_preempted_cancel_unpublished_load() -> None:
     for stage in ("lookup", "sync", "async"):
         for terminated_field in ("finished", "preempted"):
-            scheduler_type = AsynchronousBulkScheduler if stage == "async" else SynchronousBulkScheduler
+            scheduler_type = AsynchronousScheduler if stage == "async" else SynchronousScheduler
             scheduler = scheduler_type(make_config(), FakeLookupClient(8))
             request = make_request(tokens=9)
             scheduler.get_num_new_matched_tokens(request, 0)
@@ -302,7 +301,7 @@ def test_finished_and_preempted_cancel_unpublished_load() -> None:
             assert scheduler.build_step(make_output()).load_commands == (), (stage, terminated_field)
 
 
-@pytest.mark.parametrize("scheduler_type", (SynchronousBulkScheduler, AsynchronousBulkScheduler, LayerwiseScheduler))
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler, SynchronousScheduler))
 def test_step_reports_finished_and_preempted_request_union(scheduler_type) -> None:
     scheduler = scheduler_type(make_config(), FakeLookupClient())
     step = scheduler.build_step(make_output(finished=("finished", "both"), preempted=("preempted", "both")))
@@ -313,9 +312,7 @@ def test_step_reports_finished_and_preempted_request_union(scheduler_type) -> No
 
 @pytest.mark.parametrize("terminated_field", ("finished", "preempted"))
 def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_field: str) -> None:
-    scheduler = SynchronousBulkScheduler(
-        make_config(load=False, store=True, workers=2, recycling=True), FakeLookupClient()
-    )
+    scheduler = SynchronousScheduler(make_config(load=False, store=True, workers=2, recycling=True), FakeLookupClient())
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     blocks = [pool.blocks[1], pool.blocks[2]]
@@ -350,9 +347,7 @@ def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_
 
 
 def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgements() -> None:
-    scheduler = SynchronousBulkScheduler(
-        make_config(load=False, store=True, workers=2, recycling=True), FakeLookupClient()
-    )
+    scheduler = SynchronousScheduler(make_config(load=False, store=True, workers=2, recycling=True), FakeLookupClient())
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     block = pool.blocks[1]
@@ -391,7 +386,7 @@ def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgemen
 
 
 def test_pending_block_frees_detects_masked_block_without_freeing_active_blocks() -> None:
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, recycling=True), FakeLookupClient())
+    scheduler = SynchronousScheduler(make_config(load=False, store=True, recycling=True), FakeLookupClient())
     pool = _RefCountBlockPool()
     scheduler.bind_gpu_block_pool(pool)
     active, masked = pool.blocks[1], pool.blocks[2]
@@ -416,7 +411,7 @@ def test_running_window_sources_are_not_reused_until_every_worker_releases() -> 
     sources = pool.get_new_blocks(2)
     source_ids = [block.block_id for block in sources]
     config = make_config(load=False, store=True, workers=2, recycling=True)
-    scheduler = SynchronousBulkScheduler(config, FakeLookupClient())
+    scheduler = SynchronousScheduler(config, FakeLookupClient())
     scheduler.bind_gpu_block_pool(pool)
     scheduler.confirm_allocation(make_request(), FakeBlocks(source_ids), 0)
     step = scheduler.build_step(
@@ -450,7 +445,7 @@ def test_running_window_sources_are_not_reused_until_every_worker_releases() -> 
 
 
 def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> None:
-    scheduler = SynchronousBulkScheduler(
+    scheduler = SynchronousScheduler(
         make_config(groups=(0, 1), align_groups=frozenset((1,)), store=True, workers=2),
         FakeLookupClient(8),
     )
@@ -483,7 +478,7 @@ def test_finished_tail_lease_survives_cleanup_until_every_worker_releases() -> N
 
 @pytest.mark.parametrize("eagle,expected_external_tokens", ((True, 0), (False, 3)))
 def test_store_skip_survives_safe_frontier_trimming(eagle, expected_external_tokens) -> None:
-    scheduler = SynchronousBulkScheduler(make_config(store=True, save_decode=True, eagle=eagle), FakeLookupClient(4))
+    scheduler = SynchronousScheduler(make_config(store=True, save_decode=True, eagle=eagle), FakeLookupClient(4))
     scheduler.bind_gpu_block_pool(FakeBlockPool())
     request = make_request(prompt_tokens=4)
 
@@ -504,7 +499,7 @@ def test_store_skip_survives_safe_frontier_trimming(eagle, expected_external_tok
 
 
 def test_zero_external_match_never_advertises_async_loading() -> None:
-    scheduler = AsynchronousBulkScheduler(make_config(store=True, eagle=True), FakeLookupClient(4))
+    scheduler = AsynchronousScheduler(make_config(store=True, eagle=True), FakeLookupClient(4))
     request = make_request(prompt_tokens=4)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
@@ -523,7 +518,7 @@ def test_zero_external_match_never_advertises_async_loading() -> None:
 def test_speculative_lookup_recomputes_only_the_prompt_tail(
     prompt_tokens, readable_end, local_tokens, eagle, safe_end, load_end
 ) -> None:
-    scheduler = SynchronousBulkScheduler(make_config(eagle=eagle), FakeLookupClient(readable_end))
+    scheduler = SynchronousScheduler(make_config(eagle=eagle), FakeLookupClient(readable_end))
     request = make_request(prompt_tokens=prompt_tokens)
     try:
         assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (safe_end - local_tokens, False)
@@ -551,7 +546,7 @@ def test_load_keeps_lookup_tail_identity_only_when_physical_frontier_is_unchange
     prompt_tokens, readable_end, attention_tail, eagle, private, safe_end, load_end
 ) -> None:
     tail_keys = (TailKeyBoundary(0, attention_tail), TailKeyBoundary(1, readable_end))
-    scheduler = SynchronousBulkScheduler(
+    scheduler = SynchronousScheduler(
         replace(make_config(granularity=64, groups=(0, 1), eagle=eagle, private=private), hash_block_size=8),
         FakeLookupClient(readable_end, tail_key_boundaries=tail_keys),
     )
@@ -577,7 +572,7 @@ def test_private_state_recomputes_safe_frontier_without_erasing_store_skip(
     eagle,
     expected_safe_end,
 ) -> None:
-    scheduler = SynchronousBulkScheduler(
+    scheduler = SynchronousScheduler(
         make_config(store=True, private=True, eagle=eagle),
         FakeLookupClient(readable_end),
     )
@@ -613,13 +608,13 @@ def test_eagle_hit_is_trimmed_once_by_scheduler() -> None:
 
     assert coordinator.resolve_available_end(0, 8, block_hashes, (observation,)).end_token == 8
 
-    scheduler = SynchronousBulkScheduler(make_config(eagle=True), FakeLookupClient(8))
+    scheduler = SynchronousScheduler(make_config(eagle=True), FakeLookupClient(8))
     assert scheduler.get_num_new_matched_tokens(make_request(prompt_tokens=8), 0) == (4, False)
 
 
 def test_scheduler_close_rejects_active_store_source_leases() -> None:
     lookup = FakeLookupClient()
-    scheduler = SynchronousBulkScheduler(make_config(load=False, store=True, recycling=True), lookup)
+    scheduler = SynchronousScheduler(make_config(load=False, store=True, recycling=True), lookup)
     scheduler.bind_gpu_block_pool(FakeBlockPool())
     request = make_request(prompt_tokens=4)
     scheduler.confirm_allocation(request, FakeBlocks([1]), 0)
@@ -638,7 +633,7 @@ def test_scheduler_close_rejects_active_store_source_leases() -> None:
 
 def test_nontransferred_align_state_does_not_keep_decode_snapshots():
     config = make_config(groups=(0,), align_groups=frozenset((1,)), private=True, load=False, store=True)
-    scheduler = SynchronousBulkScheduler(config, FakeLookupClient())
+    scheduler = SynchronousScheduler(config, FakeLookupClient())
     scheduler.bind_gpu_block_pool(FakeBlockPool())
     request = make_request(prompt_tokens=4)
     scheduler.confirm_allocation(request, FakeBlocks([1], [10]), 0)

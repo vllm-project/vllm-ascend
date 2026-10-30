@@ -24,7 +24,7 @@ class FakeLookupClient:
 
     def lookup(self, request) -> LookupResult:
         self.queries.append(
-            ((request.start_token, request.end_token), request.transfer_group_ids, request.block_hashes)
+            ((request.local_available_tokens, request.end_token), request.transfer_group_ids, request.block_hashes)
         )
         return LookupResult(self.available_end_token, self.tail_key_boundaries)
 

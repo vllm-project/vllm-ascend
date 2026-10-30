@@ -11,9 +11,9 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 @dataclass(frozen=True, slots=True)
 class LookupRequest:
-    """Content hashes and cache groups participating in one remote Lookup."""
+    """Search recovery points using content hashes and a trusted local prefix, independently of the Load range."""
 
-    start_token: int
+    local_available_tokens: int
     end_token: int
     transfer_group_ids: tuple[int, ...]
     block_hashes: tuple[BlockHash, ...]

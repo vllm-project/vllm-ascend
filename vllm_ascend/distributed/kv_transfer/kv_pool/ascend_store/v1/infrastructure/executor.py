@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
@@ -13,6 +14,7 @@ from typing import Any, ParamSpec, TypeVar
 from vllm.logger import logger
 
 _COMPUTE_START_LOG_INTERVAL_S = 10
+_ABORT_POLL_INTERVAL_S = 0.1
 Parameters = ParamSpec("Parameters")
 ResultT = TypeVar("ResultT")
 PreparedT = TypeVar("PreparedT")
@@ -208,8 +210,13 @@ class LayerwiseExecutor:
     @staticmethod
     def _write_layer(step: _LayerwiseStep, layer_id: int, gate: Any) -> None:
         if gate is not None:
-            while not gate.wait(timeout=_COMPUTE_START_LOG_INTERVAL_S):
-                logger.info("Layerwise %d write waits for compute start", layer_id)
+            next_log = time.monotonic() + _COMPUTE_START_LOG_INTERVAL_S
+            while not step.write_aborted.is_set():
+                if gate.wait(timeout=_ABORT_POLL_INTERVAL_S):
+                    break
+                if time.monotonic() >= next_log:
+                    logger.info("Layerwise %d write waits for compute start", layer_id)
+                    next_log = time.monotonic() + _COMPUTE_START_LOG_INTERVAL_S
         if not step.write_aborted.is_set():
             assert step.write is not None
             step.write(layer_id)
@@ -335,25 +342,37 @@ class LayerwiseExecutor:
         for gate in step.start_gates.values():
             gate.on_start = None
         step.write_aborted.set()
+        error = None
         cancelled: set[int] = set()
         for future, gate in zip(step.write_futures, step.write_gates, strict=True):
             if gate is not None and not future.done() and id(gate) not in cancelled:
-                gate.cancel()
                 cancelled.add(id(gate))
-        error = None
+                try:
+                    gate.cancel()
+                except BaseException as caught:
+                    error = error or caught
+        cleanup_submitted = True
         try:
             if step.finish_write is not None:
                 self._finish_writes(step)
-            if wait:
-                wait_futures(step.write_futures)
-                if step.write_finished is not None:
-                    step.write_finished.result()
         except BaseException as caught:
-            error = caught
+            cleanup_submitted = False
+            error = error or caught
         try:
             self.seal_reads()
         except BaseException as caught:
+            cleanup_submitted = False
             error = error or caught
+        # Submitted closures and business batches retain unfinished work. Only a
+        # failed submission needs this execution record for a cleanup retry.
+        if cleanup_submitted:
+            self._step = None
+        if wait:
+            wait_futures(step.write_futures)
+            if step.write_finished is not None:
+                try:
+                    step.write_finished.result()
+                except BaseException as caught:
+                    error = error or caught
         if error is not None:
             raise error
-        self._step = None

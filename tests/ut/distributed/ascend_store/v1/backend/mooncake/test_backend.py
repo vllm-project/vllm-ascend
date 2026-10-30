@@ -205,7 +205,7 @@ def test_mooncake_native_byte_counts_reach_layerwise_store_and_load(failed_copy,
         worker.save_layer("layers.0.group.0")
         worker.save_layer("layers.1.group.0")
         worker.finish_step()
-        assert store.batch_put_from_multi_buffer_ranges.call_count == 2
+        assert store.batch_put_from_multi_buffer_ranges.call_count == (1 if failed_copy == "store" else 2)
         assert store.batch_put_session_end.call_count == (0 if failed_copy == "store" else 1)
         assert store.batch_put_session_revoke.call_count == (1 if failed_copy == "store" else 0)
         assert worker.take_released_store_job_ids() == {17}

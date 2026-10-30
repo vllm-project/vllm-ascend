@@ -1,45 +1,86 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" role="img" aria-labelledby="architecture-layers-title architecture-layers-desc">
-<title id="architecture-layers-title">AscendStore v1 分层架构</title>
-<desc id="architecture-layers-desc">Scheduler 与 Worker 共享 Protocol 业务契约并组合基础设施能力；通用 RPC 与 Lookup 业务适配分开，图中不表示消息流或执行顺序。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" role="img" aria-labelledby="architecture_layers-title architecture_layers-desc">
+<title id="architecture_layers-title">AscendStore v1 总体架构</title>
+<desc id="architecture_layers-desc">总图只表示职责分组；Worker 的业务组合在独立图中展开</desc>
 <defs>
-<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
-<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;fill:#526a76}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}.module{fill:#fff;stroke:#c8d4d9}</style>
+<marker id="architecture_layers-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="architecture_layers-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="architecture_layers-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
 </defs><rect width="1280" height="800" fill="#fff"/>
-<text x="48" y="68" class="title">AscendStore v1 分层架构</text><text x="48" y="94" class="muted">业务层组合基础设施能力；Backend 适配原生访问；第三方系统负责实际传输与存储</text>
-
-<g data-node="integration"><rect x="48" y="112" width="1184" height="64" rx="6" class="band"/>
-<text x="64" y="139" class="name">接入与装配</text><text x="64" y="160" class="code">Connector / Factory</text>
-<text x="240" y="139" class="name">vLLM / AscendStoreV1Connector</text><text x="240" y="160" class="muted">框架钩子与角色适配</text>
-<text x="816" y="139" class="name">Factory</text><text x="816" y="160" class="muted">依据已校验的配置装配 Scheduler、Worker、Backend</text></g>
-
-<rect x="48" y="192" width="1184" height="96" rx="6" class="band"/>
-<text x="64" y="228" class="name">业务层</text><text x="64" y="253" class="muted">请求决策与结果归属</text>
-<g data-node="scheduler"><rect x="224" y="204" width="352" height="72" rx="4" class="module"/>
-<text x="240" y="231" class="name">Scheduler</text><text x="240" y="256" class="muted">命中采用 · 分配确认 · 命令规划 · 来源引用</text></g>
-<g data-node="worker"><rect x="592" y="204" width="624" height="72" rx="4" class="module"/>
-<text x="608" y="231" class="name">Worker</text><text x="736" y="231" class="muted">Bulk / Layerwise（KeyRange · GVA）</text><text x="608" y="256" class="muted">对象选择与组批 · 参数组织 · 结果解释 · 对象完整性与来源安全</text></g>
-
-<g data-node="protocol"><rect x="48" y="304" width="1184" height="64" rx="6" class="band"/>
-<text x="64" y="331" class="name">共享契约</text><text x="64" y="352" class="code">protocol/</text>
-<text x="240" y="331" class="name">Protocol · 消息定义</text><text x="240" y="352" class="muted">Load / Store 命令 · Lookup 消息 · 来源释放回执</text>
-<text x="816" y="331" class="name">Lookup 业务适配</text><text x="816" y="352" class="muted">编解码 · 校验 · 失败回退为未命中</text></g>
-
-<rect x="48" y="384" width="1184" height="168" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.5"/>
-<text x="64" y="450" class="name">基础设施层</text><text x="64" y="475" class="muted">稳定规则与执行能力</text><text x="64" y="500" class="code">infrastructure/</text>
-<g data-node="configuration"><rect x="224" y="400" width="320" height="60" rx="4" class="module"/><text x="240" y="424" class="name">Configuration / Topology</text><text x="240" y="447" class="muted">静态配置与分区 · 本地拓扑绑定</text></g>
-<g data-node="coordinator"><rect x="560" y="400" width="320" height="60" rx="4" class="module"/><text x="576" y="424" class="name">Coordinator</text><text x="576" y="447" class="muted">恢复条件 · 共同前缀 · 选择掩码</text></g>
-<g data-node="mapping"><rect x="896" y="400" width="320" height="60" rx="4" class="module"/><text x="912" y="424" class="name">Mapping</text><text x="912" y="447" class="muted">对象身份 · 静态布局 · 字节位置</text></g>
-<g data-node="rpc"><rect x="224" y="476" width="320" height="60" rx="4" class="module"/><text x="240" y="500" class="name">RPC</text><text x="240" y="523" class="muted">字节帧请求应答 · 超时与生命周期</text></g>
-<g data-node="execution"><rect x="560" y="476" width="320" height="60" rx="4" class="module"/><text x="576" y="500" class="name">Execution</text><text x="576" y="523" class="muted">Executor / Session · 排队、预取、同步</text></g>
-<g data-node="resources"><rect x="896" y="476" width="320" height="60" rx="4" class="module"/><text x="912" y="500" class="name">Resources</text><text x="912" y="523" class="muted">资源持有 · 注册 · 安全关闭</text></g>
-
-<g data-node="backend"><rect x="48" y="568" width="1184" height="80" rx="6" class="band"/><text x="64" y="601" class="name">Backend 适配层</text><text x="64" y="627" class="code">backend/</text>
-<text x="240" y="599" class="name">访问契约</text><text x="360" y="599">整对象 / KeyRange / GVA</text><text x="240" y="625" class="muted">注册句柄 · 原生结果校验 · 对象会话</text>
-<text x="816" y="599" class="name">MooncakeBackend / MemcacheBackend</text><text x="816" y="625" class="muted">本地适配代码，负责兑现访问与完成约定</text></g>
-
-<g data-node="external"><rect x="48" y="664" width="1184" height="64" rx="6" fill="#f4f7f7" stroke="#c8d4d9"/><text x="64" y="691" class="name">第三方传输后端</text><text x="64" y="713" class="muted">原生客户端与外部服务</text>
-<text x="240" y="691" class="name">Mooncake</text><text x="240" y="713" class="muted">原生 Store / 传输能力与外部存储</text>
-<text x="816" y="691" class="name">Memcache</text><text x="816" y="713" class="muted">原生客户端 / 全局地址访问与外部存储</text></g>
-<line x1="48" y1="732" x2="1232" y2="732" stroke="#c8d4d9"/><text x="48" y="756" class="muted">按职责组织各层；业务路径按需组合基础设施，并通过 Backend 完成实际访问。</text>
+<text x="48" y="60" class="title">AscendStore v1 总体架构</text>
+<text x="48" y="88" class="muted">总图只表示职责分组；Worker 的业务组合在独立图中展开</text>
+<g data-node="connector">
+<rect x="48" y="112" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">vLLM / AscendStoreV1Connector</text>
+<text x="64" y="163" class="muted">框架钩子与角色适配 · 直接装配 Scheduler / Worker · 先校验配置，再申请资源</text>
+</g>
+<g data-node="scheduler">
+<rect x="48" y="192" width="568" height="80" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="219" class="name">Scheduler</text>
+<text x="64" y="243" class="muted">命中采用 · 分配确认 · 命令规划 · 来源引用</text>
+</g>
+<g data-node="worker">
+<rect x="632" y="192" width="600" height="80" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="648" y="219" class="name">Worker</text>
+<text x="648" y="243" class="muted">查询与传输 · 结果归属 · 对象发布 · 本地 KV 安全</text>
+</g>
+<g data-node="protocol">
+<rect x="48" y="288" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="315" class="name">Protocol · 共享业务契约</text>
+<text x="64" y="339" class="muted">Load / Store 命令与结果 · Lookup 编解码、校验与未命中回退 · 来源释放回执</text>
+</g>
+<rect x="48" y="368" width="1184" height="216" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="397" class="name">Infrastructure · 可组合能力</text>
+<g data-node="configuration">
+<rect x="64" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="80" y="441" class="name">Configuration</text>
+<text x="80" y="465" class="muted">静态配置 · 支持检查</text>
+</g>
+<g data-node="topology">
+<rect x="356" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="372" y="441" class="name">Topology</text>
+<text x="372" y="465" class="muted">本地 rank · 缓存组 · 物理层</text>
+</g>
+<g data-node="coordinator">
+<rect x="648" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="664" y="441" class="name">Coordinator</text>
+<text x="664" y="465" class="muted">恢复终点 · 逻辑选块</text>
+</g>
+<g data-node="mapping">
+<rect x="940" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="956" y="441" class="name">Mapping</text>
+<text x="956" y="465" class="muted">Hash / Block ID · 字节布局</text>
+</g>
+<g data-node="rpc">
+<rect x="64" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="80" y="523" class="name">RPC</text>
+<text x="80" y="547" class="muted">字节通信 · 超时 · 生命周期</text>
+</g>
+<g data-node="executor">
+<rect x="356" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="372" y="523" class="name">Executor</text>
+<text x="372" y="547" class="muted">队列 · Bulk / Layerwise 执行控制</text>
+</g>
+<g data-node="collective">
+<rect x="648" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="664" y="523" class="name">Collective</text>
+<text x="664" y="547" class="muted">CollectiveGroup / GroupCompletion</text>
+</g>
+<g data-node="resources">
+<rect x="940" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="956" y="523" class="name">Resources</text>
+<text x="956" y="547" class="muted">资源持有 · 注册 · 安全关闭</text>
+</g>
+<g data-node="backend">
+<rect x="48" y="600" width="1184" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="627" class="name">Backend · MooncakeBackend / MemcacheBackend</text>
+<text x="64" y="651" class="muted">整对象 / KeyRange / GVA · 注册 · 对象会话 · 原生完成保证</text>
+</g>
+<g data-node="external">
+<rect x="48" y="688" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="715" class="name">第三方传输与存储 · Mooncake / Memcache</text>
+<text x="64" y="739" class="muted">原生客户端、传输能力与外部存储服务</text>
+</g>
+<text x="48" y="783" class="muted">业务层按需组合基础设施并直接调用 Backend；各层不是逐级转发链。</text>
 </svg>

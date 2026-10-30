@@ -368,3 +368,28 @@ def test_last_write_hook_waits_for_cleanup_before_returning(cleanup_fails, make_
         finally:
             release.set()
             execution.end_step(wait=False)
+
+
+@pytest.mark.parametrize("wait", (False, True))
+def test_failed_gate_cancel_still_seals_reads_and_stops_prefetch(make_execution, queues, wait):
+    error = RuntimeError("gate cancellation failed")
+
+    class BrokenCancelGate(FakeGate):
+        def cancel(self):
+            raise error
+
+    execution, gates = make_execution(3, BrokenCancelGate)
+    copied, writes_finished, reads_finished = [], Mock(), Mock()
+    execution.start_write(lambda: (2, 5, 9), copied.append, writes_finished)
+    execution.start_read(lambda: None, lambda *_: None, lambda _: False, lambda: (), reads_finished)
+    execution.wait_for_layer(0, object, read_at_compute_start=False)
+    with pytest.raises(RuntimeError) as caught:
+        execution.end_step(wait=wait)
+    assert caught.value is error and not execution.active
+    # The abort flag terminates gate polling even when cancellation did not wake it.
+    queues[0].submit(lambda: None).result(timeout=2)
+    queues[1].submit(lambda: None).result(timeout=2)
+    assert not copied
+    writes_finished.assert_called_once()
+    reads_finished.assert_called_once()
+    assert all(gate.on_start is None for gate in gates.values())

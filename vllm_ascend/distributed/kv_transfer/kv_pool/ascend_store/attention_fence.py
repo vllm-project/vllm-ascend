@@ -41,16 +41,20 @@ class AttentionComputeStartGate:
         self.on_start: Callable[[], None] | None = None
         self.on_finish: Callable[[], None] | None = None
         self._event: torch.npu.Event | None = None
+        self._cancelled = False
 
     def record(
         self,
         stream: torch.npu.Stream | None = None,
     ) -> None:
+        with self._condition:
+            if self._cancelled:
+                return
         stream = stream or torch.npu.current_stream()
         event = torch.npu.Event()
         event.record(stream)
         with self._condition:
-            if self._event is None:
+            if self._event is None and not self._cancelled:
                 self._event = event
                 self._condition.notify_all()
                 if self.on_start is not None:
@@ -58,15 +62,19 @@ class AttentionComputeStartGate:
 
     def cancel(self) -> None:
         """Release gated tasks after their caller has set its transfer abort flag."""
-        self.on_start = None
-        self.on_finish = None
-        self.record()
+        with self._condition:
+            self._cancelled = True
+            self.on_start = None
+            self.on_finish = None
+            self._condition.notify_all()
 
     def wait(self, timeout: float = 10.0) -> bool:
         with self._condition:
-            while self._event is None:
+            while self._event is None and not self._cancelled:
                 if not self._condition.wait(timeout=timeout):
                     return False
+            if self._cancelled:
+                return True
             event = self._event
 
         event.synchronize()

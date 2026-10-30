@@ -11,15 +11,16 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec, MambaSpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from tests.ut.distributed.ascend_store.v1.align_state_fixtures import make_sparse_group_topology
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
 )
 from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import make_config
-from tests.ut.distributed.ascend_store.v1.worker.bulk.fixtures import make_sparse_group_topology
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
     ReachablePrefix,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BlockHashMapping
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -29,10 +30,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.lookup import resolve_load_candidate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.rows import (
-    lookup_chunk_ranges,
-    store_transfer_records,
-)
 
 
 @pytest.mark.parametrize(
@@ -48,12 +45,13 @@ def test_store_records_intersect_hashes_and_retained_suffix(
     start, end, hash_count, block_count, expected_hashes, expected_ids
 ) -> None:
     hashes = tuple(bytes([index]) for index in range(hash_count))
-    counts, selected_hashes, ids = store_transfer_records(
-        end, hashes, tuple(range(1, block_count + 1)), block_size=4, hash_block_size=4, start_token=start
+    pairs = list(
+        BlockHashMapping(4, 4).pair_block_ids(
+            hashes, tuple(range(1, block_count + 1)), start_token=start, end_token=end
+        )
     )
-    assert ids == expected_ids
-    assert selected_hashes == [hashes[index] for index in expected_hashes]
-    assert counts == [4] * len(expected_ids)
+    assert [block_id for _, _, block_id in pairs] == expected_ids
+    assert [block_hash for _, block_hash, _ in pairs] == [hashes[index] for index in expected_hashes]
 
 
 @pytest.mark.parametrize("group_ids", ((0,), (0, 1)), ids=("single", "multiple"))
@@ -207,7 +205,6 @@ def test_sliding_load_uses_scheduler_physical_frontier_without_another_eagle_dro
     candidate = resolve_load_candidate(
         make_config(granularity=16, eagle=eagle),
         LookupResult(128),
-        query_start_token=0,
         query_end_token=128,
         local_cached_tokens=0,
         request_token_count=128,
@@ -246,9 +243,17 @@ def test_store_suffix_mask_intersects_requested_and_retained_ranges(start, block
     hashes = tuple(bytes([index]) for index in range(8))
     (mask,) = coordinator.select_for_store(start, 128, 128)
     assert mask is not None and len(mask) == max(8 - start // 16, 0)
-    counts, selected_hashes, ids = store_transfer_records(
-        128, hashes, blocks, block_size=16, hash_block_size=16, start_token=start, mask=mask
-    )
+    pairs = list(BlockHashMapping(16, 16).pair_block_ids(hashes, blocks, start_token=start, end_token=128))
+    pairs = [pair for pair in pairs if pair[0] - start // 16 < len(mask) and mask[pair[0] - start // 16]]
+    ids = [block_id for _, _, block_id in pairs]
     assert ids == expected_ids
-    assert selected_hashes == [hashes[block_id - 100] for block_id in expected_ids]
-    assert counts == [16] * len(expected_ids)
+
+
+def lookup_chunk_ranges(end, hashes, *, block_size, hash_block_size, mask=None):
+    ranges = list(BlockHashMapping(block_size, hash_block_size).iter_hash_ranges(hashes, start_token=0, end_token=end))
+    ranges = [chunk for i, chunk in enumerate(ranges) if mask is None or (i < len(mask) and mask[i])]
+    return (
+        [chunk.start_token for chunk in ranges],
+        [chunk.token_count for chunk in ranges],
+        tuple(chunk.block_hash for chunk in ranges),
+    )

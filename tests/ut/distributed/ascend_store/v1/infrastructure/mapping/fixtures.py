@@ -1,7 +1,6 @@
 """CPU Tensor fixtures: real storage, resolved topology facts, no Worker or Backend."""
 
 import ctypes
-import inspect
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -19,37 +18,6 @@ class MappingCase:
     caches: dict
     layout: str
     head_slices: int
-
-    def bind(self, module, *, group_id=None):
-        options = {} if group_id is None else {"group_id": group_id}
-        # Snapshot compatibility belongs only to the paired benchmark fixture.
-        bind = getattr(module, "bind_mapping", module.BulkMapping)
-        binding = bind(
-            self.topology, *self.registration_arrays, kv_cache_layout=self.layout, kv_caches=self.caches, **options
-        )
-        return module.BulkMapping(binding) if hasattr(module, "bind_mapping") else binding
-
-    def bind_layers(self, module, *, group_id=None, **options):
-        if "topology" not in inspect.signature(module.LayerwiseMapping).parameters:
-            # Compare complete initialization, including the historical local
-            # binding, instead of timing only the old Layerwise view constructor.
-            bind = getattr(module, "bind_mapping", module.BulkMapping)
-            bound = bind(
-                self.topology,
-                *self.registration_arrays,
-                group_id=group_id,
-                kv_cache_layout=self.layout,
-                kv_caches=self.caches,
-            )
-            return module.LayerwiseMapping(bound, **options)
-        return module.LayerwiseMapping(
-            self.topology,
-            *self.registration_arrays,
-            group_id=group_id,
-            kv_cache_layout=self.layout,
-            kv_caches=self.caches,
-            **options,
-        )
 
 
 def make_case(

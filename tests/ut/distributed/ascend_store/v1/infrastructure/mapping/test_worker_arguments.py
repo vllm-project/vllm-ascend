@@ -2,11 +2,13 @@
 
 import ctypes
 from itertools import product
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import (
     expected_group_bytes,
     expected_head_bytes,
@@ -14,63 +16,61 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import
     make_hybrid_case,
     read_bytes,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
-    build_key_range_remote,
-    build_mappings,
-    map_keys,
-    select_layers,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import LayerwiseAccessKind
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.executor import (
+    BulkExecutor,
+    Executor,
+    LayerwiseExecutor,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.transfer import (
-    bind_bulk_sizes,
-    materialize_bulk_arguments,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.key_range import (
-    bind_key_range_layouts,
-    materialize_store_layer_ranges,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
-    bind_layer_memberships,
-    prepare_layer_transfer,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.batch import (
-    KVGroupBatch,
-    KVTransferBatch,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import map_keys, select_layers
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.context import bind_context
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.keys import KeyIndex
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.selection import LoadSelection
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.bulk import BulkTransfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.layerwise import LayerwiseTransfer
 
 
 def transfer_arguments(case, group_id, hashes, ids, mask=None):
-    keys, local, layers = build_mappings(
-        case.topology, case.caches, group_id=group_id, kv_cache_layout=case.layout, layerwise=True
+    case.topology.config.align_state_group_ids = frozenset(
+        group.group_id for group in case.topology.transfer_groups if group.uses_align_state
     )
-    remote = build_key_range_remote(local)
+    context = bind_context(case.topology, case.caches, case.layout, layerwise_access=LayerwiseAccessKind.KEY_RANGE)
+    selection = LoadSelection(context.partition_order)
+    index = KeyIndex(keys=selection.keys)
+    keys = {partition: parts for (_, partition), parts in context.key_parts[group_id].items()}
+    for p, (partition, parts) in enumerate(keys.items()):
+        coordinate = (group_id, partition)
+        for row, (block_hash, block_id) in enumerate(zip(hashes, ids, strict=True)):
+            if mask is None or mask[p * len(ids) + row]:
+                selection.add_target(
+                    index.identify(parts, block_hash), coordinate, block_id, 0, context.object_sizes[coordinate]
+                )
+    selection.bind_results()
+    backend = FakeBackend()
+    queue = Executor("mapping-test", lambda: None)
+    bulk = BulkTransfer(context, backend, BulkExecutor(queue, None)).arguments(selection)
+    sessions = backend.create_sessions()
+    transfer = LayerwiseTransfer(
+        context,
+        backend,
+        LayerwiseAccessKind.KEY_RANGE,
+        sessions,
+        LayerwiseExecutor(queue, None, prefetch_layers=1, start_gate_factory=lambda: None),
+    )
+    try:
+        plan, _, _ = transfer.open(selection, to_remote=False)
+        per_layer = {}
+        for layer in plan.layers:
+            transfer._copy_ranges(plan, layer, to_remote=False)
+            _, names, addresses, sizes, offsets = backend.calls[-1]
+            per_layer[layer] = (names, addresses, sizes, offsets)
+    finally:
+        sessions.finish_load()
+        sessions.close()
+        queue.close()
     group = next(group for group in case.topology.transfer_groups if group.group_id == group_id)
     by_pp = select_layers(group, case.topology.config.pp_partition.target_layer_counts)
-    batch = KVTransferBatch(
-        ("request",),
-        (
-            KVGroupBatch(
-                group_id,
-                np.asarray(ids, dtype=np.uint64),
-                tuple(map_keys(parts, hashes) for parts in keys.values()),
-                np.array((0, len(ids)), dtype=np.intp),
-                tuple(layer.physical_layer_id for layer in group.layers),
-                next(iter(remote.values()))["size_bytes"],
-                None if mask is None else np.asarray(mask, dtype=np.bool_),
-                physical_layer_ids_by_partition=tuple(
-                    tuple(layer.physical_layer_id for layer in by_pp[pp]) for pp, _, _ in keys
-                ),
-            ),
-        ),
-    )
-    locals_by_group, layers_by_group, remote_by_group = {group_id: local}, {group_id: layers}, {group_id: remote}
-    bulk = materialize_bulk_arguments(locals_by_group, batch, bind_bulk_sizes(locals_by_group))
-    plan = prepare_layer_transfer(batch, bind_layer_memberships(locals_by_group, layers_by_group))
-    layouts = bind_key_range_layouts(locals_by_group, layers_by_group, remote_by_group)
-    per_layer = {
-        layer: (plan.selected_keys_by_layer[layer], *materialize_store_layer_ranges(layouts, groups, layer))
-        for layer, groups in plan.groups_by_layer.items()
-    }
-    return bulk, per_layer, keys, by_pp
+    return SimpleNamespace(keys=bulk[0], addresses=bulk[1], sizes=bulk[2]), per_layer, keys, by_pp
 
 
 @pytest.mark.parametrize(

@@ -84,20 +84,20 @@ class LookupCodec:
         return [
             request.end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
             *group_frames,
-            request.start_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
+            request.local_available_tokens.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
             *hash_frames,
         ]
 
     def decode_request(self, frames: Sequence[WireFrame]) -> LookupRequest:
         if len(frames) != _REQUEST_FRAME_COUNT:
             raise ValueError(f"Lookup request requires {_REQUEST_FRAME_COUNT} frames, received {len(frames)}")
-        start_token = int.from_bytes(frames[2], byteorder="big")
+        local_available_tokens = int.from_bytes(frames[2], byteorder="big")
         end_token = int.from_bytes(frames[0], byteorder="big")
-        if end_token < start_token:
-            raise ValueError(f"Lookup range end {end_token} precedes start {start_token}")
+        if end_token < local_available_tokens:
+            raise ValueError(f"Lookup range end {end_token} precedes local prefix {local_available_tokens}")
         hash_strings = self._decoder.decode(frames[3:])
         return LookupRequest(
-            start_token=start_token,
+            local_available_tokens=local_available_tokens,
             end_token=end_token,
             transfer_group_ids=tuple(self._decoder.decode([frames[1]])),
             block_hashes=tuple(BlockHash(bytes.fromhex(block_hash)) for block_hash in hash_strings),

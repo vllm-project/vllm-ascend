@@ -13,7 +13,7 @@ from ..backend import (
     ObjectSessions,
     Registration,
 )
-from .execution import Executor
+from .executor import Executor
 
 if TYPE_CHECKING:
     from .topology import KVPoolGroupTopology
@@ -28,7 +28,7 @@ class Resources:
     Own Executors, Backend object sessions, buffer registrations, and the Backend
     client. Keep KV tensors alive until cleanup succeeds. The Worker submits work
     and decides when to start, stop, and release these resources; mappings and
-    per-step execution Sessions remain Worker-owned.
+    per-step scheduling remains Executor-owned.
     """
 
     def __init__(

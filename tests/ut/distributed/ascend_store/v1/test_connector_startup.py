@@ -13,11 +13,16 @@ from vllm.platforms.interface import Platform
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+from tests.ut.distributed.ascend_store.v1.construction_fixtures import create_scheduler, create_worker
 from vllm_ascend.distributed.kv_transfer import register_connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_config,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector, factory
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector as connector_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure import (
+    configuration as configuration_module,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import (
     resolve_kv_pool_config,
 )
@@ -46,24 +51,24 @@ def test_registered_name_creates_v1_for_both_roles(configuration_case, monkeypat
     config, cache = configuration_case
     config.kv_transfer_config = transfer_config("AscendStoreV1Connector")
     config.parallel_config.data_parallel_rank = 0
-    config.parallel_config.rank = 1  # This Worker does not own the Lookup RPC server.
-    scheduler_owner, worker_owner = object(), object()
+    config.parallel_config.rank = 1
+    scheduler_owner, worker_owner = (object(), object())
     create_scheduler = Mock(return_value=scheduler_owner)
     create_worker = Mock(return_value=worker_owner)
-    monkeypatch.setattr(connector, "create_kv_pool_scheduler", create_scheduler)
-    monkeypatch.setattr(connector, "create_kv_pool_worker", create_worker)
-
+    monkeypatch.setattr(connector.AscendStoreV1Connector, "_create_scheduler", create_scheduler)
+    monkeypatch.setattr(connector.AscendStoreV1Connector, "_create_worker", create_worker)
     instance = KVConnectorFactory.create_connector(config, role, cache)
-
     assert type(instance) is connector.AscendStoreV1Connector
     assert config.kv_transfer_config.kv_connector_module_path is None
     if role == KVConnectorRole.SCHEDULER:
         assert instance.scheduler is scheduler_owner
-        create_scheduler.assert_called_once_with(config, cache, instance._resolve_lookup_address(config))
+        create_scheduler.assert_called_once()
+        assert create_scheduler.call_args.args[1] == instance._resolve_lookup_address(config)
         create_worker.assert_not_called()
     else:
         assert instance.worker is worker_owner
-        create_worker.assert_called_once_with(config, cache)
+        create_worker.assert_called_once()
+        assert create_worker.call_args.args[:2] == (config, cache)
         create_scheduler.assert_not_called()
 
 
@@ -74,7 +79,6 @@ def test_registered_name_creates_v1_for_both_roles(configuration_case, monkeypat
 def test_registered_connector_preserves_hma_and_layerwise_graph_requirements(name, nested, layerwise):
     transfer = transfer_config(name, nested=nested, extra={"use_layerwise": layerwise})
     connector_type = KVConnectorFactory.get_connector_class(transfer)
-
     assert KVConnectorFactory.supports_hma_config(transfer)
     assert connector_type.requires_piecewise_for_cudagraph(transfer.kv_connector_extra_config) is layerwise
     if not nested:
@@ -93,15 +97,11 @@ def test_hybrid_startup_aligns_mamba_before_v1_admission(configuration_case, mon
     config.cache_config.mamba_block_size = None
     config.model_config.architecture = "HybridStartupFixture"
     config.scheduler_config.enable_chunked_prefill = True
-
     HybridAttentionMambaModelConfig.verify_and_update_config(config)
-    # Keep the fixture's Attention geometry fixed; exercise NPU's final adjustment
-    # after the real upstream and Ascend model configuration hooks.
     monkeypatch.setattr(Platform, "update_block_size_for_backend", classmethod(lambda cls, config: None))
     NPUPlatform.update_block_size_for_backend(config)
     assert config.cache_config.mamba_cache_mode == "align"
     assert config.cache_config.mamba_block_size == config.cache_config.block_size
-
     state = MambaSpec(
         block_size=config.cache_config.mamba_block_size,
         shapes=((1,),),
@@ -110,12 +110,11 @@ def test_hybrid_startup_aligns_mamba_before_v1_admission(configuration_case, mon
     )
     cache.kv_cache_groups.append(SimpleNamespace(kv_cache_spec=state, is_eagle_group=False))
     cache.transfer_group_ids = (0, 1)
-    # MultiConnector gives each child its own transfer config before construction.
     if nested:
         child = config.kv_transfer_config.kv_connector_extra_config["connectors"][0]
         config.kv_transfer_config = KVTransferConfig(**child)
     resolved = resolve_kv_pool_config(config, cache)
-    factory._validate_support(config, cache, resolved)
+    configuration_module.validate_kv_pool_config(config, cache, resolved)
     assert resolved.hash_block_size == config.cache_config.block_size
     assert resolved.align_state_group_ids == frozenset({1})
 
@@ -134,13 +133,12 @@ def test_registered_v1_rejects_shared_layerwise_buffers_before_binding(configura
     config.model_config.get_num_layers = lambda _parallel: 4
     bind_topology = Mock(side_effect=AssertionError("Topology must not be bound"))
     lookup_client = Mock(side_effect=AssertionError("Lookup must not be connected"))
-    monkeypatch.setattr(factory, "resolve_worker_topology", bind_topology)
-    monkeypatch.setattr(factory, "LookupClient", lookup_client)
-
+    monkeypatch.setattr(connector_module, "resolve_worker_topology", bind_topology)
+    monkeypatch.setattr(connector_module, "LookupClient", lookup_client)
     with pytest.raises(ValueError, match="Layerwise buffer reuse requires native partial-object support"):
         if side == "scheduler":
-            factory.create_kv_pool_scheduler(config, cache, "unused")
+            create_scheduler(config, cache, "unused")
         else:
-            factory.create_kv_pool_worker(config, cache)
+            create_worker(config, cache)
     bind_topology.assert_not_called()
     lookup_client.assert_not_called()

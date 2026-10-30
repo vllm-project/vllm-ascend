@@ -60,17 +60,16 @@ class KVPoolScheduler:
         minimum_query_tokens = self._config.cache_transfer_granularity
         if query_end < minimum_query_tokens:
             return 0, False
-        query_start = self._lookup_start_token(num_computed_tokens, query_end)
-        if query_start >= query_end:
+        local_available = min(num_computed_tokens, query_end)
+        if local_available >= query_end:
             return 0, False
 
         result = self._lookup_client.lookup(
-            LookupRequest(query_start, query_end, self._config.transfer_group_ids, tuple(request.block_hashes))
+            LookupRequest(local_available, query_end, self._config.transfer_group_ids, tuple(request.block_hashes))
         )
         candidate = resolve_load_candidate(
             self._config,
             result,
-            query_start_token=query_start,
             query_end_token=query_end,
             local_cached_tokens=num_computed_tokens,
             request_token_count=request.num_tokens,
@@ -115,9 +114,6 @@ class KVPoolScheduler:
             )
         selected_for_load = expected_external_tokens > 0 and allocated_external_tokens == expected_external_tokens
         self._confirm_load_candidate(request_id, candidate, selected_for_load=selected_for_load)
-
-    def _lookup_start_token(self, local_cached_tokens: int, query_end: int) -> int:
-        return min(local_cached_tokens, query_end)
 
     def _confirm_load_candidate(
         self,
@@ -461,13 +457,13 @@ def _freeze_block_ids(block_ids_by_group: Iterable[Iterable[int]]) -> tuple[tupl
     return tuple(tuple(block_ids) for block_ids in block_ids_by_group)
 
 
-class SynchronousBulkScheduler(KVPoolScheduler):
-    """Publish a Bulk Load when its allocated request is scheduled."""
+class SynchronousScheduler(KVPoolScheduler):
+    """Publish a Load when its allocated request is scheduled."""
 
     store_with_scheduled_load = True
 
 
-class AsynchronousBulkScheduler(KVPoolScheduler):
+class AsynchronousScheduler(KVPoolScheduler):
     """Publish allocated Bulk Loads even before their requests are scheduled."""
 
     load_is_deferred = True
@@ -481,17 +477,3 @@ class AsynchronousBulkScheduler(KVPoolScheduler):
             if command is not None:
                 commands.append(command)
         return commands
-
-
-class LayerwiseScheduler(KVPoolScheduler):
-    """Load per-layer data independently of the local HBM prefix allocation."""
-
-    store_with_scheduled_load = True
-
-    def _lookup_start_token(self, local_cached_tokens: int, query_end: int) -> int:
-        del local_cached_tokens, query_end
-        return 0
-
-    def _confirm_load_candidate(self, request_id: str, candidate: LoadCandidate, *, selected_for_load: bool) -> None:
-        if selected_for_load or candidate.num_new_matched_tokens == 0:
-            self._confirmed_loads[request_id] = candidate

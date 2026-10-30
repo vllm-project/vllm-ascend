@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 630" role="img" aria-labelledby="lookup_flow-title lookup_flow-desc">
+<title id="lookup_flow-title">Lookup · 准备查询与恢复证据</title>
+<desc id="lookup_flow-desc">恢复点搜索使用完整逻辑轴；Backend 只查询本地证据尚未覆盖的候选。</desc>
+<defs>
+<marker id="lookup_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="lookup_flow-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="lookup_flow-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
+</defs><rect width="1120" height="630" fill="#fff"/>
+<text x="48" y="60" class="title">Lookup · 准备查询与恢复证据</text>
+<text x="48" y="88" class="muted">恢复点搜索使用完整逻辑轴；Backend 只查询本地证据尚未覆盖的候选。</text>
+<path d="M 348,184 V 208" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,280 V 304" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,376 V 400" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,472 V 496" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<g data-node="step-1">
+<rect x="48" y="112" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">01  输入查询范围</text>
+<text x="64" y="163" class="muted">上限、hash、缓存组、本地已确认前缀</text>
+</g>
+<text x="696" y="139" class="name">空输入直接返回</text>
+<text x="696" y="165" class="muted">本地完整且对齐：跳过 Backend 查询</text>
+<g data-node="step-2">
+<rect x="48" y="208" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="235" class="name">02  选择逻辑查询块</text>
+<text x="64" y="259" class="muted">Coordinator：连续区间或稀疏候选</text>
+</g>
+<text x="696" y="235" class="name">保留恢复点搜索范围</text>
+<text x="696" y="261" class="muted">不能用 Store 保留掩码替代</text>
+<g data-node="step-3">
+<rect x="48" y="304" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="331" class="name">03  建立唯一 Key 与必要路由</text>
+<text x="64" y="355" class="muted">无别名用偏移；有重复才建立显式索引</text>
+</g>
+<text x="696" y="331" class="name">只准备查询数据</text>
+<text x="696" y="357" class="muted">不计算本地地址，不创建传输 Batch</text>
+<g data-node="step-4">
+<rect x="48" y="400" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="427" class="name">04  查询 exists 并还原可用性</text>
+<text x="64" y="451" class="muted">只查新 Key；按既有路由合并各分区证据</text>
+</g>
+<text x="696" y="427" class="name">每个对象只查询一次</text>
+<text x="696" y="453" class="muted">结果数量必须与查询 Key 一致</text>
+<g data-node="step-5">
+<rect x="48" y="496" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="523" class="name">05  求恢复终点，交给 Scheduler</text>
+<text x="64" y="547" class="muted">本地 + 外部证据 → 共同终点与尾部边界</text>
+</g>
+<text x="696" y="523" class="name">恢复终点 ≠ 实际 Load 范围</text>
+<text x="696" y="549" class="muted">Scheduler 采用、确认分配后才生成 Load</text>
+<text x="48" y="608" class="muted">箭头表示数据依赖；右侧说明各步的处理要点。</text>
+</svg>

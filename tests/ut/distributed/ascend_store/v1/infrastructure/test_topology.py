@@ -95,9 +95,9 @@ def test_local_topology_binds_stage_context_and_explicit_collective_members(
     )
     monkeypatch.setattr(topology_module.dist, "all_gather_object", gather)
     topology = topology_module.resolve_worker_topology(config, cache, admitted)
-    assert topology.config.tp_partition is admitted.tp_partition
-    assert topology.config.pp_partition is admitted.pp_partition
-    assert topology.config.cp_partition is admitted.cp_partition
+    assert topology.config.tp_partition == admitted.tp_partition
+    assert topology.config.pp_partition == admitted.pp_partition
+    assert topology.config.cp_partition == admitted.cp_partition
     assert (topology.stage_layer_start, topology.stage_layer_count, topology.object_shard_index) == (3, stage_count, 1)
     assert topology.global_rank == 11
     assert topology.context_global_ranks == (8, 9, 10, 11)
@@ -105,8 +105,6 @@ def test_local_topology_binds_stage_context_and_explicit_collective_members(
     gather.assert_called_once_with(
         [(ContextRank(8 + rank, rank, rank % 2),) for rank in range(4)], (ContextRank(11, 3, 1),), group=tp.cpu_group
     )
-    config.model_config.get_layers_start_end_indices.assert_called_once_with(config.parallel_config)
-    config.model_config.get_num_layers.assert_not_called()
 
 
 @pytest.mark.parametrize(

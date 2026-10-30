@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 726" role="img" aria-labelledby="store_flow-title store_flow-desc">
+<title id="store_flow-title">Store · 合格来源只绑定一次</title>
+<desc id="store_flow-desc">先筛选写入资格与存在性，再展开实际要传输的地址。</desc>
+<defs>
+<marker id="store_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="store_flow-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="store_flow-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
+</defs><rect width="1120" height="726" fill="#fff"/>
+<text x="48" y="60" class="title">Store · 合格来源只绑定一次</text>
+<text x="48" y="88" class="muted">先筛选写入资格与存在性，再展开实际要传输的地址。</text>
+<path d="M 348,184 V 208" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,280 V 304" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,376 V 400" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,472 V 496" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,568 V 592" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<g data-node="step-1">
+<rect x="48" y="112" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">01  登记 StoreBatch 与原始命令</text>
+<text x="64" y="163" class="muted">保留请求、Store job、来源所有权；后台准备候选</text>
+</g>
+<text x="696" y="139" class="name">先持有来源，再启动准备</text>
+<text x="696" y="165" class="muted">无候选也要完成原始命令交接</text>
+<g data-node="step-2">
+<rect x="48" y="208" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="235" class="name">02  选块与 writer，构造 Key 并去重</text>
+<text x="64" y="259" class="muted">唯一 Key → 首个合格的分区、Block ID、命令索引</text>
+</g>
+<text x="696" y="235" class="name">writer 筛选先于 Key 去重</text>
+<text x="696" y="261" class="muted">无需 Load 式多目标反向索引</text>
+<g data-node="step-3">
+<rect x="48" y="304" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="331" class="name">03  按 Backend 要求查询 exists</text>
+<text x="64" y="355" class="muted">全缺失沿用；有命中只同步筛选 Key 与来源</text>
+</g>
+<text x="696" y="331" class="name">查询后不重扫原始命令</text>
+<text x="696" y="357" class="muted">全存在跳过 IO，仍需结果与释放交接</text>
+<g data-node="step-4">
+<rect x="48" y="400" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="427" class="name">04  准备参数 / 对象计划，等待源就绪</text>
+<text x="64" y="451" class="muted">Bulk 批量地址；Layerwise open 成功后按层求值</text>
+</g>
+<text x="696" y="427" class="name">真正读源前必须等待就绪</text>
+<text x="696" y="453" class="muted">事件由模型钩子记录；参数准备可提前</text>
+<g data-node="step-5">
+<rect x="48" y="496" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="523" class="name">05  读取 KV，累计复制与发布证据</text>
+<text x="64" y="547" class="muted">Bulk 随 store 发布；共享 GVA 汇总后由 Service 决定</text>
+</g>
+<text x="696" y="523" class="name">空结果和失败也参与共享汇总</text>
+<text x="696" y="549" class="muted">Layerwise：Transfer 执行 commit / revoke</text>
+<g data-node="step-6">
+<rect x="48" y="592" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="619" class="name">06  返回存储结果与来源释放结果</text>
+<text x="64" y="643" class="muted">按已绑定命令索引归属；分别确认对象与来源状态</text>
+</g>
+<text x="696" y="619" class="name">发布成功 ≠ 来源可以回收</text>
+<text x="696" y="645" class="muted">读源安全未知时保留保护并上抛</text>
+<text x="48" y="704" class="muted">箭头表示数据依赖；右侧说明各步的处理要点。</text>
+</svg>

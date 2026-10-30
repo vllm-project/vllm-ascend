@@ -17,9 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     Resources,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
-    BulkWorker,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
 
 
 class RecordingBackend(FakeBackend):
@@ -79,7 +77,8 @@ def make_resources(backend: RecordingBackend, *, physical_layers=(0, 1)):
 def run_backend_resource_lifecycle(backend, backend_spec) -> None:
     topology = make_topology(physical_layers=(0,))
     resources = Resources(backend, backend_spec, topology.groups)
-    worker = BulkWorker(topology, resources, coordinator=make_coordinator(topology, 64), store_enabled=False)
+    backend.set_device = lambda: None
+    worker = Worker(topology, resources, coordinator=make_coordinator(topology, 64), store_enabled=False)
     worker.bind_kv_caches(make_caches(topology))
     worker.close()
 

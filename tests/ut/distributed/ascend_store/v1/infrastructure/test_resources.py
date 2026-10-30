@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, Mock, create_autospec
 import pytest
 import torch
 
+from tests.ut.distributed.ascend_store.v1.gva_fixtures import (
+    make_gva_spec,
+)
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_backend_spec,
     make_topology,
@@ -18,14 +21,11 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.resources_fixtures impo
     make_resources,
     register_caches,
 )
-from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import (
-    make_gva_spec,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.sessions import MemcacheSessions
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.execution import Executor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.executor import Executor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import (
     Resources,
 )
@@ -348,26 +348,26 @@ def test_worker_binds_real_executors_and_preserves_start_and_cleanup_order(layer
 
         return call
 
-    assert resources._executors == (worker._store_executor, worker._load_executor)
+    assert resources._executors == (worker._executor._read, worker._executor._write)
     for name, executor in zip(("store", "load"), resources._executors, strict=True):
         assert isinstance(executor, Executor)
         monkeypatch.setattr(executor, "start", record(executor.start, f"start_{name}"))
         monkeypatch.setattr(executor, "close", record(executor.close, f"stop_{name}"))
-    monkeypatch.setattr(worker, "fence_previous_store", record(worker.fence_previous_store, "store_fence"))
-    monkeypatch.setattr(worker, "_check_execution_results", record(worker._check_execution_results, "results"))
     monkeypatch.setattr(resources, "register_kv_buffers", record(resources.register_kv_buffers, "registration"))
     monkeypatch.setattr(resources, "close", record(resources.close, "release"))
     try:
         worker.bind_kv_caches({})
+        monkeypatch.setattr(worker.store, "drain", record(worker.store.drain, "store_drain"))
+        monkeypatch.setattr(worker.load, "drain", record(worker.load.drain, "load_drain"))
         worker.close()
         assert events == [
             "registration",
             "start_store",
             "start_load",
-            "store_fence",
+            "store_drain",
+            "load_drain",
             "stop_store",
             "stop_load",
-            "results",
             "release",
         ]
         assert resources.executors_stopped and resources.closed

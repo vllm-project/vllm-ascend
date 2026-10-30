@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 726" role="img" aria-labelledby="load_flow-title load_flow-desc">
+<title id="load_flow-title">Load · 唯一对象与全部目标</title>
+<desc id="load_flow-desc">选块时绑定目标；后续参数和结果沿同一套归属推进。</desc>
+<defs>
+<marker id="load_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="load_flow-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="load_flow-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
+</defs><rect width="1120" height="726" fill="#fff"/>
+<text x="48" y="60" class="title">Load · 唯一对象与全部目标</text>
+<text x="48" y="88" class="muted">选块时绑定目标；后续参数和结果沿同一套归属推进。</text>
+<path d="M 348,184 V 208" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,280 V 304" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,376 V 400" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,472 V 496" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,568 V 592" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<g data-node="step-1">
+<rect x="48" y="112" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">01  采用已确定的加载范围</text>
+<text x="64" y="163" class="muted">起点 = 本地缓存边界；终点 = 已采用恢复点</text>
+</g>
+<text x="696" y="139" class="name">只选该终点需要的块</text>
+<text x="696" y="165" class="muted">不再执行 Lookup 恢复点搜索</text>
+<g data-node="step-2">
+<rect x="48" y="208" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="235" class="name">02  配对 hash / Block ID，绑定 Key 与目标</text>
+<text x="64" y="259" class="muted">分区、Block ID、请求索引；保留所有目的地</text>
+</g>
+<text x="696" y="235" class="name">去重对象，不能丢目标</text>
+<text x="696" y="261" class="muted">同一 Key 可以写入多个本地 Block</text>
+<g data-node="step-3">
+<rect x="48" y="304" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="331" class="name">03  固定结果槽位并登记 LoadBatch</text>
+<text x="64" y="355" class="muted">pending 批次与请求登记 → Transfer 提交</text>
+</g>
+<text x="696" y="331" class="name">先登记，再执行</text>
+<text x="696" y="357" class="muted">空选集仍完成对应请求</text>
+<g data-node="step-4">
+<rect x="48" y="400" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="427" class="name">04  准备 Backend 参数 / 成功对象计划</text>
+<text x="64" y="451" class="muted">Bulk：整对象；Layerwise：open 后准备成功目标</text>
+</g>
+<text x="696" y="427" class="name">只为入选 / 打开成功的目标展开</text>
+<text x="696" y="453" class="muted">open 结果投影到原槽位，不重新选块</text>
+<g data-node="step-5">
+<rect x="48" y="496" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="523" class="name">05  写入本地 KV 并累计结果</text>
+<text x="64" y="547" class="muted">Bulk 整体写入；Layerwise 按层、Gate 与 Future 推进</text>
+</g>
+<text x="696" y="523" class="name">层间复用对象与归属</text>
+<text x="696" y="549" class="muted">参数契约错误、写入安全未知必须上抛</text>
+<g data-node="step-6">
+<rect x="48" y="592" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="619" class="name">06  收集完成，回报请求和失败位置</text>
+<text x="64" y="643" class="muted">LoadService：按既有目标槽位还原结果</text>
+</g>
+<text x="696" y="619" class="name">完成只交付一次</text>
+<text x="696" y="645" class="muted">部分失败能否重算，受缓存组契约约束</text>
+<text x="48" y="704" class="muted">箭头表示数据依赖；右侧说明各步的处理要点。</text>
+</svg>

@@ -1,1 +1,1 @@
-"""AscendStore v1 worker contract tests."""
+"""Isolated Bulk operation prototype contracts."""

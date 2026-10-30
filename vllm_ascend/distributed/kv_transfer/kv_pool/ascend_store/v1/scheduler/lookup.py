@@ -13,7 +13,6 @@ def resolve_load_candidate(
     config: KVPoolConfig,
     lookup_result: LookupResult,
     *,
-    query_start_token: int,
     query_end_token: int,
     local_cached_tokens: int,
     request_token_count: int,
@@ -21,7 +20,7 @@ def resolve_load_candidate(
     """Derive readable, Store-skip, and Scheduler-safe prefix frontiers."""
 
     readable_end = lookup_result.available_end_token
-    if readable_end == 0 or readable_end <= query_start_token:
+    if readable_end == 0 or readable_end <= local_cached_tokens:
         return None
     if readable_end > query_end_token:
         raise ValueError(f"Lookup returned token {readable_end} beyond query end {query_end_token}")
@@ -40,7 +39,7 @@ def resolve_load_candidate(
     safe_load_end = max(local_cached_tokens, safe_load_end)
 
     physical_load_end = min(readable_end, cdiv(safe_load_end, granularity) * granularity)
-    load_start = 0 if query_start_token == 0 else local_cached_tokens
+    load_start = local_cached_tokens
     if physical_load_end < load_start:
         physical_load_end = load_start
     # Lookup may select a longer Attention object in the same physical tail page.
