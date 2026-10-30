@@ -199,6 +199,71 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     refresh.assert_called_once_with(model_states["model"])
 
 
+def _make_upstream_policy_state(*, rearrangement_step):
+    """A state whose policy does not prepare load statistics."""
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
+    # No prepare_local_load_stats, so uses_custom_load_stats is False.
+    state.policy = object()
+    state.expert_rearrangement_step = rearrangement_step
+    state.expert_rearrangement_step_interval = 10
+    state.expert_load_window_size = 2
+    state._has_fresh_recorded_load = False
+    return state
+
+
+@pytest.mark.parametrize(
+    "rearrangement_step, is_dummy, is_profile, expected_fresh",
+    [
+        # Within the recording window, so upstream writes the sliding window.
+        (9, False, False, True),
+        # Dummy and profile steps contribute no load.
+        (9, True, False, False),
+        (9, False, True, False),
+        # Too far from the next rearrangement for upstream to record.
+        (0, False, False, False),
+    ],
+)
+def test_step_records_load_freshness_for_an_upstream_policy(
+    monkeypatch, rearrangement_step, is_dummy, is_profile, expected_fresh
+):
+    """A policy without custom load statistics must still report freshness.
+
+    ``rearrange`` refuses to migrate experts unless some rank recorded load
+    since the last rearrangement, and only the custom-load-stats path marks
+    that, in the controller's ``prepare_forward``. Every other policy feeds the
+    upstream sliding window instead, so without this the flag stayed ``False``
+    for the lifetime of the process and no expert was ever migrated.
+    """
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
+
+    state = _make_upstream_policy_state(rearrangement_step=rearrangement_step)
+    state.step(is_dummy=is_dummy, is_profile=is_profile)
+
+    assert state._has_fresh_recorded_load is expected_fresh
+
+
+def test_step_leaves_custom_load_stats_freshness_to_the_controller(monkeypatch):
+    """The STAIR path owns the flag, so ``step`` must not set it there."""
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
+
+    state = _make_upstream_policy_state(rearrangement_step=9)
+    state.policy = SimpleNamespace(prepare_local_load_stats=lambda *_, **__: None)
+    monkeypatch.setattr(AscendEplbState, "_discard_samples_from_old_mapping", MagicMock())
+    state._load_stats_window_write_index = 0
+    state._load_stats_window_start_index = 0
+    state._num_recorded_load_steps = 0
+    state._local_load_collection_mask = torch.zeros(2, dtype=torch.bool)
+    state._physical_load_sample_slots = torch.zeros(2, dtype=torch.int64)
+    state.expert_load_window_step = 0
+
+    state.step()
+
+    assert state._has_fresh_recorded_load is False
+
+
 def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):
     monkeypatch.setattr(
         upstream_eplb_state.EplbState,

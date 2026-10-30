@@ -1,0 +1,7 @@
+pr: 20364
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MRv2 EPLB never rearranging experts when `eplb_config.policy` is `default`. Only the
+      STAIR path recorded the load freshness the rearrangement gate requires, so every other
+      policy silently performed no migrations.

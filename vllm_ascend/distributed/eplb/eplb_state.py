@@ -369,6 +369,13 @@ class AscendEplbState(_eplb_state.EplbState):
                         self._load_stats_window_start_index + 1
                     ) % self.expert_load_window_size
                 self._load_stats_window_write_index = (index + 1) % self.expert_load_window_size
+        elif not is_dummy and not is_profile and self._should_record_current_step(log_stats=log_stats):
+            # Only the custom path records freshness, through the controller's
+            # prepare_forward. Every other policy feeds the upstream sliding
+            # window instead, so mark freshness on the steps that write to it;
+            # otherwise the gate in rearrange() can never be satisfied and no
+            # expert is ever migrated.
+            self._has_fresh_recorded_load = True
         super().step(
             is_dummy=is_dummy,
             is_profile=is_profile,
