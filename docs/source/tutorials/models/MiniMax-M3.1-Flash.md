@@ -78,9 +78,10 @@ This selection requires FP16/BF16 queries, unquantized KV, decoder attention,
 and PP/PCP/DCP size 1; sinks, multimodal prefixes, adaptive verification,
 batch-invariant mode and per-head KV scales are excluded. A5 never selects this
 optional backend automatically and retains its CANN path. KV allocation follows
-the existing runner policy without additional contiguity overrides. DSpark skips
-the sparse preparation and QK-norm/RoPE graph fusions that are incompatible with
-this path. Native draft loading reuses the normal plugin; no external adapter,
+the existing runner policy without additional contiguity overrides. DSpark keeps
+the fused sparse QKNorm/RoPE/cache preparation path for supported BF16 and FP8
+caches; the separate QK-norm/RoPE graph fusion pass remains disabled for DSpark.
+Native draft loading reuses the normal plugin; no external adapter,
 offline draft conversion, or manual vLLM core patch is required.
 
 CPU tests cover routing, metadata padding, prefill bounds, graph storage and KV
