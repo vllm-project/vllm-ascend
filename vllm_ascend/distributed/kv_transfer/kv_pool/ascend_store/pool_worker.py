@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -14,6 +15,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
