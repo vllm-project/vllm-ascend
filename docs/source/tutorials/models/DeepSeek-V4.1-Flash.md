@@ -2667,7 +2667,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
       --seed 1024 \
       --served-model-name dsv41 \
       --max-model-len 1048576 \
-      --max-num-batched-tokens 4096 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 32 \
       --async-scheduling \
       --block-size 128 \
