@@ -73,7 +73,7 @@ def _remove_spec_graph_padding_queries(
         return common_attn_metadata
     num_reqs = common_attn_metadata.num_reqs
     draft_tokens = num_decode_draft_tokens_cpu[:num_reqs]
-    if draft_tokens.numel() != num_reqs or not torch.any(draft_tokens > 0).item():
+    if draft_tokens.numel() != num_reqs or not torch.any(draft_tokens >= 0).item():
         return common_attn_metadata
     inactive = (seq_lens[:num_reqs] == 0) & (draft_tokens < 0)
     if not torch.any(inactive).item():
@@ -83,9 +83,13 @@ def _remove_spec_graph_padding_queries(
         raise ValueError("GDN speculative graph padding must be a request suffix")
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.clone()
     query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
+    # Adaptive verification can redistribute the CPU's even split on device.
+    # Remove only padding; copying CPU boundaries would undo that allocation.
+    query_start_loc = common_attn_metadata.query_start_loc.clone()
+    query_start_loc[first_inactive + 1 :] = query_start_loc[first_inactive]
     return common_attn_metadata.replace(
         query_start_loc_cpu=query_start_loc_cpu,
-        query_start_loc=query_start_loc_cpu.to(common_attn_metadata.query_start_loc.device),
+        query_start_loc=query_start_loc,
         num_actual_tokens=int(query_start_loc_cpu[-1]),
     )
 
@@ -164,6 +168,9 @@ class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
     # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
     actual_seq_lengths: torch.Tensor | None
+    # Adaptive graphs must retain the state-table row stride independently
+    # of the current query length, including accepted_prev > query_len.
+    use_upstream_recurrent: bool = False
 
 
 def _build_actual_seq_lengths(
@@ -505,6 +512,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
 
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+            use_upstream_recurrent=bool(
+                self.speculative_config and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            ),
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
                 cache_indices=attn_metadata.spec_state_indices_tensor[:spec_num_rows],
@@ -732,16 +742,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             num_reqs = num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
-            runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            if runtime_draft_tokens.sum().item() > 0:
-                torch.ge(
-                    num_decode_draft_tokens_cpu,
-                    0,
-                    out=spec_sequence_masks_cpu,
-                )
-            else:
-                # Dynamic speculative decoding can be enabled while this batch
-                # carries no draft tokens. Keep the normal prefill/decode split.
+            # Match vLLM: zero drafts still need the previous accepted-token
+            # offset, including one-token rows used to capture varlen graphs.
+            torch.ge(num_decode_draft_tokens_cpu, 0, out=spec_sequence_masks_cpu)
+            adaptive = bool(
+                self.speculative_config and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            )
+            if not adaptive and not torch.any(num_decode_draft_tokens_cpu > 0).item():
+                # Keep legacy static graphs on their original decode route.
+                # Only adaptive graphs capture the strided recurrent path.
                 spec_sequence_masks_cpu.zero_()
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
@@ -750,10 +759,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             else:
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
                 spec_sequence_masks.copy_(spec_sequence_masks_cpu, non_blocking=True)
-                spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
-                    spec_sequence_masks_cpu,
-                    num_spec_decodes,
-                )
 
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
@@ -775,8 +780,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             assert spec_sequence_masks_cpu is not None
-            assert spec_sequence_indices is not None
-            assert non_spec_sequence_indices is not None
 
             non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
             num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
@@ -807,16 +810,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
-                spec_state_indices_tensor = torch.index_select(
-                    block_table_tensor[:, : self.num_spec + 1],
-                    0,
-                    spec_sequence_indices,
-                )
+                # Reuse vLLM's pure-spec path: real requests precede padding,
+                # so neither device sequence indices nor a gather are needed.
+                spec_state_indices_tensor = block_table_tensor[:num_spec_decodes, : self.num_spec + 1]
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
+                spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
+                    spec_sequence_masks_cpu,
+                    num_spec_decodes,
+                )
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
                     query_lens,
@@ -880,11 +885,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
 
             assert num_accepted_tokens is not None
-            num_accepted_tokens = torch.index_select(
-                num_accepted_tokens,
-                0,
-                spec_sequence_indices,
-            )
+            if num_prefills == 0 and num_decodes == 0:
+                num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
+            else:
+                num_accepted_tokens = torch.index_select(num_accepted_tokens, 0, spec_sequence_indices)
 
         # A FULL graph retains captured speculative conv/recurrent tasks. Clear
         # their stable inputs on every no-spec replay so an idle or prefill

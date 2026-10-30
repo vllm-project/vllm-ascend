@@ -434,11 +434,20 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
-@pytest.mark.parametrize("num_draft_tokens", [0, 3])
-def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata, graph_mode, num_draft_tokens):
+@pytest.mark.parametrize("num_draft_tokens", [None, 0, 3])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_prepare_attn_classifies_one_token_prompt_tails(
+    mock_build_attn_metadata, graph_mode, num_draft_tokens, adaptive
+):
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
+    drafts_missing = num_draft_tokens is None
+    num_draft_tokens = num_draft_tokens or 0
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
+        vllm_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
+            parallel_config=SimpleNamespace(),
+        ),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
         recoverssm=None,
@@ -463,6 +472,13 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         positions=None,
         attn_state=None,
     )
+    if drafts_missing:
+        input_batch.num_draft_tokens_per_req = None
+    if adaptive and num_draft_tokens:
+        input_batch.num_scheduled_tokens = np.array([2, 4, 2])
+        input_batch.query_start_loc_np = np.array([0, 2, 6, 8], dtype=np.int32)
+        input_batch.query_start_loc = torch.tensor([0, 1, 5, 8], dtype=torch.int32)
+        input_batch.num_tokens = input_batch.num_tokens_after_padding = 8
     AscendMambaHybridModelState.prepare_attn(
         state,
         input_batch=input_batch,
@@ -474,7 +490,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
     )
     metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
     assert metadata.is_prefilling.tolist() == [False, True, False]
-    expected_drafts = num_draft_tokens if num_draft_tokens else -1
+    expected_drafts = num_draft_tokens if adaptive or num_draft_tokens else -1
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [expected_drafts, -1, expected_drafts]
     np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 

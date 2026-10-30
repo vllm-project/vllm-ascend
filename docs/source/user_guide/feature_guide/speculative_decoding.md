@@ -466,6 +466,43 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 
 Adaptive verification takes effect only with model runner V2.
 
+#### Hybrid Gated DeltaNet targets
+
+The Model Runner V2 GDN path supports variable verification lengths, including
+steps that admit no draft tokens. Zero-draft decode requests retain the previous
+step's accepted-token offset so convolution and recurrent attention resume from
+the correct state. ACL Graph capture uses the same speculative path for one-token
+rows, and padding requests have zero-length GDN queries.
+
+Adaptive GDN verification directly reuses vLLM's Triton recurrent implementation
+with a two-dimensional state table. Its row stride is independent of the current
+query length, so a one-token query can restore the state from an earlier step
+that accepted multiple tokens. The fixed-length path keeps the native recurrent
+operator. This adaptive path requires triton-ascend and is not supported by the
+310P recurrent backend.
+
+Use a matching vLLM revision with GDN adaptive-verification support and a DSpark
+checkpoint trained for the target model. For Qwen hybrid targets, including
+Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
+length and enable `enable_adaptive_verification` as above. Keep full decode graphs
+enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
+to use vLLM's model-state implementation and the compacted device query boundaries.
+
+Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
+rejection sampler. Newer vLLM Triton budget allocators are used directly; the
+Ascend `index_fill_` workaround applies only to the older torch allocator.
+No change to sampling probabilities or model weights is required.
+
+Validate each target/draft pair on the intended NPU and CANN version. Compare
+plain decoding, fixed-length DSpark, and adaptive DSpark with the same precision,
+TP size, concurrency, prompt/output lengths, and cache settings, after warmup.
+Check output quality and actual admitted draft counts as well as throughput.
+The FIA path currently copies admitted query boundaries back to the host to
+prepare its attention metadata; include this synchronization cost in profiling.
+The upstream recurrent kernel may also have different performance from the native
+operator on each NPU generation; measure the complete target step, rather than
+inferring a speedup from the reduced verification token count alone.
+
 > **Performance note (Ascend):** The benefits of adaptive verification depend on
 > the workload.
 >

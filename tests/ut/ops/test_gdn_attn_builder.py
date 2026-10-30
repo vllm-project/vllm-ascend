@@ -182,6 +182,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
     num_heads: int = 32,
     num_speculative_tokens: int = 0,
+    enable_adaptive_verification: bool = False,
     mamba_cache_mode: str = "none",
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ):
@@ -190,6 +191,8 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            enable_adaptive_verification=enable_adaptive_verification,
+            use_eagle_block_drop=lambda: False,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
@@ -222,6 +225,7 @@ def _make_builder(
     device: torch.device,
     num_heads: int,
     num_speculative_tokens: int,
+    enable_adaptive_verification: bool = False,
     builder_cls=AscendGDNAttentionMetadataBuilder,
     mamba_cache_mode: str = "none",
     block_size: int = 16,
@@ -231,6 +235,7 @@ def _make_builder(
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
+        enable_adaptive_verification=enable_adaptive_verification,
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
@@ -672,6 +677,113 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
         prefill_metadata.chunk,
         attn_metadata.prefill_query_start_loc,
     )
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+@pytest.mark.parametrize("cache_mode,expected_slots", [("none", [12, 20]), ("align", [15, 23])])
+@pytest.mark.parametrize("draft_count", [0, 3])
+def test_spec_rows_preserve_previous_accepted_state(builder_cls, graph_mode, cache_mode, expected_slots, draft_count):
+    query_len = draft_count + 1
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([list(range(10, 18)), list(range(20, 28))], dtype=torch.int32)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        mamba_cache_mode=cache_mode,
+        enable_adaptive_verification=True,
+        num_speculative_blocks=3,
+        cudagraph_mode=graph_mode,
+        builder_cls=builder_cls,
+    )
+    # Include one-token capture rows, before any draft tokens are admitted.
+    captured = builder.build_for_cudagraph_capture(common)
+    assert AscendGDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert builder.get_varlen_cudagraph_max_query_len(builder.vllm_config, builder.kv_cache_spec) == 4
+    assert captured.num_spec_decodes == 2
+    assert captured.num_decodes == 0
+
+    accepted = torch.tensor([3, 1], dtype=torch.int32)
+    metadata = builder.build(0, common, accepted, torch.full((2,), draft_count, dtype=torch.int32))
+    assert metadata.num_spec_decodes == 2
+    assert metadata.num_decodes == 0
+    assert metadata.non_spec_state_indices_tensor is None
+    assert metadata.num_accepted_tokens.tolist() == [3, 1]
+    slots = metadata.spec_state_indices_tensor
+    assert slots[torch.arange(2), accepted - 1].tolist() == expected_slots
+    assert metadata.spec_decode_metadata.actual_seq_lengths.tolist() == [0, query_len, query_len]
+    assert metadata.spec_decode_metadata.use_upstream_recurrent
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.query_start_loc.tolist() == [0, query_len, 2 * query_len]
+    if graph_mode == CUDAGraphMode.NONE:
+        # Pure speculative rows reuse views rather than materializing a gather.
+        assert metadata.num_accepted_tokens.data_ptr() == accepted.data_ptr()
+        if cache_mode == "none":
+            assert slots.data_ptr() == common.block_table_tensor.data_ptr()
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize(
+    "draft_count,host_lens,device_queries,expected_queries,expected_lens",
+    [
+        (9, [5, 5, 2], [0, 1, 10, 12], [0, 1, 10, 10], [0, 1, 9, 0]),
+        (0, [1, 1, 2], [0, 1, 2, 4], [0, 1, 2, 2], [0, 1, 1, 0]),
+    ],
+)
+def test_adaptive_gdn_padding_preserves_device_query_boundaries(
+    builder_cls, draft_count, host_lens, device_queries, expected_queries, expected_lens
+):
+    common = create_common_attn_metadata(BatchSpec([64, 64, 0], host_lens), 16, torch.device("cpu"))
+    common.query_start_loc = torch.tensor(device_queries, dtype=torch.int32)
+    common.block_table_tensor = torch.arange(30, dtype=torch.int32).reshape(3, 10)
+    original_queries = common.query_start_loc.clone()
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=9,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.tensor([2, 3, 1], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([draft_count, draft_count, -1], dtype=torch.int32),
+        num_actual_reqs=2,
+    )
+    # The host's [5, 5] split must not replace the admitted [1, 9] split.
+    assert metadata.spec_query_start_loc.tolist() == expected_queries
+    assert metadata.spec_decode_metadata.actual_seq_lengths.tolist() == expected_lens
+    assert metadata.num_accepted_tokens.tolist() == [2, 3, 1]
+    assert metadata.num_spec_decode_tokens == expected_queries[-1]
+    assert torch.equal(common.query_start_loc, original_queries)
+
+
+def test_310p_does_not_advertise_adaptive_recurrent_graphs():
+    assert GDNAttentionMetadataBuilder310.get_varlen_cudagraph_max_query_len(None, None) is None
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_static_capture_keeps_native_recurrent_route(builder_cls, query_len):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    metadata = builder.build_for_cudagraph_capture(common)
+    if query_len == 1:
+        assert metadata.num_spec_decodes == 0
+        assert metadata.num_decodes == 2
+        assert metadata.spec_decode_metadata is None
+    else:
+        assert metadata.num_spec_decodes == 2
+        assert metadata.num_decodes == 0
+        assert not metadata.spec_decode_metadata.use_upstream_recurrent
 
 
 def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():

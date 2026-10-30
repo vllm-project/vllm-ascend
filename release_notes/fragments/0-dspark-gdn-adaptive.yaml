@@ -1,0 +1,4 @@
+pr: 0
+entries:
+  - category: bugfix
+    text: Added a DSpark adaptive GDN verification path that reuses vLLM's strided recurrent implementation, preserves accepted-state offsets and device query boundaries, and avoids redundant gathers for pure speculative batches. The 310P recurrent backend remains unsupported for adaptive verification.

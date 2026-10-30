@@ -1563,6 +1563,8 @@
 #       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
 #       `DeviceOperator`. The A5 adaptor temporarily implements it with the
 #       equivalent `scatter_` operation; other hardware keeps the native path.
+#       Apply this only when the legacy torch allocator exists. Newer vLLM
+#       Triton allocators are reused directly without replacing their kernels.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
