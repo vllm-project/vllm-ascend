@@ -23,6 +23,7 @@ import torch
 import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
@@ -131,6 +132,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.group_name = group_name
         self.group_ranks = group_ranks
         self.dead_dp_ranks: set[int] = set()
+        # GroupCoordinator.cpu_all_reduce_ forwards this cached timeout.
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
 
         try:
             self._init_device_groups(create_cpu_group=True)
