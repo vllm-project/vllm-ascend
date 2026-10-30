@@ -1,24 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Host-only admission and readiness tracking for early decode submission.
+"""Qwen-owned admission and lifecycle for early decode submission.
 
-Models explicitly advertise an audited CPU-length capability through their
-model state. Request lifecycle, uniform speculative batches and exact snapshot
-ownership are framework concerns and do not depend on a model architecture.
-Admission and snapshot recording never read pending pinned data. The consumer
-retains the original event synchronization whenever exact host counts are used.
+All optional scheduling, exact-snapshot and connector proofs live with the
+model whose CPU metadata consumers were audited. Shared runners expose only
+lifecycle hooks and retain their original synchronized length consumer.
+Admission and snapshot recording never read pending pinned data.
 """
 
 from typing import Any, Protocol, cast
 
 import numpy as np
 
-from vllm_ascend.worker.v2.mm_decode_queue import (
+from vllm_ascend.models.qwen4_exp.mm_decode_queue import (
     MMDecodeCertificateState,
     MMDecodeRequestKey,
     make_mm_decode_request_key,
 )
-from vllm_ascend.worker.v2.pd_decode_queue import PDDecodeQueueState
+from vllm_ascend.models.qwen4_exp.pd_decode_queue import PDDecodeQueueState
 
 
 class DecodeQueueCapability(Protocol):
@@ -30,7 +29,7 @@ class DecodeQueueCapability(Protocol):
 
 
 class DecodeQueueController:
-    """One runner's optional, fail-closed decode submission controller."""
+    """One Qwen model state's optional, fail-closed submission controller."""
 
     def __init__(self, enabled: bool = False, multimodal: bool = False, full_graph_mode: Any = None) -> None:
         self.enabled = enabled
@@ -52,6 +51,122 @@ class DecodeQueueController:
         self.last_guard: dict[str, Any] | None = None
         self._model_state_owner: Any = None
         self._pd_state: PDDecodeQueueState | None = None
+
+    def invalidate(self) -> None:
+        """Retire proofs before model-state or KV initialization is replaced."""
+        self._set_model_state_owner(None)
+        self.mm_decode_state.invalidate()
+        if self._pd_state is not None:
+            self._pd_state.invalidate()
+
+    def initialize(self, runner: Any) -> bool:
+        """Install the model-owned observer after the runner binds its caches."""
+        if not self.model_enabled(runner):
+            return False
+        try:
+            from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+
+            from vllm_ascend.models.qwen4_exp.decode_queue_connector import (
+                unwrap_pd_decode_queue_connector,
+                wrap_pd_decode_queue_connector,
+            )
+
+            # Preserve unknown connector subclasses and clear only observers
+            # installed by this model's earlier initialization.
+            connector = unwrap_pd_decode_queue_connector(runner.kv_connector)
+            if has_kv_transfer_group():
+                connector = wrap_pd_decode_queue_connector(connector, get_kv_transfer_group())
+            runner.kv_connector = connector
+            return True
+        except (AttributeError, ImportError, TypeError, RuntimeError):
+            # This observer is optional; unknown connector installations retain
+            # their original execution path and never acquire queue admission.
+            self.invalidate()
+            return False
+
+    def before_requests_for_runner(self, runner: Any, output: Any) -> None:
+        """Observe receives before the shared runner retires request slots."""
+        if not self.model_enabled(runner):
+            return
+        from vllm_ascend.models.qwen4_exp.decode_queue_connector import PDDecodeQueueKVConnector
+
+        connector = getattr(runner, "kv_connector", None)
+        if type(connector) is PDDecodeQueueKVConnector:
+            connector.observe_scheduler_output(output)
+        self.before_requests(output)
+
+    def prepare_seq_lens(self, runner: Any, output: Any, batch: Any, desc: Any) -> bool:
+        """Handle model-specific length preparation or defer to the runner.
+
+        Returning True means exactly one consumer has run. The shared runner
+        calls its unchanged consumer when the model has no active controller.
+        """
+        if not self.model_enabled(runner):
+            return False
+        try:
+            import torch
+            from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+            from vllm.v1.worker.gpu.kv_connector import KVConnector
+
+            from vllm_ascend.models.qwen4_exp.decode_queue_connector import PDDecodeQueueKVConnector
+
+            current_stream = torch.npu.current_stream()
+            connector = runner.kv_connector
+            has_transfer = has_kv_transfer_group()
+            pd_state = connector.decode_queue_state if type(connector) is PDDecodeQueueKVConnector else None
+            connector_ready = (
+                type(connector) is KVConnector and not has_transfer and output.kv_connector_metadata is None
+            )
+            group_matches = (
+                type(connector) is PDDecodeQueueKVConnector
+                and has_transfer
+                and connector.transfer_group is get_kv_transfer_group()
+            )
+        except (AttributeError, ImportError, TypeError, RuntimeError):
+            return False
+        eligible = self.can_queue(
+            runner,
+            output,
+            batch,
+            desc,
+            current_stream,
+            connector_ready=connector_ready,
+            pd_state=pd_state,
+            pd_transfer_group_matches=group_matches,
+        )
+        if eligible:
+            self.consume_early_seq_lens(runner, output, batch.req_ids, current_stream)
+        else:
+            # Exact synchronization and the pending pinned-buffer read stay in
+            # the baseline runner. Certify only after that consumer completes.
+            runner._update_seq_lens_cpu(output, batch.req_ids)
+            self.certify_exact(runner, output, batch, current_stream, pd_state=pd_state)
+        return True
+
+    def record_runner_snapshot(self, runner: Any, source_stream: Any) -> None:
+        """Observe the original exact D2H only after its event was recorded."""
+        if not self.model_enabled(runner):
+            return
+        from vllm_ascend.models.qwen4_exp.decode_queue_connector import PDDecodeQueueKVConnector
+
+        connector = getattr(runner, "kv_connector", None)
+        pd_state = connector.decode_queue_state if type(connector) is PDDecodeQueueKVConnector else None
+        self.record_snapshot(runner, source_stream, pd_state=pd_state)
+
+    def consume_early_seq_lens(self, runner: Any, output: Any, req_ids: list[str], current_stream: Any) -> None:
+        """Fill the audited CPU bound without reading pending pinned data.
+
+        Admission proves the exact producer ran on this source stream. Keep its
+        device dependency so the next step cannot overwrite state still being
+        copied, while allowing CPU graph submission to continue immediately.
+        """
+        current_stream.wait_event(runner.num_computed_tokens_event)
+        self.stats["host_length_wait_skipped"] += 1
+        self.stats["length_device_wait_enqueued"] += 1
+        for row, req_id in enumerate(req_ids):
+            index = runner.req_states.req_id_to_index[req_id]
+            computed = runner.req_states.num_computed_tokens_cpu[index]
+            runner.input_buffers.seq_lens_cpu[row] = computed + output.num_scheduled_tokens[req_id]
 
     def _remember_pd_state(self, state: PDDecodeQueueState | None) -> None:
         if state is None or state is self._pd_state:
@@ -420,40 +535,3 @@ class DecodeQueueController:
             # Unsupported optional schemas keep the runner's original exact
             # synchronization path; admission never raises into model execution.
             return self._record_guard({"supported_batch_state": False})
-
-
-def update_seq_lens_cpu(
-    runner: Any,
-    output: Any,
-    req_ids: list[str],
-    *,
-    allow_cpu_upper_bound: bool = False,
-    current_stream: Any = None,
-    controller: DecodeQueueController | None = None,
-) -> None:
-    """Consume corrected host counts or enqueue their device dependency.
-
-    The original exact producer runs for every speculative step. An admitted
-    batch may use the scheduler's owned CPU upper bound, without touching the
-    pending pinned snapshot or its NumPy view. The device wait still protects
-    that snapshot's read-before-next-write dependency on request device state.
-    """
-    if (
-        runner.speculator is not None or runner.sync_spec_pp_cpu_counts
-    ) and not runner._can_skip_spec_cpu_length_sync():
-        if allow_cpu_upper_bound and controller is not None and current_stream is not None:
-            current_stream.wait_event(runner.num_computed_tokens_event)
-            controller.stats["host_length_wait_skipped"] += 1
-            controller.stats["length_device_wait_enqueued"] += 1
-        else:
-            runner.num_computed_tokens_event.synchronize()
-            for req_id in output.scheduled_cached_reqs.req_ids:
-                index = runner.req_states.req_id_to_index[req_id]
-                runner.req_states.num_computed_tokens_cpu[index] = runner.num_computed_tokens_cpu[index]
-
-    # Exact GPU positions, lengths, KV slots and accepted recurrent state keep
-    # their existing device path; this CPU field is only a backend upper bound.
-    for row, req_id in enumerate(req_ids):
-        index = runner.req_states.req_id_to_index[req_id]
-        computed = runner.req_states.num_computed_tokens_cpu[index]
-        runner.input_buffers.seq_lens_cpu[row] = computed + output.num_scheduled_tokens[req_id]

@@ -10,7 +10,7 @@ retain the normal synchronized path.
 
 from typing import Any
 
-from vllm_ascend.worker.v2.mm_decode_queue import ObjectIdentity
+from vllm_ascend.models.qwen4_exp.mm_decode_queue import ObjectIdentity
 
 
 class QwenDecodeQueueCapability:

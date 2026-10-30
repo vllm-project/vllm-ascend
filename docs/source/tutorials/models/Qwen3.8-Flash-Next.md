@@ -357,11 +357,12 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ### 9.3 Model Runner V2 Decode Submission
 
 The following `--additional-config` boolean options default to `false`
-(disabled). The shared controller requires an explicit model-state capability;
-models without one retain their original path even when both options are `true`.
-Qwen3.8 Flash Next currently supplies this capability for target architectures
-`Qwen4ExpForCausalLM` and `Qwen4ExpForConditionalGeneration`. Its model-owned
-implementation validates the target/draft attention consumers before admission.
+(disabled). Qwen3.8 Flash Next owns the submission policy in
+`models/qwen4_exp/`, for target architectures `Qwen4ExpForCausalLM` and
+`Qwen4ExpForConditionalGeneration`. Its model state initializes the policy and
+validates the target/draft attention consumers before admission. The shared
+runner only calls optional model-state hooks; other models retain their original
+path even when both options are `true`.
 
 | Option | Behavior |
 | --- | --- |

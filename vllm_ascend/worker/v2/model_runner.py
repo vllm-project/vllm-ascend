@@ -25,7 +25,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from numpy.typing import NDArray
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -117,14 +116,9 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
-from vllm_ascend.worker.v2.decode_queue import DecodeQueueController, update_seq_lens_cpu
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.kv_connector import (
-    MambaCopyKVConnector,
-    PDDecodeQueueKVConnector,
-    wrap_pd_decode_queue_connector,
-)
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -259,17 +253,6 @@ class NPUModelRunner(GPUModelRunner):
             dtype=torch.int32,
             device="cpu",
             pin_memory=True,
-        )
-        # Models opt in through their model-state capability. Shared workers
-        # keep the original path unless the user also enables the controller.
-        self._decode_queue = (
-            DecodeQueueController(
-                enabled=True,
-                multimodal=getattr(self.ascend_config, "enable_mm_decode_early_queue", False) is True,
-                full_graph_mode=CUDAGraphMode.FULL,
-            )
-            if getattr(self.ascend_config, "enable_decode_early_queue", False) is True
-            else None
         )
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
@@ -561,9 +544,10 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
-        queue = getattr(self, "_decode_queue", None)
-        if queue is not None and queue.model_enabled(self) and has_kv_transfer_group():
-            self.kv_connector = wrap_pd_decode_queue_connector(self.kv_connector, get_kv_transfer_group())
+        # Model-specific submission policy is owned by the model state.
+        initialize_submission = getattr(self.model_state, "initialize_decode_submission", None)
+        if callable(initialize_submission):
+            initialize_submission(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -832,13 +816,9 @@ class NPUModelRunner(GPUModelRunner):
         return batch_state, uniform_token_count
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
-        connector = getattr(self, "kv_connector", None)
-        if isinstance(connector, PDDecodeQueueKVConnector):
-            # Observe tokenless receives before request slots are retired/reused.
-            connector.observe_scheduler_output(scheduler_output)
-        queue = getattr(self, "_decode_queue", None)
-        if queue is not None and queue.model_enabled(self):
-            queue.before_requests(scheduler_output)
+        before_requests = getattr(getattr(self, "model_state", None), "before_decode_requests", None)
+        if callable(before_requests):
+            before_requests(self, scheduler_output)
         super().finish_requests(scheduler_output)
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -876,38 +856,12 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        queue = getattr(self, "_decode_queue", None)
-        pd_state = None
-        current_stream = None
-        allow_cpu_upper_bound = False
-        if queue is not None and queue.model_enabled(self):
-            current_stream = torch.npu.current_stream()
-            connector = self.kv_connector
-            has_transfer = has_kv_transfer_group()
-            pd_state = connector.decode_queue_state if isinstance(connector, PDDecodeQueueKVConnector) else None
-            allow_cpu_upper_bound = queue.can_queue(
-                self,
-                scheduler_output,
-                batch_req_state,
-                batch_desc,
-                current_stream,
-                connector_ready=(
-                    type(connector) is KVConnector
-                    and not has_transfer
-                    and scheduler_output.kv_connector_metadata is None
-                ),
-                pd_state=pd_state,
-                pd_transfer_group_matches=(
-                    isinstance(connector, PDDecodeQueueKVConnector)
-                    and has_transfer
-                    and connector.transfer_group is get_kv_transfer_group()
-                ),
-            )
-        else:
-            queue = None
-        self._update_seq_lens_cpu(scheduler_output, req_ids, allow_cpu_upper_bound=allow_cpu_upper_bound)
-        if queue is not None and not allow_cpu_upper_bound:
-            queue.certify_exact(self, scheduler_output, batch_req_state, current_stream, pd_state=pd_state)
+        prepare_seq_lens = getattr(getattr(self, "model_state", None), "prepare_decode_seq_lens", None)
+        if (
+            not callable(prepare_seq_lens)
+            or prepare_seq_lens(self, scheduler_output, batch_req_state, batch_desc) is not True
+        ):
+            self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
@@ -939,7 +893,7 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np: NDArray[np.int32] = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
@@ -972,7 +926,7 @@ class NPUModelRunner(GPUModelRunner):
         # See _pad_query_start_loc_for_fia.
         # Inputs are still global here; eager PCP descriptors carry local counts.
         num_reqs_padded = max(num_reqs, graph_num_reqs or 0)
-        query_start_loc_np: NDArray[np.int32] = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
@@ -1078,7 +1032,7 @@ class NPUModelRunner(GPUModelRunner):
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-        seq_lens_cpu_upper_bound_np: NDArray[np.int32] = np.zeros(num_reqs_padded, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             num_computed_tokens_np,
             num_scheduled_tokens_upper_bound,
@@ -1427,29 +1381,32 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
-        queue = getattr(self, "_decode_queue", None)
-        if queue is not None and queue.model_enabled(self):
-            connector = getattr(self, "kv_connector", None)
-            pd_state = connector.decode_queue_state if isinstance(connector, PDDecodeQueueKVConnector) else None
-            queue.record_snapshot(self, default_stream, pd_state=pd_state)
+        record_snapshot = getattr(getattr(self, "model_state", None), "record_decode_snapshot", None)
+        if callable(record_snapshot):
+            record_snapshot(self, default_stream)
 
     def _update_seq_lens_cpu(
         self,
         scheduler_output: SchedulerOutput,
         req_ids: list[str],
-        *,
-        allow_cpu_upper_bound: bool = False,
     ):
-        queue = getattr(self, "_decode_queue", None)
-        stream = torch.npu.current_stream() if allow_cpu_upper_bound and queue is not None else None
-        update_seq_lens_cpu(
-            self,
-            scheduler_output,
-            req_ids,
-            allow_cpu_upper_bound=allow_cpu_upper_bound,
-            current_stream=stream,
-            controller=queue,
-        )
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        # Wait for and consume the snapshot only when its producer runs.
+        # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
+            # Blocks CPU submission until D2H completes; may stall the async pipeline.
+            self.num_computed_tokens_event.synchronize()
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+
+        # Without a CPU consumer, retain the upstream optimistic upper bound.
+        # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
+        for i, req_id in enumerate(req_ids):  # type: ignore
+            req_index = self.req_states.req_id_to_index[req_id]
+            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1540,9 +1497,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded += 1
             return query_start_loc_np, num_reqs_padded
 
-        cumulative_padding: NDArray[np.int32] = (
-            np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
-        )
+        cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
         query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
 

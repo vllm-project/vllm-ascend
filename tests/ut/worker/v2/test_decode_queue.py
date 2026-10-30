@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Key CPU regressions for model capabilities and shared decode submission."""
+"""Key CPU regressions for Qwen-owned decode submission and shared hooks."""
 
 import importlib.util
 import json
@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[4]
-WORKER = ROOT / "vllm_ascend/worker/v2"
 MODEL = ROOT / "vllm_ascend/models/qwen4_exp"
 QUEUE_KEYS = ("enable_decode_early_queue", "enable_mm_decode_early_queue")
 FULL = object()
@@ -30,12 +29,13 @@ def load(name: str, path: Path) -> Any:
     return module
 
 
-MM = load("_decode_test_mm", WORKER / "mm_decode_queue.py")
-PD = load("_decode_test_pd", WORKER / "pd_decode_queue.py")
+MM = load("_decode_test_mm", MODEL / "mm_decode_queue.py")
+PD = load("_decode_test_pd", MODEL / "pd_decode_queue.py")
 with patch.dict(
-    sys.modules, {"vllm_ascend.worker.v2.mm_decode_queue": MM, "vllm_ascend.worker.v2.pd_decode_queue": PD}
+    sys.modules,
+    {"vllm_ascend.models.qwen4_exp.mm_decode_queue": MM, "vllm_ascend.models.qwen4_exp.pd_decode_queue": PD},
 ):
-    QUEUE = load("_decode_test_queue", WORKER / "decode_queue.py")
+    QUEUE = load("_decode_test_queue", MODEL / "decode_submission.py")
     QWEN = load("_decode_test_qwen", MODEL / "decode_queue.py")
 
 
@@ -256,22 +256,18 @@ class TestDecodeQueue(unittest.TestCase):
                     )
                 self.assertFalse(controller.can_queue(runner, output, batch, desc, stream, connector_ready=True))
 
-    def test_device_wait_never_reads_pinned_snapshot_and_fallback_synchronizes(self):
-        for early in (True, False):
-            with self.subTest(early=early):
-                calls: list[str] = []
-                runner, output, _, _ = fixture()
-                runner.num_computed_tokens_cpu = PinnedSnapshot(calls)
-                runner.num_computed_tokens_event = NS(synchronize=lambda calls=calls: calls.append("sync"))
-                runner.input_buffers = NS(seq_lens_cpu=np.zeros(1, dtype=np.int32))
-                controller, stream = QUEUE.DecodeQueueController(True), NS(wait_event=Mock())
-                QUEUE.update_seq_lens_cpu(
-                    runner, output, ["r"], allow_cpu_upper_bound=early, current_stream=stream, controller=controller
-                )
-                self.assertEqual(calls, [] if early else ["sync", "read"])
-                self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [108 if early else 104])
-                self.assertEqual(stream.wait_event.call_count, int(early))
-                self.assertEqual(controller.stats["host_length_wait_skipped"], int(early))
+    def test_eligible_consumer_waits_on_device_without_reading_pinned_snapshot(self):
+        calls: list[str] = []
+        runner, output, _, _ = fixture()
+        runner.num_computed_tokens_cpu = PinnedSnapshot(calls)
+        runner.num_computed_tokens_event = NS(synchronize=lambda: calls.append("sync"))
+        runner.input_buffers = NS(seq_lens_cpu=np.zeros(1, dtype=np.int32))
+        controller, stream = QUEUE.DecodeQueueController(True), NS(wait_event=Mock())
+        controller.consume_early_seq_lens(runner, output, ["r"], stream)
+        self.assertEqual(calls, [])
+        self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [108])
+        stream.wait_event.assert_called_once_with(runner.num_computed_tokens_event)
+        self.assertEqual(controller.stats["host_length_wait_skipped"], 1)
 
     def test_multimodal_controller_requires_exact_snapshot_and_revokes_lifecycle(self):
         runner, output, batch, desc = fixture()
@@ -358,6 +354,152 @@ class TestDecodeQueue(unittest.TestCase):
             self.assertIsNone(subclass.get_decode_queue_capability(NS(model_state=subclass)))
         self.assertFalse(QWEN.QwenDecodeQueueCapability().supports(NS()))
         self.assertIsNone(QWEN.QwenDecodeQueueCapability().mm_context(NS()))
+
+    def test_model_hooks_default_off_unknown_model_and_state_reinitialization(self):
+        module = qwen_state_module()
+        state = module.AscendQwen4ExpModelState()
+        runner, output, batch, desc = fixture()
+        runner.model_state, runner.model_config.architecture = state, "Qwen4ExpForCausalLM"
+        runner.ascend_config = NS(enable_decode_early_queue=False, enable_mm_decode_early_queue=True)
+        modules = {
+            "vllm_ascend.models.qwen4_exp.decode_queue": QWEN,
+            "vllm_ascend.models.qwen4_exp.decode_submission": QUEUE,
+            "vllm.config.compilation": NS(CUDAGraphMode=NS(FULL=FULL)),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(QUEUE.DecodeQueueController, "initialize", return_value=True),
+        ):
+            state.initialize_decode_submission(runner)
+            self.assertIsNone(state._decode_submission)
+            state.before_decode_requests(runner, output)
+            state.record_decode_snapshot(runner, object())
+            self.assertFalse(state.prepare_decode_seq_lens(runner, output, batch, desc))
+            runner.ascend_config.enable_decode_early_queue = True
+            runner.model_config.architecture = "LlamaForCausalLM"
+            state.initialize_decode_submission(runner)
+            self.assertIsNone(state._decode_submission)
+            runner.model_config.architecture = "Qwen4ExpForCausalLM"
+            state.initialize_decode_submission(runner)
+            previous = state._decode_submission
+            previous.record_snapshot(runner, object())
+            self.assertEqual(previous.snapshot_generation, 1)
+            state.initialize_decode_submission(runner)
+            self.assertIsNot(state._decode_submission, previous)
+            self.assertEqual(previous.snapshot_generation, 0)
+            self.assertEqual(state._decode_submission.snapshot_generation, 0)
+            fresh_state = module.AscendQwen4ExpModelState()
+            self.assertFalse(fresh_state.prepare_decode_seq_lens(runner, output, batch, desc))
+
+    def test_model_hooks_use_exact_consumer_before_certifying_then_device_wait(self):
+        state = qwen_state_module().AscendQwen4ExpModelState()
+        runner, output, batch, desc = fixture()
+        capability = runner.model_state.get_decode_queue_capability(runner)
+        state.get_decode_queue_capability = lambda _: capability
+        runner.model_state = state
+        runner.encoder_cache, runner.supports_mm_inputs = NS(mm_features={"r": media()}), True
+        output.kv_connector_metadata = None
+        calls: list[str] = []
+
+        def exact_counts() -> Any:
+            self.assertEqual(calls, ["exact"])
+            calls.append("pinned")
+            return np.array([104])
+
+        runner._update_seq_lens_cpu = Mock(side_effect=lambda *_: calls.append("exact"))
+        runner.num_computed_tokens_cpu = NS(numpy=exact_counts)
+        runner.num_computed_tokens_event = object()
+        runner.input_buffers = NS(seq_lens_cpu=np.zeros(1, dtype=np.int32))
+        stream = NS(wait_event=Mock())
+        connector_type = type("KVConnector", (), {})
+        runner.kv_connector = connector_type()
+        state._decode_submission = QUEUE.DecodeQueueController(True, True, FULL)
+        modules = {
+            "torch": NS(npu=NS(current_stream=lambda: stream)),
+            "vllm.distributed.kv_transfer": NS(has_kv_transfer_group=lambda: False, get_kv_transfer_group=Mock()),
+            "vllm.v1.worker.gpu.kv_connector": NS(KVConnector=connector_type),
+            "vllm_ascend.models.qwen4_exp.decode_queue_connector": NS(
+                PDDecodeQueueKVConnector=type("PDConnector", (), {})
+            ),
+        }
+        with patch.dict(sys.modules, modules):
+            state.before_decode_requests(runner, output)
+            state.record_decode_snapshot(runner, stream)
+            self.assertTrue(state.prepare_decode_seq_lens(runner, output, batch, desc))
+            self.assertTrue(state.prepare_decode_seq_lens(runner, output, batch, desc))
+        runner._update_seq_lens_cpu.assert_called_once_with(output, ["r"])
+        self.assertEqual(calls, ["exact", "pinned"])
+        stream.wait_event.assert_called_once_with(runner.num_computed_tokens_event)
+        self.assertEqual(runner.input_buffers.seq_lens_cpu.tolist(), [108])
+
+    def test_model_reinitialization_unwraps_old_pd_observer_even_when_disabled(self):
+        with patch.dict(
+            sys.modules,
+            {
+                "vllm.v1.worker.gpu.kv_connector": NS(KVConnector=type("KVConnector", (), {})),
+                "vllm_ascend.models.qwen4_exp.pd_decode_queue": PD,
+            },
+        ):
+            baseline = load("_decode_test_baseline_connector", ROOT / "vllm_ascend/worker/v2/kv_connector.py")
+            with patch.dict(sys.modules, {"vllm_ascend.worker.v2.kv_connector": baseline}):
+                adapter = load("_decode_test_reset_connector", MODEL / "decode_queue_connector.py")
+        state_type = qwen_state_module().AscendQwen4ExpModelState
+        modules = {
+            "vllm_ascend.models.qwen4_exp.decode_queue": QWEN,
+            "vllm_ascend.models.qwen4_exp.decode_queue_connector": adapter,
+        }
+        cases = (
+            (False, True, False),
+            (False, False, False),
+            (True, True, False),
+            (True, False, False),
+            (True, True, True),
+        )
+        for fresh, disabled, nested in cases:
+            with self.subTest(fresh=fresh, disabled=disabled, nested=nested), patch.dict(sys.modules, modules):
+                runner, output, batch, _ = fixture()
+                owner = state_type()
+                runner.model_state, runner.model_config.architecture = owner, "Qwen4ExpForCausalLM"
+                controller, pd_state, stream = QUEUE.DecodeQueueController(True), PD.PDDecodeQueueState(), object()
+                receive(pd_state)
+                pd_state.observe_completion(completion())
+                pd_state.observe_step(output, metadata_known=True)
+                controller.record_snapshot(runner, stream, pd_state)
+                controller.certify_exact(runner, output, batch, stream, pd_state)
+                self.assertEqual(pd_state.snapshot()["certified_requests"], 1)
+                inner = Mock()
+                wrapper = adapter.PDDecodeQueueKVConnector(inner, object(), type("Metadata", (), {}))
+                wrapper.decode_queue_state = pd_state
+                runner.kv_connector, owner._decode_submission = wrapper, controller
+                copy_state = Mock()
+                if nested:
+                    runner.kv_connector = baseline.MambaCopyKVConnector(wrapper, copy_state)
+                runner.ascend_config = NS(enable_decode_early_queue=not disabled)
+                if not disabled:
+                    runner.model_config.architecture = "LlamaForCausalLM"
+                if fresh:
+                    runner.model_state = state_type()
+                runner.model_state.initialize_decode_submission(runner)
+                if nested:
+                    self.assertIs(type(runner.kv_connector), baseline.MambaCopyKVConnector)
+                    self.assertIs(runner.kv_connector._connector, inner)
+                    self.assertIs(runner.kv_connector._copy_mamba_state, copy_state)
+                else:
+                    self.assertIs(runner.kv_connector, inner)
+                self.assertEqual(pd_state.snapshot()["certified_requests"], 0)
+                self.assertIsNone(runner.model_state._decode_submission)
+                self.assertEqual(inner.mock_calls, [])
+                copy_state.assert_not_called()
+                if nested:
+                    runner.kv_connector.pre_forward(output)
+                    inner.pre_forward.assert_called_once_with(output)
+                    copy_state.assert_called_once_with()
+        custom = type("CustomPDObserver", (adapter.PDDecodeQueueKVConnector,), {})(Mock(), object(), object)
+        self.assertIs(adapter.unwrap_pd_decode_queue_connector(custom), custom)
+        unknown = object()
+        self.assertIs(adapter.unwrap_pd_decode_queue_connector(unknown), unknown)
+        clean_mamba = baseline.MambaCopyKVConnector(Mock(), Mock())
+        self.assertIs(adapter.unwrap_pd_decode_queue_connector(clean_mamba), clean_mamba)
 
     def test_qwen_capability_checks_target_and_draft_inventory_each_time(self):
         state_module = qwen_state_module()
@@ -534,10 +676,11 @@ class TestDecodeQueue(unittest.TestCase):
             sys.modules,
             {
                 "vllm.v1.worker.gpu.kv_connector": NS(KVConnector=type("KVConnector", (), {})),
-                "vllm_ascend.worker.v2.pd_decode_queue": PD,
+                "vllm_ascend.models.qwen4_exp.pd_decode_queue": PD,
+                "vllm_ascend.worker.v2.kv_connector": NS(MambaCopyKVConnector=type("MambaCopyKVConnector", (), {})),
             },
         ):
-            module = load("_queue_test_connector", WORKER / "kv_connector.py")
+            module = load("_queue_test_connector", MODEL / "decode_queue_connector.py")
         metadata_type = type("Metadata", (), {})
         transfer = NS(get_finished=Mock(side_effect=AssertionError("unexpected polling")))
         wrapper = module.PDDecodeQueueKVConnector(inner, transfer, metadata_type)
@@ -573,6 +716,34 @@ class TestDecodeQueue(unittest.TestCase):
         wrapper.decode_queue_state.invalidate.assert_called_once_with()
         wrapper.decode_queue_state.observe_completion.assert_not_called()
         transfer.get_finished.assert_not_called()
+
+    def test_connector_finalizes_mamba_inner_and_preserves_errors(self):
+        mamba_type = type("MambaCopyKVConnector", (), {})
+        with patch.dict(
+            sys.modules,
+            {
+                "vllm.v1.worker.gpu.kv_connector": NS(KVConnector=type("KVConnector", (), {})),
+                "vllm_ascend.models.qwen4_exp.pd_decode_queue": PD,
+                "vllm_ascend.worker.v2.kv_connector": NS(MambaCopyKVConnector=mamba_type),
+            },
+        ):
+            module = load("_decode_test_mamba_connector", MODEL / "decode_queue_connector.py")
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                error = RuntimeError("finalization failed")
+                outer: Any = mamba_type()
+                outer._connector = NS(finalize_step=Mock(side_effect=error if fails else None))
+                wrapper = module.PDDecodeQueueKVConnector(outer, object(), type("Metadata", (), {}))
+                wrapper.decode_queue_state = Mock()
+                if fails:
+                    with self.assertRaises(RuntimeError) as raised:
+                        wrapper.finalize_step()
+                    self.assertIs(raised.exception, error)
+                    wrapper.decode_queue_state.invalidate.assert_called_once_with()
+                else:
+                    wrapper.finalize_step()
+                    wrapper.decode_queue_state.invalidate.assert_not_called()
+                outer._connector.finalize_step.assert_called_once_with()
 
     def test_connector_unknown_metadata_revokes_proof_without_interrupting_forward(self):
         def read_metadata(instance: Any, name: str) -> Any:
