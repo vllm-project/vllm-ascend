@@ -42,7 +42,7 @@ def eager_dspark_swa_indices(
     """Reference implementation (mirrors dsa_v1.build_dspark_swa_indices)."""
 
     if index_width is None:
-        min_width = int(window_size) + int(num_speculative_tokens)
+        min_width = int(window_size) + int(num_speculative_tokens) + 1
         index_width = ((min_width + 127) // 128) * 128
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -185,7 +185,7 @@ def test_capacity_grid_padding():
     T_active = num_reqs * num_query_per_req
     R_alloc = 16  # capture-size bound, deliberately > num_reqs
     T_padded = R_alloc * num_query_per_req
-    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    index_width = ((window_size + num_speculative_tokens + 1 + 127) // 128) * 128
 
     # Persistent buffers pre-filled with sentinel garbage: after the kernel
     # runs, every row in [T_active, T_padded) must read -1 / 0.
@@ -313,7 +313,7 @@ def test_capacity_grid_exact_sized_inputs():
     T_active = num_reqs * num_query_per_req
     R_alloc = 16  # deliberately far beyond the exact-sized inputs
     T_padded = R_alloc * num_query_per_req
-    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    index_width = ((window_size + num_speculative_tokens + 1 + 127) // 128) * 128
 
     slots_buf = torch.full((T_padded, 1, index_width), 12345, dtype=torch.int32, device=DEVICE)
     lens_buf = torch.full((T_padded,), 777, dtype=torch.int64, device=DEVICE)
@@ -376,7 +376,7 @@ def test_active_sized_buffer_warns_and_disables_cleanup():
 
     num_query_per_req = num_speculative_tokens + 1
     T_active = num_reqs * num_query_per_req
-    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    index_width = ((window_size + num_speculative_tokens + 1 + 127) // 128) * 128
 
     # Buffer cut to exactly the active rows (the eager-style slice).
     slots_slice = torch.zeros((T_active, 1, index_width), dtype=torch.int32, device=DEVICE)
@@ -450,7 +450,7 @@ def test_anchor_sampling_num_query_per_req():
     T_active = num_reqs * nqp
     R_alloc = 8
     T_padded = R_alloc * nqp
-    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    index_width = ((window_size + num_speculative_tokens + 1 + 127) // 128) * 128
 
     slots_buf = torch.full((T_padded, 1, index_width), 12345, dtype=torch.int32, device=DEVICE)
     lens_buf = torch.full((T_padded,), 777, dtype=torch.int64, device=DEVICE)
@@ -519,7 +519,7 @@ def test_capacity_grid_exact_allocation_boundary():
     T_active = num_reqs * num_query_per_req
     R_alloc = num_reqs  # boundary: allocation capacity exactly equals demand
     T_padded = R_alloc * num_query_per_req
-    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    index_width = ((window_size + num_speculative_tokens + 1 + 127) // 128) * 128
 
     slots_buf = torch.full((T_padded, 1, index_width), 12345, dtype=torch.int32, device=DEVICE)
     lens_buf = torch.full((T_padded,), 777, dtype=torch.int64, device=DEVICE)
@@ -672,3 +672,30 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
 )
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)
+
+
+@pytest.mark.parametrize("query_width", [8, 9])
+@pytest.mark.parametrize("explicit_width", [False, True])
+def test_anchor_boundary_preserves_complete_visible_slots(query_width, explicit_width):
+    """Independent logical interval catches a last-slot omission in both paths."""
+    table_cpu = torch.tensor([[10, 21, 32, 43, 54]], dtype=torch.int32)
+    table = table_cpu.to(DEVICE)
+    query = torch.tensor([0, query_width], dtype=torch.int32, device=DEVICE)
+    lengths = torch.tensor([128 + query_width], dtype=torch.int32, device=DEVICE)
+    width = 120 + query_width if explicit_width else None
+    actual, visible = build_dspark_swa_slot_indices_triton(
+        table,
+        8,
+        120,
+        32,
+        query,
+        lengths,
+        num_decode_tokens=query_width,
+        index_width=width,
+        num_query_per_req=query_width,
+    )
+    expected = [int(table_cpu[0, position // 32]) * 32 + position % 32 for position in range(8, 128 + query_width)]
+    actual_cpu = actual.cpu()
+    assert visible.cpu().tolist() == [len(expected)] * query_width
+    for row in actual_cpu[:, 0]:
+        assert row[row >= 0].tolist() == expected

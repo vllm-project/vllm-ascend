@@ -13,6 +13,16 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 
+@pytest.fixture(autouse=True)
+def _window_config_off(monkeypatch):
+    # Factory dispatch tests exercise the baseline CONFIG_OFF path. Window
+    # policy and effective configuration have separate factory regressions.
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.get_ascend_config",
+        lambda: SimpleNamespace(draft_window_size=None),
+    )
+
+
 def test_rejection_sample_rejects_block_with_synthetic_rates():
     """Reject incompatible verification modes before allocating or launching on NPU."""
     with pytest.raises(AssertionError, match="incompatible with synthetic"):

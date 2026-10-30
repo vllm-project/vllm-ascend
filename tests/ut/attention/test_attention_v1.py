@@ -283,6 +283,48 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.builder.build(1, common_attn_metadata, mock_model)
 
+    @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
+    def test_device_read_keeps_capacity_separate_from_exact(self, metadata_cls):
+        from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
+        from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource
+
+        common = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 9], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 9], dtype=torch.int32),
+            seq_lens=torch.tensor([129], dtype=torch.int32),
+            num_reqs=1,
+            num_actual_tokens=9,
+            max_query_len=9,
+            max_seq_len=130,
+            block_table_tensor=torch.tensor([[2, 1]], dtype=torch.int32),
+            slot_mapping=torch.arange(9),
+            seq_lens_cpu_upper_bound=torch.tensor([130]),
+            positions=torch.arange(120, 129),
+            num_input_tokens=9,
+            causal=False,
+            attn_state=AscendAttentionState.ChunkedPrefill,
+        )
+        read = prepare_dense_draft_read(
+            DirectPrefixSource(common.block_table_tensor, (0,), (2,), 128),
+            exact_device=common.seq_lens,
+            row_indices=torch.tensor([0]),
+            upper_cpu=common.seq_lens_cpu_upper_bound,
+            window_size=128,
+            anchor_span=128,
+            query_width=9,
+            causal=False,
+            retain=lambda *objects: None,
+        )
+        read.apply(common)
+        result = self.builder.build(0, common)
+        arguments = metadata_cls.call_args.kwargs
+        # E=129 remains exact on device. U=130 bounds this allocation to
+        # 160 after alignment, rather than the window-only capacity256.
+        assert read.capacity == 160
+        assert arguments["seq_lens_list"] == [160]
+        assert arguments["seq_lens_gpu"].tolist() == [129]
+        assert result._draft_window_device_read is read
+
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)

@@ -1668,6 +1668,7 @@ def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_
 
 
 def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypatch):
+    monkeypatch.setattr(model_state_module, "enable_dsa_cp", lambda: False)
     state = AscendModelState.__new__(AscendModelState)
     state.decoder_replay = None
     state.vllm_config = SimpleNamespace(
@@ -1970,6 +1971,9 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("default", None, False, 1, 5),
         ("model_state", CUDAGraphMode.NONE, False, 1, 5),
         ("model_state", CUDAGraphMode.FULL, False, 1, 8),
+        ("dsa_cp_eager", CUDAGraphMode.NONE, False, 1, 8),
+        ("dsa_cp_piecewise", CUDAGraphMode.PIECEWISE, False, 1, 8),
+        ("dsa_cp_full", CUDAGraphMode.FULL, False, 1, 8),
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
@@ -1989,6 +1993,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         decode_context_parallel_size=2,
         cp_kv_cache_interleave_size=2,
     )
+    monkeypatch.setattr(model_state_module, "enable_dsa_cp", lambda: caller.startswith("dsa_cp"))
     monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0))
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups(builder_cls)
     block_tables = (
@@ -2038,6 +2043,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
         model_state.pcp_manager = pcp_manager
         input_batch = SimpleNamespace(
+            is_dummy=False,
             num_reqs=2,
             num_reqs_after_padding=4,
             num_tokens=5,

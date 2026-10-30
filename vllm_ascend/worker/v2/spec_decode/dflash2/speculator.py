@@ -122,6 +122,23 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
 
+    def load_draft_model(self, target_model, target_attn_layer_names):
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+        for layer, causal in zip(model.model.layers, model.get_draft_attn_causal()):
+            impl = layer.self_attn.attn.impl
+            if causal or impl.sliding_window is None:
+                continue
+            if type(impl) is not AscendAttentionBackendImpl or impl.sinks is not None or impl.use_bnsd_kv_cache:
+                raise NotImplementedError("DFlash2 reference needs ordinary noncausal native GQA/SWA")
+            # A single cached compressed mask/device. It is interpreted with
+            # symmetric pre/next distances, not as a causal default mask.
+            impl._dflash2_native_swa_mask = AttentionMaskBuilder(self.device).get_splitfuse_attn_mask()
+        self._dflash2_full_kv_reference = True
+        return model
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # V2 passes the runner's cudagraph mode to the draft speculator
         # without consulting the spec-level enforce_eager. Honor it here:

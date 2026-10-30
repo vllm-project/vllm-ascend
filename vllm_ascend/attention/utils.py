@@ -717,18 +717,22 @@ def _select_seq_lens(
 ) -> torch.Tensor:
     """Choose the seq_lens tensor carried by the built attention metadata.
 
-    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
-    updated during draft iterations, while ``seq_lens_cpu`` is None in async
-    spec decode mode. Cross-attention and generic parallel drafting override
-    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
-    family, whose CPU mirror carries the same post-rejection-sampling lengths
-    across draft iterations, so building from it skips the NPU->CPU sync at
-    ``seq_lens.tolist()`` in the metadata build.
+    Without a Window read certificate, preserve the baseline choice,
+    including the GLM DSpark CPU mirror in both runners. An enabled Window
+    supplies its current exact read pair before the builder, or uses the
+    dedicated device-exact consumer. Its continuing-prompt Full read also
+    carries a certificate; the baseline CPU mirror is never that certificate.
     """
     # Prefer _seq_lens_cpu (always available, updated during draft
     # iterations) over seq_lens_cpu (None in async spec decode mode).
     model_config = vllm_config.model_config
     num_reqs = common_attn_metadata.num_reqs
+    window_read = getattr(common_attn_metadata, "_draft_window_read", None)
+    if window_read is not None:
+        # Projection already owns a current exact CPU/device pair. Selecting
+        # device lengths again would repeat D2H in the parallel GQA builder.
+        # Uncertified baseline CPU mirrors retain the original selection below.
+        return window_read.exact_cpu_for(common_attn_metadata)[:num_reqs]
     if common_attn_metadata._seq_lens_cpu is not None:
         seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
     elif common_attn_metadata.seq_lens_cpu is not None:
@@ -739,8 +743,8 @@ def _select_seq_lens(
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
     if speculative_config is not None and speculative_config.parallel_drafting:
-        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
-        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
+        # Keep the official OFF behavior. Window read certificates above
+        # are scoped to their prepared table/length pair, not a global flag.
         if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens

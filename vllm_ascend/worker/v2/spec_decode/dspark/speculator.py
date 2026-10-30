@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, cast
 
 import numpy as np
@@ -258,6 +259,11 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 block_tables,
             )
 
+        if hasattr(self, "draft_window_policy"):
+            from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime
+
+            self._draft_window_runtime = DraftWindowRuntime(self, self.draft_window_policy)
+
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -330,26 +336,61 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata through the upstream attention hook."""
+        runtime = getattr(self, "_draft_window_runtime", None)
+        # Older vLLM releases do not accept this optional upstream argument.
+        slot_kwargs = {} if slot_mappings is None else {"slot_mappings": slot_mappings}
         if self.attn_architecture not in ("GQA", "MLA"):
-            # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
-            # Ascend CPU-side DCP preparation.
-            return super()._build_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                query_start_loc_np=query_start_loc_np,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=step,
-                causal=causal,
-                dcp_local_seq_lens=dcp_local_seq_lens,
-            )
+            # These consumers keep their existing preparation. Window changes
+            # only the fresh common read view and its private builder owner.
+            metadata_scope: AbstractContextManager = nullcontext()
+            if runtime is not None:
+                assert self.input_batch is not None
+                metadata_scope = build_attn_metadata_factory(
+                    self.input_buffers.positions,
+                    batch_desc.num_tokens,
+                    torch.from_numpy(self.input_batch.is_prefilling_np),
+                    parallel_config=self.attn_vllm_config.parallel_config,
+                    common_metadata_callback=runtime.metadata_callback(step, num_reqs),
+                    metadata_builder_callback=runtime.metadata_builder_callback(step),
+                )
+            with metadata_scope:
+                metadata = super()._build_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                    **slot_kwargs,
+                )
+            if runtime is not None:
+                runtime.retain_metadata(metadata)
+            return metadata
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
+        common_metadata_callback = None
+        if runtime is not None:
+            if not self.use_dcp and self.attn_architecture == "MLA":
+                # This helper completed a fresh CPU copy of the current draft
+                # preparation. Bind it to that exact device input and proposal;
+                # GQA and DCP CPU fields do not provide the same guarantee.
+                assert seq_lens_cpu is not None
+                common_metadata_callback = runtime.metadata_callback(
+                    step,
+                    num_reqs,
+                    prepared_exact_cpu=seq_lens_cpu[:num_reqs],
+                    prepared_exact_device=self.input_buffers.seq_lens[:num_reqs],
+                )
+            else:
+                common_metadata_callback = runtime.metadata_callback(step, num_reqs)
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
@@ -359,6 +400,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
+                common_metadata_callback=common_metadata_callback,
+                metadata_builder_callback=runtime.metadata_builder_callback(step) if runtime is not None else None,
             ),
         ):
             attn_metadata = super()._build_attn_metadata(
@@ -369,11 +412,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 step=step,
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,
+                **slot_kwargs,
             )
         if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        if runtime is not None:
+            runtime.retain_metadata(attn_metadata)
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
@@ -448,7 +494,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
                 input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
             )
+        runtime = getattr(self, "_draft_window_runtime", None)
         with (
+            runtime.proposal_context(
+                self,
+                input_batch,
+                dummy_run,
+                is_profile,
+                context_kv_only=num_speculative_tokens == 0,
+            )
+            if runtime is not None
+            else nullcontext(),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

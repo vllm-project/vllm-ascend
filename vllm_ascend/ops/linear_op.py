@@ -35,6 +35,8 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 get_row_parallel_op.
 """
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from types import SimpleNamespace
 
@@ -60,6 +62,21 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+
+# Construction only: ordinary MLA draft projections do not use the target's
+# DSA-CP replicated-head layout. Scoped to the current context, including
+# exception recovery, without changing the validated target configuration.
+_KEEP_TP_PROJECTIONS: ContextVar[bool] = ContextVar("_KEEP_TP_PROJECTIONS", default=False)
+
+
+@contextmanager
+def keep_tensor_parallel_projections():
+    """Keep TP weight partitions while constructing a non-CP attention block."""
+    token = _KEEP_TP_PROJECTIONS.set(True)
+    try:
+        yield
+    finally:
+        _KEEP_TP_PROJECTIONS.reset(token)
 
 
 class CustomLinearOp:
@@ -410,7 +427,7 @@ def _is_shared_expert_layer(prefix: str) -> bool:
 def _get_column_parallel_op(
     prefix, layer
 ) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | ShardedCPColumnParallelOp | None:
-    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
+    if enable_dsa_cp() and not _KEEP_TP_PROJECTIONS.get() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)

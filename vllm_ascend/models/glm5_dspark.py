@@ -18,28 +18,32 @@ from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSpark
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM, align_draft_weights
+from vllm_ascend.ops.linear_op import keep_tensor_parallel_projections
 
 
 class Glm5DSparkMLAAttention(DeepseekV2MLAAttention):
     """Reuse the patched dense MLA attention, not the Qwen GQA backbone."""
 
     def __init__(self, *, vllm_config: VllmConfig, config, prefix: str) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            config=config,
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
-            max_position_embeddings=config.max_position_embeddings,
-            cache_config=vllm_config.cache_config,
-            quant_config=None,
-            prefix=prefix,
-            non_causal_multi_token_decode=True,
-        )
+        # The target can use legacy DSA-CP while this ordinary MLA draft uses
+        # local TP heads. Preserve matching weight partitions at construction.
+        with keep_tensor_parallel_projections():
+            super().__init__(
+                vllm_config=vllm_config,
+                config=config,
+                hidden_size=config.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank,
+                kv_lora_rank=config.kv_lora_rank,
+                max_position_embeddings=config.max_position_embeddings,
+                cache_config=vllm_config.cache_config,
+                quant_config=None,
+                prefix=prefix,
+                non_causal_multi_token_decode=True,
+            )
         self.attn = self.mla_attn.mla_attn
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:

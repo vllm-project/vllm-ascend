@@ -525,11 +525,45 @@ options.
 - **`draft_window_size`** (int, optional): the number of most recent tokens
   the draft attention can read. Omit the key (or remove it) to disable the
   window. Typical values are 512-4096; the window is block-aligned internally,
-  so any positive value works.
-- Works on the default model runner (MRV1). Not yet supported under
-  `VLLM_USE_V2_MODEL_RUNNER=1`.
+  so the readable extent can include up to one additional partial block.
+  MRV2 Eagle3 additionally requires `draft_window_size >= 2 * K + 1`, where
+  `K` is the static number of speculative tokens, to cover first-pass queries
+  and the frozen proposal horizon through rejection.
+- MRV2 requires an eager draft (`speculative_config.enforce_eager=true`).
+  The target retains its configured graph mode. Draft Window graph execution
+  is not implemented. Actual draft backend and KV-group compatibility are
+  checked after attention setup; unsupported read layouts fail explicitly.
 - For `mtp` the window is ignored (force-disabled): MTP reuses the target
   model's own layers, so windowing it would change the target's computation.
+- MRV2 also force-disables the window for the dedicated built-in DeepSeek V4
+  DSpark model category. DSpark itself remains enabled. Other recognized draft
+  categories follow their own window setting and consumer capability checks.
+- MRV2 supports static Eagle3, DFlash (including `DFlash2DraftModel` with
+  `method="dflash"`), and eligible DSpark methods. DFlash2 uses the existing
+  candidate selector and proposal distribution; only its Draft attention
+  read view changes. Native SWA layers intersect their native readable band
+  with the extra window, including drafts with only native SWA layers.
+  Plain Eagle and dynamic speculative length remain unsupported with a
+  window. DFlash2 requires an eager Draft; this does not disable Target Graph.
+  A supported native-only non-causal DFlash2 draft keeps symmetric native SWA,
+  including when the extra window is OFF. ON intersects it with the added
+  read window; it does not make the model causal. The provider requires
+  `W + B - 1 + Q <= P` (B: kernel table-column span, Q: prepared query width,
+  P: native window). Other non-causal native layouts are rejected explicitly.
+  These DFlash2 Draft groups retain full KV backing for native paged-reader
+  compatibility; Target/GDN cache specs are unchanged. This is a storage
+  measure, not Full attention. At a fixed 8 GiB/rank budget the verified
+  five-layer P2048 deployment lost about 6.89% estimated cache-token capacity.
+  Extra W1024 is not currently recommended as a speedup setting for that
+  already-windowed checkpoint; finite native numerical deviations remain
+  documented separately from successful request execution.
+  Continuing prefill chunks retain full reads. Eagle3 also keeps
+  full reads for its first prefill pass. An unfinished prompt keeps full reads
+  at every autoregressive step; after prompt completion, eligible steps use
+  the frozen proposal window.
+
+See the [MRV2 design](../../developer_guide/Design_Documents/speculative_kv_sliding_window.md#mrv2-implementation)
+for read ownership, backend boundaries, and current synchronization costs.
 
 ### When to enable it
 
@@ -537,14 +571,16 @@ options.
   degrades as conversations grow: e.g. an early GLM-5.2 DSpark draft dropped
   from mean acceptance ~5 (short context) to ~1 at 32k; a 512-1024 window
   restored it to ~4.7-5.5, with end-to-end throughput up to +381% at 32k.
-- **Leave it off** when the draft is already stable at long context — the
-  window then only removes information the draft could have used. In
-  particular, if the draft itself was trained with sliding-window attention
-  (its config carries a native `sliding_window`), keep
-  `draft_window_size` at or above that training window, or disable the
-  feature; a window smaller than the training window measurably reduces
-  acceptance (observed -4.5% mean acceptance for a 1024 window against a
-  2048-native SWA DSpark draft at 32k input).
+- **Prefer the native window by default** for a draft that already uses SWA.
+  Omitting `draft_window_size` preserves the model's native attention window.
+  An additional supported window can remove information and may reduce
+  acceptance or throughput; its effect depends on the checkpoint and workload.
+  MRV2 emits one startup warning on the global first rank when the requested
+  window is smaller than a certified Draft group's native SWA window. Mixed
+  Full/SWA models are checked by their actual Draft groups, not their names.
+  The warning does not disable the feature, change either window, or relax
+  provider checks. Choose only values supported by that provider; for example,
+  the native-only non-causal DFlash2 bounds above still apply.
 
 Check the effect with the server log: `SpecDecoding metrics: Mean acceptance
 length: ...` lines report the acceptance per interval — compare runs with the

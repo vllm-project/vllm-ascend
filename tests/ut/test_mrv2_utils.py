@@ -36,6 +36,7 @@ def test_environment_override_wins(monkeypatch, env_value):
     [
         SimpleNamespace(),
         SimpleNamespace(model_config=None),
+        SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(
             model_config=SimpleNamespace(
                 runner_type="generate",
@@ -96,6 +97,7 @@ def test_environment_override_wins(monkeypatch, env_value):
     ids=[
         "empty-config",
         "no-model",
+        "draft-window-size",
         "unknown-attention-free-generate",
         "dynamic-unsupported-speculation",
         "lora",
@@ -144,7 +146,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
-        SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(additional_config={"enable_dsa_cp": True}),
         SimpleNamespace(additional_config={"enable_dsa_cp": "true"}),
         SimpleNamespace(additional_config={"enable_dsa_cp": 1}),
@@ -160,7 +161,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "pooling-runner",
         "pooling-model",
         "vl-encoder-graph",
-        "draft-window-size",
         "enable-dsa-cp",
         "enable-dsa-cp-string",
         "enable-dsa-cp-int",
@@ -274,3 +274,15 @@ def test_apply_config_patch_is_wired(monkeypatch):
     # Restore the upstream class state so later tests are unaffected.
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
     monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+
+
+@pytest.mark.parametrize("method", ["eagle3", "dflash", "dspark", "mtp"])
+def test_window_does_not_silently_select_mrv1(monkeypatch, method):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    config = SimpleNamespace(
+        additional_config={"draft_window_size": 1024},
+        speculative_config=SimpleNamespace(method=method, enforce_eager=True),
+    )
+    assert use_v2_model_runner(config) is True
+    # Device-independent selection does not replace the factory policy or
+    # the actual consumer capability checks after set_attn.

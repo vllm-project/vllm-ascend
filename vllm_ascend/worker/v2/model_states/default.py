@@ -442,10 +442,13 @@ class AscendModelState(DefaultModelState):
         # path handles padded attention inputs separately from logical queries.
         if (
             cudagraph_mode == CUDAGraphMode.FULL
+            or enable_dsa_cp()
             or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
             or (cudagraph_mode == CUDAGraphMode.PIECEWISE and input_batch.is_dummy)
         ):
-            # Token-shaped metadata must match the padded model inputs.
+            # DSA-CP splits the actual model input across TP ranks, including
+            # eager/PIECEWISE padding. Rounding scheduled tokens alone can
+            # choose a different shard than the model's padded input shape.
             num_input_tokens = input_batch.num_tokens_after_padding
         else:
             num_input_tokens = input_batch.num_tokens

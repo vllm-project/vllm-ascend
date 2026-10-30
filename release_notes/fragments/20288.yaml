@@ -1,0 +1,8 @@
+pr: 20288
+entries:
+  - category: feature
+    text: Added opt-in Model Runner V2 eager Draft KV read windows for static Eagle3, DFlash, DFlash2 and eligible DSpark methods while keeping Target Graph independent.
+  - category: bugfix
+    text: Restored native symmetric SWA and full KV backing for admitted noncausal DFlash2 drafts. The storage compatibility measure can reduce cache-token capacity at a fixed memory budget, and does not enable Full attention.
+  - category: feature
+    text: Added a global-first-rank startup warning when an additional MRV2 Draft window narrows certified native SWA groups. Supported settings remain opt-in and are not automatically disabled.
