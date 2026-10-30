@@ -16,8 +16,15 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
     mixed_quant_sparse_flash_mla_metadata_turboquant,
     mixed_quant_sparse_flash_mla_turboquant,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.attention.sparse_flash_mla import (
+    sparse_flash_mla,
+    sparse_flash_mla_metadata,
+)
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 
@@ -61,6 +68,52 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     if cache_config is None:
         return False
     return str(cache_config.cache_dtype).lower() in _BF16_KV_CACHE_DTYPES
+
+
+def _pcp_process_world_size() -> int:
+    """Return the PCP world size this process actually belongs to.
+
+    Speculative decoding replicates the draft across CP ranks and hands it a
+    ``prefill_context_parallel_size=1`` replica config (see
+    ``prepare_replicated_pcp_config``), so the draft's config alone cannot
+    reveal that the process still runs inside a PCP world. The distributed
+    group is the process-global truth; "no group" (unit tests, plain serving)
+    counts as a world size of 1.
+    """
+    try:
+        from vllm.distributed import get_pcp_group
+
+        return get_pcp_group().world_size
+    except Exception:
+        return 1
+
+
+def is_a3_bf16_kv_enabled(vllm_config) -> bool:
+    """Return whether the DSpark draft can use the compiled SparseFlashMla binding.
+
+    A3-class hardware keeps the FIA target plan; only the draft switches
+    kernels, and only over a BF16 paged KV cache. ``auto`` resolves to the
+    BF16 model dtype here (the FP8 mixed-quant plans need A5), so it counts.
+    """
+    if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.STANDARD:
+        return False
+    # The compiled-binding draft path is validated without context parallelism
+    # only. PCP replicates the draft with a PCP=1 replica config while the
+    # process stays in the PCP world, so it must be detected from the config
+    # and from the process group; DCP keeps its size on the draft config.
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is not None and (
+        getattr(parallel_config, "prefill_context_parallel_size", 1) > 1
+        or getattr(parallel_config, "decode_context_parallel_size", 1) > 1
+    ):
+        return False
+    if _pcp_process_world_size() > 1:
+        return False
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if cache_config is None:
+        return False
+    dtype = str(cache_config.cache_dtype).lower()
+    return dtype in _BF16_KV_CACHE_DTYPES or dtype in ("auto", "none", "")
 
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
@@ -150,6 +203,9 @@ class DsaAttnKvPlan:
     sparse_attn_metadata_kwargs: dict[str, Any]
     include_metadata_device: bool
     applies_sparse_attn_runtime_kwargs: bool
+    uses_draft_sparse_flash_mla: bool = False
+    draft_sparse_attn_op: Callable[..., Any] | None = None
+    draft_sparse_attn_metadata_op: Callable[..., Any] | None = None
 
     def get_dsa_sparse_attn_metadata_op(self):
         return self.sparse_attn_metadata_op
@@ -165,6 +221,12 @@ class DsaAttnKvPlan:
 
     def get_dsa_sparse_attn_base_kwargs(self) -> dict[str, Any]:
         return dict(self.sparse_attn_base_kwargs)
+
+    def get_draft_sparse_attn_op(self):
+        return self.draft_sparse_attn_op
+
+    def get_draft_sparse_attn_metadata_op(self):
+        return self.draft_sparse_attn_metadata_op
 
     def add_dsa_sparse_attn_extra_kwargs(self, extra_kwargs: dict[str, Any], **kwargs_to_add) -> None:
         if self.applies_sparse_attn_runtime_kwargs:
@@ -218,6 +280,42 @@ class DsaAttnKvPlan:
         )
 
 
+def get_draft_sparse_kv_plan(vllm_config) -> DsaAttnKvPlan:
+    """Build the plan the DSpark draft attention executes against.
+
+    On A3-class hardware with a BF16 KV cache this returns the FIA target
+    plan plus the compiled-binding draft ops; everywhere else (including
+    context-parallel runs, where the replicated draft's config hides the PCP
+    world size and the gate falls back to the process group) it returns
+    exactly what ``get_dsa_attn_kv_plan`` would. The per-step
+    ``get_dsa_attn_kv_plan`` itself stays identical to the pre-A3 FIA plan,
+    so the target attention and the CP paths are untouched.
+    """
+    if not is_a3_bf16_kv_enabled(vllm_config):
+        return get_dsa_attn_kv_plan(vllm_config)
+    from vllm_ascend.attention.sparse_flash_mla import (
+        a3_sparse_flash_mla,
+        a3_sparse_flash_mla_metadata,
+    )
+
+    return DsaAttnKvPlan(
+        uses_sparse_flash_mla=False,
+        uses_kv_compress_epilog=False,
+        layout_kv="PA_ND",
+        compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
+        requires_block_offset_slots=True,
+        sparse_attn_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv,
+        sparse_attn_metadata_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
+        sparse_attn_base_kwargs={},
+        sparse_attn_metadata_kwargs={},
+        include_metadata_device=True,
+        applies_sparse_attn_runtime_kwargs=True,
+        uses_draft_sparse_flash_mla=True,
+        draft_sparse_attn_op=a3_sparse_flash_mla,
+        draft_sparse_attn_metadata_op=a3_sparse_flash_mla_metadata,
+    )
+
+
 def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
     """Select a cache plan by hardware, dtype and the layer compression ratio."""
     if is_turboquant(vllm_config) and compress_ratio == 4:
@@ -233,8 +331,14 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
             sparse_attn_metadata_kwargs={},
             include_metadata_device=False,
             applies_sparse_attn_runtime_kwargs=True,
+            uses_draft_sparse_flash_mla=False,
+            draft_sparse_attn_op=None,
+            draft_sparse_attn_metadata_op=None,
         )
     if not _supports_dsv4_compressed_cache():
+        # A3-class hardware keeps the FIA target plan. The compiled-binding
+        # draft path is enabled separately via get_draft_sparse_kv_plan;
+        # this branch is identical to the pre-A3 FIA plan.
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
             uses_kv_compress_epilog=False,
@@ -263,6 +367,9 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
             sparse_attn_metadata_kwargs={},
             include_metadata_device=True,
             applies_sparse_attn_runtime_kwargs=True,
+            uses_draft_sparse_flash_mla=True,
+            draft_sparse_attn_op=sparse_flash_mla,
+            draft_sparse_attn_metadata_op=sparse_flash_mla_metadata,
         )
     return DsaAttnKvPlan(
         uses_sparse_flash_mla=False,
@@ -276,4 +383,7 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
         sparse_attn_metadata_kwargs={},
         include_metadata_device=False,
         applies_sparse_attn_runtime_kwargs=False,
+        uses_draft_sparse_flash_mla=False,
+        draft_sparse_attn_op=None,
+        draft_sparse_attn_metadata_op=None,
     )
