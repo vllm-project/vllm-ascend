@@ -10,14 +10,32 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
+def test_qwen4_exp_owns_platform_components_without_global_monkey_patches() -> None:
     model = _source("vllm_ascend/models/qwen4_exp/model.py")
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
     mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
 
-    assert "vllm.models.qwen4_exp.amd" in model
-    assert "vllm.models.qwen4_exp.amd" in qsa
-    assert "vllm.models.qwen4_exp.amd" in mtp
+    ple = _source("vllm_ascend/models/qwen4_exp/ple.py")
+    hyperconnection = _source(
+        "vllm_ascend/models/qwen4_exp/hyperconnection.py"
+    )
+    assert "class Qwen4ExpModel" in model
+    assert "class Qwen4ExpPLELayer" in ple
+    assert "class GatedResidual" in hyperconnection
+    assert "class Qwen4ExpMultiTokenPredictor" in mtp
+    assert "class AscendQSAMetadataBuilder" in qsa
+    assert "class AscendQwen4ExpQSAAttention" in qsa
+    combined = model + qsa + mtp + ple + hyperconnection
+    for mutation in (
+        "upstream_model.Qwen4ExpModel =",
+        "upstream_model.Qwen4ExpQSAAttention =",
+        "upstream_mtp._make_draft_vllm_config =",
+        "upstream_mtp.Qwen4ExpMultiTokenPredictor =",
+        "upstream_indexer.apply_qsa_rope =",
+        "qsa_cache.build_qsa_metadata =",
+        "Qwen4ExpPLELayer._short_conv =",
+    ):
+        assert mutation not in combined
     assert "vllm.model_executor.models.qwen4_exp" not in model + qsa + mtp
 
     model_root = ROOT / "vllm_ascend/models/qwen4_exp"
