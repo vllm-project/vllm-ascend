@@ -16,18 +16,23 @@ def penalties(monkeypatch):
     # Run real tensor allocation, indexing and typed views on CPU. Only the
     # device capability query and Triton launches are substituted.
     triton_utils = ModuleType("vllm.triton_utils")
-    triton_utils.triton = SimpleNamespace(
-        jit=lambda function: MagicMock(name=function.__name__),
-        cdiv=lambda value, block: (value + block - 1) // block,
+    triton_utils.__dict__.update(
+        triton=SimpleNamespace(
+            jit=lambda function: MagicMock(name=function.__name__),
+            cdiv=lambda value, block: (value + block - 1) // block,
+        ),
+        tl=MagicMock(),
     )
-    triton_utils.tl = MagicMock()
     device_utils = ModuleType("vllm_ascend.ops.triton.triton_utils")
-    device_utils.init_device_properties_triton = MagicMock()
-    device_utils.get_vectorcore_num = MagicMock(return_value=17)
+    device_utils.__dict__.update(
+        init_device_properties_triton=MagicMock(),
+        get_vectorcore_num=MagicMock(return_value=17),
+    )
     monkeypatch.setitem(sys.modules, triton_utils.__name__, triton_utils)
     monkeypatch.setitem(sys.modules, device_utils.__name__, device_utils)
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/worker/v2/sample/penalties.py"
     spec = importlib.util.spec_from_file_location("_bincount_wrapper_ut", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)

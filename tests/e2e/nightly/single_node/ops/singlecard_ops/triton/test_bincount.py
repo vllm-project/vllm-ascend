@@ -1,8 +1,15 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.worker.v2.sample.penalties import WORDS_PER_BLOCK, apply_penalties, bincount
+
+pytestmark = pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Preserves A2/A3 test scope; A5 nightly validation is outside this PR's verified scope",
+)
 
 MAX_NUM_REQS = 64
 
@@ -311,3 +318,54 @@ def test_bincount_short_request_admission(requests, prompt, output):
     # cores. Preserve their exact results even when main has lower device work.
     rows = requests + 2
     _assert_bincount_case(list(range(requests)), [prompt] * rows, [prompt + output] * rows, 151936)
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_bincount_reuses_request_rows(dtype):
+    rows, width, vocab_size = 3, 3072, 97
+    tokens = torch.arange(width, dtype=dtype).remainder(vocab_size).repeat(rows, 1)
+    tokens[:, 0] = 31
+    device_tokens = tokens.npu()
+    words = (vocab_size + 31) // 32
+    masks = torch.full((rows, words), -12345, dtype=torch.int32)
+    counts = torch.full((rows, vocab_size), -12345, dtype=torch.int32)
+    device_masks, device_counts = masks.npu(), counts.npu()
+    scenarios = [
+        ([2, 0], [2048, 0, 2048], [2050, 0, 2050]),
+        # Row2 now has only bit31 and no output history. Row0 retains the
+        # previous invocation's result despite containing stale nonzero data.
+        ([2], [2048, 0, 1], [2050, 0, 1]),
+    ]
+    for request_ids, prompts, prefills in scenarios:
+        mapping = torch.tensor(request_ids, dtype=dtype)
+        prompt = torch.tensor(prompts, dtype=torch.int32)
+        prefill = torch.tensor(prefills, dtype=torch.int32)
+        torch_bincount(mapping, tokens, prompt, prefill, masks, counts)
+        bincount(
+            mapping.npu(),
+            device_tokens,
+            prompt.npu(),
+            prefill.npu(),
+            device_masks,
+            device_counts,
+            max(prefills[index] for index in request_ids),
+        )
+        torch.testing.assert_close(device_masks.cpu(), masks, rtol=0, atol=0)
+        torch.testing.assert_close(device_counts.cpu(), counts, rtol=0, atol=0)
+        torch.testing.assert_close(device_tokens.cpu(), tokens, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("shift", [0, 7])
+def test_bincount_cross_program_same_word(dtype, shift):
+    init_device_properties_triton()
+    blocks = max(32, 2 * get_vectorcore_num() + 1)
+    length = blocks * 1024
+    storage = torch.empty((3, length + 7), dtype=dtype)
+    tokens = storage[:, :length]
+    for block in range(blocks):
+        # Every block writes a different bit of word0, cycling over all32
+        # bits. A request spans enough history tiles to use multiple programs.
+        tokens[:, block * 1024 : (block + 1) * 1024] = (13 * block + shift) % 32
+    tokens[:, -1] = 32
+    _assert_bincount_case([2], [0, 0, length], [0, 0, length], 33, dtype, tokens=tokens)

@@ -93,7 +93,7 @@ showed no useful device-work improvement, so the simpler tile loops remain.
 `tl.constexpr` format constants. Only fixed tile sizes are kernel configuration
 parameters. Request counts, work counts, strides and vocabulary-word counts
 remain runtime scalars. Backend dtype/value/alignment specialization can still
-produce variants; this is a static review, not a measured cold-cache audit.
+produce variants; the measured compilation audit is recorded below.
 
 ## Correctness and regression coverage
 
@@ -111,11 +111,14 @@ python -B -m pytest -q -p no:cacheprovider --confcutdir=tests/ut/worker/v2 \
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bincount.py
 ```
 
-The task executes the unchanged product NPU test file with explicit source
-binding to the exact operator and device-helper snapshots. This proves the
-operator component in the frozen runtime, not full-framework/model dispatch.
-A2, model E2E, graph execution and empirical recompilation counts are outside
-the measured scope.
+The final A3 operator acceptance ran the current product test file through
+normal repository conftests and real framework imports: 50 cases passed.
+This includes six added cases for same-word updates across program boundaries
+and long-to-short request-row reuse. The original A2/A3 test guard is restored;
+A5 is explicitly outside this PR's verified scope. Early component checks used
+standalone source binding and remain distinct from this final test.
+Fresh model evidence is recorded separately below. A2 device execution and an
+isolated bincount capture/replay test are outside the measured scope.
 
 ## Profiling protocol
 
@@ -255,3 +258,266 @@ strided=8/4096/256/vocab151936 with row padding.
 | one_word | 8.679 | 1.228 | 0.608 | 14.27x | 2.02x |
 | int64 | 1.231 | 0.633 | 0.332 | 3.71x | 1.91x |
 | strided | 9.579 | 1.152 | 0.548 | 17.47x | 2.10x |
+
+## Fresh MRV2 model validation
+
+These are fresh Qwen3-8B BF16, TP1 runs on the same Ascend910_9362 device,
+with Model Runner V2 confirmed in server logs. Serving used the default
+`FULL_AND_PIECEWISE` graph configuration; both capture phases completed.
+Max context40960, max sequences32, batched tokens4096, memory utilization0.85
+and prefix caching disabled were identical. The 1M issue test remains a
+standalone launch-boundary test, beyond this model's configured context.
+
+Only the penalty module changes between the three runs. Common Python sources
+are upstream vLLM `544f182d9f0c9bfe8bd7645525951d5e3692a542` and this PR's
+plugin tree `c0e0e05b94830034e40270384002d5ba5a416821`; later commits change
+tests/docs and remove the benchmark. Native dependencies are the same image
+artifacts for all three, rather than a new native build of the PR:
+
+- Image: `sha256:0c85b29e600f291bbe920c7a50a667c548bd4826fd79795283d66ea97417fac2`.
+- Native plugin revision: `b64b4d714484feaa6ca71edc99b98318fe6d2f0d`.
+- CANN9.2.0, Torch2.10.0, torch_npu2.10.0.post4, Triton-Ascend3.2.2.
+- Frozen weight-file and native-library hashes are retained in the task evidence.
+
+Generation uses temperature0, top_p1, top_k-1, explicit request seed42,
+`repetition_penalty=1.03` and `enable_thinking=False`. Each source has a fresh
+server and a separate bounded profiler request before unprofiled workloads.
+Its 24-token prompt invokes the main bincount kernel once, or the original/new
+statistics and packing kernels once each. Source hashes, responses, server
+logs and kernel CSVs establish the enabled penalty path. Those short profiles
+are dispatch evidence, not sustained performance measurements.
+
+### GPQA Diamond accuracy
+
+The unchanged official AISBench zero-shot direct-answer template evaluates
+all198 Diamond items. AISBench source provenance is
+`7bcb6440da11bef020943b2af9ed7c1ac8362306`; the dataset CSV SHA256 is
+`41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305`.
+Concurrency16 and max output4096 are identical across sources. A preliminary
+512-token pilot was rejected because it truncated answers; its records remain
+separate. The full runs retain every item, including length finishes, in the
+official evaluator. The scores below apply to this finite decoding budget.
+
+| Implementation | Correct / total | Accuracy | Failed requests | Length finishes |
+| --- | ---: | ---: | ---: | ---: |
+| Main | 97/198 | 48.99% | 0 | 9 |
+| PR15270 | 93/198 | 46.97% | 0 | 12 |
+| New | 93/198 | 46.97% | 0 | 12 |
+
+Every prediction JSONL and captured response was parsed using its LF record
+delimiter. There are198 successful predictions per run plus a separately
+identified client warmup. Paired comparisons use identical prompts and gold
+answers for all198 IDs:
+
+| Compared with main | Raw text matches | Evaluated answer matches | Correctness matches |
+| --- | ---: | ---: | ---: |
+| PR15270 | 25/198 | 145/198 | 170/198 |
+| New | 25/198 | 145/198 | 170/198 |
+
+Concurrent outputs are not identical, so these runs do not establish exact
+model-output equivalence or by themselves identify the cause of the difference.
+New and PR15270 have identical normalized predictions, token counts and scores
+for all 198 items. Per-item differences from main remain in the raw evidence.
+The additional control below
+uses one request at a time to evaluate precision under a stable batch size.
+
+### Serial GPQA final-answer control
+
+This separate full198-item run adds only the explicit instruction:
+"Give only the final answer in the required format. Do not include any reasoning
+or explanation." Dataset questions, choices and the official evaluator remain
+unchanged. Concurrency1, max output512, request seed42 and all model/penalty
+settings are the same across sources. This is a final-answer prompt variant;
+its score must not be mixed with the concurrent official-template score above.
+
+| Implementation | Correct / total | Accuracy | Failures | Length finishes | Raw text matches vs main | Evaluated answer matches vs main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Main | 73/198 | 36.87% | 0 | 0 | 198/198 | 198/198 |
+| PR15270 | 73/198 | 36.87% | 0 | 0 | 198/198 | 198/198 |
+| New | 73/198 | 36.87% | 0 | 0 | 198/198 | 198/198 |
+
+### GSM8K sustained serving performance
+
+The full1,319-item test split uses the official zero-shot CoT performance
+template; dataset SHA256 is
+`3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14`.
+Streaming concurrency32, 32 warmups and fixed128-token outputs
+(`ignore_eos=True`) are identical. Runs are sequential main/PR15270/new with
+two repeats each on the same device. Each of the six runs completed1,319
+requests with zero failures and168,832 generated tokens. GSM8K is the serving
+performance workload here; GPQA supplies the model accuracy result.
+
+Latency values below come from the official AISBench CSV, while throughput
+comes from its common-metric JSON. This is unprofiled end-to-end serving.
+
+| Implementation / repeat | Duration s | Output token/s | Requests/s | Mean TTFT ms | P99 TTFT ms | Mean TPOT ms | Mean E2EL ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Main / 1 | 116.734 | 1446.3 | 11.2992 | 158.7 | 218.8 | 20.7 | 2788.7 |
+| Main / 2 | 116.421 | 1450.2 | 11.3296 | 154.8 | 168.2 | 20.7 | 2780.7 |
+| PR15270 / 1 | 114.668 | 1472.4 | 11.5028 | 162.6 | 194.7 | 20.3 | 2738.6 |
+| PR15270 / 2 | 114.999 | 1468.1 | 11.4696 | 162.4 | 182.2 | 20.3 | 2745.6 |
+| New / 1 | 115.783 | 1458.2 | 11.3920 | 175.7 | 341.5 | 20.4 | 2762.2 |
+| New / 2 | 114.311 | 1476.9 | 11.5387 | 164.1 | 208.7 | 20.2 | 2729.8 |
+
+Mean output throughput is main 1448.2, PR15270 1470.2 and new 1467.6 token/s.
+The new mean differs from main by +1.33% and from PR15270 by -0.18%.
+These are two sequential repeats on one device; small differences do not
+establish a broad model-level speedup. Mean TTFT is worse for the new version
+in these runs: main 156.75, PR15270 162.50 and new 169.90 ms. The new mean is
+13.15 ms above main and 7.40 ms above PR15270. No reverse-order confirmation
+was performed, and these aggregate differences cannot be attributed solely to
+bincount. The operator is initialized when new
+penalty requests enter, so its microbenchmark gains need not dominate decode.
+
+### Validation boundaries
+
+The approved operator source remains SHA256
+`83b871bc1f77319da7e6d9733c7393606a5ef56a24aabd68aa052baf837a01b3`.
+All 50 product NPU tests passed through normal repository conftests and real
+framework imports in this model runtime. The accepted compiler is the
+project-pinned Triton-Ascend 3.2.2.
+A separate3.6 image probe rejects annotated constexpr globals and is not a
+passed environment; no permissive compiler override or kernel rewrite was
+used. Native API-loading failures during preparation and the discarded short
+GPQA pilot remain separate diagnostic evidence.
+
+## Invocation frequency and captured model share
+
+The fixed upstream `PenaltiesState.apply_staged_writes` initializes the
+nonempty list of newly admitted penalty requests, then clears that list.
+Subsequent decode steps maintain counts incrementally. A preempted/resumed
+request can require another initialization episode; disabled penalties skip
+this path. R is the newly staged count, not the total active decode batch.
+
+Two fresh Qwen3-8B captures on the same frozen operator confirm the behavior:
+
+| Window | Generated tokens | Logical bincount calls | R per call | Max prefill per call | Penalty-application launches |
+| --- | ---: | ---: | --- | --- | ---: |
+| One request | 64 | 1 | 1 | 24 | 64 |
+| Eight concurrent GSM8K questions | 512 | 2 | 1,7 | 38,123 | 65 |
+
+Logical bincount calls each launch one statistics and one pack kernel. The
+penalty-application kernel is a separate operator. The full 1,319-request
+GSM8K performance runs were not instrumented for call counts, so no exact
+total bincount count is inferred for those runs.
+
+The following denominator sums every device task duration in its capture.
+The inclusive wrapper scope includes Torch initialization and was associated
+with its device tasks by the profiler; host duration is not used as device
+time. These are device-work shares, not end-to-end critical-path fractions:
+
+| Window | Statistics + pack us | Wrapper inclusive device work us | All captured device work us | Wrapper share |
+| --- | ---: | ---: | ---: | ---: |
+| One request / 64 output | 43.60 | 79.90 | 956064.42 | 0.00836% |
+| Eight requests / 512 output | 282.96 | 402.34 | 1101596.32 | 0.03652% |
+
+Only existing host metadata was read by the diagnostic wrapper: no tensor
+copies, `.item()`, `.cpu()` or stream synchronization were added. Its CPU
+recording still makes profiled request wall time unsuitable as the sustained
+benchmark result. The earlier GSM8K runs were uninstrumented. These captures
+show why single-operator wins do not imply comparable model-throughput gains;
+they do not establish a universal model share or a bound on wall-time gains.
+
+## Memory-ordering scope
+
+Prompt flags use non-atomic byte stores and duplicate token IDs can target the
+same byte. The intended result relies on identical writes of one, followed by
+packing after the statistics kernel. Passing the stated device tests does not
+prove a general race-free guarantee for all backends. Output counts retain
+atomic addition. Unique-writer packed alternatives are evaluated separately;
+experimental results are not silently substituted for this frozen source.
+
+## Compilation variants and startup warmup
+
+The statistics and packing kernels use fixed constexpr tiles, with request
+counts, work counts and strides supplied as runtime integers. On the pinned
+Triton-Ascend 3.2.2 runtime, ordinary positive integers still specialize into
+exact-one, generic and divisible-by-16 classes. Pointer dtype/alignment and
+the compilation target are additional dimensions. A new concrete shape does
+not necessarily compile another binary.
+
+An isolated, compile-only probe with task-owned cold and persistent caches
+observed the following on the frozen operator:
+
+| Change | Observed binary behavior |
+| --- | --- |
+| Request count 2 to 8 | Reused |
+| Request count 16 to 32 | Reused |
+| Token blocks 2 to 3, or 16 to 32 to 1024 | Reused within the respective class |
+| Grid 1 to 40 with unchanged arguments | Reused |
+| Exact-one/divisibility class, pointer dtype or alignment | Additional variants |
+
+Fifteen controlled cases produced eight statistics and five packing binaries.
+These include dtype/alignment controls rather than the complete production
+signature set. The first cold statistics call took 9.153 s including toolchain
+discovery; later new statistics variants took 0.516–0.626 s and packing variants
+1.282–1.349 s. Same-process hits took about 0.04–0.16 ms. A fresh process with
+the persistent cache ran no actual kernel compilations: the first statistics
+lookup including discovery took 0.218 s, and later first-per-key lookups about
+1.6–3.4 ms. These are host compile/cache API durations, not device execution
+times or full-model startup measurements. Compiler help queries are excluded
+from the count of 13 actual cold compilations.
+
+The pinned MRV2 caller creates int64 admission mappings with int32 token
+storage. The standalone probe's primary signature used int32 for both, so its
+hashes do not establish production warmup coverage. Ordinary dummy decode also
+does not exercise the admission-only path. A compile-only adapter for the
+existing warmup registry has been prepared separately: the configured
+32-request/40960-context worker has nine reachable statistics keys and three
+packing keys, using representatives 1, 2 and 16. Actual JIT hash equivalence,
+real-dependency integration and the 12-key startup cost remain unvalidated.
+That adapter is not part of this tested revision; lazy compilation remains.
+
+## Packed-workspace experiments
+
+Two alternatives were tested separately without changing the approved operator:
+
+- **Private packed partials:** each request/part has one writer for its packed
+  GM row. That writer updates prompt words sequentially; a final unique writer
+  ORs the partials. Prompt updates need no atomic OR under this ownership.
+  Output counts retain atomic adds. The tested implementation uses 256-token
+  tiles and at most `max(1, Vector cores // R)` parts per request.
+- **Vocabulary ownership:** each task owns disjoint 128-word output ranges,
+  scans the prompt in 1024-token tiles and masks IDs outside its range. A local
+  histogram builds presence before packing; only one task per request counts
+  output history. It allocates no explicit prompt workspace in GM, but that
+  alone does not establish the backend's complete working set.
+
+On a separately idle A3 device with the same runtime, each source/shape passed
+an exact reference check, then retained ten measured wrapper calls after three
+warmups. Values below sum device-task work including initialization, in us.
+R/P/O denote requests/prompt/output; vocabulary is 151936 except the last row.
+The source order and all raw per-call results are retained in task evidence.
+
+| R / P / O | Main | PR15270 | Approved | Private packed | Vocabulary owner |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 / 1 / 0 | 83.09 | 141.15 | 65.51 | 34.46 | 201.54 |
+| 1 / 32 / 0 | 89.93 | 145.07 | 68.98 | 41.46 | 201.62 |
+| 1 / 128 / 0 | 113.62 | 156.04 | 80.79 | 62.78 | 201.47 |
+| 8 / 1 / 0 | 193.19 | 979.14 | 374.59 | 135.17 | 1489.19 |
+| 8 / 32 / 0 | 256.02 | 982.83 | 378.17 | 142.53 | 1489.04 |
+| 8 / 128 / 0 | 449.23 | 994.83 | 389.88 | 165.79 | 1489.75 |
+| 64 / 1 / 0 | 488.36 | 6610.57 | 2016.27 | 182.50 | 10542.28 |
+| 64 / 32 / 0 | 1121.48 | 6615.70 | 2024.48 | 192.90 | 10545.88 |
+| 64 / 128 / 0 | 2947.84 | 6639.92 | 2047.92 | 242.23 | 10543.09 |
+| 8 / 4096 / 32 | 9529.01 | 1127.22 | 520.74 | 408.72 | 3576.06 |
+| 64 / 4096 / 256 | 84767.77 | 7599.52 | 3007.06 | 2261.46 | 26530.66 |
+| 1 / 32768 / 4096 | 9751.16 | 331.60 | 255.96 | 298.10 | 3641.76 |
+| 3 / 1025 / 33, V=5121 | 882.56 | 259.33 | 185.91 | 89.91 | 279.53 |
+
+Private packed partials reduce device work on 12/13 measured shapes, but the
+single-request long-history case regresses by 42.14 us (16.5%). If S is the
+number of partials per request, its GM prompt workspace is S/8 of the current
+int8 flags, not S/32. With 40 Vectors and R=1, the long case uses S=40:
+759680 bytes versus 151936 bytes, or five times the workspace. With R=64,
+S=1 and the workspace is 1215488 versus 9723904 bytes, or one eighth.
+Thus private packing is not an unconditional memory reduction.
+
+The private-packed variant also passed the existing standalone cases including
+int64, strides, duplicate mapping and all three exact #19958 boundaries.
+Its 1M performance and model integration were not measured. The histogram
+vocabulary-owner variant lost on all 13 comparison shapes; this result applies
+to that realization, not every possible vocabulary-owner algorithm. An earlier
+sort/scan partial-packing trial hit a vector-core runtime exception and was
+excluded from the timing table. None of these trials is promoted into this PR;
+the approved operator and its model evidence remain unchanged.
