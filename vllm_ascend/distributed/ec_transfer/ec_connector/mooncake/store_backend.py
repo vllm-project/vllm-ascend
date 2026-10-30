@@ -100,9 +100,6 @@ def create_ascend_mooncake_embedding_store_client(
     read_buffer_bytes: int = 128 * 1024**2,  # 128 MiB
 ) -> AscendMooncakeEmbeddingStoreClient:
     """Create an embedding Store using the selected Ascend engine topology."""
-    # Native Store treats any present FabricMem flag as enabled, including "0".
-    if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-        os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
     config = MooncakeStoreConfig.load_from_config()
     if config.protocol != "ascend":
         raise ValueError("Ascend cross_encoder_cache requires Mooncake Store protocol='ascend'")

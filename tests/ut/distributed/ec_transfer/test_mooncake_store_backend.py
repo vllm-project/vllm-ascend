@@ -186,10 +186,7 @@ def test_factory_selects_engine_and_local_buffer(topology, selectors):
         patch.object(module, "get_ip", return_value="127.0.0.1"),
     ):
         client = module.create_ascend_mooncake_embedding_store_client(pool, transfer)
-        expected_environment = dict(environment)
-        if topology != "fabric":
-            expected_environment.pop("ASCEND_ENABLE_USE_FABRIC_MEM")
-        assert dict(module.os.environ) == expected_environment
+        assert dict(module.os.environ) == environment
     shared = topology == "shared"
     engine = transfer._ensure_engine.return_value
     kwargs = {"engine": engine.get_engine.return_value} if shared else {}

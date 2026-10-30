@@ -145,17 +145,6 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                 raise EmbeddingStoreOperationError(f"Failed to register Store staging pool: {status}")
         self._bound = True
 
-    def _validate_buffers(self, addresses: list[int], sizes: list[int]) -> None:
-        """Reject native I/O addresses outside the bound producer slab."""
-        pool = self._staging_pool.tensor
-        if not self._bound or pool is None:
-            raise EmbeddingStoreOperationError("Store staging pool is not bound")
-        start, end = pool.data_ptr(), pool.data_ptr() + pool.nbytes
-        if len(addresses) != len(sizes) or any(
-            size <= 0 or address < start or address + size > end for address, size in zip(addresses, sizes, strict=True)
-        ):
-            raise EmbeddingStoreOperationError("Store I/O must use the fixed staging pool")
-
     def put_tensor(self, pool_key: str, tensor: torch.Tensor) -> None:
         """Publish one tensor through the staged PUT path."""
         self.put_tensors([(pool_key, tensor)])
@@ -210,10 +199,10 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
         self._check_healthy()
         if not items:
             return []
+        if not self._bound:
+            raise EmbeddingStoreOperationError("Store staging pool is not bound")
         owners = [owner for _, _, _, item_owners in items for owner in item_owners]
         try:
-            for _, addresses, sizes, _ in items:
-                self._validate_buffers(addresses, sizes)
             results = self.store.batch_put_from_multi_buffers(
                 [pool_key for pool_key, _, _, _ in items],
                 [addresses for _, addresses, _, _ in items],
@@ -238,6 +227,8 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
     def _load_pool_chunk(self, expected: dict[str, TensorSpec], device: torch.device) -> dict[str, torch.Tensor]:
         """Read objects into leased slab regions and retain all active readers."""
         self._check_healthy()
+        if not self._bound:
+            raise EmbeddingStoreOperationError("Store staging pool is not bound")
         if device.type != "npu":
             raise EmbeddingStoreOperationError("Ascend embedding target must be on an NPU")
         torch.npu.set_device(device)
@@ -255,7 +246,6 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
         copy_event: Any | None = None
         try:
             addresses = [buffer.data_ptr() for buffer in lease.tensors]
-            self._validate_buffers(addresses, sizes)
             results = self.store.batch_get_into(list(expected), addresses, sizes)
             if not _batch_get_completed_safely(results, sizes):
                 raise EmbeddingStoreError("Unsafe batch GET results")

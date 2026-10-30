@@ -164,18 +164,13 @@ def test_close_keeps_bound_store_and_pool_registered():
 
 
 @pytest.mark.parametrize("independent", [False, True])
-def test_store_bind_once_and_reject_out_of_pool_io(independent):
+def test_store_binds_once(independent):
     client, pool, store = _client(256, use_store_independent_te=independent)
     client.bind_staging_buffer(pool.tensor)
     if independent:
         store.register_buffer.assert_called_once_with(pool.tensor.data_ptr(), 256)
     else:
         store.register_buffer.assert_not_called()
-    start = pool.tensor.data_ptr()
-    for addresses, sizes in [([start - 1], [24]), ([start + 250], [24]), ([start], [])]:
-        with pytest.raises(module.EmbeddingStoreOperationError, match="fixed staging pool"):
-            client.put_prepared_tensor("key", addresses, sizes, [])
-    store.batch_put_from_multi_buffers.assert_not_called()
     store.unregister_buffer.assert_not_called()
 
 

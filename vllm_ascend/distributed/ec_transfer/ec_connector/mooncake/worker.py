@@ -154,9 +154,6 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             enabled=config.cross_encoder_cache,
             device=config.buffer_device,
         )
-        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-            # Native Store uses presence rather than the value of this flag.
-            os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
         ensure_mooncake_available()
         device_index = torch.npu.current_device()
 

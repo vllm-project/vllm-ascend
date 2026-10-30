@@ -39,14 +39,6 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                 self._engine = global_te.get_transfer_engine(self._hostname, device_name=None)
             return self._engine
 
-    def ensure_initialized(self) -> None:
-        """Initialize the process-wide P2P engine without exposing it."""
-        self._ensure_engine()
-
-    def acquire_sources(self, tensors: list[torch.Tensor]) -> list[int]:
-        """Reject transient source registration outside the fixed staging pool."""
-        raise RuntimeError("Ascend Mooncake requires sources in the fixed staging pool")
-
     def retain_owners(self, owners: list[object]) -> None:
         """Keep allocations alive while native channels may still reference them."""
         self._retained_owners.extend(owners)
@@ -56,13 +48,3 @@ class AscendMooncakeTransfer(MooncakeTransfer):
         """Register fixed storage and retain it even if registration is uncertain."""
         self.retain_owners([tensor])
         return super().register_memory(tensor)
-
-    def unregister_memory(self, tensor: torch.Tensor) -> bool:
-        # The shared engine has no public global channel-retirement barrier.
-        """Keep fixed storage registered until process exit for channel safety."""
-        self.retain_owners([tensor])
-        return False
-
-    def close(self) -> None:
-        """Mark the wrapper closed without retiring the process-wide engine."""
-        self._closed = True
