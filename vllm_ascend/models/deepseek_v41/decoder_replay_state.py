@@ -324,10 +324,9 @@ class DecoderReplayState:
                 attn_state=batch.attn_state,
                 is_prefilling=torch.from_numpy(batch.is_prefilling_np[:num_reqs]),
                 replay_start=self.replay_start[:num_reqs],
+                pcp_context=self.replay_pcp_context,
+                pcp_cache_group_idx=group_id if self.replay_pcp_context is not None else None,
             )
-            build_kwargs = {}
-            if self.replay_pcp_context is not None:
-                build_kwargs = {"pcp_context": self.replay_pcp_context, "pcp_cache_group_idx": group_id}
             value = builder.build(
                 0,
                 common,
@@ -335,7 +334,6 @@ class DecoderReplayState:
                 common_v41_batch_metadata=batch_shared,
                 common_v41_metadata=group_shared.setdefault(group_id, {}),
                 rope_views=rope,
-                **build_kwargs,
             )
             for task in builder.take_device_metadata_tasks():
                 task.run()

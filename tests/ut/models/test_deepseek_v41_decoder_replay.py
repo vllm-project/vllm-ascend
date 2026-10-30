@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -13,12 +14,16 @@ from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching):
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(
+    pcp_size, prefix_caching, sequence_parallel, monkeypatch
+):
+    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
         decoder_replay_start=3,
-        use_sequence_parallel=False,
+        use_sequence_parallel=sequence_parallel,
         _run_replay_layers=lambda *states: states,
         topk_indices_buffer=torch.zeros(8, 2),
         candidate_indices_buffer=torch.zeros(8, 2),
@@ -41,6 +46,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     replay = replay_mod.make_decoder_replay(model, config)
     assert replay is not None
     assert model.decoder_replay_start == 1
+    assert replay.sequence_parallel is sequence_parallel
 
 
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
@@ -123,7 +129,36 @@ def test_replay_without_rows_keeps_inputs():
     assert replay(hidden, None) == (hidden, None)
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize("rank", [0, 3])
+def test_sp_one_row_replay_pads_before_sharding_and_restores_original_layout(monkeypatch, rank):
+    tp_size = 4
+    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=tp_size, rank_in_group=rank))
+    hidden = torch.arange(8, dtype=torch.float32).view(-1, 1)
+    gathered_outputs = torch.tensor([[16.0], [10.0], [10.0], [10.0]])
+    gather = Mock(side_effect=[hidden, gathered_outputs])
+    monkeypatch.setattr(replay_mod, "tensor_model_parallel_all_gather", gather)
+
+    def run_layers(local_hidden, mix, positions):
+        assert local_hidden[:, 0].tolist() == ([6] if rank == 0 else [0])
+        assert positions.tolist() == [6, 0, 0, 0]
+        return (local_hidden + 10,)
+
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [])
+    replay.sequence_parallel = True
+    replay.rows = torch.tensor([6])
+    replay.num_actual_rows = 1
+    replay.num_padded_rows = tp_size
+    replay.context_factory = nullcontext
+    (output,) = replay(hidden.chunk(tp_size)[rank], None, torch.arange(7))
+    expected = torch.zeros_like(hidden)
+    expected[6] = 16
+    torch.testing.assert_close(output, expected.chunk(tp_size)[rank])
+    assert gather.call_count == 2
+
+
+@pytest.mark.parametrize("rows", [[2, 3], [3]])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, rows):
     monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     seen = []
 
@@ -155,8 +190,8 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.decoder_replay_start = 1
     model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
-    replay.rows = torch.tensor([2, 3])
-    replay.num_actual_rows = 2
+    replay.rows = torch.tensor(rows)
+    replay.num_actual_rows = len(rows)
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
     output, aux = DeepseekV41Model.forward(
@@ -168,7 +203,10 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
-    assert output[:, 0].tolist() == [0, 0, 4, 4]
+    assert seen == [(0, [0, 1, 2, 3]), (1, rows), (2, rows)]
+    expected = torch.zeros(4)
+    expected[rows] = 4
+    torch.testing.assert_close(output[:, 0], expected)
     assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    expected[rows] = 3
+    torch.testing.assert_close(aux[1][:, 0], expected)
