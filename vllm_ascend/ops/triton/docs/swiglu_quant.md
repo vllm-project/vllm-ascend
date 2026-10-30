@@ -63,14 +63,17 @@ Final output dtypes are unchanged: quantized output is INT8 with FP32 scales, an
 
 ## Test Cases
 
-[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains twelve cases:
+[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains sixteen cases:
 
 - Quantized correctness: FP16 `[1, 4096]` and BF16 `[65, 14336]`, each with both group-list modes. The BF16 case includes zero-token experts and multiple token rows.
-- MoE-derived correctness: four BF16 inputs `[2, 256]`, `[384, 4096]`, `[198, 4096]`, and `[2, 2048]`, using INT64 expert counts in count mode. These preserve the SwiGLU input shapes from the former W8A8 AllGather tests, with deterministic valid routing counts and empty experts. They directly test this kernel rather than the dispatcher/GMM/combine pipeline; NPU validation of these four extracted cases is pending.
+- MoE-derived correctness: four BF16 inputs `[2, 256]`, `[384, 4096]`, `[198, 4096]`, and `[2, 2048]`, using INT64 expert counts in count mode. These preserve the SwiGLU input shapes from the former W8A8 AllGather tests, with deterministic valid routing counts and empty experts. They directly test this kernel rather than the dispatcher/GMM/combine pipeline.
+- Caller contracts: four restored BF16 W8A8 AllGather combinations retain the original shapes, routing parameters, hardware marker, and final output-shape assertion. Integer weights and positive initialized scales provide valid quantized inputs. The test disables GMM/activation fusion and verifies that the MLP actually calls this local Triton implementation once, with contiguous BF16 activations, INT64 count-mode expert metadata, and counts covering every routed row. Its activation output and scales use the same numerical reference as the direct tests. This does not establish numerical accuracy of the full MoE pipeline.
 - Non-quantized correctness: FP16 and BF16 `[9, 4096]`, including a zero-token expert.
 - Invalid metadata: unsupported `group_list_type` and unsupported group-list dtype.
 
 The numerical reference computes SwiGLU in FP32. Quantized output is checked with `rtol=0, atol=1`; scale tolerances are `(rtol=5e-3, atol=1e-5)` for FP16 and `(rtol=2e-2, atol=1e-4)` for BF16. Non-quantized output uses `rtol=atol=5e-3` for FP16 and `rtol=atol=2e-2` for BF16. Output shapes and dtypes are also checked.
+
+Targeted validation of all sixteen cases, including the four restored caller combinations, passed on Ascend910B4-1 (A2) and Ascend950PR (A5), using Python 3.11.10, torch-npu 2.10.0.post7, and Triton Ascend 3.6.0. These results cover this test file; they do not establish full-model correctness or performance.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py
