@@ -561,6 +561,19 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
 
+    def test_from_request_tracker_preserves_session_id(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+            token_ids=list(range(32)),
+            session_id="sess-1",
+        )
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, block_hashes=[b"h1", b"h2"])
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.session_id, "sess-1")
+
     def test_from_request_tracker_owns_only_new_token_suffix(self):
         tracker = RequestTracker(
             req_id="r1",

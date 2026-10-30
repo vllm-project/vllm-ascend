@@ -818,6 +818,35 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(tracker.token_ids, list(range(48)))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_new_request_session_id_comes_from_request_real(self, mock_client_cls):
+        config = self._make_config()
+        config.kv_events_config = MagicMock(enable_kv_cache_events=True)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        request = MagicMock(
+            request_id="r1",
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(48)),
+            block_hashes=[b"h0", b"h1", b"h2"],
+            session_id="sess-1",
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        # NewRequestData does not carry session_id; the authoritative Request does.
+        new_request = MagicMock(
+            req_id="r1",
+            num_computed_tokens=0,
+            block_ids=[0, 1, 2],
+            prompt_token_ids=list(range(32)),
+            prefill_token_ids=list(range(48)),
+            session_id=None,
+        )
+        output = MagicMock(num_scheduled_tokens={"r1": 48})
+
+        scheduler._process_new_request(new_request, output, force_skip_save=False)
+
+        tracker = scheduler._request_trackers["r1"]
+        self.assertEqual(tracker.session_id, "sess-1")
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_consumer_decode_boundary_backfills_missing_prefix(self, mock_client_cls):
         config = self._make_config(
             kv_role="kv_consumer",
