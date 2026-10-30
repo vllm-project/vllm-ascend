@@ -119,6 +119,20 @@ def _propose(spec, req_states, slots, num_sampled=None, num_rejected=None):
     return drafts.cpu().numpy(), spec.num_valid[:n].cpu().numpy()
 
 
+
+_OBSERVE_MLIR_DIAG = "ConvertLinalgRToBinary"
+
+
+def _propose_or_xfail(spec, rs, slots, **kw):
+    """Run _propose; xfail only on the known observe-kernel MLIR compile
+    diagnostic (CANN 9.1). Any other failure stays a failure."""
+    try:
+        return _propose(spec, rs, slots, **kw)
+    except Exception as e:
+        if _OBSERVE_MLIR_DIAG in str(e):
+            pytest.xfail(f"observe kernel MLIR compile failure: {type(e).__name__}")
+        raise
+
 @pytest.mark.parametrize("vocab", [4, 16, 1000])
 def test_local_matches_reference(vocab):
     k, depth, max_reqs, max_len = 6, 8, 8, 300
@@ -367,17 +381,11 @@ def test_ingestion_is_deterministic():
 # the four core kernels (local_scan, corpus_draft, finalize, ingest) all
 # pass on NPU. Adaptive verification is an optional feature
 # (enable_adaptive_verification defaults to False) — tracked as follow-up.
-@pytest.mark.xfail(
-    _IS_NPU,
-    reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
-    raises=RuntimeError,
-    match=r"(?i)mlir|compile|ascend",
-)
 def test_adaptive_verification_confidences():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=0, adaptive=True)
     _set(rs, 0, [], [1, 2, 3, 1, 2])
-    drafts, num_valid = _propose(spec, rs, [0])
+    drafts, num_valid = _propose_or_xfail(spec, rs, [0])
     assert num_valid[0] == 3
     conf = spec.draft_token_confidence_probs[0].tolist()
     # No observations yet: smoothed 1/2 for real drafts, 0 for the filler.
@@ -385,7 +393,7 @@ def test_adaptive_verification_confidences():
 
     # The target accepted 2 of the 3 real tokens and rejected the third.
     _set(rs, 0, [], [1, 2, 3, 1, 2, 3, 1, 9])
-    _propose(spec, rs, [0], num_sampled=[3], num_rejected=[1])
+    _propose_or_xfail(spec, rs, [0], num_sampled=[3], num_rejected=[1])
     stats = spec.accept_stats.sum(dim=0).tolist()  # [K, (accepted, observed)]
     assert stats[:3] == [[1, 1], [1, 1], [0, 1]]
     assert stats[3] == [0, 0]
@@ -487,21 +495,15 @@ def test_document_counter_rollover_restarts_the_index():
 
 
 # [NPU] Shares the observe-kernel MLIR compile failure (see above).
-@pytest.mark.xfail(
-    _IS_NPU,
-    reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
-    raises=RuntimeError,
-    match=r"(?i)mlir|compile|ascend",
-)
 def test_reused_slot_does_not_inherit_verification_stats():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=0, adaptive=True)
     _set(rs, 0, [], [1, 2, 3, 1, 2])
-    _propose(spec, rs, [0])  # the request finishes before this draft is verified
+    _propose_or_xfail(spec, rs, [0])  # the request finishes before this draft is verified
     # A new request takes slot 0; its first step verifies only placeholders.
     spec.add_request(0)
     _set(rs, 0, [], [5, 6, 7])
-    _propose(spec, rs, [0], num_sampled=[1], num_rejected=[k])
+    _propose_or_xfail(spec, rs, [0], num_sampled=[1], num_rejected=[k])
     assert spec.accept_stats.sum().item() == 0
 
 
