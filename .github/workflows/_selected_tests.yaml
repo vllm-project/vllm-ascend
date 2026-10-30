@@ -136,6 +136,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uv
+          pip install "slipcover>=1.0.18" pytest-xdist diff-cover
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -413,6 +414,27 @@ jobs:
           path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ./tests/coverage.json
+
+      - name: Check coverage on new code
+        if: github.event_name == 'pull_request'
+        run: |
+          pip install diff-cover
+          diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
+            --fail-under=80 \
+            --markdown-report ./tests/diff_coverage.md
+
+      - name: Post diff coverage as PR comment
+        uses: thollander/actions-comment-pull-request@v2.5.0
+        with:
+          filePath: ./tests/diff_coverage.md
+          pr_number: ${{ github.event.number }}
+          comment_tag: ./tests/diff-coverage # 用于后续更新同一条评论
 
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}
