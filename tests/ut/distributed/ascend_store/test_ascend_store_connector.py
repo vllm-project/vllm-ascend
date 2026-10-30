@@ -753,8 +753,8 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         connector._mamba_state = MagicMock()
         connector._loaded_layer = None
         connector.connector_worker = MagicMock()
-        connector.connector_worker._extract_physical_layer_index.side_effect = (
-            lambda name: get_physical_layer_index(name, 4)
+        connector.connector_worker._extract_physical_layer_index.side_effect = lambda name: get_physical_layer_index(
+            name, 4
         )
         if not mamba_state:
             connector._mamba_state = None
