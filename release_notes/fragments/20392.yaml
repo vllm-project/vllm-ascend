@@ -1,0 +1,6 @@
+pr: 20392
+entries:
+  - category: bugfix
+    text: >-
+      Fail initialization when Mooncake Store buffer registration fails,
+      preventing KV transfers from starting with partially registered cache buffers.
