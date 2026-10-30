@@ -52,6 +52,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, shared_experts_calculation_stream
@@ -1329,11 +1330,11 @@ class NPUModelRunner310V2(NPUModelRunner):
     ):
         # TODO: Refactor 310P sampling to use Triton Dispatcher after vLLM RFC
         # #45133 lands.
-        if grammar_output is not None:
-            # TODO: Restore structured output support in the next 310P MRV2 iteration.
-            raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
         self._synchronize_multistream_moe_before_logits()
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
+        invalid_drafts = None
+        if grammar_output is not None:
+            invalid_drafts = apply_grammar_bitmask(logits, input_batch, grammar_output)
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
@@ -1358,6 +1359,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits,
             input_batch,
             self.speculator.draft_logits,
+            invalid_drafts,
         )
         num_reqs = input_batch.num_reqs
         self._sampled_tokens_cpu = self.rejection_sampler.sampled_tokens_cpu[:num_reqs]
