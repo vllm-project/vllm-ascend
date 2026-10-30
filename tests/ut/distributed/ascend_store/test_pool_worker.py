@@ -1260,6 +1260,24 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
+    def test_register_kv_caches_failure_does_not_start_transfer_threads(self):
+        worker = self._make_worker()
+        fake_cache = MagicMock()
+        fake_cache.shape = [100, 16, 8, 64]
+        fake_cache.element_size.return_value = 2
+        fake_cache.data_ptr.return_value = 10000
+        worker.m_store.register_buffer.side_effect = RuntimeError("Mooncake registration failed")
+
+        with (
+            patch.object(worker, "_start_kv_transfer_threads") as start_threads,
+            self.assertRaisesRegex(RuntimeError, "Mooncake registration failed"),
+        ):
+            worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+
+        worker.m_store.register_buffer.assert_called_once()
+        start_threads.assert_not_called()
+        self.assertFalse(worker._transfer_threads_started)
+
     def test_register_nope_cache_skips_empty_rope_view(self):
         # A NoPE RoPE view is empty but retains its parent's backing storage.
         # Registering its null data_ptr would corrupt the aligned region start.

@@ -947,17 +947,39 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             b.batch_get_start(["k"])
 
     def test_register_buffer_with_store_independent_te(self):
-        b = self._make_backend()
-        b._use_store_independent_te = True
-        b.store.register_buffer.return_value = 0
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
-        ) as mock_te:
-            b.register_buffer([100, 101], [200, 201])
-            b.store.register_buffer.assert_any_call(100, 200)
-            b.store.register_buffer.assert_any_call(101, 201)
-            self.assertEqual(b.store.register_buffer.call_count, 2)
-            mock_te.register_buffer.assert_not_called()
+        for use_dict_setup in (False, True):
+            with self.subTest(use_dict_setup=use_dict_setup):
+                b = self._make_backend()
+                b._use_store_independent_te = not use_dict_setup
+                b._prefetch_conf = b._prefetch_conf._replace(use_dict_setup=use_dict_setup)
+                b.store.register_buffer.return_value = 0
+                with patch.object(mooncake_module, "global_te") as mock_te:
+                    b.register_buffer([100, 101], [200, 201])
+                    self.assertEqual(b.store.register_buffer.call_args_list, [call(100, 200), call(101, 201)])
+                    mock_te.register_buffer.assert_not_called()
+
+    def test_register_buffer_store_failure_stops_registration(self):
+        ptrs = [0x1000, 0x2000, 0x3000]
+        lengths = [256, 512, 1024]
+        # Exercise failure both before and after a successful registration.
+        for use_dict_setup in (False, True):
+            for failed_index in (0, 1):
+                with self.subTest(use_dict_setup=use_dict_setup, failed_index=failed_index):
+                    b = self._make_backend()
+                    b._use_store_independent_te = not use_dict_setup
+                    b._prefetch_conf = b._prefetch_conf._replace(use_dict_setup=use_dict_setup)
+                    b.store.register_buffer.side_effect = [0] * failed_index + [-600, 0, 0]
+                    with patch.object(mooncake_module, "global_te") as mock_te:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            f"ptr={ptrs[failed_index]:#x}, length={lengths[failed_index]}, ret=-600",
+                        ):
+                            b.register_buffer(ptrs, lengths)
+                        self.assertEqual(
+                            b.store.register_buffer.call_args_list,
+                            [call(ptr, length) for ptr, length in zip(ptrs, lengths)][: failed_index + 1],
+                        )
+                        mock_te.register_buffer.assert_not_called()
 
     def test_register_buffer_skips_fabric_mem(self):
         b = self._make_backend()
