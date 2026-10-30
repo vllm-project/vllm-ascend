@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch_npu  # noqa: F401
+import torch_npu
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import AscendAttentionState, _get_fia_sparse_params
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl, AscendFlashAttentionMetadataBuilder
 
 
@@ -97,3 +98,54 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
     result = run()
     reference = golden(query, key, value, block_table, [4093, 3067], window, query_len, causal)
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("window", [4, 16])
+def test_noncausal_fia_band_eager_and_graph_match_reference(dtype, window):
+    """Keep future draft keys, but exclude KV outside the trained window."""
+    torch.npu.set_device(0)
+    torch.manual_seed(2026)
+    head_dim, query_len, kv_len, block_size = 128, 9, 65, 128
+    query = torch.randn(query_len, 2, head_dim, device="npu", dtype=dtype)
+    key = torch.randn(1, block_size, 1, head_dim, device="npu", dtype=dtype)
+    value = torch.randn_like(key)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device="npu")
+    mask = AttentionMaskBuilder(torch.device("npu")).get_splitfuse_attn_mask()
+    sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(window, False)
+    output = torch.empty_like(query)
+
+    def forward():
+        result, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            block_table=block_table,
+            atten_mask=mask,
+            sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_lengths=[query_len],
+            actual_seq_lengths_kv=[kv_len],
+            num_heads=2,
+            num_key_value_heads=1,
+            scale=head_dim**-0.5,
+        )
+        output.copy_(result)
+
+    forward()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        forward()
+    tolerance = 0.02 if dtype == torch.bfloat16 else 0.003
+    for _ in range(3):
+        query.copy_(torch.randn_like(query))
+        key.copy_(torch.randn_like(key))
+        value.copy_(torch.randn_like(value))
+        expected = golden(query, key, value, block_table, [kv_len], window, query_len, False)
+        for execute in (forward, graph.replay):
+            execute()
+            torch.testing.assert_close(output, expected, rtol=tolerance, atol=tolerance)

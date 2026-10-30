@@ -1,0 +1,4 @@
+pr: null
+entries:
+  - category: bugfix
+    text: Fixed non-causal DFlash2 sliding-window attention to retain bidirectional window bounds with the FIA compressed band mask. Eager execution, workspace queries, and captured tasks now share the same sparse parameters instead of dropping the window to avoid capture errors.

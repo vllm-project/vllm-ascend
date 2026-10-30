@@ -40,3 +40,8 @@ DFlash2 probability sampling uses upstream seed/step/position hashing and the
 stable FP32 Gumbel transform in both eager and graph execution. This changes
 seeded probabilistic outputs compared with the previous Ascend Philox-based
 selector. FP64 Gumbel sampling remains unsupported on NPU.
+
+Non-causal sliding-window draft layers retain the symmetric window from the
+checkpoint in both eager and graph execution. FIA uses its compressed band-mask
+template with matching left/right bounds; removing the mask and selecting full
+attention would expose cache entries outside the window and alter draft scores.

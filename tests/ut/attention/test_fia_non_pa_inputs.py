@@ -111,14 +111,14 @@ def test_pa_params_preserve_cache_storage_and_stride(use_bnsd, state):
         torch.testing.assert_close(actual.reshape(original.shape), original)
 
 
-@pytest.mark.parametrize("branch", ["causal", "non_causal", "sliding_window"])
+@pytest.mark.parametrize("branch", ["causal", "non_causal", "sliding_window", "non_causal_sliding_window"])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("cross_attention", [False, True])
 def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross_attention):
     impl = _make_impl()
     metadata = _make_metadata()
-    metadata.causal = branch != "non_causal"
-    impl.sliding_window = 16 if branch == "sliding_window" else None
+    metadata.causal = branch not in ("non_causal", "non_causal_sliding_window")
+    impl.sliding_window = 16 if "sliding_window" in branch else None
     if cross_attention:
         impl.attn_type = AttentionType.ENCODER_DECODER
         metadata.seq_lens = torch.tensor([5], dtype=torch.int32)
@@ -142,6 +142,10 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
     selected_fia.assert_called_once()
     kwargs = selected_fia.call_args.kwargs
+    if branch == "non_causal_sliding_window":
+        assert kwargs["sparse_mode"] == 4
+        assert kwargs["pre_tokens"] == 15
+        assert kwargs["next_tokens"] == 15
     assert kwargs["block_table"] is None
     assert kwargs["actual_seq_lengths_kv"] == ([5] if cross_attention else [3])
     for name, original in (("key", key), ("value", value)):
@@ -154,9 +158,14 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
 @pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("use_pa", [False, True])
-def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("sliding_window", [None, 16])
+def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa, causal, sliding_window):
     impl = _make_impl()
     metadata = _make_metadata(AscendAttentionState.DecodeOnly if use_pa else AscendAttentionState.PrefillNoCache)
+    impl.sliding_window = sliding_window
+    metadata.causal = causal
+    metadata.attn_mask = torch.zeros(1, 1, dtype=torch.bool) if causal or sliding_window is not None else None
     query = torch.zeros(3, 2, 4)
     key, value = _strided_kv(), _strided_kv()
     if use_pa:
@@ -186,6 +195,13 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     expected_key = impl.key_cache.view(2, 3, 4) if use_pa else key
     expected_value = impl.value_cache.view(2, 3, 4) if use_pa else value
     for kwargs in (workspace_kwargs, task_kwargs):
+        assert kwargs["atten_mask"] is metadata.attn_mask
+        expected_window = sliding_window if causal else sliding_window - 1 if sliding_window is not None else None
+        assert kwargs["sparse_mode"] == (4 if sliding_window is not None else 3 if causal else 0)
+        assert kwargs["pre_tokens"] == (expected_window if sliding_window is not None else attn_module.SWA_INT_MAX)
+        assert kwargs["next_tokens"] == (
+            0 if causal else expected_window if sliding_window is not None else attn_module.SWA_INT_MAX
+        )
         assert kwargs["block_table"] is (metadata.block_tables if use_pa else None)
         for name, original in (("key", expected_key), ("value", expected_value)):
             assert kwargs[name].is_contiguous() == (not use_pa)
@@ -201,6 +217,10 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
         )
         provider = register.call_args.args[2]
         runtime_kwargs = {**task_kwargs, **provider.resolve({"layer": runtime_metadata})}
+        assert runtime_kwargs["atten_mask"] is metadata.attn_mask
+        assert runtime_kwargs["sparse_mode"] == task_kwargs["sparse_mode"]
+        assert runtime_kwargs["pre_tokens"] == task_kwargs["pre_tokens"]
+        assert runtime_kwargs["next_tokens"] == task_kwargs["next_tokens"]
         assert runtime_kwargs["block_table"] is (runtime_metadata.block_tables if use_pa else None)
         assert runtime_kwargs["key"] is task_kwargs["key"]
         assert runtime_kwargs["value"] is task_kwargs["value"]
