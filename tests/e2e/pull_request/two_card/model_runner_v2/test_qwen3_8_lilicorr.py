@@ -62,6 +62,16 @@ def greedy_reference(mrv2_environment):
     return [list(output.outputs[0].token_ids) for output in outputs]
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3.8-27B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="spec_decode",
+    parallel="TP",
+    deploy="",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="eager",
+)
 @pytest.mark.parametrize(
     "draft_sample_method,temperature",
     [("greedy", 0.0), ("probabilistic", 0.0), ("probabilistic", 0.8)],
