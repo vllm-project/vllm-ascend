@@ -294,6 +294,13 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
 
+        # B1 paged verify: the head_dim=512 MTP verify step cannot be captured
+        # by the default TND/PA paths on Model Runner V2, so give exactly that
+        # geometry a dedicated backend that captures it as a FIA-v2 BNSD paged
+        # op. Everything else keeps the default backend below.
+        if _want_b1_paged_verify(attn_selector_config):
+            return "vllm_ascend.attention.attention_v2_b1.AscendB1AttentionBackend"
+
         return backend_map[backend_key]
 
     @classmethod
@@ -1692,6 +1699,59 @@ def _validate_fa3_backend(key, _attn_selector_config):
     logger.info(
         "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
     )
+    return True
+
+
+def _want_b1_paged_verify(attn_selector_config) -> bool:
+    """Select the B1 paged-verify backend for the exact geometry it serves.
+
+    Model Runner V2 runs every other GQA layer through the shared Ascend
+    backend, but the Gemma4-style head_dim=512 MTP verify step cannot be
+    captured by its TND/PA paths. Keep this narrowly scoped: MTP, decoder
+    self-attention, head_dim=512, no sliding window, no MLA/sparse/compress/
+    PCP/DCP/KV-connector/sinks, Model Runner V2, and not A5 (where the stock
+    PagedAttention capture works). Otherwise keep the default backend.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import AttentionType
+
+    from vllm_ascend import envs as ascend_envs
+    from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+    from vllm_ascend.utils import is_950
+
+    if not ascend_envs.VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY:
+        return False
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or not bool(getattr(vllm_config, "use_v2_model_runner", False)):
+        return False
+    if vllm_config.speculative_config is None:
+        return False
+    if attn_selector_config.head_size != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        return False
+    if attn_selector_config.has_sliding_window:
+        return False
+    if attn_selector_config.attn_type != AttentionType.DECODER:
+        return False
+    # use_mm_prefix is deliberately allowed: Gemma4 sets is_mm_prefix_lm on the
+    # whole model, but clears mm_prefix_range for every non-sliding layer each
+    # forward (plain causal masking), and the B1 op only ever captures uniform
+    # k+1 decode verify steps. Adaptive verification, in contrast, makes the
+    # decode graphs varlen, which the uniform k+1 capture contract cannot serve.
+    if (
+        attn_selector_config.use_mla
+        or attn_selector_config.use_sparse
+        or getattr(attn_selector_config, "use_compress", False)
+        or attn_selector_config.use_pcp
+        or attn_selector_config.use_dcp
+        or attn_selector_config.use_kv_connector
+        or attn_selector_config.has_sink
+        or attn_selector_config.use_non_causal
+        or attn_selector_config.use_per_head_quant_scales
+        or getattr(attn_selector_config, "use_adaptive_verification", False)
+    ):
+        return False
+    if is_950():
+        return False
     return True
 
 

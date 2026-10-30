@@ -312,9 +312,22 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
     impl = getattr(layer, "impl", None)
+    if type(impl) is not AscendAttentionBackendImpl:
+        # B1: the head_dim=512 MTP verify step is captured as a FIA-v2 BNSD
+        # paged op, and that op rejects the block-interleaved K/V views
+        # produced by the combined single-buffer allocation. Give these layers
+        # private contiguous K and V buffers instead. This cannot ride on
+        # using_paged_attention(): speculative decoding turns it off, even
+        # though the 512 verify step still runs through the paged path.
+        from vllm_ascend.attention.attention_v2_b1 import AscendB1AttentionBackendImpl
+
+        return (
+            type(impl) is AscendB1AttentionBackendImpl
+            and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+            and spec.page_size_bytes == spec.real_page_size_bytes
+        )
     return (
-        type(impl) is AscendAttentionBackendImpl
-        and impl.sliding_window is None
+        impl.sliding_window is None
         and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
         and spec.page_size_bytes == spec.real_page_size_bytes
         and using_paged_attention(None, vllm_config, spec.head_size)
