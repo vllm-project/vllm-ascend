@@ -19,6 +19,7 @@ from typing import TypedDict
 
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.ops import kda_state_copy_plan as production
 from vllm_ascend.ops.triton import kda_state_copy_kernel as kernels
@@ -149,7 +150,10 @@ def main(output: Path, trials: int, seed: int):
         backing = torch.full(((rows - 1) * stride + offset + payload,), -23.0, device="npu")
         state = backing.as_strided((rows, 12, 128, 128), (stride, 16384, 128, 1), offset)
         indices = torch.arange(rows - count, rows, device="npu", dtype=torch.int32)
-        plan = production.KDAStateCopyPlan.prepare(state, 128)
+        registry = JitWarmupRegistry(None)
+        with registry.activate():
+            plan = production.KDAStateCopyPlan.prepare(state, 128)
+        registry.warmup()
         plan.seal()
         for case in ("gather", "clear", "scatter"):
             flags = torch.full((count,), case == "gather", dtype=torch.bool, device="npu")

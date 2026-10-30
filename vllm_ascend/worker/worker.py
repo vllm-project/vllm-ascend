@@ -992,6 +992,12 @@ class NPUWorker(WorkerBase):
             )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+
+        # Registered KDA launchers are needed by model dummy runs as well as
+        # graph capture. KV caches and their compile keys are already bound.
+        kernel_warmup(self)
+
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -1014,10 +1020,6 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
-
-        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
-
-        kernel_warmup(self)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
