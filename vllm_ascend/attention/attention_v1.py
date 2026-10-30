@@ -49,9 +49,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
+    FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     enable_dcp,
+    expand_pa_per_token_rows,
+    in_full_cudagraph_mode,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -466,6 +469,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
+        if (
+            getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+            and getattr(self.kv_cache_spec, "sliding_window", None) is None
+            and in_full_cudagraph_mode(self.vllm_config)
+        ):
+            # FULL cudagraph steps capture this group through full_graph_pa,
+            # whose op is decode-only (exactly one query per context_lens
+            # row); see expand_pa_per_token_rows. Both the runtime build and
+            # build_for_cudagraph_capture (the base class calls build) come
+            # through here, so the captured graph and every replay share the
+            # same one-row-per-query layout.
+            expand_pa_per_token_rows(attn_metadata)
         return attn_metadata
 
     def _finalize_pcp_metadata(

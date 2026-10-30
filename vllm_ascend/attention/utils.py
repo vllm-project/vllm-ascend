@@ -306,6 +306,86 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
     return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
 
 
+def in_full_cudagraph_mode(vllm_config: VllmConfig | None = None) -> bool:
+    """True when the engine runs whole steps inside FULL cudagraphs.
+
+    FULL graphs capture every op of the step, so the head_dim=512 layers are
+    captured by the stock PagedAttention path (the one the no-spec FULL
+    profile uses) and must keep the natural LBNHC cache layout. The B1
+    FIA-v2 BNSD verify capture stays exclusive to the FULL_DECODE_ONLY lane,
+    where prefill runs eagerly and only the uniform k+1-query steps are
+    captured.
+    """
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if getattr(compilation_config, "cudagraph_mode", None) is None:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+
+    return compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+
+
+def expand_pa_per_token_rows(metadata) -> bool:
+    """Re-lay the 512-dim group's PagedAttention metadata as one query per row.
+
+    ``torch_npu._npu_paged_attention`` is decode-only: it splits the query
+    tensor evenly over the rows of ``context_lens``, so every row must hold
+    exactly one query.  FULL cudagraph steps do not satisfy that -- the MTP
+    verify runs k+1 queries per request and prefills run many per request --
+    and the op then silently returns wrong values (verified on NPU: a single
+    multi-query row matches neither causal nor full-context attention, while
+    one-query-per-row stays within bf16 noise of a torch reference for every
+    context length tried).
+
+    Splitting each request's query block into one row per token -- the row's
+    context length being the request's computed prefix plus its own causal
+    position -- restores exact causal attention with the same output row
+    order.  ``block_tables`` and ``seq_lens`` are replaced in place because
+    they are exactly the two fields full_graph_pa binds and PAParamProvider
+    rebinds on every replay.  Zero-query rows (the pad row the runner appends)
+    contribute nothing.
+    """
+    if getattr(metadata, "pa_rows_expanded", False):
+        return True
+    block_tables = getattr(metadata, "block_tables", None)
+    query_lengths = getattr(metadata, "actual_seq_lengths_q", None)
+    seq_lens_list = getattr(metadata, "seq_lens_list", None)
+    if block_tables is None or not query_lengths or not seq_lens_list:
+        return False
+    if len(query_lengths) != len(seq_lens_list):
+        return False
+    query_lens: list[int] = []
+    prev = 0
+    for end in query_lengths:
+        query_lens.append(int(end) - prev)
+        prev = int(end)
+    num_tokens = int(query_lengths[-1])
+    if sum(query_lens) != num_tokens:
+        return False
+    if all(q == 1 for q in query_lens):
+        # Already one query per row; the per-request metadata is exact.
+        metadata.pa_rows_expanded = True
+        return True
+    context_lens: list[int] = []
+    for query_len, seq_len in zip(query_lens, seq_lens_list):
+        if query_len <= 0:
+            continue
+        # seq_len counts the computed prefix plus this step's queries; the
+        # query at index j therefore attends prefix + j + 1 KV positions.
+        prefix = max(int(seq_len) - query_len, 0)
+        context_lens.extend(prefix + j + 1 for j in range(query_len))
+    if len(context_lens) != num_tokens:
+        return False
+    counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
+    metadata.block_tables = block_tables.repeat_interleave(counts, dim=0)
+    metadata.seq_lens = torch.tensor(context_lens, dtype=torch.int32)
+    metadata.pa_rows_expanded = True
+    return True
+
+
 def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
     """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
     # Import lazily to avoid a circular dependency with attention_v1.
