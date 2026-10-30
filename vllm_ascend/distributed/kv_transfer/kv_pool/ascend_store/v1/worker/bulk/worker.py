@@ -20,7 +20,7 @@ from ...infrastructure.mapping import (
 )
 from ...infrastructure.resources import Resources
 from ...infrastructure.topology import KVPoolTopology
-from ...protocol.messages import CheckpointStoreCommand, StoreCommand
+from ...protocol.messages import CheckpointStoreCommand, KVTransferStep, StoreCommand
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeysByPartition,
@@ -82,8 +82,7 @@ class BulkWorker(KVPoolWorker):
         }
         self._store_executor = Executor("KVPoolStoreExecutor", resources.backend.set_device) if store_enabled else None
         self._load_executor = Executor("KVPoolLoadExecutor", resources.backend.set_device) if load_async else None
-        self._pending_loads: deque[Future[tuple[LoadCompletion, ...]]] = deque()
-        self._load_batches: dict[Future[tuple[LoadCompletion, ...]], KVTransferBatch] = {}
+        self._pending_loads: deque[tuple[Future[tuple[LoadCompletion, ...]], KVTransferBatch]] = deque()
         self._pending_load_request_ids: set[str] = set()
         super().__init__(
             topology,
@@ -96,6 +95,19 @@ class BulkWorker(KVPoolWorker):
             kv_cache_layout=kv_cache_layout,
             source_ready_event_factory=source_ready_event_factory,
         )
+
+    def begin_step(self, step: KVTransferStep) -> None:
+        context = self._new_step_context(step)
+        if self._store_enabled and step.store.all_sources_ready:
+            self._submit_bulk_store(context)
+        self._active_step = context
+
+    @KVPoolWorker._with_active_step
+    def finish_step(self, context: KVPoolStepContext) -> None:
+        self._raise_store_fatal_error()
+        if not self._store_enabled or not context.step.store.commands or context.store_submitted:
+            return
+        self._submit_bulk_store(context)
 
     def _bind_mappings(self) -> None:
         # Resources retains the caller's tensors through executor drain and unregister.
@@ -138,15 +150,16 @@ class BulkWorker(KVPoolWorker):
         except BaseException:
             self._pending_load_request_ids.difference_update(batch.request_ids)
             raise
-        self._load_batches[future] = batch
-        self._pending_loads.append(future)
+        self._pending_loads.append((future, batch))
         return ()
 
     def _collect_load_completions(self) -> tuple[LoadCompletion, ...]:
         completed: list[LoadCompletion] = []
-        while self._pending_loads and self._pending_loads[0].done():
-            future = self._pending_loads.popleft()
-            batch = self._load_batches.pop(future)
+        while self._pending_loads:
+            future, batch = self._pending_loads[0]
+            if not future.done():
+                break
+            self._pending_loads.popleft()
             completed.extend(self._load_batch_completions(future, batch))
         return tuple(completed)
 
@@ -166,30 +179,28 @@ class BulkWorker(KVPoolWorker):
             raise RuntimeError(f"Load completion has no pending execution: {completion.request_id}")
         self._pending_load_request_ids.remove(completion.request_id)
 
-    def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
-        del fence
-        if self._store_executor is None:
-            raise RuntimeError("Bulk Store is disabled")
-        commands = context.step.store.commands
-        future = self._store_executor.submit(self._execute_bulk_store, commands, self._record_source_ready())
-        self._track_store_batch(
-            PendingStore(
-                future,
-                frozenset(command.request_id for command in commands),
-                frozenset(command.store_job_id for command in commands if command.store_job_id is not None),
+    def _submit_bulk_store(self, context: KVPoolStepContext) -> None:
+        try:
+            if self._store_executor is None:
+                raise RuntimeError("Bulk Store is disabled")
+            commands = context.step.store.commands
+            future = self._store_executor.submit(self._execute_bulk_store, commands, self._record_source_ready())
+            self._track_store_batch(
+                PendingStore(
+                    future,
+                    frozenset(command.request_id for command in commands),
+                    frozenset(command.store_job_id for command in commands if command.store_job_id is not None),
+                )
             )
-        )
+        except Exception as error:
+            self._store_fatal_error = error
+            raise
         context.store_submitted = True
-
-    def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
-        if not wait and not batch.future.done():
-            return None
-        return batch.future.result()
 
     def _check_execution_results(self) -> None:
         # Observe task failures at shutdown without consuming pending Load notifications.
-        for future in self._pending_loads:
-            self._load_batch_completions(future, self._load_batches[future])
+        for future, batch in self._pending_loads:
+            self._load_batch_completions(future, batch)
 
     def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreTransferCandidates:
         transfer_records_by_group: dict[int, list[StoreTransferRecords]] = {group_id: [] for group_id in self._groups}
@@ -302,17 +313,8 @@ class BulkWorker(KVPoolWorker):
     def _execute_bulk_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         try:
             arguments = self._materialize_bulk_arguments(batch)
-        except Exception as error:
-            logger.error(
-                "Bulk Load materialization failed for requests %s. type=%s, error=%s",
-                batch.request_ids,
-                type(error).__name__,
-                error,
-            )
-            return _failed_load_completions(batch, None)
-        if not arguments.keys:
-            return tuple(LoadCompletion(request_id, ()) for request_id in batch.request_ids)
-        try:
+            if not arguments.keys:
+                return tuple(LoadCompletion(request_id, ()) for request_id in batch.request_ids)
             result_codes = self._backend.load(arguments.keys, arguments.addresses, arguments.sizes)
         except Exception as error:
             logger.error(
@@ -327,7 +329,6 @@ class BulkWorker(KVPoolWorker):
     def _execute_bulk_store(
         self, commands: tuple[StoreCommand, ...], source_ready_event: Any
     ) -> tuple[StoreCompletion, ...]:
-        selected: KVTransferBatch | None = None
         try:
             candidates = self._build_store_candidates(commands)
             candidate_keys = store_transfer_candidate_keys(candidates)
@@ -340,13 +341,8 @@ class BulkWorker(KVPoolWorker):
                 else select_store_transfer_candidates(candidate_keys, accepted, claim_once=claim_once)
             )
             selected = self._materialize_store_candidates(commands, candidates, transfer_candidate_mask)
-            if selected is None:
-                return _store_command_completions(commands)
         except Exception as error:
-            if selected is None:
-                return _store_command_completions(commands, error)
-            evidence = tuple(TransferEvidence(source, None, True) for source in _batch_sources(selected, None))
-            return _failed_store_completions(selected, evidence, error)
+            return _store_command_completions(commands, error)
         try:
             arguments = self._materialize_bulk_arguments(selected)
             sources = _batch_sources(selected, None)

@@ -53,3 +53,24 @@ def test_gva_wrong_size_cleanup_failure_preserves_only_acquired_keys():
         sessions.load_regions(("wrong_size",), 64)
     sessions.finish_load()
     assert backend.remove_gva_leases.call_args_list == [call(["wrong_size"]), call(["valid", "wrong_size"])]
+
+
+@pytest.mark.parametrize("direction", ("load", "store"))
+def test_gva_region_lookup_preserves_heterogeneous_size_order_and_ownership(direction):
+    backend = MagicMock()
+    regions = (GVARegion(1000, 64), GVARegion(2000, 128))
+    backend.allocate_gva.return_value = (1000, 2000)
+    backend.add_gva_leases.return_value = (0, 0)
+    backend.query_gva_regions.return_value = regions
+    sessions = MemcacheSessions(backend)
+    start = sessions.start_load if direction == "load" else sessions.start_store
+    resolve = sessions.load_regions if direction == "load" else sessions.store_regions
+    assert start(["a", "b"], [64, 128]) == (0, 0)
+    assert resolve(("b", "a"), (128, 64)) == regions[::-1]
+    assert resolve(("a",), 64) == regions[:1]
+    with pytest.raises(ValueError, match="sizes must match"):
+        resolve(("a", "b"), (64,))
+    with pytest.raises(RuntimeError, match="unexpected object size"):
+        resolve(("b", "a"), (64, 128))
+    with pytest.raises(RuntimeError, match="unavailable"):
+        resolve(("unowned",), (64,))

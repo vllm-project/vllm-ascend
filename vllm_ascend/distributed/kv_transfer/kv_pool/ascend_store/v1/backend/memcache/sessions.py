@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from itertools import repeat
 from typing import TYPE_CHECKING
 
 from ..interfaces import GVARegion
@@ -66,7 +68,7 @@ class MemcacheSessions:
         self.finish_load(rejected)
         return tuple(codes)
 
-    def load_regions(self, keys: tuple[str, ...], object_size: int) -> tuple[GVARegion, ...]:
+    def load_regions(self, keys: tuple[str, ...], object_size: int | Sequence[int]) -> tuple[GVARegion, ...]:
         return self._resolve_regions(keys, object_size, self._load_regions)
 
     def finish_load(self, keys: list[str] | None = None) -> None:
@@ -104,7 +106,7 @@ class MemcacheSessions:
                 del self._store_regions[key]
         return tuple(codes)
 
-    def store_regions(self, keys: tuple[str, ...], object_size: int) -> tuple[GVARegion, ...]:
+    def store_regions(self, keys: tuple[str, ...], object_size: int | Sequence[int]) -> tuple[GVARegion, ...]:
         return self._resolve_regions(keys, object_size, self._store_regions)
 
     def commit_store(self, keys: list[str]) -> tuple[int, ...]:
@@ -142,14 +144,21 @@ class MemcacheSessions:
 
     @staticmethod
     def _resolve_regions(
-        keys: tuple[str, ...], object_size: int, regions: dict[str, GVARegion | None]
+        keys: tuple[str, ...], object_size: int | Sequence[int], regions: dict[str, GVARegion | None]
     ) -> tuple[GVARegion, ...]:
         resolved = []
-        for key in keys:
+        sizes: Iterator[int]
+        if isinstance(object_size, int):
+            sizes = repeat(object_size, len(keys))
+        else:
+            if len(keys) != len(object_size):
+                raise ValueError("GVA region sizes must match their keys")
+            sizes = iter(object_size)
+        for key, size in zip(keys, sizes, strict=True):
             region = regions.get(key)
             if region is None:
                 raise RuntimeError(f"GVA session for {key!r} is unavailable")
-            if region.size != object_size:
+            if region.size != size:
                 raise RuntimeError(f"GVA session for {key!r} has an unexpected object size")
             resolved.append(region)
         return tuple(resolved)

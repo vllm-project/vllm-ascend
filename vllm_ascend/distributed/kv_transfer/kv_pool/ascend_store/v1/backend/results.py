@@ -18,9 +18,15 @@ def integer_results(operation: str, keys: list[str], results: Iterable[int] | No
         raise BackendResultError(f"{operation} returned non-integer results") from error
     if len(raw_values) != len(keys):
         raise BackendResultError(f"{operation} returned {len(raw_values)} results for {len(keys)} keys")
-    if any(not is_integer_result(value) for value in raw_values):
-        raise BackendResultError(f"{operation} returned non-integer results")
-    return tuple(int(value) for value in raw_values)
+    converted: list[int] | None = None
+    for index, value in enumerate(raw_values):
+        if type(value) is not int:
+            if not is_integer_result(value):
+                raise BackendResultError(f"{operation} returned non-integer results")
+            if converted is None:
+                converted = list(raw_values)
+            converted[index] = int(value)
+    return raw_values if converted is None else tuple(converted)
 
 
 def integer_result(operation: str, value: Any) -> int:
@@ -37,4 +43,4 @@ def presence_results(operation: str, keys: list[str], results: Iterable[int] | N
 
 
 def is_integer_result(value: Any) -> bool:
-    return not isinstance(value, bool) and isinstance(value, Integral)
+    return type(value) is int or (not isinstance(value, bool) and isinstance(value, Integral))

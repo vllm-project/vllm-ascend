@@ -31,9 +31,9 @@ def test_key_range_merged_failure_identifies_every_original_request_destination(
     )
     try:
         batch = worker._build_load_batch(commands)
-        worker._prepare_load_layers(batch)
+        prepared = worker._prepare_load_layers(batch)
         backend.session_copy_result = (-7, 0) if failed_group == 0 else (0, -7)
-        completions = worker._copy_load_layer(2)
+        completions = prepared.copy_layer(2)
         assert [completion.request_id for completion in completions] == ["first", "second"]
         expected_blocks = (1, 4) if failed_group == 0 else (2, 5)
         for completion, block_id in zip(completions, expected_blocks, strict=True):
@@ -46,6 +46,29 @@ def test_key_range_merged_failure_identifies_every_original_request_destination(
     finally:
         worker.close()
     assert resources.closed
+
+
+def test_prepared_load_keeps_its_key_merges_and_destinations_after_another_preparation():
+    worker, resources, backend = make_worker(layerwise=True, store=False, physical_layers=(2,))
+    commands = (
+        LoadCommand("first", 0, 4, ((1,),), (b"same",)),
+        LoadCommand("second", 0, 4, ((4,),), (b"same",)),
+    )
+    try:
+        prepared = worker._prepare_load_layers(worker._build_load_batch(commands))
+        other = worker._prepare_load_layers(
+            worker._build_load_batch((LoadCommand("other", 0, 4, ((7,),), (b"other",)),))
+        )
+        backend.session_copy_result = (-7,)
+        completions = prepared.copy_layer(2)
+        assert [completion.request_id for completion in completions] == ["first", "second"]
+        assert [completion.failures[0].source.local_block_id for completion in completions] == [1, 4]
+        copy = next(call for call in backend.calls if call[0] == "batch_copy_get")
+        assert copy[1] == tuple(dict.fromkeys(prepared.plan.batch.selected_keys()))
+        assert set(copy[1]).isdisjoint(other.plan.batch.selected_keys())
+        assert copy[2] == (tuple(resources.kv_caches["layers.2.group.0"][block].data_ptr() for block in (1, 4)),)
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("with_load", (False, True), ids=("cold", "external_load"))

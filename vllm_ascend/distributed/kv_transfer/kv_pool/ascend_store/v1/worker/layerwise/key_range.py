@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from itertools import repeat
 from typing import Any, cast
 
@@ -31,6 +32,7 @@ from .transfer import (
     LayerStoreResult,
     LayerTransferGroup,
     LayerTransferPlan,
+    PreparedLayerLoad,
     _layer_load_completions,
     prepare_layer_transfer,
 )
@@ -56,7 +58,6 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         backend = cast(KeyRangeBackend, resources.backend)
         sessions = backend.create_sessions()
         self._key_range_backend = backend
-        self._load_key_merges: dict[int, KeyRangeKeyMerge | None] = {}
         super().__init__(
             topology,
             resources,
@@ -77,25 +78,19 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         self._remote = {group_id: build_key_range_remote(local) for group_id, local in self._local.items()}
         self._key_range_layouts = bind_key_range_layouts(self._local, self._layer_slices, self._remote)
 
-    def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._load_plan = prepare_layer_transfer(batch, self._layer_memberships)
-        self._load_key_merges = prepare_load_key_merges(self._load_plan)
-        return self._load_plan.selected_keys_by_layer
+    def _prepare_load_layers(self, batch: KVTransferBatch) -> PreparedLayerLoad:
+        plan = prepare_layer_transfer(batch, self._layer_memberships)
+        key_merges = prepare_load_key_merges(plan)
+        return PreparedLayerLoad(plan, partial(self._copy_load_layer, plan, key_merges))
 
-    def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._store_plan = prepare_layer_transfer(batch, self._layer_memberships)
-        return self._store_plan.selected_keys_by_layer
+    def _prepare_store_layers(self, batch: KVTransferBatch) -> LayerTransferPlan:
+        return prepare_layer_transfer(batch, self._layer_memberships)
 
-    def _finish_load(self) -> None:
-        self._load_key_merges.clear()
-        super()._finish_load()
-
-    def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
-        plan = self._prepared_load_plan()
+    def _copy_load_layer(
+        self, plan: LayerTransferPlan, key_merges: dict[int, KeyRangeKeyMerge | None], layer_id: int
+    ) -> tuple[LoadCompletion, ...]:
         try:
-            arguments = materialize_load_layer_ranges(
-                self._key_range_layouts, plan, layer_id, self._load_key_merges[layer_id]
-            )
+            arguments = materialize_load_layer_ranges(self._key_range_layouts, plan, layer_id, key_merges[layer_id])
             if not arguments.keys:
                 return _layer_load_completions(plan, layer_id, {})
             result_codes = self._key_range_backend.copy_key_range_load(
@@ -112,11 +107,14 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         failed_codes = {key: code for key, code in zip(arguments.keys, result_codes, strict=True) if code != 0}
         return _layer_load_completions(plan, layer_id, failed_codes)
 
-    def _copy_store_layer(self, source_ready_event: Any | None, layer_id: int) -> LayerStoreResult:
+    def _copy_store_layer(
+        self, source_ready_event: Any | None, layer_id: int, plan: LayerTransferPlan
+    ) -> LayerStoreResult:
         """Prepare addresses ahead of source readiness, then copy this layer."""
 
         source_handed_off = False
-        groups, keys = self._prepared_store_layer(layer_id)
+        groups = plan.groups_by_layer[layer_id]
+        keys = plan.selected_keys_by_layer[layer_id]
         try:
             addresses, sizes, offsets = materialize_store_layer_ranges(self._key_range_layouts, groups, layer_id)
             if source_ready_event is not None:
@@ -126,13 +124,6 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         except Exception as error:
             return LayerStoreResult(None, not source_handed_off, error)
         return LayerStoreResult(result_codes, (True,) * len(result_codes))
-
-    def _prepared_store_layer(self, layer_id: int) -> tuple[tuple[LayerTransferGroup, ...], list[str]]:
-        plan = self._prepared_store_plan()
-        try:
-            return plan.groups_by_layer[layer_id], plan.selected_keys_by_layer[layer_id]
-        except KeyError as error:
-            raise RuntimeError(f"Layerwise Store layer {layer_id} was not prepared") from error
 
 
 __all__ = ("KeyRangeLayerwiseWorker",)

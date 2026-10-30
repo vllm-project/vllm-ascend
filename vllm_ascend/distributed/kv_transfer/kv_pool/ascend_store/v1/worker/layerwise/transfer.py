@@ -43,6 +43,14 @@ class LayerTransferPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedLayerLoad:
+    """Keep one Load plan and its route-specific copy inputs together."""
+
+    plan: LayerTransferPlan
+    copy_layer: Callable[[int], tuple[LoadCompletion, ...]]
+
+
+@dataclass(frozen=True, slots=True)
 class LayerStoreResult:
     """One layer copy result; scalar values apply to every prepared key."""
 

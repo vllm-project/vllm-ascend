@@ -68,8 +68,8 @@ def test_gva_readability_changes_only_after_publication() -> None:
 
     assert sessions.start_store([key], [64]) == (0,)
     assert not worker._exists([key])[0]
-    worker._prepare_store_layers(batch)
-    assert worker._copy_store_layer(FakeEvent(), 0).result_codes == 0
+    plan = worker._prepare_store_layers(batch)
+    assert worker._copy_store_layer(FakeEvent(), 0, plan).result_codes == 0
     assert not worker._exists([key])[0]
     assert sessions.commit_store([key]) == (0,)
     assert worker._exists([key])[0]
@@ -90,8 +90,8 @@ def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(mo
 
     monkeypatch.setattr(store, "batch_add_lease", acquire)
     assert sessions.start_load([first, second, "wrong-size"], [64, 64, 64]) == (0, -7, -1)
-    worker._prepare_load_layers(batch.select_keys({first}))
-    completion = worker._copy_load_layer(0)[0]
+    prepared = worker._prepare_load_layers(batch.select_keys({first}))
+    completion = prepared.copy_layer(0)[0]
     assert completion.request_id == "request" and completion.failures == ()
     assert next(call for call in store.calls if call[0] == "copy")[1] == (4000,)
     sessions.finish_load([first, second, "wrong-size"])
@@ -99,15 +99,52 @@ def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(mo
     assert not store.leases
 
 
+def test_prepared_gva_loads_keep_their_own_keys_and_remote_bases():
+    worker, batch, store, sessions = make_gva_binding()
+    first, second = batch.selected_keys()
+    store.objects.update({first: (1000, 64, True), second: (2000, 64, True)})
+    assert sessions.start_load([first, second], [64, 64]) == (0, 0)
+    try:
+        first_load = worker._prepare_load_layers(batch.select_keys({first}))
+        second_load = worker._prepare_load_layers(batch.select_keys({second}))
+        assert not first_load.copy_layer(0)[0].failures
+        assert not second_load.copy_layer(0)[0].failures
+        copies = [call for call in store.calls if call[0] == "copy"]
+        assert [call[1] for call in copies] == [(1000,), (2000,)]
+        cache = worker._resources.kv_caches["layers.0.group.0"]
+        assert [call[2] for call in copies] == [(cache[1].data_ptr(),), (cache[3].data_ptr(),)]
+    finally:
+        sessions.finish_load()
+
+
+def test_prepared_gva_stores_copy_their_own_plan_after_another_preparation():
+    worker, batch, store, sessions = make_gva_binding()
+    first, second = batch.selected_keys()
+    assert sessions.start_store([first, second], [64, 64]) == (0, 0)
+    try:
+        first_plan = worker._prepare_store_layers(batch.select_keys({first}))
+        second_plan = worker._prepare_store_layers(batch.select_keys({second}))
+        first_base = sessions.store_regions((first,), 64)[0].address
+        second_base = sessions.store_regions((second,), 64)[0].address
+        assert worker._copy_store_layer(FakeEvent(), 0, first_plan).source_release_confirmed
+        assert worker._copy_store_layer(FakeEvent(), 0, second_plan).source_release_confirmed
+        copies = [call for call in store.calls if call[0] == "copy"]
+        assert [call[1] for call in copies] == [(first_base,), (second_base,)]
+        cache = worker._resources.kv_caches["layers.0.group.0"]
+        assert [call[2] for call in copies] == [(cache[1].data_ptr(),), (cache[3].data_ptr(),)]
+    finally:
+        sessions.revoke_store([first, second])
+
+
 def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
     worker, batch, store, sessions = make_gva_binding()
     first, second = batch.selected_keys()
     store.objects.update({first: (1000, 64, True), second: (2000, 64, True)})
     assert sessions.start_load([first, second], [64, 64]) == (0, 0)
-    worker._prepare_load_layers(batch)
+    prepared = worker._prepare_load_layers(batch)
 
     for layer_id in (0, 1):
-        assert worker._copy_load_layer(layer_id)[0].failures == ()
+        assert prepared.copy_layer(layer_id)[0].failures == ()
     copies = [call for call in store.calls if call[0] == "copy"]
     assert [call[1] for call in copies] == [(1000, 2000), (1032, 2032)]
     assert [call[2] for call in copies] == [
@@ -125,8 +162,8 @@ def test_gva_remote_addition_retains_python_integer_range() -> None:
     base = (1 << 64) - 16
     store.objects.update({first: (base, 64, True), second: (1 << 63, 64, True)})
     assert sessions.start_load([first, second], [64, 64]) == (0, 0)
-    worker._prepare_load_layers(batch)
-    assert worker._copy_load_layer(1)[0].failures == ()
+    prepared = worker._prepare_load_layers(batch)
+    assert prepared.copy_layer(1)[0].failures == ()
     copy = next(call for call in store.calls if call[0] == "copy")
     assert copy[1] == ((1 << 64) + 16, (1 << 63) + 32)
     sessions.finish_load([first, second])
@@ -139,8 +176,8 @@ def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
 
     assert sessions.start_load([key], [64]) == (0,)
     store.copy_result = RuntimeError("GVA copy failed")
-    worker._prepare_load_layers(batch)
-    completion = worker._copy_load_layer(0)[0]
+    prepared = worker._prepare_load_layers(batch)
+    completion = prepared.copy_layer(0)[0]
 
     assert len(completion.failures) == 1
     evidence = completion.failures[0]
@@ -181,8 +218,8 @@ def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
         keys = list(batch.selected_keys())
         store.copy_result = native_result
         assert sessions.start_store(keys, [64, 64]) == (0, 0)
-        worker._prepare_store_layers(batch)
-        result = worker._copy_store_layer(FakeEvent(), 0)
+        plan = worker._prepare_store_layers(batch)
+        result = worker._copy_store_layer(FakeEvent(), 0, plan)
         assert [result.result_codes] * len(keys) == expected_codes
         assert (result.result_codes == 0 and result.error is None) is succeeded
         assert result.source_release_confirmed is released
@@ -194,8 +231,8 @@ def test_gva_publication_failure_does_not_hide_copy_source_release() -> None:
     key = batch.selected_keys()[0]
 
     assert sessions.start_store([key], [64]) == (0,)
-    worker._prepare_store_layers(batch)
-    assert worker._copy_store_layer(FakeEvent(), 0).source_release_confirmed
+    plan = worker._prepare_store_layers(batch)
+    assert worker._copy_store_layer(FakeEvent(), 0, plan).source_release_confirmed
     assert sessions.commit_store([key]) == (-8,)
     assert not store.objects[key][2]
     assert sessions.revoke_store([key]) == (-1,)
@@ -308,7 +345,7 @@ def test_gva_unconfirmed_revoke_survives_steps_without_reopening_or_reusing_the_
             worker.finish_step()
             assert worker.take_released_store_job_ids() == {job_id}
             assert len(worker._backend_sessions.pending_store_keys) == 1
-            assert worker._store_plan is None
+            assert worker._store_state is None
             worker.end_step()
         # The second attempt cannot acquire or copy through the abandoned session.
         assert sum(item[0] == "alloc" for item in store.calls) == 1

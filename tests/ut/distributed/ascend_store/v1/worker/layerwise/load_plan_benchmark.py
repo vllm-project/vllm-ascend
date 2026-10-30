@@ -186,7 +186,9 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
 
 
 def run_layers(worker, batch):
-    worker._prepare_load_layers(batch)
+    prepared = worker._prepare_load_layers(batch)
+    if hasattr(prepared, "copy_layer"):
+        return tuple(prepared.copy_layer(layer) for layer in range(_LAYERS))
     return tuple(worker._copy_load_layer(layer) for layer in range(_LAYERS))
 
 
@@ -254,12 +256,28 @@ def capture_arguments(worker, batch, route):
 def phase_operations(worker, batch, route, package):
     if route == "bulk":
         return {"native_arguments": partial(worker._materialize_bulk_arguments, batch)}
-    worker._prepare_load_layers(batch)
+    prepared = worker._prepare_load_layers(batch)
     module_name = ".worker.layerwise.gva.worker" if route == "gva" else ".worker.layerwise.key_range"
     module = importlib.import_module(package + module_name)
     materialize = module.materialize_layer_gva if route == "gva" else module.materialize_load_layer_ranges
 
-    if route == "key_range" and hasattr(worker, "_load_key_merges"):
+    if hasattr(prepared, "copy_layer"):
+        plan = prepared.plan
+        if route == "key_range":
+            key_merges = module.prepare_load_key_merges(plan)
+
+            def all_layer_arguments():
+                return tuple(
+                    materialize(worker._key_range_layouts, plan, layer, key_merges[layer]) for layer in range(_LAYERS)
+                )
+        else:
+
+            def all_layer_arguments():
+                return tuple(
+                    materialize(worker._local, worker._layer_slices, worker._remote, plan, layer)
+                    for layer in range(_LAYERS)
+                )
+    elif route == "key_range" and hasattr(worker, "_load_key_merges"):
 
         def all_layer_arguments():
             return tuple(
@@ -326,7 +344,8 @@ def compare(request_count, route, repeats, baseline):
         if gc_was_enabled:
             gc.enable()
         for worker, *_ in cases.values():
-            worker._load_plan = None
+            if hasattr(worker, "_load_plan"):
+                worker._load_plan = None
             worker.close()
     medians = {name: statistics.median(values) for name, values in timings.items()}
     return {

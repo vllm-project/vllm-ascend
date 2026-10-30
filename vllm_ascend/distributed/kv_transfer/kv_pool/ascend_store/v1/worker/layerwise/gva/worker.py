@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -27,6 +28,7 @@ from ...transfer.completion import LoadCompletion
 from ..transfer import (
     LayerStoreResult,
     LayerTransferPlan,
+    PreparedLayerLoad,
     _layer_load_completions,
     prepare_layer_transfer,
 )
@@ -82,16 +84,14 @@ class GVALayerwiseWorker(LayerwiseWorker):
     def _exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
 
-    def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._load_plan = prepare_layer_transfer(batch, self._layer_memberships, self._resolve_load_bases)
-        return self._load_plan.selected_keys_by_layer
+    def _prepare_load_layers(self, batch: KVTransferBatch) -> PreparedLayerLoad:
+        plan = prepare_layer_transfer(batch, self._layer_memberships, self._resolve_load_bases)
+        return PreparedLayerLoad(plan, partial(self._copy_load_layer, plan))
 
-    def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._store_plan = prepare_layer_transfer(batch, self._layer_memberships, self._resolve_store_bases)
-        return self._store_plan.selected_keys_by_layer
+    def _prepare_store_layers(self, batch: KVTransferBatch) -> LayerTransferPlan:
+        return prepare_layer_transfer(batch, self._layer_memberships, self._resolve_store_bases)
 
-    def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
-        plan = self._prepared_load_plan()
+    def _copy_load_layer(self, plan: LayerTransferPlan, layer_id: int) -> tuple[LoadCompletion, ...]:
         if not plan.groups:
             return _layer_load_completions(plan, layer_id, 0)
         try:
@@ -107,11 +107,10 @@ class GVALayerwiseWorker(LayerwiseWorker):
             return _layer_load_completions(plan, layer_id, None)
         return _layer_load_completions(plan, layer_id, result_code)
 
-    def _copy_store_layer(self, source_ready_event: Any, layer_id: int) -> LayerStoreResult:
+    def _copy_store_layer(self, source_ready_event: Any, layer_id: int, plan: LayerTransferPlan) -> LayerStoreResult:
         """Prepare native arguments ahead of source readiness, then copy this layer."""
 
         source_handed_off = False
-        plan = self._prepared_store_plan()
         try:
             remote_addresses, local_addresses, sizes = materialize_layer_gva(
                 self._local, self._layer_slices, self._remote, plan, layer_id

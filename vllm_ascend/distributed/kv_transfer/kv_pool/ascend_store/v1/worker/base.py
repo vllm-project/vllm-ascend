@@ -58,13 +58,18 @@ class KVPoolStepContext:
     store_submitted: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PendingStore:
-    """Associate one submitted Store result with its requests and source leases."""
+    """Associate one sealed Store result with its requests and source leases.
+
+    Only the Worker caller thread marks consumed, after the common fence accepts
+    the result and removes the pending entry. Future completion alone is not consumption.
+    """
 
     future: Future[tuple[StoreCompletion, ...]]
     request_ids: frozenset[str]
     store_job_ids: frozenset[int]
+    consumed: bool = field(default=False, init=False)
 
 
 class KVPoolWorker(ABC):
@@ -98,7 +103,6 @@ class KVPoolWorker(ABC):
         self._groups = {group.group_id: group for group in topology.transfer_groups}
         self._active_step: KVPoolStepContext | None = None
         self._pending_store_batches: deque[PendingStore] = deque()
-        self._pending_store_batch: PendingStore | None = None
         self._latest_store_batch_by_request: dict[str, PendingStore] = {}
         self._released_store_job_ids: set[int] = set()
         # Only source-safety and execution faults block later steps. Completed
@@ -216,22 +220,17 @@ class KVPoolWorker(ABC):
             )
         return KVTransferBatch(tuple(command.request_id for command in commands), tuple(groups))
 
+    @abstractmethod
     def begin_step(self, step: KVTransferStep) -> None:
+        """Accept one Step and start the selected route's preparation."""
+
+    def _new_step_context(self, step: KVTransferStep) -> KVPoolStepContext:
         if not self._execution_started:
             raise RuntimeError("KV caches must be bound before a transfer step")
         self._raise_store_fatal_error()
         if self._active_step is not None:
             raise RuntimeError("Previous KV Pool step has not ended")
-        context = KVPoolStepContext(step)
-        if self._store_enabled and step.store.commands:
-            try:
-                self._prepare_step_store(step.store.commands)
-                if step.store.all_sources_ready:
-                    self._submit_step_store(context, fence=False)
-            except Exception as error:
-                self._store_fatal_error = error
-                raise
-        self._active_step = context
+        return KVPoolStepContext(step)
 
     def end_step(self) -> None:
         if self._active_step is None:
@@ -284,49 +283,26 @@ class KVPoolWorker(ABC):
 
     @_with_active_step
     def wait_for_layer_load(self, context: KVPoolStepContext, layer_name: str) -> None:
-        for completion in self._wait_for_layer_load(layer_name):
-            self._record_load_completion(context, completion)
+        """Retain the public hook for Bulk, which has no layer-local Load work."""
+
+        del layer_name
         self._raise_load_error(context)
 
     @_with_active_step
     def save_layer(self, _context: KVPoolStepContext, layer_name: str) -> None:
-        self._raise_store_fatal_error()
-        try:
-            self._submit_store_layer(layer_name)
-        except Exception as error:
-            self._store_fatal_error = error
-            raise
-
-    @_with_active_step
-    def finish_step(self, context: KVPoolStepContext) -> None:
-        self._raise_store_fatal_error()
-        if not self._store_enabled or not context.step.store.commands or context.store_submitted:
-            return
-        try:
-            self._submit_step_store(context, fence=True)
-        except Exception as error:
-            self._store_fatal_error = error
-            raise
-
-    @abstractmethod
-    def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
-        """Publish one route-specific Store invocation into the common fence."""
-
-    def _prepare_step_store(self, commands: tuple[StoreCommand, ...]) -> None:
-        """Prepare route-specific Store state before source readiness."""
-
-        del commands
-
-    def _prepare_store_close(self) -> PendingStore | None:
-        return None
-
-    def _submit_store_layer(self, layer_name: str) -> None:
-        """Submit one layer when the selected route is layerwise."""
+        """Retain the public hook for Bulk, which submits complete Store tasks."""
 
         del layer_name
+        self._raise_store_fatal_error()
 
-    def _wait_for_layer_load(self, layer_name: str) -> tuple[LoadCompletion, ...]:
-        return ()
+    @abstractmethod
+    def finish_step(self) -> None:
+        """Complete this route's Store submission at the model's source boundary."""
+
+    def _seal_store(self, context: KVPoolStepContext | None = None) -> None:
+        """Hand off any open Store before close; Bulk tasks are already sealed at submission."""
+
+        del context
 
     @abstractmethod
     def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
@@ -347,9 +323,12 @@ class KVPoolWorker(ABC):
         del completion
 
     def _track_store_batch(self, batch: PendingStore) -> None:
-        if self._pending_store_batch is None:
-            self._pending_store_batch = batch
-        self._pending_store_batches.append(batch)
+        # A retained handoff can retry after a public fence has already consumed its record.
+        if batch.consumed:
+            return
+        # A handoff may retry after append but before every request index was updated.
+        if not self._pending_store_batches or self._pending_store_batches[-1] is not batch:
+            self._pending_store_batches.append(batch)
         for request_id in batch.request_ids:
             self._latest_store_batch_by_request[request_id] = batch
 
@@ -361,7 +340,7 @@ class KVPoolWorker(ABC):
         by requests whose blocks are not being released.
         """
         self._raise_store_fatal_error()
-        if self._pending_store_batch is None:
+        if not self._pending_store_batches:
             return ()
         if not self._store_enabled:
             raise RuntimeError("Store completion exists while Store is disabled")
@@ -378,15 +357,14 @@ class KVPoolWorker(ABC):
         try:
             while self._pending_store_batches:
                 pending = self._pending_store_batches[0]
-                completions = self._collect_store_completions(
-                    pending, wait=released_request_ids is None or bool(required_batch_ids)
-                )
-                if completions is None:
+                must_wait = released_request_ids is None or bool(required_batch_ids)
+                if not must_wait and not pending.future.done():
                     break
+                completions = pending.future.result()
                 self._accept_store_completions(pending, completions)
                 collected.extend(completions)
                 self._pending_store_batches.popleft()
-                self._pending_store_batch = self._pending_store_batches[0] if self._pending_store_batches else None
+                pending.consumed = True
                 required_batch_ids.discard(id(pending))
                 for request_id in pending.request_ids:
                     if self._latest_store_batch_by_request.get(request_id) is pending:
@@ -395,10 +373,6 @@ class KVPoolWorker(ABC):
             self._store_fatal_error = error
             raise
         return tuple(collected)
-
-    @abstractmethod
-    def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
-        """Read one Store result; readiness alone does not confirm source release."""
 
     def _accept_store_completions(self, batch: PendingStore, completions: tuple[StoreCompletion, ...]) -> None:
         for completion in completions:
@@ -431,14 +405,11 @@ class KVPoolWorker(ABC):
     def close(self) -> None:
         close_error: BaseException | None = None
         store_handoff_complete = False
-        if not self._execution_started and self._pending_store_batch is None:
+        if not self._execution_started and not self._pending_store_batches:
             store_handoff_complete = True
         else:
             try:
-                if not self._pending_store_batches:
-                    closing_batch = self._prepare_store_close()
-                    if closing_batch is not None:
-                        self._track_store_batch(closing_batch)
+                self._seal_store(self._active_step)
                 store_handoff_complete = True
                 self.fence_previous_store()
             except BaseException as error:
@@ -462,7 +433,7 @@ class KVPoolWorker(ABC):
                 else:
                     logger.exception("Failed to check execution results after an earlier close failure")
 
-        if store_handoff_complete and self._pending_store_batch is None and executors_stopped:
+        if store_handoff_complete and not self._pending_store_batches and executors_stopped:
             try:
                 self._resources.close()
             except BaseException as error:

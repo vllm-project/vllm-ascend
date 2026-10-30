@@ -38,7 +38,9 @@ from ..protocol.messages import TailKeyBoundary
 from .topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]
-LookupChunkRanges: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
+LookupChunkRanges: TypeAlias = tuple[
+    Sequence[int] | NDArray[np.uint64], Sequence[int] | NDArray[np.uint64], tuple[BlockHash | str, ...]
+]
 ChunkMask: TypeAlias = tuple[bool, ...] | None
 ChunkMasks: TypeAlias = tuple[ChunkMask, ...]
 LookupObservation: TypeAlias = tuple[LookupChunkRanges, tuple[bool, ...]]
@@ -58,6 +60,15 @@ class ReachablePrefix:
 
     end_token: int
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ContiguousObservation:
+    """Ordered full blocks; positions are derived instead of materialized per candidate."""
+
+    start_token: int
+    block_size: int
+    available: tuple[bool, ...]
 
 
 class ExternalCachedBlockPool:
@@ -146,6 +157,10 @@ class Coordinator:
         # Find Attention coverage before a checkpoint can move the endpoint inside its last object.
         return tuple(sorted(bindings, key=lambda binding: not isinstance(binding.spec, FullAttentionSpec)))
 
+    @property
+    def contiguous_lookup(self) -> bool:
+        return self._contiguous_full_attention
+
     def select_for_lookup(self, end_token: int) -> ChunkMasks:
         aligned_token_len = (
             cdiv(min(end_token, self.max_model_len), self.scheduler_block_size) * self.scheduler_block_size
@@ -172,7 +187,11 @@ class Coordinator:
         return tuple(masks)
 
     def resolve_available_end(
-        self, start_token: int, end_token: int, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
+        self,
+        start_token: int,
+        end_token: int,
+        block_hashes: BlockHashes,
+        observations: Sequence[LookupObservation | ContiguousObservation],
     ) -> ReachablePrefix:
         if len(observations) != len(self.group_ids):
             raise ValueError(f"Lookup observations do not match configured groups {self.group_ids}")
@@ -194,6 +213,8 @@ class Coordinator:
                 (group_index, block_hash_to_bytes(group_block_hashes[index]))
                 for index in range(min(local_hit_count, len(group_block_hashes)))
             )
+            if isinstance(observation, ContiguousObservation):
+                raise ValueError("Compact Lookup observations require contiguous Full Attention")
             (_, _, observed_hashes), available = observation
             if len(observed_hashes) != len(available):
                 raise ValueError("Lookup chunks and Backend availability have different lengths")
@@ -210,13 +231,33 @@ class Coordinator:
         return ReachablePrefix(hit_length, self._tail_key_boundaries(block_hashes, hit_length, cached_block_pool))
 
     def _resolve_contiguous_prefix(
-        self, start_token: int, end_token: int, block_hashes: BlockHashes, observations: Sequence[LookupObservation]
+        self,
+        start_token: int,
+        end_token: int,
+        block_hashes: BlockHashes,
+        observations: Sequence[LookupObservation | ContiguousObservation],
     ) -> ReachablePrefix:
         # Skip the trusted local prefix instead of rebuilding and scanning it through a virtual BlockPool.
         block_size = self.hash_block_size
         hit_length = min(end_token, len(block_hashes) * block_size)
         hit_length -= hit_length % block_size
-        for (starts, counts, observed_hashes), available in observations:
+        for observation in observations:
+            if isinstance(observation, ContiguousObservation):
+                if observation.block_size != block_size or observation.start_token % block_size:
+                    raise ValueError("Compact Lookup observations must use aligned hash-sized blocks")
+                group_end = min(start_token, hit_length)
+                group_end -= group_end % block_size
+                for position, hit in enumerate(observation.available):
+                    chunk_start = observation.start_token + position * block_size
+                    chunk_end = chunk_start + block_size
+                    if chunk_end <= group_end:
+                        continue
+                    if chunk_start > group_end or chunk_end > hit_length or not hit:
+                        break
+                    group_end = chunk_end
+                hit_length = group_end
+                continue
+            (starts, counts, observed_hashes), available = observation
             if not len(starts) == len(counts) == len(observed_hashes) == len(available):
                 raise ValueError("Lookup chunks and Backend availability have different lengths")
             group_end = min(start_token, hit_length)

@@ -50,10 +50,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     CheckpointStoreCommand,
+    KVTransferStep,
     LoadCommand,
     LookupRequest,
     RangeStoreCommand,
     StateCheckpointSource,
+    StoreCommandBatch,
     TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import (
@@ -63,6 +65,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import (
     BulkWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.completion import (
     LoadCompletion,
     StoreCompletion,
@@ -129,6 +132,98 @@ def test_bulk_store_registers_target_and_mtp_entries_and_deduplicates_confirmed_
     finally:
         worker.close()
     assert backend.closed and resources.kv_caches is None
+
+
+@pytest.mark.parametrize("store_enabled", (False, True), ids=("disabled", "enabled"))
+@pytest.mark.parametrize("commands_kind", ("empty", "range", "checkpoint", "mixed"))
+def test_bulk_step_preserves_submission_boundary_for_scheduler_command_combinations(
+    commands_kind, store_enabled, monkeypatch
+):
+    worker, resources, _ = make_worker(topology=make_align_state_topology(), store=store_enabled)
+    range_command = RangeStoreCommand("range", 0, 8, ((3,), (7,)), (b"a", b"b"), 8, 17)
+    checkpoint = CheckpointStoreCommand("checkpoint", ((3,), (99,)), (b"c",), 0, (StateCheckpointSource(1, 7, 4),), 18)
+    pending = (range_command,) if commands_kind in ("range", "mixed") else ()
+    ready = (checkpoint,) if commands_kind in ("checkpoint", "mixed") else ()
+    commands = pending + ready
+    started = threading.Event()
+    allow_store = threading.Event()
+    observed = []
+
+    def execute(batch_commands, source_ready):
+        observed.append(batch_commands)
+        assert source_ready.recorded
+        started.set()
+        assert allow_store.wait(timeout=5)
+        return tuple(
+            StoreCompletion(command.request_id, StoreEvidence((), True, True), command.store_job_id)
+            for command in batch_commands
+        )
+
+    monkeypatch.setattr(worker, "_execute_bulk_store", execute)
+    try:
+        worker.begin_step(KVTransferStep(store=StoreCommandBatch(pending, ready)))
+        context = worker._active_step
+        assert context.store_submitted == (store_enabled and commands_kind == "checkpoint")
+        assert bool(worker._pending_store_batches) == context.store_submitted
+        worker.finish_step()
+        worker.finish_step()
+        assert context.store_submitted == bool(store_enabled and commands)
+        if store_enabled and commands:
+            assert started.wait(timeout=2)
+            assert len(worker._pending_store_batches) == 1
+            assert not worker._pending_store_batches[0].future.done()
+        else:
+            assert not started.is_set() and not worker._pending_store_batches
+        worker.end_step()
+        assert not allow_store.is_set()
+        allow_store.set()
+        completions = worker.fence_previous_store()
+        assert observed == ([commands] if store_enabled and commands else [])
+        assert [completion.request_id for completion in completions] == (
+            [command.request_id for command in commands] if store_enabled else []
+        )
+        assert worker.take_released_store_job_ids() == (
+            {command.store_job_id for command in commands} if store_enabled else set()
+        )
+    finally:
+        allow_store.set()
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("boundary", ("begin", "finish"))
+@pytest.mark.parametrize("failure_stage", ("record_source", "submit"))
+def test_bulk_store_submission_error_keeps_step_publication_and_failure_state(boundary, failure_stage, monkeypatch):
+    worker, resources, _ = make_worker(topology=make_align_state_topology())
+    error = RuntimeError("Bulk Store submit failed")
+
+    def fail_submit(*_args):
+        raise error
+
+    if failure_stage == "record_source":
+        monkeypatch.setattr(worker, "_record_source_ready", fail_submit)
+    else:
+        monkeypatch.setattr(worker._store_executor, "submit", fail_submit)
+    try:
+        if boundary == "begin":
+            checkpoint = CheckpointStoreCommand(
+                "checkpoint", ((3,), (99,)), (b"a",), 0, (StateCheckpointSource(1, 7, 4),), 17
+            )
+            with pytest.raises(RuntimeError, match="Bulk Store submit failed") as raised:
+                worker.begin_step(KVTransferStep(store=StoreCommandBatch(source_ready_commands=(checkpoint,))))
+            assert worker._active_step is None
+        else:
+            begin_step(worker, store=(RangeStoreCommand("range", 0, 8, ((3,), (7,)), (b"a", b"b"), 8, 17),))
+            context = worker._active_step
+            with pytest.raises(RuntimeError, match="Bulk Store submit failed") as raised:
+                worker.finish_step()
+            assert worker._active_step is context and not context.store_submitted
+        assert raised.value is error and worker._store_fatal_error is error
+        assert not worker._pending_store_batches and not worker.take_released_store_job_ids()
+    finally:
+        with pytest.raises(RuntimeError, match="fatal Store failure"):
+            worker.close()
+    assert resources.closed
 
 
 @pytest.mark.parametrize("load_async", (False, True), ids=("sync", "async"))
@@ -259,7 +354,7 @@ def test_bulk_load_uses_the_selected_thread_and_notification_mode(load_async, mo
         worker.start_load()
         if load_async:
             assert len(worker._pending_loads) == 1
-            worker._pending_loads[0].result(timeout=2)
+            worker._pending_loads[0][0].result(timeout=2)
             assert executed_on == initialized_on
             assert executed_on != [caller_id]
             assert worker._pending_load_request_ids == {"request"}
@@ -307,7 +402,7 @@ def test_bulk_load_can_complete_while_store_is_blocked(monkeypatch):
         assert store_started.wait(timeout=2)
         begin_step(worker, load=(load,))
         worker.start_load()
-        worker._pending_loads[0].result(timeout=2)
+        worker._pending_loads[0][0].result(timeout=2)
         assert worker.collect_load_result().completed_request_ids == {"load"}
         assert not release_store.is_set()
         assert worker.fence_previous_store(frozenset()) == ()
@@ -330,7 +425,6 @@ def test_bulk_async_load_submit_failure_rolls_back_request_ownership():
             worker.start_load()
         assert not worker._pending_load_request_ids
         assert not worker._pending_loads
-        assert not worker._load_batches
     finally:
         worker.close()
     assert resources.closed
@@ -352,8 +446,7 @@ def test_bulk_store_keeps_batch_identity_with_the_original_future_result(monkeyp
     try:
         begin_step(worker, store=(first, first, unleased))
         worker.finish_step()
-        pending = worker._pending_store_batch
-        assert pending is not None
+        pending = worker._pending_store_batches[0]
         assert isinstance(pending.future, Future)
         assert pending.future.result(timeout=2) is completions
         assert pending.request_ids == {"request", "unleased"}
@@ -381,7 +474,7 @@ def test_bulk_async_load_business_failure_remains_deliverable_across_shutdown(mo
     command = LoadCommand("request", 0, 4, ((7,),), (b"a",))
     begin_step(worker, load=(command,))
     worker.start_load()
-    _, unfinished = wait(worker._pending_loads, timeout=2)
+    _, unfinished = wait((future for future, _batch in worker._pending_loads), timeout=2)
     assert not unfinished
     if observe_before_close:
         result = worker.collect_load_result()
@@ -396,7 +489,6 @@ def test_bulk_async_load_business_failure_remains_deliverable_across_shutdown(mo
     assert result.failed_block_ids == (set() if observe_before_close else {7})
     assert not worker._pending_load_request_ids
     assert not worker._pending_loads
-    assert not worker._load_batches
     assert not worker.collect_load_result().completed_request_ids
 
 
@@ -429,7 +521,7 @@ def test_bulk_async_load_mixed_results_are_consumed_independently(monkeypatch, c
             begin_step(worker, load=(command,))
             worker.start_load()
             worker.end_step()
-        pending = tuple(worker._pending_loads)
+        pending = tuple(future for future, _batch in worker._pending_loads)
         _, unfinished = wait(pending, timeout=2)
         assert not unfinished
         assert executed == list(request_ids)
@@ -449,7 +541,6 @@ def test_bulk_async_load_mixed_results_are_consumed_independently(monkeypatch, c
         assert accepted == list(request_ids)
         assert not worker._pending_loads
         assert not worker._pending_load_request_ids
-        assert not worker._load_batches
         errors = [record for record in caplog.records if record.exc_info and record.exc_info[1] is error]
         assert len(errors) == 1
         assert str((request_ids[failed_batch_index],)) in errors[0].getMessage()
@@ -465,7 +556,7 @@ def test_bulk_async_load_mixed_results_are_consumed_independently(monkeypatch, c
         retry_id = request_ids[failed_batch_index]
         begin_step(worker, load=(LoadCommand(retry_id, 0, 4, ((7,),), (b"retry",)),))
         worker.start_load()
-        _, unfinished = wait(worker._pending_loads, timeout=2)
+        _, unfinished = wait((future for future, _batch in worker._pending_loads), timeout=2)
         assert not unfinished
         result = worker.collect_load_result()
         assert result.completed_request_ids == {retry_id}
@@ -476,7 +567,6 @@ def test_bulk_async_load_mixed_results_are_consumed_independently(monkeypatch, c
     assert resources.closed
     assert not worker._pending_loads
     assert not worker._pending_load_request_ids
-    assert not worker._load_batches
 
 
 def test_bulk_async_load_business_failure_covers_every_request_in_its_batch(monkeypatch):
@@ -490,7 +580,7 @@ def test_bulk_async_load_business_failure_covers_every_request_in_its_batch(monk
     try:
         begin_step(worker, load=commands)
         worker.start_load()
-        _, unfinished = wait(worker._pending_loads, timeout=2)
+        _, unfinished = wait((future for future, _batch in worker._pending_loads), timeout=2)
         assert not unfinished
         result = worker.collect_load_result()
         assert result.completed_request_ids == {"first", "second"}
@@ -502,7 +592,6 @@ def test_bulk_async_load_business_failure_covers_every_request_in_its_batch(monk
         }
         assert not worker._pending_load_request_ids
         assert not worker._pending_loads
-        assert not worker._load_batches
     finally:
         worker.close()
     assert resources.closed
@@ -534,9 +623,8 @@ def test_bulk_async_load_execution_error_leaves_later_batches_queued(monkeypatch
             worker.collect_load_result()
         if not cancelled:
             assert raised.value is error
-        assert tuple(worker._pending_loads) == (last,)
-        assert tuple(worker._load_batches) == (last,)
-        assert worker._load_batches[last].request_ids == ("last",)
+        assert tuple(future for future, _batch in worker._pending_loads) == (last,)
+        assert worker._pending_loads[0][1].request_ids == ("last",)
         assert "last" in worker._pending_load_request_ids
     finally:
         worker.close()
@@ -565,7 +653,7 @@ def test_bulk_async_load_consumes_finished_batches_once_and_preserves_late_notif
     try:
         begin_step(worker, load=(first, companion))
         worker.start_load()
-        worker._pending_loads[0].result(timeout=2)
+        worker._pending_loads[0][0].result(timeout=2)
         worker.end_step()
         begin_step(worker, load=(second,))
         worker.start_load()
@@ -1248,6 +1336,49 @@ def test_synchronous_bulk_load_reports_failed_block_for_invalid_backend_results(
         assert [call[0] for call in backend.calls].count("get") == 1
         assert result.failed_block_ids == {7}
         assert [(location.group_id, location.block_id) for location in result.failed_locations] == [(0, 7)]
+        worker.end_step()
+    finally:
+        worker.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("load_async", (False, True), ids=("sync", "async"))
+@pytest.mark.parametrize("failure_stage", ("materialize", "copy", "completion"))
+def test_bulk_load_keeps_operation_and_future_failure_boundaries(load_async, failure_stage, monkeypatch, caplog):
+    worker, resources, _ = make_worker(async_load=load_async, store=False)
+    error = RuntimeError(f"failed at {failure_stage}")
+
+    def fail(*_args):
+        raise error
+
+    if failure_stage == "materialize":
+        monkeypatch.setattr(worker, "_materialize_bulk_arguments", fail)
+    elif failure_stage == "copy":
+        monkeypatch.setattr(worker._backend, "load", fail)
+    else:
+        monkeypatch.setattr(bulk_worker, "_bulk_load_completions", fail)
+    try:
+        begin_step(worker, load=(LoadCommand("request", 0, 4, ((7,),), (b"a",)),))
+        if not load_async and failure_stage == "completion":
+            # Result interpretation stays outside the operation's best-effort boundary.
+            with pytest.raises(RuntimeError) as raised:
+                worker.start_load()
+            assert raised.value is error
+            assert not caplog.records
+        else:
+            worker.start_load()
+            if load_async:
+                future, _batch = worker._pending_loads[0]
+                wait((future,), timeout=2)
+                assert future.done()
+                assert future.exception() is (error if failure_stage == "completion" else None)
+            result = worker.collect_load_result()
+            assert result.completed_request_ids == ({"request"} if load_async else set())
+            assert not result.failed_request_ids  # One cache group reports block failures.
+            assert result.failed_block_ids == {7}
+            assert [(item.group_id, item.block_id) for item in result.failed_locations] == [(0, 7)]
+            assert not worker._pending_loads and not worker._pending_load_request_ids
+            assert sum("Bulk Load failed" in record.getMessage() for record in caplog.records) == 1
         worker.end_step()
     finally:
         worker.close()

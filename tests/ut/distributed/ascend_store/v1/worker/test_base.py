@@ -230,7 +230,7 @@ def test_completed_store_failure_logs_releases_sources_and_allows_next_step(
 
     assert "KV cache Store failed for request request (job 17)" in caplog.text
     assert worker.take_released_store_job_ids() == {17}
-    assert worker._pending_store_batch is None
+    assert not worker._pending_store_batches
     assert worker.lookup(LookupRequest(0, 4, (0,), (b"a",))).available_end_token == 0
     if layerwise:
         assert "batch_commit" not in [call[0] for call in backend.calls]
@@ -262,13 +262,12 @@ def test_store_executor_failure_still_blocks_worker_execution(monkeypatch, relea
     command = RangeStoreCommand("request", 0, 4, ((7,),), (b"a",), 4, 17)
     begin_step(worker, store=(command,))
     worker.finish_step()
-    pending = worker._pending_store_batch
-    assert pending is not None
+    pending = worker._pending_store_batches[0]
     _, unfinished = wait((pending.future,), timeout=2)
     assert not unfinished
     with pytest.raises(RuntimeError, match="unexpected Store executor failure"):
         worker.fence_previous_store(released_request_ids)
-    assert worker._pending_store_batch is pending
+    assert worker._pending_store_batches[0] is pending
     assert worker.take_released_store_job_ids() == set()
     worker.end_step()
     with pytest.raises(RuntimeError, match="fatal Store failure"):
@@ -348,7 +347,7 @@ def test_bulk_decode_and_other_requests_overlap_store_but_shutdown_retains_sourc
         assert worker.take_released_store_job_ids() == ({18} if leased else set())
         assert worker.take_released_store_job_ids() == set()
         assert len(backend.copied_keys) == 2 and backend.copied_keys[0] != backend.copied_keys[1]
-        assert worker._pending_store_batch is None
+        assert not worker._pending_store_batches
         assert resources.closed
     finally:
         for allowed in backend.allow_copy:
@@ -454,7 +453,7 @@ def test_worker_close_keeps_resources_until_interrupted_shutdown_is_retried(chan
         with pytest.raises(KeyboardInterrupt, match="shutdown interrupted"):
             worker.close()
 
-        assert worker._pending_store_batch is None
+        assert not worker._pending_store_batches
         assert worker.take_released_store_job_ids() == {17}
         assert not executor.stopped
         assert not resources.closed
@@ -463,6 +462,32 @@ def test_worker_close_keeps_resources_until_interrupted_shutdown_is_retried(chan
         worker.close()
 
     assert executor.stopped
+    assert resources.closed
+
+
+@pytest.mark.parametrize("route", ("bulk", "key_range", "gva"))
+def test_worker_public_step_hooks_preserve_guards_and_empty_step_behavior(route):
+    worker, resources, _ = make_gva_worker() if route == "gva" else make_worker(layerwise=route == "key_range")
+    try:
+        for active in (False, True):
+            if active:
+                begin_step(worker)
+            for name in ("finish_step", "save_layer", "wait_for_layer_load"):
+                method = getattr(worker, name)
+                args = () if name == "finish_step" else ("unrelated.layer",)
+                if active:
+                    method(*args)
+                else:
+                    with pytest.raises(RuntimeError, match="has not begun"):
+                        method(*args)
+        worker.end_step()
+        for method, args in ((worker.finish_step, ()), (worker.save_layer, ("unrelated.layer",))):
+            with pytest.raises(RuntimeError, match="has not begun"):
+                method(*args)
+        assert not worker._pending_store_batches
+        assert not worker.take_released_store_job_ids()
+    finally:
+        worker.close()
     assert resources.closed
 
 
@@ -478,7 +503,7 @@ def test_worker_owns_active_step_and_async_completion_lifecycle() -> None:
     worker.start_load()
     worker.end_step()
     begin_step(worker)
-    _, unfinished = wait(worker._pending_loads, timeout=2)
+    _, unfinished = wait((future for future, _batch in worker._pending_loads), timeout=2)
     assert not unfinished
     result = worker.collect_load_result()
     assert result.completed_request_ids == {"request"}
@@ -504,7 +529,7 @@ def test_async_load_failure_drains_pending_work_and_rejects_overlap(monkeypatch)
     with pytest.raises(RuntimeError, match="already has a pending asynchronous Load"):
         worker.start_load()
     assert worker._pending_load_request_ids == {"request"}
-    _, unfinished = wait(worker._pending_loads, timeout=2)
+    _, unfinished = wait((future for future, _batch in worker._pending_loads), timeout=2)
     assert not unfinished
     result = worker.collect_load_result()
     assert result.completed_request_ids == {"request"}
@@ -545,7 +570,7 @@ def test_successful_load_never_constructs_object_evidence_and_preserves_notifica
         begin_step(worker, load=commands)
         worker.start_load()
         if route == "bulk_async":
-            worker._pending_loads[0].result(timeout=5)
+            worker._pending_loads[0][0].result(timeout=5)
         elif route in ("key_range", "gva"):
             for layer in (2, 2, 5, 5, 9):
                 worker.wait_for_layer_load(f"layers.{layer}.group.0")

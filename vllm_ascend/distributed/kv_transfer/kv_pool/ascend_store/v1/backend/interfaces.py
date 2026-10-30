@@ -13,8 +13,8 @@ own clients and registration mechanics, not request completion decisions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, TypeAlias
+from collections.abc import Sequence
+from typing import NamedTuple, Protocol, TypeAlias
 
 from .registration import Registration
 
@@ -24,8 +24,7 @@ OffsetRows: TypeAlias = list[list[int]]
 ResultCodes: TypeAlias = tuple[int, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class GVARegion:
+class GVARegion(NamedTuple):
     """One contiguous remote object; an address snapshot does not itself pin it."""
 
     address: int
@@ -74,9 +73,9 @@ class GVAObjectSessions(ObjectSessions, Protocol):
     before releasing or committing its sessions.
     """
 
-    def load_regions(self, keys: tuple[str, ...], object_size: int) -> tuple[GVARegion, ...]: ...
+    def load_regions(self, keys: tuple[str, ...], object_size: int | Sequence[int]) -> tuple[GVARegion, ...]: ...
 
-    def store_regions(self, keys: tuple[str, ...], object_size: int) -> tuple[GVARegion, ...]: ...
+    def store_regions(self, keys: tuple[str, ...], object_size: int | Sequence[int]) -> tuple[GVARegion, ...]: ...
 
 
 class KVStoreBackend(Protocol):

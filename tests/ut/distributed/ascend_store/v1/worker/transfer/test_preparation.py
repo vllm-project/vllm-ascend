@@ -16,13 +16,12 @@ def test_native_argument_rows_do_not_alias_other_rows_or_later_calls(layerwise):
     try:
         batch = worker._build_load_batch((LoadCommand("r", 0, 8, ((1, 2),), (b"a", b"b")),))
         if layerwise:
-            worker._prepare_load_layers(batch)
+            plan = worker._prepare_load_layers(batch).plan
+            key_merges = key_range.prepare_load_key_merges(plan)
 
         def materialize():
             if layerwise:
-                return key_range.materialize_load_layer_ranges(
-                    worker._key_range_layouts, worker._load_plan, 0, worker._load_key_merges[0]
-                )
+                return key_range.materialize_load_layer_ranges(worker._key_range_layouts, plan, 0, key_merges[0])
             return worker._materialize_bulk_arguments(batch)
 
         first = materialize()

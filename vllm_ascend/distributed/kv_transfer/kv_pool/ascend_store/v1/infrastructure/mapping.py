@@ -1,5 +1,6 @@
-"""Bind one group's Key/Local tables and layer indices; build Remote layouts separately.
+"""Map logical token positions to block hashes and caller-supplied block IDs.
 
+Layout binding defines partition Keys, Local addresses, layer indices and Remote offsets.
 Segments follow layer/name/component/element order. Within one PP partition (DCP rank fixed):
 
     segment              0    1    2  |  3    4
@@ -17,9 +18,9 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import accumulate
-from typing import TYPE_CHECKING, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict
 
 import numpy as np
 import torch
@@ -34,6 +35,106 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 
     from .topology import KVPoolGroupTopology, KVPoolLayerTopology, KVPoolTopology
+
+
+# ========================
+# Logical block identities
+# ========================
+
+
+BlockPair: TypeAlias = tuple[int, bytes | str, int]
+
+
+class TokenChunk(NamedTuple):
+    start_token: int
+    token_count: int
+    block_hash: bytes | str
+
+
+@dataclass(frozen=True, slots=True)
+class BlockHashMapping:
+    """Align content hashes and caller-supplied block IDs by logical token position.
+
+    Hashes describe the full prefix; block IDs may retain only its suffix.
+    Bound token geometry determines their alignment, independently of selection
+    policy, transfer direction and physical memory addresses.
+    """
+
+    block_size: int
+    hash_block_size: int
+
+    def __post_init__(self) -> None:
+        if self.block_size <= 0 or self.hash_block_size <= 0 or self.block_size % self.hash_block_size:
+            raise ValueError("Block size must be a positive multiple of the hash block size")
+
+    def pair_block_ids(
+        self,
+        hashes: Sequence[bytes | str],
+        block_ids: Sequence[int],
+        *,
+        start_token: int,
+        end_token: int,
+        tail_boundary: int | None = None,
+    ) -> Iterator[BlockPair]:
+        if not hashes or end_token <= 0:
+            return
+        hashes_per_block = self.block_size // self.hash_block_size
+        hash_count = len(hashes) // hashes_per_block
+        block_count = -(-end_token // self.block_size)
+        if tail_boundary is not None:
+            if tail_boundary < end_token or -(-tail_boundary // self.block_size) != block_count:
+                raise ValueError(f"Tail-key boundary {tail_boundary} does not identify the tail ending at {end_token}")
+        else:
+            block_count = min(block_count, hash_count)
+        block_offset = max(block_count - len(block_ids), 0)
+        for logical_index in range(max(start_token // self.block_size, block_offset, 0), block_count):
+            if tail_boundary is not None and logical_index == block_count - 1:
+                value = self.hash_at_boundary(tail_boundary, hashes)
+            elif logical_index < hash_count:
+                value = hashes[(logical_index + 1) * hashes_per_block - 1]
+            else:
+                continue
+            yield logical_index, value, block_ids[logical_index - block_offset]
+
+    def iter_hash_ranges(
+        self,
+        hashes: Sequence[bytes | str],
+        *,
+        start_token: int,
+        end_token: int,
+        fine_grained: bool = False,
+    ) -> Iterator[TokenChunk]:
+        """Enumerate content identities without requiring an allocated local block table."""
+        if not hashes or end_token <= 0:
+            return
+        if fine_grained:
+            for index in range(
+                max(start_token // self.hash_block_size, 0), min(len(hashes), end_token // self.hash_block_size)
+            ):
+                boundary = (index + 1) * self.hash_block_size
+                start = (-(-boundary // self.block_size) - 1) * self.block_size
+                yield TokenChunk(start, boundary - start, hashes[index])
+        else:
+            hashes_per_block = self.block_size // self.hash_block_size
+            count = min(len(hashes) // hashes_per_block, -(-end_token // self.block_size))
+            for index in range(max(start_token // self.block_size, 0), count):
+                start = index * self.block_size
+                yield TokenChunk(
+                    start, min(self.block_size, end_token - start), hashes[(index + 1) * hashes_per_block - 1]
+                )
+
+    def hash_at_boundary(self, boundary: int, hashes: Sequence[bytes | str]) -> bytes | str:
+        if boundary <= 0 or boundary % self.hash_block_size:
+            raise ValueError(f"Token boundary {boundary} is not aligned to the hash block size")
+        index = boundary // self.hash_block_size - 1
+        if index >= len(hashes):
+            raise ValueError(f"Token boundary {boundary} has no corresponding block hash")
+        return hashes[index]
+
+
+# ========================
+# Layout tables
+# ========================
 
 
 _ALL_SEGMENTS = slice(None)
@@ -69,7 +170,7 @@ RemoteTable = dict[int, RemoteLayout]  # One layout shared by all head partition
 
 
 # ========================
-# Common binding
+# Key and local binding
 # ========================
 
 

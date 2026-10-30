@@ -29,7 +29,7 @@ from ...infrastructure.mapping import (
 )
 from ...infrastructure.resources import Resources
 from ...infrastructure.topology import KVPoolTopology
-from ...protocol.messages import CheckpointStoreCommand, StoreCommand
+from ...protocol.messages import CheckpointStoreCommand, KVTransferStep, StoreCommand
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
     KeysByPartition,
@@ -53,19 +53,35 @@ from ..transfer.rows import (
     merge_keys_by_partition,
     store_transfer_records,
 )
-from .transfer import LayerStoreResult, LayerTransferPlan, bind_layer_memberships
+from .transfer import LayerStoreResult, LayerTransferPlan, PreparedLayerLoad, bind_layer_memberships
+
+
+@dataclass(slots=True)
+class _LoadState:
+    """Retain this Load's ownership and preparation through result claiming.
+
+    Remote session cleanup can precede the model's final result claim. Keep
+    the prepared copy inputs until end_step() detaches this operation.
+    """
+
+    batch: KVTransferBatch
+    prepared: PreparedLayerLoad | None = None
+    initial_completions: tuple[LoadCompletion, ...] = ()
 
 
 @dataclass(slots=True)
 class _StoreState:
     """One Store's inputs and accumulated outcomes, retained by its queued tasks.
 
-    Only the serial Store executor mutates this state. failure_codes contains
-    failures only; an absent key is not yet a successful publication.
+    The serial Store executor mutates preparation and outcomes; the caller
+    retains pending during handoff. failure_codes contains failures only;
+    an absent key is not yet a successful publication.
     """
 
     commands: tuple[StoreCommand, ...]
+    pending: PendingStore | None = None
     batch: KVTransferBatch | None = None
+    plan: LayerTransferPlan | None = None
     opened_keys: tuple[str, ...] = ()
     selected_keys_by_layer: dict[int, list[str]] = field(default_factory=dict)
     failure_codes: dict[str, int | None] = field(default_factory=dict)
@@ -91,8 +107,6 @@ class LayerwiseWorker(KVPoolWorker):
         key_builder: WireKeyBuilder | None = None,
     ) -> None:
         self._key_builder = key_builder
-        self._load_plan: LayerTransferPlan | None = None
-        self._store_plan: LayerTransferPlan | None = None
         self._backend_sessions = backend_sessions
         resources.bind_backend_sessions(backend_sessions)
         self._store_writers = tuple(min(peers) for peers in topology.context_replica_groups)
@@ -103,8 +117,7 @@ class LayerwiseWorker(KVPoolWorker):
         self._session: Session[tuple[LoadCompletion, ...]] | None = None
         self._store_state: _StoreState | None = None
         self._store_opening: Future[None] | None = None
-        self._load_batch: KVTransferBatch | None = None
-        self._load_initial_completions: tuple[LoadCompletion, ...] = ()
+        self._load_state: _LoadState | None = None
         self._attention_store_layers: frozenset[int] = frozenset()
         self._load_executor = Executor("KVPoolLayerwiseLoadExecutor", resources.backend.set_device)
         self._store_executor = (
@@ -121,6 +134,52 @@ class LayerwiseWorker(KVPoolWorker):
             kv_cache_layout=kv_cache_layout,
             source_ready_event_factory=source_ready_event_factory,
         )
+
+    def begin_step(self, step: KVTransferStep) -> None:
+        context = self._new_step_context(step)
+        if self._store_enabled and step.store.commands:
+            # The common fence retains its own failures. An empty Decode Step does not wait.
+            if self._pending_store_batches:
+                self.fence_previous_store()
+            try:
+                state = _StoreState(step.store.commands)
+                self._store_state = state
+                assert self._store_executor is not None
+                self._store_opening = self._store_executor.submit(self._open_store, state)
+                # Preserve the all-ready handoff without making it a per-layer readiness rule.
+                if step.store.all_sources_ready:
+                    self._seal_store(context)
+            except Exception as error:
+                self._store_fatal_error = error
+                raise
+        self._active_step = context
+
+    @KVPoolWorker._with_active_step
+    def finish_step(self, context: KVPoolStepContext) -> None:
+        self._raise_store_fatal_error()
+        if not self._store_enabled or not context.step.store.commands or context.store_submitted:
+            return
+        try:
+            self._seal_store(context)
+        except Exception as error:
+            self._store_fatal_error = error
+            raise
+        self.fence_previous_store()
+
+    @KVPoolWorker._with_active_step
+    def wait_for_layer_load(self, context: KVPoolStepContext, layer_name: str) -> None:
+        for completion in self._wait_for_layer_load(layer_name):
+            self._record_load_completion(context, completion)
+        self._raise_load_error(context)
+
+    @KVPoolWorker._with_active_step
+    def save_layer(self, _context: KVPoolStepContext, layer_name: str) -> None:
+        self._raise_store_fatal_error()
+        try:
+            self._submit_store_layer(layer_name)
+        except Exception as error:
+            self._store_fatal_error = error
+            raise
 
     def _bind_mappings(self) -> None:
         kv_caches = self._resources.kv_caches
@@ -167,35 +226,29 @@ class LayerwiseWorker(KVPoolWorker):
         return remote["size_bytes"], self._physical_layer_ids_by_partition[group_id]
 
     @abstractmethod
-    def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
+    def _prepare_load_layers(self, batch: KVTransferBatch) -> PreparedLayerLoad: ...
 
     @abstractmethod
-    def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
+    def _prepare_store_layers(self, batch: KVTransferBatch) -> LayerTransferPlan: ...
 
     @abstractmethod
-    def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]: ...
-
-    @abstractmethod
-    def _copy_store_layer(self, source_ready_event: Any, layer_id: int) -> LayerStoreResult: ...
-
-    def _prepared_load_plan(self) -> LayerTransferPlan:
-        if self._load_plan is None:
-            raise RuntimeError("Layerwise Load plan was not prepared")
-        return self._load_plan
-
-    def _prepared_store_plan(self) -> LayerTransferPlan:
-        if self._store_plan is None:
-            raise RuntimeError("Layerwise Store plan was not prepared")
-        return self._store_plan
+    def _copy_store_layer(
+        self, source_ready_event: Any, layer_id: int, plan: LayerTransferPlan
+    ) -> LayerStoreResult: ...
 
     def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         object_sizes = collect_object_sizes(batch)
         if not object_sizes:
             return ()
-        self._load_batch = batch
-        self._load_initial_completions = ()
+        state = _LoadState(batch)
+        self._load_state = state
         try:
-            order = self._load_executor.submit(self._open_load, batch, object_sizes).result()
+            self._load_executor.submit(self._open_load, state, object_sizes).result()
+            order = (
+                tuple(sorted(layer_id for layer_id, keys in state.prepared.plan.selected_keys_by_layer.items() if keys))
+                if state.prepared is not None
+                else ()
+            )
             if order:
                 self._get_session().load_order = order
         except (BrokenExecutor, CancelledError):
@@ -204,10 +257,10 @@ class LayerwiseWorker(KVPoolWorker):
             logger.exception("Layerwise Load preparation failed for requests %s", batch.request_ids)
             self._abort_load()
             return _failed_load_completions(batch, None)
-        return self._load_initial_completions
+        return state.initial_completions
 
-    def _open_load(self, batch: KVTransferBatch, object_sizes: dict[str, int]) -> tuple[int, ...]:
-        self._load_plan = None
+    def _open_load(self, state: _LoadState, object_sizes: dict[str, int]) -> None:
+        batch = state.batch
         result_codes = self._backend_sessions.start_load(list(object_sizes), list(object_sizes.values()))
         opened_keys = set()
         failed_codes = {}
@@ -216,16 +269,11 @@ class LayerwiseWorker(KVPoolWorker):
                 opened_keys.add(key)
             else:
                 failed_codes[key] = code
-        self._load_initial_completions = _load_session_failures(batch, failed_codes) if failed_codes else ()
+        state.initial_completions = _load_session_failures(batch, failed_codes) if failed_codes else ()
         if not opened_keys:
-            return ()
+            return
         selected = batch if not failed_codes else batch.select_keys(opened_keys)
-        selected_keys_by_layer = self._prepare_load_layers(selected)
-        return tuple(sorted(layer_id for layer_id, keys in selected_keys_by_layer.items() if keys))
-
-    def _finish_load(self) -> None:
-        self._load_plan = None
-        self._backend_sessions.finish_load()
+        state.prepared = self._prepare_load_layers(selected)
 
     def _collect_load_completions(self) -> tuple[LoadCompletion, ...]:
         if self._session is not None and (pending := self._session.pending_load_layers):
@@ -235,11 +283,8 @@ class LayerwiseWorker(KVPoolWorker):
 
     def _abort_load(self, *, wait: bool = True) -> None:
         if self._session is not None or self._backend_sessions.has_load_sessions:
-            finish = self._finish_load if self._backend_sessions.has_load_sessions else None
+            finish = self._backend_sessions.finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().abort_load(finish, wait=wait)
-
-    def _collect_store_completions(self, batch: PendingStore, *, wait: bool) -> tuple[StoreCompletion, ...] | None:
-        return batch.future.result() if wait or batch.future.done() else None
 
     def _get_session(self) -> Session[tuple[LoadCompletion, ...]]:
         if self._session is None:
@@ -293,16 +338,6 @@ class LayerwiseWorker(KVPoolWorker):
             for group_id, mask in zip(self._topology.config.transfer_group_ids, masks, strict=True)
         )
 
-    def _prepare_step_store(self, commands: tuple[StoreCommand, ...]) -> None:
-        # Worker has one Store plan; a new Store waits, an empty decode does not.
-        if self._pending_store_batch is not None:
-            self.fence_previous_store()
-        state = _StoreState(commands)
-        self._store_state = state
-        assert self._store_executor is not None
-        # Presence checks run without a step Session or Backend leases and overlap model execution.
-        self._store_opening = self._store_executor.submit(self._open_store, state)
-
     def _open_store(self, state: _StoreState) -> None:
         candidates = self._build_store_candidates(state.commands)
         candidate_keys = store_transfer_candidate_keys(candidates)
@@ -323,7 +358,6 @@ class LayerwiseWorker(KVPoolWorker):
             group_keys = group.selected_keys()
             keys.extend(group_keys)
             object_sizes.extend([group.remote_object_size_bytes] * len(group_keys))
-        self._store_plan = None
         try:
             result_codes = self._backend_sessions.start_store(keys, object_sizes)
         except Exception as error:
@@ -345,7 +379,8 @@ class LayerwiseWorker(KVPoolWorker):
             return
         selected = batch if len(state.opened_keys) == len(keys) else batch.select_keys(set(state.opened_keys))
         try:
-            state.selected_keys_by_layer = self._prepare_store_layers(selected)
+            state.plan = self._prepare_store_layers(selected)
+            state.selected_keys_by_layer = state.plan.selected_keys_by_layer
         except Exception as error:
             state.failure_codes.update((key, None) for key in state.opened_keys)
             state.errors_by_key.update((key, error) for key in state.opened_keys)
@@ -353,7 +388,8 @@ class LayerwiseWorker(KVPoolWorker):
     def _store_layer(self, source_ready: Any, layer_id: int, state: _StoreState) -> None:
         keys = state.selected_keys_by_layer.get(layer_id)
         if keys:
-            result = self._copy_store_layer(source_ready, layer_id)
+            assert state.plan is not None
+            result = self._copy_store_layer(source_ready, layer_id, state.plan)
             self._record_store_result(state, keys, result)
 
     def _finish_store(
@@ -366,7 +402,7 @@ class LayerwiseWorker(KVPoolWorker):
             raise
         except Exception as error:
             # Layer jobs depend on opening, so no source was handed off after its failure.
-            self._store_plan = None
+            state.plan = None
             self._complete_shared_store(state, [])
             if state.opened_keys:
                 try:
@@ -383,7 +419,7 @@ class LayerwiseWorker(KVPoolWorker):
                 self._record_store_result(
                     state, state.selected_keys_by_layer[layer_id], LayerStoreResult(None, False, error)
                 )
-        self._store_plan = None
+        state.plan = None
         if state.batch is None:
             self._complete_shared_store(state, [])
             return _store_command_completions(state.commands)
@@ -513,33 +549,33 @@ class LayerwiseWorker(KVPoolWorker):
             for index, (command, evidence) in enumerate(zip(state.commands, evidence_by_request, strict=True))
         )
 
-    def _submit_step_store(self, context: KVPoolStepContext, *, fence: bool) -> None:
-        self._finalize_layerwise_store(context)
-        if fence:
-            self.fence_previous_store()
+    def _seal_store(self, context: KVPoolStepContext | None = None) -> None:
+        """Seal and register the current Store once, without waiting for its result.
 
-    def _finalize_layerwise_store(self, context: KVPoolStepContext) -> None:
-        if self._pending_store_batch is not None:
-            raise RuntimeError("Previous Store invocation has not reached its fence")
-        batch = self._prepare_store_close()
-        assert batch is not None
-        self._track_store_batch(batch)
-        context.store_submitted = True
-
-    def _prepare_store_close(self) -> PendingStore | None:
+        Keep active ownership and the sealed record until registration succeeds,
+        including retries after only part of the pending bookkeeping completed.
+        """
         state = self._store_state
         if state is None:
-            return None
-        assert self._store_opening is not None
-        future = self._get_session().finish_store(self._store_opening, self._finish_store, state)
-        # Seal submission. Queued tasks retain this invocation's state, even after end_step().
+            return
+        pending = state.pending
+        if self._pending_store_batches and self._pending_store_batches[-1] is not pending:
+            raise RuntimeError("Previous Store invocation has not reached its fence")
+        if pending is None:
+            assert self._store_opening is not None
+            future = self._get_session().finish_store(self._store_opening, self._finish_store, state)
+            pending = PendingStore(
+                future,
+                frozenset(command.request_id for command in state.commands),
+                frozenset(command.store_job_id for command in state.commands if command.store_job_id is not None),
+            )
+            state.pending = pending
+        self._track_store_batch(pending)
+        # Queued tasks retain this invocation after the Step relinquishes its entry points.
         self._store_state = None
         self._store_opening = None
-        return PendingStore(
-            future,
-            frozenset(command.request_id for command in state.commands),
-            frozenset(command.store_job_id for command in state.commands if command.store_job_id is not None),
-        )
+        if context is not None:
+            context.store_submitted = True
 
     def _submit_store_layer(self, layer_name: str) -> None:
         layer_id = self._layer_ids_by_name.get(layer_name)
@@ -566,45 +602,42 @@ class LayerwiseWorker(KVPoolWorker):
         return layer_id in state.selected_keys_by_layer
 
     def _wait_for_layer_load(self, layer_name: str) -> tuple[LoadCompletion, ...]:
-        context = self._active_step
-        if context is None:
-            raise RuntimeError("KV Pool step has not begun")
         layer_id = self._layer_ids_by_name.get(layer_name)
         if layer_id is None:
             return ()
         store_at_attention_entry = layer_id in self._attention_store_layers and self._can_store_layer(layer_id)
         if self._session is None and not store_at_attention_entry:
             return ()
+        state = self._load_state
         try:
             session = self._get_session()
-            result = session.wait_for_layer(layer_id, self._copy_load_layer, self._finish_load)
+            result = None
+            if state is not None and state.prepared is not None:
+                result = session.wait_for_layer(layer_id, state.prepared.copy_layer, self._backend_sessions.finish_load)
             if store_at_attention_entry:
                 session.bind_store_to_compute_start(layer_id, self.save_layer, layer_name)
             return result or ()
         except (BrokenExecutor, CancelledError):
             raise
         except Exception:
-            if self._load_batch is None:
+            if state is None:
                 raise
             logger.exception("Layerwise Load failed at physical layer %d", layer_id)
             self._abort_load()
-            return _failed_load_completions(self._load_batch, layer_id)
+            return _failed_load_completions(state.batch, layer_id)
 
     def end_step(self) -> None:
         if self._session is not None or self._backend_sessions.has_load_sessions:
-            finish_load = self._finish_load if self._backend_sessions.has_load_sessions else None
+            finish_load = self._backend_sessions.finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().end_step(finish_load)
-        closing_batch = self._prepare_store_close()
-        if closing_batch is not None:
-            self._track_store_batch(closing_batch)
+        self._seal_store(self._active_step)
         self._session = None
-        self._store_state = None
-        self._load_batch = None
+        self._load_state = None
         super().end_step()
 
     def close(self) -> None:
         if self._session is not None or self._backend_sessions.has_load_sessions:
-            finish_load = self._finish_load if self._backend_sessions.has_load_sessions else None
+            finish_load = self._backend_sessions.finish_load if self._backend_sessions.has_load_sessions else None
             self._get_session().end_step(finish_load, wait=False)
         super().close()
 
