@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
@@ -54,9 +53,9 @@ def test_input_preparation_uses_each_draft_group(monkeypatch, physical_sizes, of
     spec.vllm_config.cache_config.block_size = 32
 
     for group, physical_size in enumerate(physical_sizes, start=1):
-        inputs = [None] * 28
+        inputs: list[torch.Tensor | int | None] = [None] * 28
         inputs[16] = tables.input_block_tables[group]
-        inputs[17] = tables.kernel_block_sizes[group] if vllm_version_is("0.31.0") else physical_size
+        inputs[17] = physical_size
         dspark_module.dflash_speculator.prepare_dflash_inputs(*inputs)
         assert prepare.call_args.args[16] is tables.input_block_tables[group]
         assert prepare.call_args.args[17] == tables.kernel_block_sizes[group]
@@ -70,12 +69,8 @@ def test_group_mapping_rejects_unknown_table_before_preparation(monkeypatch):
     table = torch.zeros(1, 4, dtype=torch.int32)
     sizes = {id(table): 128}
     tables = SimpleNamespace(input_block_tables=[table], kernel_block_sizes=[32])
-    wrapper = (
-        dflash_module.prepare_dflash_inputs_factory(sizes)
-        if vllm_version_is("0.31.0")
-        else dflash_module.prepare_dflash_inputs_factory(sizes, tables)
-    )
-    inputs = [None] * 28
+    wrapper = dflash_module.prepare_dflash_inputs_factory(sizes, tables)
+    inputs: list[torch.Tensor | int | None] = [None] * 28
     inputs[16] = torch.zeros_like(table)
     with pytest.raises(RuntimeError, match="block table"):
         wrapper(*inputs)
@@ -88,14 +83,10 @@ def test_group_mapping_preserves_table_identity_for_keyword_and_positional_calls
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs", prepare)
     table = torch.zeros(1, 4, dtype=torch.int32)
     tables = SimpleNamespace(input_block_tables=[table], kernel_block_sizes=[128])
-    wrapper = (
-        dflash_module.prepare_dflash_inputs_factory({id(table): 384})
-        if vllm_version_is("0.31.0")
-        else dflash_module.prepare_dflash_inputs_factory({id(table): 384}, tables)
-    )
-    inputs = [None] * 28
+    wrapper = dflash_module.prepare_dflash_inputs_factory({id(table): 384}, tables)
+    inputs: list[torch.Tensor | int | None] = [None] * 28
     inputs[16] = table
-    inputs[17] = 128 if vllm_version_is("0.31.0") else 384
+    inputs[17] = 384
     if as_keyword:
         names = list(inspect.signature(dflash_module.prepare_dflash_inputs_triton).parameters)[: len(inputs)]
         wrapper(**dict(zip(names, inputs)))

@@ -1,4 +1,0 @@
-pr: 18604
-entries:
-  - category: feature
-    text: Added opt-in exact MoE expert offload for Model Runner V2 eager execution and bounded decode ACL graphs, on Ascend 950 with adapters for W4A8 MXFP, W8A8 MXFP8/INT8 and native block FP8 routed experts, including GLM-5.3-Flash MTP with concurrent eager drafting and checkpoint-native DeepSeek V4 DSpark drafting. Draft experts stay fully resident on the NPU. Qwen3.8-Flash-Next full-model hardware validation remains pending.
