@@ -433,6 +433,7 @@ class AscendConfig:
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
             "enable_dsa_cp": false,
+            "enable_dsv4_decode_indexer_tp_shard": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
@@ -583,6 +584,9 @@ class AscendConfig:
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
+    # Experimental C4 QLI query-row sharding across TP ranks; cache writes
+    # remain replicated. Supports eager and MRV2 int8 FULL_DECODE_ONLY.
+    enable_dsv4_decode_indexer_tp_shard: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
