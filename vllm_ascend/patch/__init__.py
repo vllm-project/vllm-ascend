@@ -1479,7 +1479,7 @@
 #       Regression coverage is in
 #       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
 #       Integrated rejection-sampling and replay on/off RNG coverage is in
-#       `tests/e2e/pull_request/one_card/spec_decode/test_sampling_mask_rejection.py`.
+#       `tests/e2e/pull_request/one_card/rlhf/consistency/test_sampling_mask_rejection.py`.
 #    Related PR (if no, explain why):
 #       No. This is a Triton-Ascend compiler compatibility workaround.
 #    Future Plan:

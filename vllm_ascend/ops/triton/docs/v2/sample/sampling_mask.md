@@ -159,5 +159,5 @@ The rejection-sampling integration test covers mask replay on/off, rejection
 outcomes, logprobs and RNG preservation, and is kept outside the operator suite:
 
 ```bash
-pytest -sv tests/e2e/pull_request/one_card/spec_decode/test_sampling_mask_rejection.py
+pytest -sv tests/e2e/pull_request/one_card/rlhf/consistency/test_sampling_mask_rejection.py
 ```
