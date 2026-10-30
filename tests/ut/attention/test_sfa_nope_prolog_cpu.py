@@ -32,7 +32,6 @@ def _load(path, name, scope, owner=None):
 def state(monkeypatch):
     dynamic = type("AscendW8A8DynamicLinearMethod", (), {})
     mx = type("AscendW8A8MXFP8DynamicLinearMethod", (), {})
-    config = SimpleNamespace(enable_sfa_nope_prolog=True)
     profile = SimpleNamespace(supports=lambda capability: True)
     types = SimpleNamespace(NATIVE="native", PROLOG_V3="prolog_v3", MLAPO="mlapo")
     op = Mock()
@@ -54,7 +53,6 @@ def state(monkeypatch):
         "AscendW8A8MXFP8DynamicLinearMethod": mx,
         "AscendW8A8LinearMethod": type("AscendW8A8LinearMethod", (), {}),
         "logger": Mock(),
-        "get_ascend_config": lambda: config,
         "get_current_hardware_profile": lambda: profile,
     }
     page_view = _load("vllm_ascend/attention/sfa_v1.py", "_view_cache_as_operator_pages", {"torch": torch})
@@ -108,17 +106,19 @@ def state(monkeypatch):
         "dequant_scale_w_dkv_kr",
     ):
         setattr(impl, name, torch.empty(1))
-    return SimpleNamespace(impl=impl, scope=scope, config=config, profile=profile, op=op, types=types, mx=mx)
+    return SimpleNamespace(impl=impl, scope=scope, profile=profile, op=op, types=types, mx=mx)
 
 
-def test_nope_opt_in_resolves_and_prepares_weights(state):
+def test_nope_automatically_resolves_and_prepares_weights(state):
     assert state.impl._resolve_preprocess_type(torch.bfloat16) == state.types.PROLOG_V3
     state.impl._process_weights_for_fused_prolog_v3.assert_called_once()
-    state.impl._fused_preprocess_type.assert_not_called()
+    state.impl._fused_preprocess_type.assert_called_once()
 
 
-def test_nope_default_preserves_native_weights(state):
-    state.config.enable_sfa_nope_prolog = False
+@pytest.mark.parametrize("is_kv_consumer", [False, True])
+def test_nope_bf16_projections_preserve_native_weights(state, is_kv_consumer):
+    state.impl.fused_qkv_a_proj.quant_method.quant_method = None
+    state.impl.is_kv_consumer = is_kv_consumer
     assert state.impl._resolve_preprocess_type(torch.bfloat16) == state.types.NATIVE
     state.impl._process_weights_for_fused_prolog_v3.assert_not_called()
 
@@ -130,9 +130,24 @@ def test_nope_does_not_require_custom_operator_registration(state, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "unsupported", ["hardware", "mxfp8", "c16", "fp8_cache", "D", "Hcq", "Hckv", "pcp", "dcp", "indexer", "fp16"]
+    "unsupported",
+    [
+        "hardware",
+        "mxfp8",
+        "c16",
+        "fp8_cache",
+        "D",
+        "Hcq",
+        "Hckv",
+        "pcp",
+        "dcp",
+        "indexer",
+        "fp16",
+        "turboquant",
+        "chunked",
+    ],
 )
-def test_nope_opt_in_rejects_unsupported_contracts_before_weight_changes(state, unsupported):
+def test_nope_unsupported_contracts_fall_back_before_weight_changes(state, unsupported):
     impl = state.impl
     dtype = torch.bfloat16
     if unsupported == "hardware":
@@ -150,10 +165,13 @@ def test_nope_opt_in_rejects_unsupported_contracts_before_weight_changes(state, 
         setattr(impl.vllm_config.parallel_config, name, 2)
     elif unsupported == "indexer":
         impl.indexer.wq_b = None
+    elif unsupported == "turboquant":
+        impl.enable_sparse_sfa_turboquant = True
+    elif unsupported == "chunked":
+        impl.q_proj._chunk_size = 1
     else:
         dtype = torch.float16
-    with pytest.raises(ValueError, match="enable_sfa_nope_prolog"):
-        impl._resolve_preprocess_type(dtype)
+    assert impl._resolve_preprocess_type(dtype) == state.types.NATIVE
     impl._process_weights_for_fused_prolog_v3.assert_not_called()
 
 

@@ -648,7 +648,6 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
-    enable_sfa_nope_prolog: bool = False
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
     pd_tp_ratio: int = 1

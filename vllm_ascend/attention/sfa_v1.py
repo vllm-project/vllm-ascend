@@ -1024,16 +1024,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
 
-        if self.qk_rope_head_dim == 0 and get_ascend_config().enable_sfa_nope_prolog:
-            reasons = self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
-            if act_dtype != torch.bfloat16:
-                reasons.append("NoPE PROLOG_V3 requires bfloat16 activations.")
-            if reasons:
-                raise ValueError("enable_sfa_nope_prolog: " + " ".join(reasons))
-            self._nope_native_indexer_query = self.has_indexer and not hasattr(self.indexer.wq_b, "weight_scale")
-            self._process_weights_for_fused_prolog_v3()
-            return PreprocessType.PROLOG_V3
-
         pp_type = self._fused_preprocess_type()
         if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
             return pp_type
@@ -1070,11 +1060,16 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)
+        if self.qk_rope_head_dim == 0 and act_dtype != torch.bfloat16:
+            reasons.append("NoPE PROLOG_V3 requires bfloat16 activations.")
         if reasons:
             for msg in reasons:
                 logger.warning_once(msg)
             return False
         if pp_type is PreprocessType.PROLOG_V3:
+            self._nope_native_indexer_query = (
+                self.qk_rope_head_dim == 0 and self.has_indexer and not hasattr(self.indexer.wq_b, "weight_scale")
+            )
             self._process_weights_for_fused_prolog_v3()
         else:
             self._process_weights_for_fused_mlapo(act_dtype)
@@ -1097,9 +1092,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # unquantized indexer, including layers that later toggle skip_topk.
             if self.has_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
-                if not hasattr(wq_b, "weight_scale") and not (
-                    self.qk_rope_head_dim == 0 and get_ascend_config().enable_sfa_nope_prolog and wq_b is not None
-                ):
+                if not hasattr(wq_b, "weight_scale") and not (self.qk_rope_head_dim == 0 and wq_b is not None):
                     reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
@@ -1116,12 +1109,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         return reasons
 
     def _get_nope_prolog_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
-        if pp_type != PreprocessType.PROLOG_V3 or not get_ascend_config().enable_sfa_nope_prolog:
-            return ["NoPE fused preprocessing requires enable_sfa_nope_prolog and PROLOG_V3."]
+        if pp_type != PreprocessType.PROLOG_V3:
+            return ["NoPE fused preprocessing requires PROLOG_V3."]
         reasons = []
         if not get_current_hardware_profile().supports(HardwareCapability.SFA_NOPE_PROLOG_V3):
             reasons.append("NoPE PROLOG_V3 requires A2/A3 hardware.")
-        if self._quant_type is not AscendW8A8DynamicLinearMethod:
+        if type(self._get_layer_quant_method(self.fused_qkv_a_proj)) is not AscendW8A8DynamicLinearMethod:
             reasons.append("NoPE PROLOG_V3 requires dynamic W8A8 projections.")
         if not self.enable_sparse_sfa_c8 or self.c8_cache_dtype != torch.int8:
             reasons.append("NoPE PROLOG_V3 requires --kv-cache-dtype int8.")
