@@ -154,10 +154,3 @@ concatenation/slicing and graph replay with updated device metadata.
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
 ```
-
-The rejection-sampling integration test covers mask replay on/off, rejection
-outcomes, logprobs and RNG preservation, and is kept outside the operator suite:
-
-```bash
-pytest -sv tests/e2e/pull_request/one_card/rlhf/consistency/test_sampling_mask_rejection.py
-```
