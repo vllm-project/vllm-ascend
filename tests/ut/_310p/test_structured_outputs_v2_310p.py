@@ -21,7 +21,7 @@ def test_bitmask_reorders_fixed_stride_for_mixed_variable_drafts(limit, invalid_
         cu_num_logits_np=np.array([0, 1, 2, 5], dtype=np.int32),
         num_draft_tokens=2,
     )
-    masks = np.zeros((6, 2), dtype=np.int32)
+    masks: np.ndarray = np.zeros((6, 2), dtype=np.int32)
     # Exercise the signed high bit (token 31) and a partial final word (token 34).
     for row, token in enumerate([31, 34, 0, 5, 6, 7]):
         masks.view(np.uint32)[row, token // 32] = np.uint32(1 << (token % 32))

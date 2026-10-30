@@ -30,7 +30,7 @@ def apply_grammar_bitmask(
     req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
     invalid_drafts = np.zeros(logits.shape[0], dtype=bool) if input_batch.num_draft_tokens else None
     acceptable = grammar_output.num_acceptable_drafts
-    out_indices = []
+    out_indices: list[int] = []
     for grammar_idx, req_id in enumerate(grammar_req_ids):
         req_idx = req_id_to_idx.get(req_id)
         if req_idx is None:
