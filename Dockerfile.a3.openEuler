@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-a3-openeuler24.03-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.1-a3-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
@@ -115,8 +115,8 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-    echo "Install triton-ascend..." && \
-    python3 -m pip install "$TRITON_ASCEND_URL" && \
+#     echo "Install triton-ascend..." && \
+#     python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
