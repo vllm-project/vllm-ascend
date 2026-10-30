@@ -137,11 +137,29 @@ class TestQuantizedAllReduce(unittest.TestCase):
             mock_aq.assert_not_called()
             self.assertTrue(out is x)
 
+    def test_degenerate_shapes_skip_quantization(self):
+        """1-D tensors and tiny last dims fall back to bf16 (no quantize)."""
+        wrapper = _make(min_numel=8)
+        cases = [
+            torch.randn(64, dtype=torch.bfloat16),  # 1-D, numel=64 >= 8
+            torch.randn(64, 32, dtype=torch.bfloat16),  # last dim 32 < 64
+        ]
+        for x in cases:
+            with (
+                self.subTest(shape=tuple(x.shape)),
+                patch("torch.distributed.all_reduce") as mock_ar,
+                patch("torch_npu.npu_quantize", create=True) as mock_q,
+            ):
+                out = wrapper.all_reduce(x)
+                mock_ar.assert_called_once()
+                mock_q.assert_not_called()
+                self.assertTrue(out is x)
+
     def test_large_message_uses_quantized_path(self):
         wrapper = _make(min_numel=8)
-        x = torch.randn(4, 8, dtype=torch.bfloat16)  # numel=32 >= 8
+        x = torch.randn(4, 64, dtype=torch.bfloat16)  # numel=256 >= 8, C=64
 
-        q_fake = torch.zeros(4, 8, dtype=torch.int8)
+        q_fake = torch.zeros(4, 64, dtype=torch.int8)
         deq_fake = torch.randn_like(x)
         with (
             patch("torch.distributed.all_reduce") as mock_ar,
@@ -154,8 +172,8 @@ class TestQuantizedAllReduce(unittest.TestCase):
             mock_q.assert_called_once()
             mock_aq.assert_called_once()
             self.assertTrue(torch.equal(out, deq_fake))
-            # result is written in place to keep the mutation contract
-            self.assertTrue(torch.equal(x, deq_fake))
+            # out-of-place return (GroupCoordinator contract): input untouched
+            self.assertFalse(torch.equal(x, deq_fake))
             # payload all-reduce must be int8
             second_call = mock_ar.call_args_list[1]
             self.assertEqual(second_call.args[0].dtype, torch.int8)
@@ -180,13 +198,13 @@ class TestQuantizedAllReduce(unittest.TestCase):
     def test_wrapper_uses_exact_bound_scale_and_does_not_clamp(self):
         """The wrapper must use scale = amax / max_q and skip the clamp."""
         wrapper = _make(min_numel=8)
-        x = torch.full((4, 8), 1.0, dtype=torch.bfloat16)  # x == amax
+        x = torch.full((4, 64), 1.0, dtype=torch.bfloat16)  # x == amax, C=64
         captured: dict[str, list[torch.Tensor]] = {}
 
         def fake_ar(t, group=None, op=None):
             captured.setdefault("payload", []).append(t.clone())
 
-        q_fake = torch.full((4, 8), wrapper.max_q, dtype=torch.int8)
+        q_fake = torch.full((4, 64), wrapper.max_q, dtype=torch.int8)
         with (
             patch("torch.distributed.all_reduce", side_effect=fake_ar),
             patch("torch_npu.npu_quantize", create=True, return_value=q_fake) as mock_q,
