@@ -13,6 +13,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.distributed.memfabric import MemFabricRuntimeRegistry
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -296,6 +297,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                     initialize=MagicMock(return_value=0),
                 )
                 tp_group = SimpleNamespace(barrier=MagicMock())
+                runtime_registry = MemFabricRuntimeRegistry()
 
                 with (
                     patch.object(
@@ -324,6 +326,8 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                         offload_backend,
                         create=True,
                     ),
+                    patch.object(manager_module, "global_memfabric_runtime_registry", runtime_registry),
+                    patch.object(manager_module.torch_npu.npu, "current_device", return_value=rank),
                     patch.object(
                         manager_module.torch,
                         "zeros",
@@ -342,6 +346,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                         offload_config,
                     )
 
+                self.assertEqual(runtime_registry.active_claims()[0][:2], ("offload", "sparse_kv_offload"))
                 initialized_config = offload_backend.initialize.call_args.args[0]
                 self.assertEqual(
                     initialized_config.reserve_size,
@@ -402,6 +407,34 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
 
         offload_backend.OffloadConfig.assert_not_called()
         offload_backend.initialize.assert_not_called()
+
+    def test_manager_retains_runtime_claim_when_native_init_fails(self):
+        vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
+        offload_backend = SimpleNamespace(
+            OffloadConfig=lambda: SimpleNamespace(),
+            Scene=SimpleNamespace(SHARED="shared"),
+            initialize=MagicMock(return_value=-1),
+        )
+        tp_group = SimpleNamespace(barrier=MagicMock())
+        runtime_registry = MemFabricRuntimeRegistry()
+
+        with (
+            patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=0),
+            patch.object(manager_module, "get_tensor_model_parallel_world_size", return_value=1),
+            patch.object(manager_module, "get_tp_group", return_value=tp_group),
+            patch.object(manager_module, "get_sparse_kv_offload_cpu_pool_size_bytes", return_value=4096),
+            patch.object(manager_module, "offload", offload_backend, create=True),
+            patch.object(manager_module, "global_memfabric_runtime_registry", runtime_registry),
+            patch.object(manager_module.torch_npu.npu, "current_device", return_value=0),
+            patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
+            patch.object(manager_module.torch, "empty", return_value=MagicMock()),
+            patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+            self.assertRaisesRegex(RuntimeError, "initialize failed with result=-1"),
+        ):
+            SparseKVOffloadManager(vllm_config, kv_cache_config, offload_config)
+
+        self.assertEqual(runtime_registry.active_claims()[0][:2], ("offload", "sparse_kv_offload"))
+        tp_group.barrier.assert_not_called()
 
 
 if __name__ == "__main__":
