@@ -90,8 +90,16 @@ def _validate_elastic(config, vllm_config) -> int:
         raise ValueError("ElasticBuffer Engram currently requires PP=PCP=DCP=1")
     world = int(getattr(parallel, "world_size_across_dp", getattr(parallel, "world_size", 1)))
     local = int(getattr(parallel, "local_world_size", world)) * int(getattr(parallel, "data_parallel_size_local", 1))
-    if world < 2 or world > local:
-        raise ValueError("ElasticBuffer requires >=2 node-local participating ranks")
+    if world < 2:
+        raise ValueError(f"ElasticBuffer requires >=2 participating ranks; world_size_across_dp={world}")
+    # Each external DP server manages one replica, even when all replicas
+    # share a host. Verify their physical locality after distributed startup.
+    external_dp = bool(getattr(parallel, "data_parallel_external_lb", False))
+    if not external_dp and world > local:
+        raise ValueError(
+            "ElasticBuffer requires all participating ranks on one node; "
+            f"world_size_across_dp={world}, configured_local_ranks={local}"
+        )
     if getattr(parallel, "use_sequence_parallel_moe", False):
         raise ValueError("ElasticBuffer Engram does not yet support MoE sequence parallelism")
     if vllm_config.load_config.load_format == "dummy":

@@ -25,6 +25,8 @@ class _ParallelConfig:
     tensor_parallel_size: int = 8
     data_parallel_size: int = 1
     data_parallel_size_local: int = 1
+    data_parallel_external_lb: bool = False
+    data_parallel_rank: int = 0
     pipeline_parallel_size: int = 1
     prefill_context_parallel_size: int = 1
     decode_context_parallel_size: int = 1
@@ -268,6 +270,58 @@ def test_elastic_rejects_invalid_combinations(native, case):
         resolve_engram_config(config)
 
 
+@pytest.mark.parametrize("rank", range(4))
+def test_elastic_external_dp_defers_locality_checks_for_each_server(native, rank):
+    config = vc({"enabled": True, "backend": "elastic", "overlap": False})
+    config.parallel_config = _ParallelConfig(
+        tensor_parallel_size=1,
+        data_parallel_size=4,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        data_parallel_rank=rank,
+    )
+    config.speculative_config = SimpleNamespace(method="dspark", num_speculative_tokens=5)
+    resolved = resolve_engram_config(config)
+    assert resolved.group_size == 4
+    assert resolved.cpu_offload and not resolved.dp_shared_memory
+
+
+@pytest.mark.parametrize("local_dp", [1, 4])
+def test_elastic_internal_dp_retains_configured_locality_check(native, local_dp):
+    config = vc({"enabled": True, "backend": "elastic"})
+    config.parallel_config = _ParallelConfig(
+        tensor_parallel_size=1, data_parallel_size=4, data_parallel_size_local=local_dp
+    )
+    if local_dp == 4:
+        assert resolve_engram_config(config).group_size == 4
+    else:
+        with pytest.raises(ValueError, match="world_size_across_dp=4, configured_local_ranks=1"):
+            resolve_engram_config(config)
+
+
+@pytest.mark.parametrize("external_dp", [False, True])
+def test_elastic_requires_multiple_ranks_in_all_launch_modes(native, external_dp):
+    config = vc({"enabled": True, "backend": "elastic"})
+    config.parallel_config = _ParallelConfig(tensor_parallel_size=1, data_parallel_external_lb=external_dp)
+    with pytest.raises(ValueError, match=">=2 participating ranks; world_size_across_dp=1"):
+        resolve_engram_config(config)
+
+
+def test_elastic_uses_external_dp_target_policy_when_draft_parallel_metadata_differs(native):
+    config = vc({"enabled": True, "backend": "elastic", "overlap": False})
+    target_parallel = _ParallelConfig(
+        tensor_parallel_size=1,
+        data_parallel_size=4,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+    )
+    config.parallel_config = _ParallelConfig(tensor_parallel_size=1)
+    config.speculative_config = SimpleNamespace(
+        method="dspark", num_speculative_tokens=5, target_parallel_config=target_parallel
+    )
+    assert resolve_engram_config(config).group_size == 4
+
+
 @pytest.mark.parametrize(
     "field", ["pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size"]
 )
@@ -368,11 +422,16 @@ def test_validation_failure_does_not_erase_explicit_native_input(native):
 
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("draft_model_config", [False, True])
-def test_elastic_keeps_target_domain_when_dspark_reconstructs_with_tp1(dp, draft_model_config):
+@pytest.mark.parametrize("external_dp", [False, True])
+def test_elastic_keeps_target_domain_when_dspark_reconstructs_with_tp1(dp, draft_model_config, external_dp):
     from vllm.config import replace
 
     target = vc({"enabled": True, "backend": "elastic", "overlap": False}, dp=dp)
-    parallel = _ParallelConfig(data_parallel_size=dp, data_parallel_size_local=dp)
+    parallel = _ParallelConfig(
+        data_parallel_size=dp,
+        data_parallel_size_local=1 if external_dp else dp,
+        data_parallel_external_lb=external_dp,
+    )
     target.parallel_config = parallel
     draft_model = SimpleNamespace(
         architecture="DeepseekV41DSparkModel", hf_text_config=SimpleNamespace(engram_layer_ids=[])
