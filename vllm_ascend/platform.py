@@ -605,7 +605,7 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
-        _validate_deepseek_v4_tp_config(vllm_config, ascend_config)
+        _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -616,7 +616,6 @@ class NPUPlatform(Platform):
             vllm_config,
             compile_backend=cls.get_compile_backend(),
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
-            enable_dsa_cp=ascend_config.enable_dsa_cp,
         )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
@@ -1356,7 +1355,6 @@ def _setup_compile_backend(
     compile_backend: str,
     *,
     enable_shared_expert_dp: bool = False,
-    enable_dsa_cp: bool = False,
 ) -> None:
     """Recompute cudagraph sizes and setup the compile backend.
 
@@ -1389,7 +1387,7 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
-    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
+    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1531,9 +1529,6 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     a fork despite being a monkeypatch rather than a ``scheduler_cls``, and that
     its ``super().schedule()`` fallback only applies while balancing is off.
 
-    ``enable_dsa_cp`` is deliberately not here: DSA-CP is not a scheduler fork,
-    and its V4.1 metadata builder keeps the per-request channel the window clamp
-    needs, so that check belongs with the clamp rather than at startup.
     """
     scheduler_config = ascend_config.scheduler_config
     if scheduler_config.recompute_scheduler_enable:
@@ -1978,14 +1973,9 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     return None
 
 
-def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any) -> None:
+def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
     variant = _get_deepseek_v4_variant(vllm_config.model_config)
     if variant is None:
-        return
-
-    # Model Runner V1 with DSA-CP has its own TP topology. Model Runner V2
-    # does not use that exception, even if enable_dsa_cp is present.
-    if not vllm_config.use_v2_model_runner and ascend_config.enable_dsa_cp:
         return
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size

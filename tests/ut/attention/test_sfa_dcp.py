@@ -243,23 +243,22 @@ def test_attention_forwards_its_group_without_scheduler_config():
 
 
 @pytest.mark.parametrize(
-    "tokens,decode,dsa,prepared,pcp_size",
+    "tokens,decode,prepared,pcp_size",
     [
-        (1, True, False, True, 1),
-        (6, True, False, True, 1),
-        (12, True, False, True, 1),
-        (13, True, False, True, 1),
-        (6, False, False, False, 1),
-        (6, True, True, False, 1),
-        (6, True, False, False, 2),
-        (6, True, False, False, 8),
+        (1, True, True, 1),
+        (6, True, True, 1),
+        (12, True, True, 1),
+        (13, True, True, 1),
+        (6, False, False, 1),
+        (6, True, False, 2),
+        (6, True, False, 8),
     ],
 )
 @pytest.mark.parametrize("keep_view", [False, True])
 @pytest.mark.parametrize("layout", ["native", "fp16", "fp32", "other_width", "non_power_two"])
 @pytest.mark.parametrize("ranks", [2, 4, 8, 16])
 def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
-    tokens, decode, dsa, prepared, pcp_size, ranks, layout, keep_view
+    tokens, decode, prepared, pcp_size, ranks, layout, keep_view
 ):
     if pcp_size > ranks:
         pytest.skip("PCP must divide the DCP group")
@@ -316,11 +315,9 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
         return context_type(gathered, work, None if dim == 0 else (1, 0, 2), split_sizes)
 
     state = SimpleNamespace(
-        enable_dsa_cp=dsa,
         dcp_size=ranks,
         dcp_group=group,
         _start_dcp_gather=legacy,
-        _parallel_query_gather_dim=lambda: 0 if dsa else 1,
         _has_prefill=lambda metadata: metadata.num_prefills > 0,
     )
     state._start_dcp_query_gather = lambda *args, **kwargs: namespace["_start_dcp_query_gather"](state, *args, **kwargs)
@@ -338,9 +335,8 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
     assert context.query_prepared is prepared
     assert "wait" not in events
     result = namespace["_finish_dcp_gather"](context, keep_view=keep_view)
-    dim = 0 if dsa else 1
-    assert torch.equal(result[0], torch.cat([qn] * replicas, dim=dim))
-    assert torch.equal(result[1], torch.cat([qr] * replicas, dim=dim))
+    assert torch.equal(result[0], torch.cat([qn] * replicas, dim=1))
+    assert torch.equal(result[1], torch.cat([qr] * replicas, dim=1))
     assert events.count("gather") == events.count("wait") == (0 if pcp_size == ranks else 1)
     assert ("unpack" in events) is (prepared and not keep_view)
     if prepared and not keep_view:
@@ -377,7 +373,6 @@ def test_static_store_selection_respects_native_cache_format(key_dtype, width, e
     )
     state = SimpleNamespace(
         use_pcp=False,
-        _dsa_cp_active=False,
         enable_sparse_li_c8=True,
         c8_k_cache_dtype=key_dtype,
         head_dim=width,
@@ -388,10 +383,9 @@ def test_static_store_selection_respects_native_cache_format(key_dtype, width, e
 
 
 @pytest.mark.parametrize(
-    "variant", ["native", "prefill", "mixed", "pcp", "dsa", "dcp1", "dcp2", "dcp4", "large", "subclass", "c4"]
+    "variant", ["native", "prefill", "mixed", "pcp", "dcp1", "dcp2", "dcp4", "large", "subclass", "c4"]
 )
-@pytest.mark.parametrize("with_dependency", [False, True])
-def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency):
+def test_native_quantization_and_cache_pipeline_routing(variant):
     """Keep quantization exact and finish parallel-layout transforms before writing."""
     source = ROOT / "vllm_ascend/attention/indexer.py"
     cls = next(
@@ -441,15 +435,13 @@ def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency
         "INDEXER_K_CACHE_SLOT": 0,
         "INDEXER_SCALE_CACHE_SLOT": 1,
         "_gather_prefill_cache_inputs": lambda tensors, slots, count: (tensors, slots),
-        "all_gather_async": lambda value, *args, **kwargs: (value, None),
-        "get_tp_group": lambda: None,
         "get_pcp_num_replicated_tokens": lambda count, sharded: 0 if sharded else count,
     }
     future = ast.parse("from __future__ import annotations").body
     exec(compile(ast.Module(body=[*future, *methods], type_ignores=[]), str(source), "exec"), namespace)
     state = OtherBackend() if variant == "subclass" else Backend()
     state._dcp_size = int(variant[-1]) if variant in ("dcp1", "dcp2", "dcp4") else 8
-    state.use_pcp, state._dsa_cp_active = variant == "pcp", variant == "dsa"
+    state.use_pcp = variant == "pcp"
     state._is_pcp_decode_sharded = False
     state.enable_sparse_li_c8 = variant != "c4"
     state.enable_sparse_li_c4 = variant == "c4"
@@ -494,12 +486,9 @@ def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency
         sin=torch.zeros(rows, 64),
     )
     x = torch.zeros(rows, 4)
-    dependency = SimpleNamespace(wait=lambda: events.append("wait_q")) if with_dependency else None
-    result = namespace["forward"](state, x, None, x, metadata, compute_topk=False, attn_q_gather_handle=dependency)
+    result = namespace["forward"](state, x, None, x, metadata, compute_topk=False)
     assert result is None and events == (
-        ["quant"]
-        + (["wait_q"] if with_dependency else [])
-        + ["gather_done", "fused" if variant in ("native", "dcp1", "dcp2", "dcp4", "large") else "legacy"]
+        ["quant", "gather_done", "fused" if variant in ("native", "dcp1", "dcp2", "dcp4", "large") else "legacy"]
     )
     assert torch.equal(caches[0][metadata.slot_mapping], quant)
     expected_scales = scales.view(rows, 1, 2, 2) if variant == "c4" else scales.to(torch.float16).view(rows, 1)

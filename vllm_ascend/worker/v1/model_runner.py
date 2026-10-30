@@ -128,7 +128,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_views_for_spec,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -191,7 +190,6 @@ from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
-    enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -3385,10 +3383,6 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(kept_lens, out=kept_offsets[1:])
             self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
         self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
-        if enable_dsa_cp():
-            self._decoder_replay_num_tokens = round_up(
-                self._decoder_replay_num_tokens, self.parallel_config.tensor_parallel_size
-            )
         self._decoder_replay_counts = None
         if self.parallel_config.data_parallel_size > 1:
             agreed = torch.zeros((2, self.parallel_config.data_parallel_size), dtype=torch.int32)
@@ -3595,9 +3589,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # Native MoE SP and DSA-CP shard tokens at different boundaries, but
-        # both require equal token counts on every TP rank.
-        if enable_sp(self.vllm_config) or enable_dsa_cp():
+        if enable_sp(self.vllm_config):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -4087,7 +4079,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                     )
 
-            if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
+            if isinstance(builder, AscendDSAMetadataBuilder):
                 if for_cudagraph_capture:
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
@@ -4106,7 +4098,6 @@ class NPUModelRunner(GPUModelRunner):
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
-                        AscendDSACPMetadataBuilder,
                         AscendSFADCPMetadataBuilder,
                         v41_metadata_builder_type,
                     ))):
@@ -6864,7 +6855,7 @@ class NPUModelRunner(GPUModelRunner):
         return kv_cache_spec
 
     def _should_align_cudagraph_capture_sizes(self) -> bool:
-        """Align FULL decode keys to LCM(TP, query_len) for stable CP/SP dispatch.
+        """Align FULL decode keys to LCM(TP, query_len) for stable SP dispatch.
 
         Upstream SP sizing uses max(TP, query_len) and does not account for CP.
         Pre-alignment can shrink sizes or fail before a backend-driven downgrade.
@@ -6876,7 +6867,7 @@ class NPUModelRunner(GPUModelRunner):
         pass_sp = False
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or pass_sp)
+            and (enable_sp(self.vllm_config) or pass_sp)
         )
 
     def _check_and_update_cudagraph_mode(
