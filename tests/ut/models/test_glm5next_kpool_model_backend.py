@@ -3,12 +3,14 @@
 
 import importlib.util
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from torch import nn
+from vllm.config import KVTransferConfig
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
@@ -21,6 +23,8 @@ from vllm_ascend.attention.indexer_kpool import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.models.glm5next.attention import Indexer
+from vllm_ascend.ops import cann_keypool
 
 with patch.dict(
     "sys.modules",
@@ -31,6 +35,29 @@ with patch.dict(
 ):
     import vllm_ascend.models.glm5next.sparse_attn_indexer_kpool as kpool_module
     from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
+
+
+def test_glm_indexer_rejects_unsupported_cache_dtype_before_constructing_layers():
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="int8"))
+    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16 or fp8"):
+        Indexer(config, None, 8, 8, None, None, None)
+
+
+@pytest.mark.parametrize("connector", ["OffloadingConnector", "PreemptOffloadConnector"])
+@pytest.mark.parametrize("multi_connector", [False, True])
+def test_glm_fp8_indexer_rejects_kv_offload_before_constructing_layers(connector, multi_connector):
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(indexer_kv_dtype="fp8"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector" if multi_connector else connector,
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": [{"kv_connector": connector, "kv_role": "kv_both"}]}
+            if multi_connector
+            else {},
+        ),
+    )
+    with pytest.raises(NotImplementedError, match="FP8 LI cache does not support KV offloading"):
+        Indexer(config, None, 8, 8, None, None, None)
 
 
 def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
@@ -184,7 +211,7 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
         softmax_scale=0.5,
         index_kpool_compress_ape=nn.Parameter(torch.zeros(4, 4, dtype=dtype)),
         index_kpool_compress_gate=nn.Parameter(torch.randn(4, 8, dtype=dtype)),
-        k_cache=SimpleNamespace(prefix="indexer.k_cache"),
+        k_cache=SimpleNamespace(prefix="indexer.k_cache", dtype=torch.bfloat16),
         tail_cache=SimpleNamespace(prefix="indexer.tail"),
         topk_indices_buffer=None,
     )
@@ -226,6 +253,53 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
         torch.testing.assert_close(backend._norm_weight_f32, source.k_norm.weight.detach().float())
         torch.testing.assert_close(backend._norm_bias_f32, source.k_norm.bias.detach().float())
     torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
+
+
+def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch):
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=1,
+        head_dim=128,
+        topk_tokens=2048,
+        q_lora_rank=128,
+        index_kpool=4,
+        wq_b=nn.Identity(),
+        wk_weights_proj=nn.Identity(),
+        k_norm=nn.Identity(),
+        softmax_scale=1.0,
+        index_kpool_compress_ape=torch.zeros(4, 128),
+        index_kpool_compress_gate=torch.zeros(128, 128),
+        k_cache=SimpleNamespace(dtype=torch.float8_e4m3fn),
+        tail_cache=SimpleNamespace(),
+        topk_indices_buffer=None,
+    )
+    hardware = SimpleNamespace(
+        attention_backend_family=backend_module.AttentionBackendFamily.STANDARD, supports=MagicMock(return_value=False)
+    )
+    monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
+    init = MagicMock()
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
+    with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
+        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
+    init.assert_not_called()
+
+
+def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
+    key = torch.empty(2, 4, 1, 128, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 4, 1, 1)
+    layer = SimpleNamespace(prefix="indexer.cache", kv_cache=[(), (key, scale)])
+    monkeypatch.setattr(backend_module, "get_forward_context", lambda: SimpleNamespace(virtual_engine=1))
+    caches = Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    assert caches[0] is key and caches[1] is scale
+    layer.kv_cache[1] = (key,)
+    with pytest.raises(TypeError, match="one scale tensor"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    layer.kv_cache = []
+    with pytest.raises(IndexError, match="virtual engine"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
@@ -420,6 +494,7 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
+@pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize(
     "actual_query_tokens,runtime_mode,query_rows",
     [
@@ -436,8 +511,9 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 @pytest.mark.parametrize("reuse_output", [False, True])
 @pytest.mark.parametrize("pcp", [False, True])
 def test_cann_indexer_writes_caches_before_optional_selection(
-    monkeypatch, compute_topk, actual_query_tokens, runtime_mode, query_rows, reuse_output, pcp
+    monkeypatch, compute_topk, quantized, actual_query_tokens, runtime_mode, query_rows, reuse_output, pcp
 ):
+    """Preserve cache writes when a rank skips selection or uses padded graph queries."""
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
     )
@@ -449,6 +525,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     op._norm_weight_f32 = op._norm_bias_f32 = None
     op.k_norm = SimpleNamespace(eps=1e-6)
     op.index_kpool_compress_ape = torch.empty(4, 2)
+    op._cann_pool_key_indexer = MagicMock()
     storage = torch.full((20, 22), 77, dtype=torch.int32)
     op.topk_indices_buffer = storage[::2, :11] if reuse_output else None
     pooled = torch.empty(2, 2, dtype=torch.bfloat16)
@@ -484,18 +561,20 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     metadata.num_actual_tokens = actual_query_tokens
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
-    cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
+    cache = torch.empty(2, 2, 1, 2, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)
+    scale_cache = torch.empty(2, 2, 1, 1) if quantized else None
     tail = torch.empty(2, 4, 4)
     with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
         result = op._forward_cann(
             torch.empty(8, 3, dtype=torch.bfloat16),
-            torch.empty(query_rows, 1, 2, dtype=torch.bfloat16),
+            torch.empty(query_rows, 1, 2, dtype=torch.float16 if quantized else torch.bfloat16),
             torch.empty(query_rows, 1, dtype=torch.bfloat16),
             cache,
             tail,
             metadata,
             tail_metadata,
             compute_topk=compute_topk,
+            indexer_scale_cache=scale_cache,
         )
     names = [call[0] for call in calls.mock_calls]
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
@@ -505,6 +584,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     assert op._prepare_keypool_state.call_args.args[1] is cache_metadata.start_pos
     assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
     assert op._write_keypool_caches.call_args.args[4] is pooled
+    assert op._write_keypool_caches.call_args.kwargs["scale_cache"] is scale_cache
     assert op._write_keypool_caches.call_args.args[5] is cache_metadata
     skip_empty_query = query_rows == 0 or (actual_query_tokens == 0 and runtime_mode != CUDAGraphMode.FULL)
     if compute_topk and skip_empty_query:
@@ -523,12 +603,21 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
-        assert op._pool_key_indexer.call_args.args[1] is cache
+        assert op._pool_key_indexer.call_args.args[2] is cache
         assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
         assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is metadata.cum_query_lens
         assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is metadata.seq_lens
-        assert op._pool_key_indexer.call_args.args[3] is metadata.pool_tail
+        assert op._pool_key_indexer.call_args.args[4] is metadata.pool_tail
         assert op._pack_keypool_indices.call_args.args[1] is metadata
+        assert op._pack_keypool_indices.call_args.args[0].shape[0] == query_rows
+        if quantized:
+            select = op._pool_key_indexer.call_args.args[0]
+            assert select.func == op._pool_key_indexer_fp8
+            assert select.keywords["k_descale"].data_ptr() == scale_cache.data_ptr()
+        else:
+            assert op._pool_key_indexer.call_args.args[0] is op._cann_pool_key_indexer
+        assert op._pool_key_indexer.call_args.args[1].shape == (query_rows, 1, 2)
+        assert op._pool_key_indexer.call_args.args[1].dtype == (torch.float16 if quantized else torch.bfloat16)
     else:
         assert result is None
         op._pool_key_indexer.assert_not_called()
@@ -613,3 +702,86 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_loc
     )
     assert recorded_args[-2] is metadata
     assert result.shape[0] == recorded_args[1].shape[0] == actual_tokens
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("tokens", [0, 3])
+def test_glm_nonempty_indexer_quantizes_fp8_after_padding(monkeypatch, quantized, tokens):
+    heads, dim = 2, 4
+    query = torch.zeros(tokens, heads, dim, dtype=torch.bfloat16)
+    quantized_query = torch.zeros(tokens + 1, heads, dim, dtype=torch.float8_e4m3fn)
+    weights = torch.ones(tokens, heads, dtype=torch.bfloat16)
+    ends, lengths, tails = torch.tensor([0, min(2, tokens)]), torch.tensor([0, 1]), torch.tensor([0, 2])
+    table = torch.zeros(2, 1, dtype=torch.int32)
+    padded = (
+        torch.zeros(tokens + 1, heads, dim, dtype=query.dtype),
+        torch.zeros(tokens + 1, heads, dtype=weights.dtype),
+        torch.tensor([0, min(2, tokens), tokens + 1]),
+        torch.tensor([1, 1, 1]),
+        torch.tensor([0, 2, 0]),
+        torch.zeros(3, 1, dtype=table.dtype),
+    )
+    prepare = MagicMock(return_value=padded)
+    monkeypatch.setattr(cann_keypool, "prepare_nonempty_keypool_inputs", prepare)
+    native_indices = torch.arange((tokens + 1) * 7, dtype=torch.int32).view(tokens + 1, 7)
+    native = MagicMock(return_value=(native_indices, None))
+    q_descale = torch.arange(1, (tokens + 1) * heads * 2 + 1, dtype=torch.float32).view(tokens + 1, heads * 2)[:, ::2]
+    q_descale[0].zero_()
+    q_descale[-1].zero_()
+    expected_descales = q_descale.clone()
+    expected_descales[0].fill_(1)
+    expected_descales[-1].fill_(1)
+    quantize = MagicMock(return_value=(quantized_query, q_descale))
+    monkeypatch.setattr(backend_module.torch_npu, "npu_dynamic_quant", quantize)
+    k_descale = torch.ones(2, 4, 1)
+    cache = torch.empty(2, 4, 1, dim, dtype=quantized_query.dtype if quantized else query.dtype)
+
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(backend)
+    backend.k_cache = SimpleNamespace(dtype=cache.dtype)
+    modules = {
+        "cann_ops_transformer": SimpleNamespace(),
+        "vllm_ascend.ops.cann_keypool": cann_keypool,
+        "vllm_ascend.ops.triton.glm5_next_cann_keypool": MagicMock(),
+    }
+    loader = MagicMock(side_effect=modules.__getitem__)
+    monkeypatch.setattr(backend_module, "import_module", loader)
+    monkeypatch.setattr(
+        torch.ops, "cann_ops_transformer", SimpleNamespace(key_pool=MagicMock(), pool_key_indexer=native)
+    )
+    backend._init_cann_ops()
+    select = partial(backend._pool_key_indexer_fp8, k_descale=k_descale) if quantized else native
+
+    with pytest.MonkeyPatch.context() as sync_guard:
+        sync_guard.setattr(torch.Tensor, "item", MagicMock(side_effect=AssertionError("unexpected synchronization")))
+        indices, _ = backend._pool_key_indexer(
+            select,
+            query,
+            cache,
+            weights,
+            tails,
+            actual_seq_q=ends,
+            actual_seq_k=lengths,
+            block_table=table,
+            topk=4,
+            pool_size=4,
+        )
+
+    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table)
+    assert native.call_count == 1
+    assert native.call_args.args == (quantized_query if quantized else padded[0], cache, padded[1], padded[4])
+    assert native.call_args.kwargs["actual_seq_q"] is padded[2]
+    assert native.call_args.kwargs["actual_seq_k"] is padded[3]
+    assert native.call_args.kwargs["block_table"] is padded[5]
+    torch.testing.assert_close(indices, native_indices[:tokens])
+    assert indices.untyped_storage().data_ptr() == native_indices.untyped_storage().data_ptr()
+    if quantized:
+        quantize.assert_called_once_with(padded[0], dst_type=torch.float8_e4m3fn)
+        scales = native.call_args.kwargs["q_descale"]
+        torch.testing.assert_close(scales, expected_descales)
+        assert scales.shape == (tokens + 1, heads)
+        assert native.call_args.kwargs["k_descale"] is k_descale
+        assert native.call_args.kwargs["quant_mode"] == 0
+    else:
+        quantize.assert_not_called()
+        assert not {"q_descale", "k_descale", "quant_mode"} & native.call_args.kwargs.keys()
