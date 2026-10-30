@@ -38,7 +38,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_dcp,
+    is_dcp_enabled,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
@@ -131,7 +131,7 @@ class AscendAttentionDCPMetadataBuilder(
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.pcp_group = get_pcp_group()
         self._pcp_context: AscendPCPAttentionContext | None = None
         self._pcp_cache_group_idx: int | None = None
@@ -156,10 +156,10 @@ class AscendAttentionDCPMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=(
-                not self.pcp_enabled
+                not self.use_pcp
                 and (
                     self.speculative_config is not None
-                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                    or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 )
             ),
         )
@@ -291,7 +291,7 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> dict[str, object]:
         prefill_metadata = None
         if num_prefills > 0:
-            if self.pcp_enabled:
+            if self.use_pcp:
                 prefill_metadata = self._build_pcp_prefill_metadata(
                     common_attn_metadata, block_table, query_lens, seq_lens, num_decodes, num_prefills
                 )
@@ -401,7 +401,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
 
     def _run_dcp_attention(
         self,
@@ -518,7 +518,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         )
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        if self.pcp_enabled:
+        if self.use_pcp:
             prefill = attn_metadata.prefill
             assert prefill is not None
             chunked_context = prefill.chunked_context
@@ -589,7 +589,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         query_lens = prefill.actual_seq_lengths_q
         local_query = query[attn_metadata.num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
         causal = attn_metadata.causal
-        if self.pcp_enabled:
+        if self.use_pcp:
             assert prefill.pcp_current_kv_indices is not None and prefill.pcp_actual_seq_lengths_kv is not None
             key = torch.index_select(key, 0, prefill.pcp_current_kv_indices)
             value = torch.index_select(value, 0, prefill.pcp_current_kv_indices)
@@ -669,7 +669,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         if chunked_context is not None:
             # PCP query gather includes padding; current attention uses actual local tokens.
             query_end = attn_metadata.num_actual_tokens
-            if self.pcp_enabled:
+            if self.use_pcp:
                 assert attn_metadata.pcp_local_num_input_tokens is not None
                 query_end = attn_metadata.pcp_local_num_input_tokens
             history_query = query[num_decode_tokens:query_end].contiguous()
@@ -686,7 +686,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             with torch_npu.npu.stream(comm_stream):
                 history_recv = self._merge_dcp_attention_output(history_output, history_lse, defer_combine=True)
             main_stream.wait_stream(comm_stream)
-            if self.pcp_enabled:
+            if self.use_pcp:
                 assert chunked_context.pcp_local_query_indices is not None
                 history_recv = torch.index_select(history_recv, 2, chunked_context.pcp_local_query_indices)
             current_output = fused_dcp_lse_combine(

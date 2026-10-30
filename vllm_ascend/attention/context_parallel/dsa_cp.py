@@ -36,6 +36,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
@@ -2250,6 +2251,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             metadata_cls=dsa_v1.AscendDSAMetadata,
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
         self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
@@ -2477,9 +2479,22 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
     ) -> dsa_v1.AscendDSAMetadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
+        assert common_ratio_to_sas_metadata is not None
+        if not uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
+            # Without a PCP context the batch runs replicated on every rank,
+            # like a PCP=1 model (e.g. a replicated draft decode), so build the
+            # ordinary DSA metadata that the impl executes without PCP.
+            return super().build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build,
+                num_actual_reqs=num_actual_reqs,
+                common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                full_graph_mode=full_graph_mode,
+                **kwargs,
+            )
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
-        assert common_ratio_to_sas_metadata is not None
         has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
         # Replicated decode stays on the local metadata path. Sharded decode
         # owns different requests per rank, so it still needs global metadata.

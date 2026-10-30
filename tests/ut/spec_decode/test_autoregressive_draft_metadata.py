@@ -8,14 +8,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-SPECULATOR_PATH = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/autoregressive/speculator.py"
+SPECULATOR_PATH = (
+    Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/target_dependent_ar/speculator.py"
+)
 
 
 def test_gqa_draft_block_table_matches_padded_batch():
     """Execute the production initializer without importing the NPU runtime."""
     tree = ast.parse(SPECULATOR_PATH.read_text(encoding="utf-8"))
     speculator_class = next(
-        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendAutoRegressiveSpeculator"
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AscendTargetDependentARSpeculator"
     )
     method = next(
         node

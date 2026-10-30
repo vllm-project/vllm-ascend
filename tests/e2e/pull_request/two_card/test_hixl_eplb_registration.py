@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu  # noqa: F401
 from torch.multiprocessing.spawn import ProcessExitedException
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.executor.multiproc_executor import WorkerProc
 
@@ -33,7 +34,7 @@ def _migrate(communicator, buffers, rank: int) -> None:
     communicator.execute()
 
 
-def _async_buffer_reuse_worker(rank: int, port: int, binding: str) -> None:
+def _async_buffer_reuse_worker(rank: int, port: int, binding: str, use_consumed_event: bool) -> None:
     torch.npu.set_device(rank)
     if binding == "ctypes":
         eplb_communicator._resolve_hixl_module = lambda: hixl_compat
@@ -71,14 +72,31 @@ def _async_buffer_reuse_worker(rank: int, port: int, binding: str) -> None:
     torch.npu.synchronize()
     assert torch.all(buffers[0][0].cpu() == 2 - rank)
     consumed = torch.empty_like(buffers[0][0])
-    consumed_event = torch.npu.Event()
+    consumed_event = CpuGpuEvent()
     with torch.npu.stream(consumer):
         delay.replay()
         consumed.copy_(buffers[0][0], non_blocking=True)
         consumed_event.record(consumer)
-    consumed_event.wait(background)
-    with torch.npu.stream(background):
-        read_layer(1)
+    consumed_event.wait(stream=background)
+    if use_consumed_event:
+        communicator.set_consumed_event(consumed_event._event)
+
+        def reject_stream_sync():
+            raise AssertionError("event-based buffer reuse must not synchronize the background stream")
+
+        communicator.set_stream(SimpleNamespace(synchronize=reject_stream_sync))
+        start_transfers = session._start_transfers
+
+        def check_read_dependency(reads):
+            assert consumed_event._event.query()
+            start_transfers(reads)
+
+        session._start_transfers = check_read_dependency
+    try:
+        with torch.npu.stream(background):
+            read_layer(1)
+    finally:
+        communicator.set_consumed_event(None)
     torch.npu.synchronize()
     assert torch.all(consumed.cpu() == 2 - rank)
     assert torch.all(buffers[0][0].cpu() == 12 - rank)
@@ -87,13 +105,14 @@ def _async_buffer_reuse_worker(rank: int, port: int, binding: str) -> None:
 
 
 @pytest.mark.parametrize("binding", ["ctypes", "official"])
-def test_async_read_waits_for_previous_layer_buffer_consumption(monkeypatch, binding):
+@pytest.mark.parametrize("use_consumed_event", [False, True])
+def test_async_read_waits_for_previous_layer_buffer_consumption(monkeypatch, binding, use_consumed_event):
     if torch.npu.device_count() < 2:
         pytest.skip("requires two NPU devices")
     if binding == "official" and importlib.util.find_spec("hixl") is None:
         pytest.skip("CANN does not provide the official Python binding")
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
-    mp.spawn(_async_buffer_reuse_worker, args=(get_open_port(), binding), nprocs=2, join=True)
+    mp.spawn(_async_buffer_reuse_worker, args=(get_open_port(), binding, use_consumed_event), nprocs=2, join=True)
 
 
 def _registration_worker(rank: int, port: int, binding: str) -> None:

@@ -56,7 +56,7 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -1095,7 +1095,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 device=torch.device("cpu"),
                 vocab_size=128,
                 block_sizes=[4],
-                **({"kernel_block_sizes": [4]} if vllm_version_is("0.31.0") else {}),
+                **{},
                 max_num_blocks_per_req=[8],
                 num_spec_tokens=3,
             )
@@ -1263,7 +1263,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
-    def _check_load_model_prolog_budget(self, with_draft, pcp_enabled):
+    def _check_load_model_prolog_budget(self, with_draft, use_pcp):
         """Verify persistent PROLOG buffers are charged during weight loading."""
         runner = self._build_runner()
         runner.model_config.model = "test-model"
@@ -1301,13 +1301,16 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.enable_mlapo = False
             impl.fa_quant_layer = False
             impl.use_flashmla = False
-            impl.pcp_enabled = pcp_enabled
-            impl.dcp_enabled = False
+            impl.use_pcp = use_pcp
+            impl.use_dcp = False
             impl.supports_prolog_v3_writer = lambda: True
             layer.impl = impl
             layer.indexer = None
             layer.kv_cache_dtype = "auto"
             layer.head_size = 3
+            # Set by ``MLAAttention.__init__`` on vLLM main; this stub
+            # bypasses ``__init__`` but ``get_kv_cache_spec`` reads it.
+            layer.topk_buffer_width = None
             layer.sliding_window = None
             layer.non_causal_multi_token_decode = False
 
@@ -1364,11 +1367,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 start_nz_warm_thread=MagicMock(),
                 join_nz_warm_thread=MagicMock(),
             ),
-            patch.multiple(
-                "vllm_ascend.model_executor.warmup.early_kernel_warmup",
-                start_early_kernel_warmup=MagicMock(),
-                join_early_kernel_warmup=MagicMock(),
-            ),
             patch(
                 "vllm_ascend.worker.v1.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
                 return_value=False,
@@ -1377,15 +1375,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             runner.load_model()
 
         self.assertEqual(set(layers), {"target.attn", "draft.attn"} if with_draft else {"target.attn"})
-        self.assertEqual(runner.model_memory_usage, 4096 + (0 if pcp_enabled else 32 * len(layers)))
+        self.assertEqual(runner.model_memory_usage, 4096 + (0 if use_pcp else 32 * len(layers)))
         runner.get_kv_cache_spec.assert_not_called()
         for layer in layers.values():
-            self.assertEqual(layer.impl._build_prolog_v3_weights.call_count, int(not pcp_enabled))
+            self.assertEqual(layer.impl._build_prolog_v3_weights.call_count, int(not use_pcp))
 
     def test_load_model_budgets_prolog_weights_for_target_and_draft(self):
-        for with_draft, pcp_enabled in ((False, False), (True, False), (True, True)):
-            with self.subTest(with_draft=with_draft, pcp_enabled=pcp_enabled):
-                self._check_load_model_prolog_budget(with_draft, pcp_enabled)
+        for with_draft, use_pcp in ((False, False), (True, False), (True, True)):
+            with self.subTest(with_draft=with_draft, use_pcp=use_pcp):
+                self._check_load_model_prolog_budget(with_draft, use_pcp)
 
     def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
         runner = self._build_runner()
@@ -1542,8 +1540,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=False,
             enable_kv_nz=True,
-            dcp_enabled=False,
-            pcp_enabled=False,
+            use_dcp=False,
+            use_pcp=False,
             is_pcp_decode_sharded=False,
             supports_strided_mla_writer=lambda: False,
         )
@@ -1562,13 +1560,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
-        attn_module.impl.pcp_enabled = True
+        attn_module.impl.use_pcp = True
         with patch(
             "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
-        attn_module.impl.pcp_enabled = False
+        attn_module.impl.use_pcp = False
 
         attn_module.impl.is_pcp_decode_sharded = True
         with patch(
@@ -1578,7 +1576,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
         attn_module.impl.is_pcp_decode_sharded = False
 
-        attn_module.impl.dcp_enabled = True
+        attn_module.impl.use_dcp = True
         attn_module.impl.supports_strided_mla_writer = lambda: True
         runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
         attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
@@ -1600,7 +1598,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
         attn_module.impl._dcp_current_kv_buffers = None
-        attn_module.impl.dcp_enabled = False
+        attn_module.impl.use_dcp = False
         attn_module.impl.supports_strided_mla_writer = lambda: True
         with patch(
             "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",

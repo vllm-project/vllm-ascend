@@ -1,0 +1,8 @@
+pr: 19086
+entries:
+  - category: bugfix
+    text: >-
+      Mooncake callers now receive the shared transfer engine only after successful
+      initialization. A native construction or initialization failure requires a
+      process restart before retrying, preventing repeated attempts from accumulating
+      leaked transport resources with Mooncake 0.3.11.post1.

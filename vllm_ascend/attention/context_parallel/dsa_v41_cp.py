@@ -22,7 +22,7 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41MetadataBuilder,
     _config_value,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pcp
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.utils import enable_dsa_cp
@@ -32,7 +32,7 @@ def get_v41_cp_classes():
     use_dsa_cp = enable_dsa_cp()
     # Read the current model config: DSpark's target uses PCP, while its
     # replicated draft is constructed under a separate PCP=1 config.
-    use_pcp = enable_pcp()
+    use_pcp = is_pcp_enabled()
     if use_dsa_cp and use_pcp:
         raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
     if use_dsa_cp:
@@ -262,6 +262,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             raise NotImplementedError("V4.1 PCP currently requires DCP=1 for replicated caches.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, build_local_compressor_metadata=True)
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
         self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -379,7 +380,14 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     ) -> AscendDSAV41Metadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
+        if not uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
+            # Without a PCP context the batch runs replicated on every rank,
+            # like a PCP=1 model (e.g. a replicated draft decode), so build the
+            # ordinary V4.1 metadata that the impl executes without PCP.
+            if num_actual_reqs is not None:
+                kwargs["num_actual_reqs"] = num_actual_reqs
+            return super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        assert pcp_context is not None
         assert pcp_cache_group_idx is not None
 
         # Use the global batch so all ranks choose the same prefill/decode path.

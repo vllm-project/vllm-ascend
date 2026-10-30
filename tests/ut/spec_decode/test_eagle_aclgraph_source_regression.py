@@ -7,7 +7,7 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-ACLGRAPH = ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "autoregressive" / "aclgraph.py"
+ACLGRAPH = ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "target_dependent_ar" / "aclgraph.py"
 PATCH = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_v2" / "patch_eagle_speculator.py"
 
 

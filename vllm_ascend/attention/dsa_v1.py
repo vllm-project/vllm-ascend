@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -30,8 +31,8 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_pcp,
     get_or_register_attention_buffer,
+    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -57,7 +58,6 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -271,6 +271,38 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
 
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # What the two Ascend parts can store between them; which one applies is decided
+    # per device in ``supports_kv_cache_dtype``. Everything else -- fp8_e4m3,
+    # fp8_e5m2, mxfp8, nvfp4 -- has no Ascend build.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "int8",
+        "turboquant_4bit_nc",
+    ]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        """Accept the KV cache dtypes this part has an implementation for.
+
+        A5 builds the compressed cache as fp8 and selects the plan from the literal
+        ``cache_config.cache_dtype``: ``bfloat16`` takes the SparseFlashMla path and
+        skips the compress epilog (``dsa_attn_kv_plan.is_a5_bf16_kv_enabled``), fp8
+        takes the epilog. ``auto`` means the model dtype, bfloat16, and is resolved to
+        that literal before this is asked, so it accepts the same layout.
+
+        A3 runs no compressed cache, stores the MLA cache as int8, and still runs
+        turboquant.
+
+        Only the dtype and the device decide this; the per-device split is why the
+        base class's flat list is not enough.
+        """
+        if kv_cache_dtype is None:
+            return True
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            return kv_cache_dtype in ("auto", "bfloat16", "fp8")
+        return kv_cache_dtype in ("auto", "bfloat16", "int8", "turboquant_4bit_nc")
 
     @staticmethod
     def get_name() -> str:
@@ -279,15 +311,15 @@ class AscendDSABackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
+        use_pcp = is_pcp_enabled()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
@@ -319,7 +351,7 @@ class AscendDSABackend(AttentionBackend):
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
+        use_pcp = is_pcp_enabled()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
@@ -332,17 +364,9 @@ class AscendDSABackend(AttentionBackend):
             return AscendDSAPCPImpl
         return AscendDSAImpl
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            return [2, 4, 8, 16, 32, 64, 128]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            return [2, 4, 8, 16, 32, 64, 128]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        return [2, 4, 8, 16, 32, 64, 128]
 
 
 class AscendDSAC4Backend(AscendDSABackend):
@@ -350,21 +374,11 @@ class AscendDSAC4Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4"
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            # Align with upstream's logical block-size contract: Ascend's physical
-            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-            return [128, 256, 512]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            # Align with upstream's logical block-size contract: Ascend's physical
-            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-            return [128, 256, 512]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        # Align with upstream's logical block-size contract: Ascend's physical
+        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+        return [128, 256, 512]
 
 
 class AscendDSAC128Backend(AscendDSABackend):
@@ -372,21 +386,11 @@ class AscendDSAC128Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128"
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            # Align with upstream's logical block-size contract: Ascend's physical
-            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-            return [4096, 8192, 16384]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            # Align with upstream's logical block-size contract: Ascend's physical
-            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-            return [4096, 8192, 16384]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        # Align with upstream's logical block-size contract: Ascend's physical
+        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+        return [4096, 8192, 16384]
 
 
 class AscendDSASWABackend(AscendDSABackend):
@@ -394,17 +398,9 @@ class AscendDSASWABackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_SWA"
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            return [32, 64, 128]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            return [32, 64, 128]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        return [32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
@@ -412,17 +408,9 @@ class AscendDSAC4StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4_STATE"
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            return [2, 4, 8]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            return [2, 4, 8]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        return [2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
@@ -430,21 +418,11 @@ class AscendDSAC128StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128_STATE"
 
-    if vllm_version_is("0.31.0"):
-
-        @staticmethod
-        def get_supported_kernel_block_sizes() -> list[int]:
-            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-                return [4, 8, 16]
-            return [8, 16, 32]
-
-    else:
-
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-                return [4, 8, 16]
-            return [8, 16, 32]
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
+            return [4, 8, 16]
+        return [8, 16, 32]
 
 
 @dataclass
@@ -759,6 +737,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        # Declarative JIT warmup for the fused Q-RMS kernel (upstream-style
+        # registry window is held open by the model runner while builders are
+        # constructed; no-op elsewhere).
+        from vllm_ascend.ops.triton.rms_norm import _TRITON_Q_RMS_KERNEL
+
+        _TRITON_Q_RMS_KERNEL.register_warmup(vllm_config)
         self.device = device
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)

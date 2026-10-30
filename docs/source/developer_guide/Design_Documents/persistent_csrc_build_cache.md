@@ -377,6 +377,29 @@ path, which the restore helper resolves to an absolute directory for builds.
 Deleting the local directory causes a cold build;
 it does not change the compiled source or CI's persistent snapshot.
 
+`csrc/build.sh` keeps two `operator_text_hash` versions per SOC/operator after
+a successful csrc build, retaining all actions inside each version. Configure
+the script-local `BUILD_CACHE_MAX_OPERATOR_VERSIONS` beside `BUILD_CACHE_DIR`;
+nonpositive values disable cleanup. No project-level setting is introduced.
+HITs and saves refresh recency without deleting versions, so a third version
+can coexist until the entire csrc build succeeds. Failed builds do not prune.
+
+Cleanup runs at the end of `build.sh`, after its foreground build commands
+(including their parallel compilation tasks) have succeeded. No cleanup lock
+is added; the cache directory must not be used by another concurrent build or
+prune operation. Cleanup errors never fail the successful build.
+`.updated` marks compaction for the next trusted snapshot save.
+Published outputs are never removed. Schema 4 and action identity are unchanged.
+
+Standalone action or CMake users can explicitly run
+`python3 csrc/scripts/build_cache.py prune --cache-root csrc/build_cache` after a
+successful complete build. `--max-operator-versions N` changes the default of 2.
+
+This bounds operator source-version history, not disk bytes, third-party
+entries, action-key variants within a retained version, or historical OBS
+snapshot counts. Separate concurrent builds must use separate cache directories,
+or the caller must arrange a maintenance window after all builds finish.
+
 ### Central producer
 
 The reusable producer restores L1, performs the ordinary source build, verifies

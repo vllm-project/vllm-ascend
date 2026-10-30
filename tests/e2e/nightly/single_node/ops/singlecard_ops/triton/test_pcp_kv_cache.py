@@ -8,9 +8,14 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.pcp_kv_cache import _copy_pcp_kv_cache_kernel, copy_pcp_kv_cache
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "case,strided",
@@ -44,6 +49,9 @@ def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
     assert torch.equal(packed.cpu(), expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("c8", [False, True])
 @pytest.mark.parametrize("num_slots", [5, 128, 257])
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
@@ -61,7 +69,11 @@ def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
     device = torch.npu.current_device()
     # Isolate the in-memory cache so an existing unaligned variant cannot hide
     # an extra specialization. Compiled disk artifacts can still be reused.
-    with patch.dict(_copy_pcp_kv_cache_kernel.cache, {device: {}}):
+    if hasattr(_copy_pcp_kv_cache_kernel, "device_caches"):
+        kernel_cache = _copy_pcp_kv_cache_kernel.device_caches[device][0]
+    else:
+        kernel_cache = _copy_pcp_kv_cache_kernel.cache[device]
+    with patch.dict(kernel_cache, clear=True):
         for offset in range(5):
             slots = slot_storage[offset : offset + num_slots]
             assert slots.is_contiguous()
@@ -71,9 +83,12 @@ def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
             expected = gold[selected.clamp_min(0)].clone()
             expected[selected < 0] = 0
             assert torch.equal(actual, expected)
-            assert len(_copy_pcp_kv_cache_kernel.cache[device]) == 1
+            assert len(kernel_cache) == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_slots", [5, 257, 513])
 @pytest.mark.parametrize("strided", [False, True])
@@ -92,6 +107,9 @@ def test_separate_latent_and_rope_cache(dtype, num_slots, strided):
     assert torch.equal(packed.cpu(), expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("layout", ["component_major", "token_fused"])
 def test_current_mla_kv_read_does_not_copy_history_cache(layout):
     # A full NoPE copy is 256 MiB, while the current 8193 rows need about

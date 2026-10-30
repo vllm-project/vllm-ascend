@@ -23,7 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 import vllm_ascend.sample.rejection_sampler as rejection_sampler_module
-from vllm_ascend._310p.sample.sampler import fill_exponential_310p
+from vllm_ascend._310p.worker.v2.sample_utils import fill_exponential_310p
 from vllm_ascend.sample.rejection_sampler import (
     AscendRejectionSampler,
     sample_recovered_tokens_blockwise_pytorch,

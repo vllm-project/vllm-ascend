@@ -169,6 +169,7 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 
     assert isinstance(metadata, AscendSFAIndexerMetadata)
     assert metadata.num_actual_tokens == 4
+    assert not metadata.uses_pcp_sharded_layout
     assert torch.equal(metadata.slot_mapping, common.slot_mapping[:4])
     assert torch.equal(metadata.seq_lens, common.seq_lens[:2])
     assert torch.equal(metadata.cum_query_lens, common.query_start_loc[1:3])
@@ -189,6 +190,11 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert metadata.sin.data_ptr() == sin.data_ptr()
 
 
+def _make_decode_pcp_context() -> SimpleNamespace:
+    # Only the global-prefill flag is read when no request is prefilling.
+    return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+
+
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):
@@ -196,10 +202,12 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
 
     builder = _make_builder(pcp_size=2)
     common = _make_common_metadata()
+    common.pcp_context = _make_decode_pcp_context()
     metadata = builder.build(0, common)
 
     # Under PCP the commit writes the gathered prefill region too, so the
     # builder emits the full slot mapping instead of the input-token slice.
+    assert metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping is common.slot_mapping
 
 
@@ -215,6 +223,8 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
     common.query_start_loc_cpu = common.query_start_loc.clone()
     common.max_query_len = 3
     common.is_prefilling = torch.tensor([False, True])
+
+    common.pcp_context = _make_decode_pcp_context()
 
     metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common)
 
@@ -244,6 +254,7 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
         "vllm_ascend.attention.indexer.is_pd_decode_recompute_scheduler_enabled",
         return_value=pd_decode_recompute,
     ):
+        common.pcp_context = _make_decode_pcp_context()
         metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common)
 
     # Short rescheduled prefills remain prefills unless the PD decode
@@ -450,7 +461,7 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     slots = torch.arange(2)
     metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
     indexer = SimpleNamespace(
-        _pcp_active=False,
+        use_pcp=False,
         _dsa_cp_active=True,
         enable_sparse_li_c8=quantized,
         enable_sparse_li_quant=quantized,
@@ -584,3 +595,21 @@ def test_c4_cache_spec_accounts_for_packed_key_and_mx_scales():
     )
     assert spec.real_page_size_bytes == 128 * (64 + 4)
     assert spec.page_size_bytes == spec.real_page_size_bytes
+
+
+@pytest.mark.parametrize("padded_tokens,actual_tokens", [(1, 1), (4, 1), (4, 0)])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_pcp_builder_resolves_replicated_draft_layout_with_padding(
+    mock_cos_sin, mock_config, padded_tokens, actual_tokens
+):
+    common = _make_common_metadata()
+    common.num_input_tokens = padded_tokens
+    common.num_actual_tokens = actual_tokens
+    common.slot_mapping = torch.full((padded_tokens,), -1, dtype=torch.int64)
+    common.positions = torch.arange(padded_tokens)
+    common.pcp_context = None
+    mock_cos_sin.return_value = (torch.zeros(padded_tokens, 1, 1, 8), torch.zeros(padded_tokens, 1, 1, 8))
+    metadata = _make_builder(pcp_size=2).build(0, common)
+    assert not metadata.uses_pcp_sharded_layout
+    assert metadata.slot_mapping.numel() == padded_tokens

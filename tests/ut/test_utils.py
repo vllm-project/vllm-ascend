@@ -232,6 +232,23 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
+    def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
+        with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
+            padded = utils.pad_sequence_parallel_tokens(torch.zeros(6, 3))
+        self.assertEqual(padded.shape, (8, 3))
+
+        aligned = torch.zeros(8, 3)
+        with (
+            mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
+            mock.patch("torch.nn.functional.pad", wraps=torch.nn.functional.pad) as mock_pad,
+        ):
+            padded = utils.pad_sequence_parallel_tokens(aligned)
+
+        # An aligned tracing input must still record the pad, otherwise the
+        # replayed graph drops padding for non-aligned token counts.
+        mock_pad.assert_called_once_with(aligned, (0, 0, 0, 0))
+        self.assertEqual(padded.shape, (8, 3))
+
     def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
         ascend_config = SimpleNamespace(enable_dsa_cp=True)
 

@@ -8,24 +8,33 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu
-from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from vllm_ascend.attention.attention_c8_mxfp import (
-    fill_mxfp_v_scale_cache,
-    mxfp_cache_spec,
-    mxfp_cache_views_for_spec,
-    mxfp_k_scale_slot_index,
-    scatter_mxfp_k_scale_cache,
-    scatter_mxfp_pa_nz_kv_cache,
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A5,
+    reason="The QFA C8-MXFP regression requires Ascend A5",
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
-
-
 @pytest.mark.parametrize("query_tokens", [1, 64])
 @pytest.mark.parametrize("ratio", [1, 2])
 def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio):
+    # Load A5-only dependencies after pytest evaluates the device marker.
+    from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    from vllm_ascend.attention.attention_c8_mxfp import (
+        fill_mxfp_v_scale_cache,
+        mxfp_cache_spec,
+        mxfp_cache_views_for_spec,
+        mxfp_k_scale_slot_index,
+        scatter_mxfp_k_scale_cache,
+        scatter_mxfp_pa_nz_kv_cache,
+    )
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+    from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
+
     init_device_properties_triton()
     torch.manual_seed(42)
     device = torch.device("npu")

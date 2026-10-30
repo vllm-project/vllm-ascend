@@ -305,7 +305,7 @@ jobs:
           if [ "${{ inputs.soc_version }}" = "a5" ]; then
               npu_per_node=8
               npu_resource_name=huawei.com/npu
-              shared_volume_path=/mnt/share
+              shared_volume_path=/mnt/weight
           elif [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
               pvc_name=gy005-az5-vllm-ascend
@@ -647,6 +647,33 @@ jobs:
            steps.profile_artifact.outcome != 'success')
         run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
 
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          SRC="${LOG_PREFIX}/nightly_bisect_runs"
+          if [ -d "$SRC" ]; then
+            cp -a "$SRC" "$DEST/bisect_runs"
+          fi
+          for log in "${LOG_PREFIX}"/node_*_pytest.log; do
+            if [ -f "$log" ]; then
+              cp "$log" "$DEST/"
+            fi
+          done
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-aop-bisect
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Fetch benchmark results from PVC
         if: always()
         run: |
@@ -829,7 +856,7 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: ${{ inputs.config_file_path }}-ascend-logs
+          name: ${{ steps.vars.outputs.artifact_name }}
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
 
@@ -854,7 +881,7 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90
@@ -872,6 +899,7 @@ jobs:
 
       - name: Upload AISBench outputs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: aisbench-outputs-multi-node-${{ steps.vars.outputs.benchmark_job_name }}-${{ github.run_id }}-${{ github.run_attempt }}
