@@ -224,7 +224,9 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
             use_dense_all_token_ids=(
-                self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu")
+                self.speculative_config is not None
+                and self.speculative_config.method
+                in ("ngram", "ngram_gpu", "suffix")
             ),
         )
         # The upstream speculator was constructed with the discarded upstream
