@@ -17,7 +17,9 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
@@ -30,6 +32,12 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v41_indexer_shard import (
+    AscendDSAV41PrefillRowShard,
+    build_prefill_row_shard_tensors,
+    dsv41_prefill_indexer_tp_shard_supported,
+    plan_dsv41_prefill_row_shard,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -199,6 +207,9 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
     cp_token_range: tuple[int, int, int, int] | None = None
+    # Rank-local prefill indexer row shard (index_k planes only). None keeps
+    # the fully replicated indexer scoring path.
+    prefill_row_shard: "AscendDSAV41PrefillRowShard | None" = None
 
 
 @dataclass(frozen=True)
@@ -853,6 +864,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
         self._qli_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
+        # Rank-local QLI tiling for the prefill indexer row shard; kept
+        # separate from ``_qli_metadata`` so device-metadata waits keyed by
+        # ``id()`` never collide between the global and sharded builders.
+        self._qli_shard_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
         if self._supports_device_ops and self._uses_a5_packed_cache and self._cache_kind == "swa":
             self._a5_causal_swa_indices = torch.empty((max_tokens, 1, window_size), dtype=torch.int32, device=device)
             self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
@@ -1000,6 +1015,103 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
         )
+
+    def _build_prefill_row_shard(
+        self,
+        shared,
+        common,
+        coordinates,
+        ratio: int,
+        num_reqs: int,
+        num_actual_tokens: int,
+    ) -> "AscendDSAV41PrefillRowShard | None":
+        """Plan and materialize this rank's prefill indexer row shard.
+
+        Returns None (falling back to replicated scoring) whenever the
+        parallel state, the batch layout or the row-count floor declines.
+        The plan is derived from scheduler state that is identical on every
+        TP rank, so all ranks agree on engaging the later all-gather.
+        """
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size < 2:
+            return None
+        query_start_loc_cpu = coordinates["query_start_loc_cpu"]
+        seq_lens_cpu = coordinates["seq_lens_cpu"]
+        if query_start_loc_cpu is None or seq_lens_cpu is None:
+            return None
+        plan = plan_dsv41_prefill_row_shard(
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            is_prefilling=getattr(common, "is_prefilling", None),
+            num_actual_tokens=num_actual_tokens,
+            compress_ratio=ratio,
+            tp_size=tp_size,
+            tp_rank=get_tensor_model_parallel_rank(),
+        )
+        if plan is None:
+            return None
+        shard = build_prefill_row_shard_tensors(
+            plan,
+            common.block_table_tensor[:num_reqs],
+            ratio,
+        )
+        if not self._supports_device_ops:
+            # Geometry only (CPU unit tests); the QLI op itself is mocked.
+            return shard
+        text_config = self.vllm_config.model_config.hf_text_config
+
+        def build_shard_qli_metadata() -> None:
+            value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                int(_config_value(text_config, "index_n_heads")),
+                1,
+                int(_config_value(text_config, "index_head_dim")),
+                int(_config_value(text_config, "index_topk")),
+                2,
+                cu_seqlens_q=shard.qli_cu_seqlens_q,
+                seqused_k=shard.qli_seqused_k,
+                cmp_residual_k=shard.qli_cmp_residual_k,
+                batch_size=shard.qli_seqused_k.shape[0],
+                max_seqlen_q=shard.max_query_len,
+                max_seqlen_k=(max(plan.local_seq_lens) // ratio) if plan.local_seq_lens else 0,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=ratio,
+            )
+            self._qli_shard_metadata.copy_(value)
+
+        self._publish_task(
+            shared,
+            f"qli_shard:c{ratio}",
+            self._qli_shard_metadata,
+            DeviceMetadataStage.INDEXER,
+            build_shard_qli_metadata,
+        )
+        shard = replace(shard, qli_metadata=self._qli_shard_metadata)
+        total_prefill = sum(plan.sizes)
+        logger.info_once(
+            "DeepSeek-V4.1 prefill indexer TP row shard engaged "
+            "(env VLLM_ASCEND_DSV41_PREFILL_INDEXER_TP_SHARD=1): tp_size=%d, "
+            "compress_ratio=%d. Each rank scores its work-balanced slice of "
+            "prefill rows; the candidate-source layer stays replicated. "
+            "Set VLLM_LOG_LEVEL=DEBUG for per-step plan details.",
+            tp_size,
+            ratio,
+        )
+        logger.debug(
+            "DSV41 indexer shard plan: tp=%d rank=%d ratio=%d prefill_rows=%d "
+            "decode_rows=%d sizes=%s window=[%d, %d) requests=%s",
+            tp_size,
+            get_tensor_model_parallel_rank(),
+            ratio,
+            total_prefill,
+            plan.num_decode_tokens,
+            plan.sizes,
+            plan.start,
+            plan.stop,
+            plan.request_indices,
+        )
+        return shard
 
     def build(
         self,
@@ -1416,6 +1528,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 build_qli_metadata,
             )
 
+        # TP row sharding of the prefill indexer (vllm#54951 idea, V4.1
+        # port). Only the index_k plane carries the shard; the candidate
+        # source layer declines it at execution time. Gate inputs are
+        # identical on every TP rank, so the later all-gather cannot
+        # deadlock. Declined or captured (FULL graph) batches keep the
+        # replicated path.
+        prefill_row_shard = None
+        if (
+            cache_kind == "index_k"
+            and self._build_query_metadata
+            and not self._uses_a5_packed_cache
+            and not full_graph_mode
+            and not metadata_in_graph
+            and coordinates["num_prefills"] > 0
+            and dsv41_prefill_indexer_tp_shard_supported(self.vllm_config)
+        ):
+            prefill_row_shard = self._build_prefill_row_shard(
+                shared, common, coordinates, ratio, num_reqs, num_actual_tokens
+            )
+
         c2_ring_metadata = None
         c2_complete_mask = None
         c2_source_positions = None
@@ -1562,6 +1694,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             c2_source_cos=c2_source_cos,
             c2_source_sin=c2_source_sin,
             c2_metadata_group_id=c2_metadata_group_id,
+            prefill_row_shard=prefill_row_shard,
             **coordinates,
         )
 
