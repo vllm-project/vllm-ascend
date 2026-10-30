@@ -28,6 +28,7 @@ from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 from vllm_ascend.observability.runtime_guard.detector.rare import CONFIG_RC4, RareDetector
 from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
     RareCharsDetector,
+    device_chosen_token_ids,
     top1_and_chosen_logprobs,
 )
 from vllm_ascend.observability.runtime_guard.hooks import need_pre_sample_hook
@@ -187,6 +188,15 @@ def test_need_pre_sample_hook_for_rare_chars(tmp_path: Path):
     cfg._data["detector"]["rare_chars"]["enabled"] = False
     cfg._invalidate_hot_path_gates()
     assert need_pre_sample_hook(guard) is False
+
+
+def test_device_chosen_token_ids_stay_on_device():
+    ids = torch.tensor([[7, -1], [-1, -1], [3, 9]], dtype=torch.int32)
+    chosen = device_chosen_token_ids(ids)
+    assert chosen.device == ids.device
+    assert chosen.tolist() == [7, -1, 9]
+    single = device_chosen_token_ids(torch.tensor([[4], [-1]]))
+    assert single.tolist() == [4, -1]
 
 
 def test_rare_chars_disabled_is_quiet(tmp_path: Path):
