@@ -39,6 +39,12 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     _SPEC_GRAPH_PAD_SLOT_ID = PAD_SLOT_ID
     _USE_COMMON_KERNEL_METADATA = False
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config, kv_cache_spec) -> int | None:
+        # 310P's native recurrent path still bounds accepted_prev by the
+        # current query length and does not use the upstream strided kernel.
+        return None
+
     def _can_pad_spec_decode(self, graph_request_count: int, num_spec_decode_tokens: int) -> bool:
         # MTP token buffers can hold (1 + K) tokens per request. Do not apply
         # the common single-token limit to 310P concurrent spec replay.

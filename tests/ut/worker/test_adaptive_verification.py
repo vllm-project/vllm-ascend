@@ -80,16 +80,9 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
 def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
-    if not vllm_version_is("0.32.0"):
-        # Main trims the budget in a Triton kernel, so the patch must leave
-        # the allocator untouched.
-        before = adaptive.assign_draft_token_budget
-        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-        importlib.reload(module)
-        assert adaptive.assign_draft_token_budget is before
-        return
-
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
+    allocator = Mock()
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
 
@@ -109,7 +102,13 @@ def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
 
     # Isolate this test from batch-invariant tests that patch torch.sum globally.
     monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
+
+    # Exercise the legacy API even when testing against vLLM's new Triton API.
+    def allocator(confidence_probs, idx_mapping, capacities, draft_budget, num_steps):
+        capacities.index_fill_(0, idx_mapping, draft_budget)
+
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     confidence_probs = torch.tensor([[0.95, 0.8, 0.5], [0.9, 0.85, 0.7], [0.7, 0.6, 0.5]])
@@ -142,6 +141,19 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 
     assert result is tensor
     torch.testing.assert_close(result, torch.tensor([0, 2, 0, 2, 0], dtype=result.dtype))
+
+
+def test_adaptive_verification_patch_preserves_triton_allocator(monkeypatch):
+    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
+
+    monkeypatch.delattr(adaptive, "_assign_draft_token_budget", raising=False)
+    monkeypatch.delattr(adaptive, "_assign_draft_token_budget_compiled", raising=False)
+    allocator = adaptive.assign_draft_token_budget
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
+    importlib.reload(module)
+
+    assert adaptive.assign_draft_token_budget is allocator
+    assert not hasattr(adaptive, "_assign_draft_token_budget_compiled")
 
 
 @pytest.mark.parametrize("adaptive", [False, True])

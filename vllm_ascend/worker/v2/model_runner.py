@@ -854,6 +854,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        admitted_draft_kwargs = {}
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -886,13 +887,10 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            # vLLM main appends the admitted draft counts (a 4th element) for
-            # batch-sharded sampling; the release tree returns three fields.
-            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
-            if vllm_version_is("0.32.0"):
-                cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
-            else:
-                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
+            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
+            if len(allocation) == 4:
+                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
             # Non-fia backends skip padding query boundary when using adaptive verification
@@ -987,6 +985,7 @@ class NPUModelRunner(GPUModelRunner):
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
         pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
+        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
