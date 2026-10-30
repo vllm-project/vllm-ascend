@@ -72,6 +72,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Capture the head_dim=512 MTP verify step as a FIA-v2 BNSD paged op (B1)
+    # on Model Runner V2 for A2/A3. Only the exact geometry the V1 patch
+    # serves is switched over (see platform._want_b1_paged_verify); every other
+    # layer/model keeps the default backend. Default: 1 (enabled) because the
+    # default V2 path cannot run this geometry at all. Valid values: 0 or 1.
+    # This configuration is not sensitive.
+    "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "1"))),
 }
 
 # end-env-vars-definition
