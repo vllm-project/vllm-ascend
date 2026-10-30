@@ -474,25 +474,16 @@ def test_composed_lmhead_shards_tile_padded_vocabulary(monkeypatch):
     """The composed (finegrained x TP) encoding shards the vocabulary over the
     TP-outer / fine-grained-inner grid: every tp_rank x lmtp_rank combination
     gets a unique shard that tiles the padded vocabulary evenly."""
-    heads = [
-        _composed_lmhead(monkeypatch, lmtp_rank, 2, tp_rank, 2)
-        for tp_rank in range(2)
-        for lmtp_rank in range(2)
-    ]
+    heads = [_composed_lmhead(monkeypatch, lmtp_rank, 2, tp_rank, 2) for tp_rank in range(2) for lmtp_rank in range(2)]
 
     # shard ranks are unique, consecutive, and drive an even vocab split.
     assert sorted(h.tp_rank for h in heads) == list(range(4))
     for head in heads:
         assert head.tp_size == 4
         assert head.num_embeddings_per_partition == head.num_embeddings_padded // 4
-        assert (
-            head.shard_indices.org_vocab_start_index
-            == head.org_vocab_size_padded * head.tp_rank // head.tp_size
-        )
+        assert head.shard_indices.org_vocab_start_index == head.org_vocab_size_padded * head.tp_rank // head.tp_size
     # Org spans, concatenated in shard order, tile [0, org_vocab_size_padded).
-    org_spans = sorted(
-        (h.shard_indices.org_vocab_start_index, h.shard_indices.org_vocab_end_index) for h in heads
-    )
+    org_spans = sorted((h.shard_indices.org_vocab_start_index, h.shard_indices.org_vocab_end_index) for h in heads)
     assert org_spans[0][0] == 0
     assert all(org_spans[i][1] == org_spans[i + 1][0] for i in range(len(org_spans) - 1))
     assert org_spans[-1][1] == heads[0].org_vocab_size_padded
