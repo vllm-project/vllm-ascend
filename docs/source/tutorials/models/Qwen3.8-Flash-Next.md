@@ -354,6 +354,34 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+### 9.3 Model Runner V2 Decode Submission
+
+The following non-sensitive environment switches accept `0` or `1` and default
+to `1`. No startup exports are required. Set a switch to `0` before starting
+workers to disable its behavior.
+
+| Switch | Behavior |
+| --- | --- |
+| `VLLM_ASCEND_QWEN_MRV2_EARLY_QUEUE` | Submit eligible stable text decode earlier while preserving the exact per-step D2H snapshot and device dependencies. |
+| `VLLM_ASCEND_QWEN_MRV2_MM_DECODE_EARLY_QUEUE` | Extend early submission to multimodal requests with a certified completed prompt; also requires the preceding queue switch. |
+
+Early submission replaces the CPU corrected-length wait with a device-stream
+wait. Exact positions, accepted counts, KV slots, recurrent state, and weight
+offload dependencies remain unchanged. It requires the supported Qwen MRV2 model
+and backend types, fixed positive MTP K, DCP1/PCP1, a uniform local FULL decode
+batch, and a matching same-stream snapshot. Stable Mooncake pull-consumer decode
+also requires completed KV receipt and an exact readiness certificate. Pending
+transfers, new or changing requests, unsupported connectors, active encoder work,
+LoRA, DBO, dynamic/adaptive drafting, and structured output retain the original
+synchronized path. Multimodal certificates bind request, slot, media and encoder
+cache identities; realtime media, prompt embeddings and unaudited layouts retain
+the original path.
+
+There is no blanket TP8, DP1, PP1, SP-off, prefix-cache-off or weight-offload gate.
+Admission is per local batch; PP stages without a local MTP count producer retain
+their original synchronization. Underlying model and runtime restrictions still
+apply.
+
 ## 10 FAQ
 
 For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md).
