@@ -46,6 +46,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.quantization.methods import AscendLinearScheme
 from vllm_ascend.utils import (
@@ -431,6 +432,7 @@ class DCPGatherContext(NamedTuple):
     handle: torch.distributed.Work | None
     restore_perm: tuple[int, ...] | None
     split_sizes: tuple[int, ...]
+    query_prepared: bool = False
 
 
 @dataclass
@@ -1502,6 +1504,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
+        if context.query_prepared and not keep_view:
+            return unpack_query(context.gathered, context.split_sizes)
         gathered = context.gathered
         if context.restore_perm is not None:
             gathered = gathered.permute(context.restore_perm)
@@ -1652,6 +1656,28 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 handle=handle,
                 restore_perm=(1, 0, 2),
                 split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+            )
+
+        # Decode-only callers reach this method; PCP+DCP keeps
+        # its separate TP-group override and DSA-CP gathers tokens on dim 0.
+        nope_dim, rope_dim = ql_nope.shape[-1], q_pe.shape[-1]
+        if (
+            query_gather_dim == 1
+            and ql_nope.dtype in (torch.bfloat16, torch.float16, torch.float32)
+            and ql_nope.shape[0] > 0
+            and nope_dim > 0
+            and rope_dim > 0
+            and nope_dim & (nope_dim - 1) == 0  # Each fragment uses a full tl.arange vector.
+            and rope_dim & (rope_dim - 1) == 0
+        ):
+            prepared = prepare_query_head_major(ql_nope, q_pe)
+            gathered, handle = all_gather_async(prepared, self.dcp_group)
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(nope_dim, rope_dim),
+                query_prepared=True,
             )
 
         # Avoid back-to-back DCP all_gather calls for the two SFA query
