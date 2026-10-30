@@ -10,11 +10,133 @@ import torch
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
+
+
+@pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
+@pytest.mark.parametrize("padding", [None, 64, 1048576])
+def test_flash_attn_physical_cache_budget(head_size, padding):
+    original = FullAttentionSpec(
+        block_size=128, num_kv_heads=8, head_size=head_size, dtype=torch.bfloat16, page_size_padded=padding
+    )
+    physical = AscendFlashAttentionBackend.customize_spec(original)
+    if head_size != 192:
+        assert physical is original
+        return
+    assert original.head_size == original.head_size_v == 192
+    assert physical.head_size == physical.head_size_v == 256
+    natural_bytes = 2 * 128 * 8 * 256 * 2
+    assert physical.page_size_bytes == max(padding or 0, natural_bytes)
+    assert AscendFlashAttentionBackend.customize_spec(physical) is physical
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 7])
+@pytest.mark.parametrize("head_size", [128, 192, 256])
+def test_flash_attn_padding_preserves_input(num_tokens, head_size):
+    tensor = torch.randn(num_tokens, 2, head_size)
+    padded = AscendFlashAttentionImpl._pad_head(tensor)
+    torch.testing.assert_close(padded[..., :head_size], tensor, rtol=0, atol=0)
+    if head_size == 192:
+        assert padded.shape == (num_tokens, 2, 256)
+        assert torch.count_nonzero(padded[..., head_size:]) == 0
+    else:
+        assert padded is tensor
+
+
+@pytest.mark.parametrize("writer", ["reshape_and_cache", "do_kv_cache_update"])
+@pytest.mark.parametrize("bnsd", [False, True])
+def test_flash_attn_both_cache_writers_pad_kv(monkeypatch, writer, bnsd):
+    from vllm_ascend.attention import attention_v1
+
+    query = torch.randn(7, 2, 192)
+    key, value = torch.randn_like(query), torch.randn_like(query)
+    impl = make_impl(query, num_kv_heads=2, layout="PA_BNBD" if bnsd else "PA_BBND")
+    impl.attn_type = AttentionType.DECODER
+    impl.kv_sharing_target_layer_name = None
+    cache_shape = (2, 2, 128, 256) if bnsd else (2, 128, 2, 256)
+    cache = (torch.empty(cache_shape), torch.empty(cache_shape))
+    slots = torch.tensor([0, 3, 127, 128, 130, 150, 255], dtype=torch.int32)
+    cache_write = Mock()
+    monkeypatch.setattr(attention_v1.DeviceOperator, "reshape_and_cache", cache_write)
+    monkeypatch.setattr(attention_v1, "notify_kv_cache_written", lambda: None)
+    if writer == "reshape_and_cache":
+        impl.reshape_and_cache(
+            query, key, value, cache, SimpleNamespace(slot_mapping=slots, num_actual_tokens=7), torch.empty_like(query)
+        )
+    else:
+        impl.do_kv_cache_update(None, key, value, cache, slots)
+    cache_write.assert_called_once()
+    args = cache_write.call_args.kwargs
+    for name, original in (("key", key), ("value", value)):
+        assert args[name].shape == (7, 2, 256)
+        torch.testing.assert_close(args[name][..., :192], original, rtol=0, atol=0)
+        assert torch.count_nonzero(args[name][..., 192:]) == 0
+    assert args["key_cache"] is cache[0]
+    assert args["value_cache"] is cache[1]
+    assert args["use_bnsd"] is bnsd
+    torch.testing.assert_close(args["slot_mapping"], slots)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_192_preserves_scale_and_output_buffer(monkeypatch, causal):
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
+
+    query = torch.randn(7, 2, 192)
+    impl = make_impl(query)
+    result = torch.randn(7, 2, 256)
+    output = torch.full((8, 2, 192), float("nan"))
+    ops = SimpleNamespace(
+        flash_attn_metadata=Mock(return_value=torch.empty(16)),
+        flash_attn=Mock(return_value=(result, None)),
+    )
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    metadata = AscendFlashAttentionMetadata(
+        query_start_loc_gpu=torch.tensor([0, 7], dtype=torch.int32),
+        seq_lens_gpu=torch.tensor([31], dtype=torch.int32),
+        block_tables=torch.zeros(1, 1, dtype=torch.int32),
+        max_query_len=7,
+        causal=causal,
+    )
+    assert impl.forward_impl(query, None, None, None, metadata, output) is output
+    assert ops.flash_attn_metadata.call_args.args[2] == 256
+    assert ops.flash_attn.call_args.kwargs["softmax_scale"] == 192**-0.5
+    padded_query = ops.flash_attn.call_args.args[0]
+    torch.testing.assert_close(padded_query[..., :192], query, rtol=0, atol=0)
+    assert torch.count_nonzero(padded_query[..., 192:]) == 0
+    torch.testing.assert_close(output[:7], result[..., :192], rtol=0, atol=0)
+    assert output[7].isnan().all()
+
+
+@pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, AscendAttentionBackend])
+def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    layer.attn_type = AttentionType.DECODER
+    layer.attn_backend = backend
+    layer.is_draft_layer = True
+    layer.kv_cache_dtype = "bfloat16"
+    layer.kv_cache_torch_dtype = torch.bfloat16
+    layer.sliding_window = None
+    layer.num_kv_heads = 8
+    layer.head_size = layer.head_size_v = 192
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=None),
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+    physical_size = 256 if backend is AscendFlashAttentionBackend else 192
+    assert spec.head_size == spec.head_size_v == physical_size
+    assert spec.page_size_bytes == 2 * 128 * 8 * physical_size * 2
+    assert layer.head_size == layer.head_size_v == 192
 
 
 def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
@@ -76,10 +198,13 @@ def select_flash_attn(monkeypatch):
     return select, profile
 
 
-@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize(
+    "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
+)
+@pytest.mark.parametrize("head_size", [128, 192, 256])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_minimax_m3_dspark_selects_flash_attn_for_eager_and_graph_drafts(
-    select_flash_attn, dflash2_config, architecture, enforce_eager
+def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
+    select_flash_attn, dflash2_config, architecture, enforce_eager, head_size
 ):
     select, _ = select_flash_attn
     config = dflash2_config
@@ -88,7 +213,7 @@ def test_minimax_m3_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     spec.enforce_eager = enforce_eager
     spec.target_model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture]))
     spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
-    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    selector = AttentionSelectorConfig(head_size=head_size, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
 
     assert select(config, selector, "dspark_head")
     assert not select(config, selector, "backbone")
@@ -174,6 +299,7 @@ def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dfl
         ("use_rswa", True),
         ("use_batch_invariant", True),
         ("use_per_head_quant_scales", True),
+        ("head_size", 160),
         ("dtype", torch.float32),
         ("kv_cache_dtype", "fp8"),
         ("kv_cache_dtype", "int8"),

@@ -3,9 +3,10 @@
 
 """Device-length CANN FlashAttn for A5 V2 drafts."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
+import torch.nn.functional as F
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -53,6 +54,26 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
 
 class AscendFlashAttentionBackend(AscendAttentionBackend):
     @staticmethod
+    def get_supported_head_sizes():
+        # Logical 192-wide heads use zero padding to the native 256-wide kernel.
+        return [64, 72, 128, 192, 256]
+
+    @staticmethod
+    def get_padded_head_size(head_size):
+        return 256 if head_size == 192 else head_size
+
+    @classmethod
+    def customize_spec(cls, spec):
+        head_size = cls.get_padded_head_size(spec.head_size)
+        head_size_v = cls.get_padded_head_size(spec.head_size_v)
+        if (head_size, head_size_v) == (spec.head_size, spec.head_size_v):
+            return spec
+        padded = replace(spec, head_size=head_size, head_size_v=head_size_v, page_size_padded=None)
+        if spec.page_size_padded is not None:
+            padded = replace(padded, page_size_padded=max(spec.page_size_padded, padded.real_page_size_bytes))
+        return padded
+
+    @staticmethod
     def get_impl_cls():
         return AscendFlashAttentionImpl
 
@@ -62,11 +83,30 @@ class AscendFlashAttentionBackend(AscendAttentionBackend):
 
 
 class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
+    @staticmethod
+    def _pad_head(tensor):
+        padded_size = AscendFlashAttentionBackend.get_padded_head_size(tensor.shape[-1])
+        if padded_size == tensor.shape[-1]:
+            return tensor
+        return F.pad(tensor, (0, padded_size - tensor.shape[-1]))
+
+    def reshape_and_cache(self, query, key, value, kv_cache, attn_metadata, output):
+        # Pad only newly written tokens; the persistent cache is allocated wide.
+        return super().reshape_and_cache(
+            query, self._pad_head(key), self._pad_head(value), kv_cache, attn_metadata, output
+        )
+
+    def do_kv_cache_update(self, layer, key, value, kv_cache, slot_mapping):
+        return super().do_kv_cache_update(layer, self._pad_head(key), self._pad_head(value), kv_cache, slot_mapping)
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """Reuse device lengths and tiling plans across layers in one draft step."""
         # Load CANN only in workers using this backend.
         from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
 
+        # Retain the model's original scale and output width after zero padding.
+        output_head_size = query.shape[-1]
+        query = self._pad_head(query)
         metadata = attn_metadata
         if metadata.flash_attn_lengths is None:
             num_reqs = metadata.block_tables.shape[0]
@@ -113,5 +153,5 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
                 **attrs,
             )
             # CANN returns a new tensor; vLLM requires its supplied output buffer.
-            output[: query.shape[0]].copy_(result)
+            output[: query.shape[0]].copy_(result[..., :output_head_size])
             return output
