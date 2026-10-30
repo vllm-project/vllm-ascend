@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+// CANN 9.2 Bisheng's device frontend cannot compile libstdc++12 constrained
+// std::pair assignment overloads. Keep the C++17 utility implementation for
+// device compilation, and supply the explicit debug declarations MegaMoE uses.
+#pragma once
+
+#ifdef __CCE__
+#undef __cpp_concepts
+#undef __cpp_lib_concepts
+#endif
+
+#include_next <utility>
+
+#ifdef __CCE__
+#include <utils/debug/asc_printf.h>
+#include <utils/debug/asc_assert.h>
+#endif
