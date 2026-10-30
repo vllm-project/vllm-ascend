@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pytest
+import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
+from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as module
+
+
+def make_method(scale_alg, available=True):
+    config = SimpleNamespace(quant_config=SimpleNamespace(), use_v2_model_runner=True)
+    runtime = SimpleNamespace(npu_swiglu_mx_quant=Mock()) if available else SimpleNamespace()
+    with (
+        patch.object(module, "get_current_vllm_config", return_value=config),
+        patch.object(module, "get_ascend_config"),
+        patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg),
+        patch.object(module, "torch_npu", runtime),
+    ):
+        return module.AscendW8A8MXFP8DynamicFusedMoEMethod()
+
+
+@pytest.mark.parametrize("scale_alg", [0, 1])
+@pytest.mark.parametrize("available", [False, True])
+def test_fused_clipped_activation_requires_ceil_scale_and_api(scale_alg, available):
+    method = make_method(scale_alg, available)
+    assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1 and available)
+    assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1 and available)
+    assert method.supports_fused_activation(MoEActivation.SILU)
+    for activation in (MoEActivation.SWIGLUOAI, MoEActivation.SITU, MoEActivation.GELU, MoEActivation.SWIGLUSTEP):
+        assert not method.supports_fused_activation(activation)
+
+
+def test_enabling_one_model_does_not_change_other_instances():
+    enabled = make_method(1)
+    other_model = make_method(0)
+    assert enabled.supports_fused_activation("swigluoai_uninterleave")
+    assert not other_model.supports_fused_activation("swigluoai_uninterleave")
+    assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu"})
+
+
+@pytest.mark.parametrize("scale_alg,available", [(1, True), (0, True), (1, False)])
+def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, available):
+    method = make_method(scale_alg, available)
+    packed = torch.randn(4, 128, dtype=torch.bfloat16)
+    quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
+    scales = torch.ones(4, 1, 2, dtype=torch.uint8)
+    method.apply_gmm1 = Mock(return_value=packed)
+    method.apply_act_quant = Mock(return_value=(quantized, scales))
+    method.apply_gmm2 = Mock(return_value="result")
+    inputs = SimpleNamespace(
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        quant=SimpleNamespace(is_quant=True),
+        lora_context=None,
+        swiglu_limit=5.0,
+        swiglu_alpha=1.5,
+        swiglu_beta=0.5,
+    )
+    with (
+        patch.object(module.torch_npu, "npu_swiglu_mx_quant", return_value=(quantized, scales), create=True) as fused,
+        patch("vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.clipped_swiglu", return_value="activated") as legacy,
+        patch("vllm_ascend.ops.fused_moe.moe_mlp.maybe_record_event", return_value=None),
+    ):
+        assert apply_moe_mlp(inputs, method) == ("result", None)
+    method.apply_gmm1.assert_called_once_with(inputs)
+    method.apply_gmm2.assert_called_once_with(inputs, quantized, scales)
+    if scale_alg == 1 and available:
+        fused.assert_called_once_with(
+            packed,
+            activate_left=True,
+            swiglu_mode=2,
+            clamp_limit=5.0,
+            glu_alpha=1.5,
+            glu_bias=0.5,
+            dst_type=torch.float8_e4m3fn,
+            scale_alg=1,
+        )
+        legacy.assert_not_called()
+        method.apply_act_quant.assert_not_called()
+    else:
+        fused.assert_not_called()
+        legacy.assert_called_once_with(packed, swiglu_limit=5.0, swiglu_alpha=1.5, swiglu_beta=0.5)
+        method.apply_act_quant.assert_called_once_with(inputs, "activated")
