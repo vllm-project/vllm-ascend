@@ -1485,7 +1485,6 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
-#
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
