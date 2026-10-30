@@ -346,11 +346,25 @@ def build_dspark_swa_slot_indices_triton(
     """
 
     num_reqs = query_start_loc.shape[0] - 1
+    max_query_width = int(num_speculative_tokens) + 1
+    if num_query_per_req is None:
+        num_query_per_req = max_query_width
+    num_query_per_req = int(num_query_per_req)
+    if not 1 <= num_query_per_req <= max_query_width:
+        raise ValueError(
+            f"dspark_swa_indices num_query_per_req must be in [1, {max_query_width}], got {num_query_per_req}"
+        )
     if index_width is None:
         # Same alignment rule as dsa_v1._aligned_dspark_index_width.
-        min_width = int(window_size) + int(num_speculative_tokens)
+        min_width = int(window_size) + int(num_speculative_tokens) + 1
         index_width = ((min_width + 127) // 128) * 128
     W = int(index_width)
+    min_width = int(window_size) + num_query_per_req
+    if min_width > W:
+        raise ValueError(
+            "dspark_swa_indices index_width must cover window_size + num_query_per_req: "
+            f"index_width={W}, required={min_width}"
+        )
 
     # num_decode_tokens avoids the only D2H sync on this path
     # (query_start_loc[num_reqs].item()).
@@ -364,11 +378,6 @@ def build_dspark_swa_slot_indices_triton(
     R_alloc = int(max_num_reqs) if max_num_reqs is not None else num_reqs
     if R_alloc < num_reqs:
         R_alloc = num_reqs
-    if num_query_per_req is None:
-        num_query_per_req = int(num_speculative_tokens) + 1
-    num_query_per_req = int(num_query_per_req)
-    if num_query_per_req < 1:
-        raise ValueError(f"dspark_swa_indices num_query_per_req must be >= 1, got {num_query_per_req}")
     num_rows_padded = R_alloc * num_query_per_req
 
     if indices_output is not None:

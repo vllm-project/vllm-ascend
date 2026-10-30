@@ -511,7 +511,9 @@ def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
 
 
 def _aligned_dspark_index_width(window_size: int, block_size: int, alignment: int = 128) -> int:
-    min_width = int(window_size) + int(block_size)
+    # Non-anchor drafting has K+1 queries; reserve its last query even when
+    # native_window + K is already an alignment multiple.
+    min_width = int(window_size) + int(block_size) + 1
     return ((min_width + alignment - 1) // alignment) * alignment
 
 
@@ -529,6 +531,7 @@ def build_dspark_swa_indices(
     *,
     use_logical_indices: bool = False,
     lengths_output: torch.Tensor | None = None,
+    num_query_per_req: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -540,6 +543,8 @@ def build_dspark_swa_indices(
     ``lengths_output`` optionally supplies the active persistent length view;
     with ``use_logical_indices`` the returned lengths then take the [T, 1]
     shape required by the SparseFlashMla top-k interface.
+    ``num_query_per_req`` is the caller's host-side query bound (K for anchor
+    sampling, K+1 otherwise); explicit index capacity never reads device values.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -548,10 +553,14 @@ def build_dspark_swa_indices(
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
-    min_width = int(window_size) + int(num_speculative_tokens)
+    max_query_width = int(num_speculative_tokens) + 1
+    query_width = max_query_width if num_query_per_req is None else int(num_query_per_req)
+    if not 1 <= query_width <= max_query_width:
+        raise ValueError(f"DSpark SWA num_query_per_req must be in [1, {max_query_width}], got {query_width}")
+    min_width = int(window_size) + query_width
     if index_width < min_width:
         raise ValueError(
-            "DSpark SWA index_width must cover window_size + block_size: "
+            "DSpark SWA index_width must cover window_size + num_query_per_req: "
             f"index_width={index_width}, required={min_width}"
         )
     if query_start_loc is None or seq_lens is None:
@@ -1234,8 +1243,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.model_config.hf_config.sliding_window,
             self.speculative_config.num_speculative_tokens,
         )
-        # The buffer keeps the __init__ allocation (sized for the token-count
-        # cap) unless the caller's query-token quota needs more rows; either
+        # Reuse an existing eager allocation unless the caller's query-token
+        # quota needs more rows; otherwise allocate before deferred work. Either
         # way the row count must cover the triton capacity grid, which is
         # derived from the builder's padded request capacity below.
         min_rows = self.max_num_reqs_for_dspark() * self.dspark_num_query_per_req()
@@ -1251,8 +1260,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # persistent alongside the indices buffer so the executor-stream task
         # avoids a per-step transient allocation. Same pattern as
         # spec_sas_metadata. Independent predicate: the regrow branch above is
-        # rarely taken (the __init__ allocation usually already covers the
-        # quota), so sizing the scratch only inside it would leave it None on
+        # rarely taken when an earlier eager allocation covers the quota,
+        # so sizing the scratch only inside it would leave it None on
         # the common path.
         if (
             self.dspark_lens_scratch is None
@@ -1302,6 +1311,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_decode_reqs <= self.max_num_reqs_for_dspark()
         )
 
+    def _get_dspark_swa_indices_buffer(self) -> torch.Tensor:
+        """Lazily allocate the same stable-address noncausal scratch capacity."""
+        if self.dspark_swa_indices_buffer is None:
+            assert self.speculative_config is not None and self._dspark_index_width is not None
+            scheduler = self.vllm_config.scheduler_config
+            max_rows = max(
+                scheduler.max_num_batched_tokens,
+                scheduler.max_num_seqs * (self.speculative_config.num_speculative_tokens + 1),
+            )
+            self.dspark_swa_indices_buffer = torch.zeros(
+                (max_rows, 1, self._dspark_index_width), dtype=torch.int32, device=self.device
+            )
+        return self.dspark_swa_indices_buffer
+
     def _build_dspark_swa_indices_eager(
         self, dspark_swa_args: tuple, buffer: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1313,6 +1336,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         unavailable or the shape is unsupported. ``buffer`` keeps the
         stable-address contract of the previous eager call sites.
         """
+        if buffer is None:
+            buffer = self._get_dspark_swa_indices_buffer()
         block_table, num_speculative_tokens, window_size, block_size, query_start_loc, seq_lens, num_decode_tokens = (
             dspark_swa_args
         )
@@ -1338,6 +1363,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens,
             num_decode_tokens=num_decode_tokens,
             buffer=buffer,
+            num_query_per_req=self.dspark_num_query_per_req(),
         )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
@@ -1795,6 +1821,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         indices_output=dspark_swa_indices,
                         use_logical_indices=use_sparse_flash,
                         lengths_output=dspark_swa_topk_lengths,
+                        num_query_per_req=self.dspark_num_query_per_req(),
                     )
             else:
                 if use_sparse_flash:

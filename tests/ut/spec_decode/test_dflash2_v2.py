@@ -17,7 +17,7 @@
 #
 """Unit tests for the V2 DFlash2 speculator (worker/v2/spec_decode/dflash2)."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import make_dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -235,6 +235,7 @@ def test_dflash_loader_temporarily_disables_profiling_chunk(monkeypatch, fail):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
         additional_config=additional_config,
+        quant_config=None,
     )
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.vllm_config = config
@@ -275,7 +276,10 @@ def _spec_config(arch: str) -> SimpleNamespace:
     )
 
 
-def test_init_speculator_routes_dflash2_draft_model():
+def test_init_speculator_routes_dflash2_draft_model(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.get_ascend_config", lambda: SimpleNamespace(draft_window_size=None)
+    )
     cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
     with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
         assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
@@ -328,6 +332,84 @@ def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
     with pytest.raises(NotImplementedError, match="graph mode"):
         speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
     assert calls == [CUDAGraphMode.NONE]
+
+
+@pytest.mark.parametrize("selector_fails", [False, True])
+def test_window_scope_covers_dflash2_selector_and_candidate_walk(monkeypatch, selector_fails):
+    """Real MRO dispatch; CPU substitutes cannot validate the NPU walk itself."""
+    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    events = []
+    active = False
+
+    @contextmanager
+    def proposal_context(actual, batch, dummy_run, is_profile):
+        nonlocal active
+        assert actual is speculator
+        active = True
+        events.append("proposal")
+        try:
+            yield
+        finally:
+            events.append("completion")
+            active = False
+
+    def run_model(*args):
+        assert active
+        events.append("attention")
+        return torch.ones(3, 4)
+
+    def compute_candidates(hidden):
+        assert active and hidden.shape == (2, 4)
+        events.append("candidates")
+        return torch.tensor([[1, 2], [3, 4]]), torch.ones(2, 2)
+
+    def score(candidate_ids, logits, hidden, anchors):
+        assert active and anchors.tolist() == [17]
+        events.append("selector")
+        if selector_fails:
+            raise RuntimeError("selector submission failed")
+        return logits.unsqueeze(2).expand(1, 2, 2, 2)
+
+    def sample(*args):
+        assert active and args[-2] is speculator.draft_logits
+        events.append("walk_and_cache")
+
+    speculator._draft_window_runtime = SimpleNamespace(proposal_context=proposal_context)
+    speculator.num_speculative_steps = 2
+    speculator.num_query_per_req = 3
+    speculator.top_k = 2
+    speculator.input_buffers = SimpleNamespace(input_ids=torch.tensor([17, 0, 0]))
+    speculator.sample_indices = torch.tensor([1, 2])
+    speculator.sample_pos = torch.tensor([18, 19])
+    speculator.sample_idx_mapping = torch.tensor([0, 0])
+    speculator.temperature = torch.tensor([0.0])
+    speculator.seeds = torch.tensor([3])
+    speculator.draft_tokens = torch.empty(2, dtype=torch.int64)
+    speculator.draft_logits = torch.empty(1, 2, 20)
+    speculator.use_fp64_gumbel = False
+    speculator.enable_adaptive_verification = False
+    speculator._run_model = run_model
+    speculator.model = SimpleNamespace(
+        compute_candidates=compute_candidates, model=SimpleNamespace(candidate_selector=score)
+    )
+    speculator.candidate_sampler = SimpleNamespace(sample=sample)
+
+    def baseline_propose(actual, *args, **kwargs):
+        assert actual is speculator
+        # This virtual call must select DFlash2, while propose uses Ascend's
+        # window wrapper; falling back to DFlash would skip its selector.
+        actual._generate_draft(1, 3, None, None, None)
+
+    monkeypatch.setattr(DFlashSpeculator, "propose", baseline_propose)
+    monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+    assert AscendDFlash2Speculator.propose is AscendDFlashSpeculator.propose
+    with pytest.raises(RuntimeError, match="selector submission") if selector_fails else nullcontext():
+        speculator.propose(SimpleNamespace(), {}, {}, *([None] * 8))
+    expected = ["proposal", "attention", "candidates", "selector"]
+    if not selector_fails:
+        expected.append("walk_and_cache")
+    assert events == [*expected, "completion"]
+    assert not active
 
 
 def test_greedy_walk_contract_reference():

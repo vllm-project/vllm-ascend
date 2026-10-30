@@ -1930,6 +1930,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mrv2_dsa_cp_uses_uncompressed_sfa_route(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config = SimpleNamespace(
+            is_moe=False,
+            use_mla=True,
+            hf_text_config=SimpleNamespace(index_topk=2048),
+            hf_config=SimpleNamespace(),
+            enforce_eager=True,
+            architectures=[],
+        )
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 2
+        vc.parallel_config.data_parallel_size = 2
+        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+        vc.additional_config = {"enable_dsa_cp": True}
+        with patch.object(_VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True):
+            self.assertTrue(init_ascend_config(vc).enable_dsa_cp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mrv2_dsa_cp_keeps_compressed_route_guard(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.hf_text_config = SimpleNamespace(index_topk=2048, compress_ratios=[1, 4])
+        vc.additional_config = {"enable_dsa_cp": True}
+        with (
+            patch.object(_VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True),
+            self.assertRaisesRegex(ValueError, "MRV2 DSA-CP"),
+        ):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
         """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
         with patch.dict(os.environ, {}, clear=False):

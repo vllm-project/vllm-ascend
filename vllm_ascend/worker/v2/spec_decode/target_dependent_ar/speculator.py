@@ -16,9 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import inspect
 import logging
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +49,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+_UPSTREAM_PREFILL_HAS_SKIP_SAMPLE = "skip_sample" in inspect.signature(TargetDependentARSpeculator._prefill).parameters
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -218,6 +219,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs_padded: int,
         num_tokens_padded: int,
         cudagraph_runtime_mode: CUDAGraphMode,
+        *,
+        build_metadata: bool = True,
     ) -> tuple[
         dict[str, Any] | None,
         dict[str, torch.Tensor] | None,
@@ -273,6 +276,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             slot_mappings_tensor,
             self.kv_cache_config,
         )
+        if not build_metadata:
+            # Window prefill builds its private metadata after this helper has
+            # restored the global Full table and write-slot coordinates.
+            return attn_metadata, slot_mappings
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
         attn_metadata = self._build_attn_metadata(
@@ -333,7 +340,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         sync_state = None if self.replicated_pcp else dp_sync_state
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
+        runtime = getattr(self, "_draft_window_runtime", None)
         with (
+            runtime.proposal_context(self, input_batch, dummy_run, is_profile)
+            if runtime is not None
+            else nullcontext(),
             disable_target_pcp_for_replicated_draft(self),
             build_attn_metadata_wrapper(),
             torch_gather_wrapper(),
@@ -389,6 +400,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self.attn_architecture = "GQA"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
+
+        if hasattr(self, "draft_window_policy"):
+            from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime
+
+            self._draft_window_runtime = DraftWindowRuntime(self, self.draft_window_policy)
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
@@ -536,13 +552,28 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         skip_sample: bool = False,
     ) -> None:
+        runtime = getattr(self, "_draft_window_runtime", None)
+        window_active = runtime is not None and runtime.reads_active
         attn_metadata, slot_mappings = self._prepare_replicated_prefill_attn(
             attn_metadata,
             slot_mappings,
             num_reqs,
             num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            build_metadata=not window_active,
         )
+        if window_active:
+            attn_metadata = self._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=BatchExecutionDescriptor(
+                    cg_mode=cudagraph_runtime_mode,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                ),
+                query_start_loc_np=self.input_batch.query_start_loc_np,
+                seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                step=0,
+            )
         # Draft prefill reuses target metadata, but the target metadata may
         # also contain target-only attention layers (e.g. GDN layers).
         if attn_metadata is not None and self.draft_attn_layer_names is not None:
@@ -550,7 +581,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        if vllm_version_is("0.32.0"):
+        if not _UPSTREAM_PREFILL_HAS_SKIP_SAMPLE:
             super()._prefill(
                 num_reqs,
                 num_tokens,
@@ -583,8 +614,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata for uniform and explicit query layouts."""
+        runtime = getattr(self, "_draft_window_runtime", None)
+        window_first_pass = runtime is not None and runtime.reads_active and step == 0
+        slot_kwargs = {} if slot_mappings is None else {"slot_mappings": slot_mappings}
         assert self.input_batch is not None
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
@@ -610,8 +645,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             batch_desc.num_tokens,
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
+            # The private Window first pass can contain long or mixed queries.
+            # DecodeOnly consumers may assume exactly one query per request.
+            attn_state=AscendAttentionState.ChunkedPrefill if window_first_pass else None,
             parallel_config=self.draft_vllm_config.parallel_config,
             offload_kwargs=offload_kwargs,
+            common_metadata_callback=runtime.metadata_callback(step, num_reqs) if runtime is not None else None,
+            metadata_builder_callback=runtime.metadata_builder_callback(step) if runtime is not None else None,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs,
@@ -621,16 +661,20 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 step,
                 causal,
                 dcp_local_seq_lens,
+                **slot_kwargs,
             )
         if attn_metadata is not None:
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
+                if not window_first_pass:
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
             # Only draft decode steps (step > 0) update CPU-side lengths.
             # Step 0 is draft prefill and skips this decode update.
             if step > 0:
                 self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
+        if runtime is not None:
+            runtime.retain_metadata(attn_metadata)
         return attn_metadata
 
     def build_draft_attn_metadatas(
@@ -720,6 +764,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
     ):
         """Update per-step decode attention metadata on Ascend."""
+        runtime = getattr(self, "_draft_window_runtime", None)
+        if runtime is not None and runtime.reads_active:
+            # Every eager AR step has already built independent exact Window
+            # lengths. The baseline update below derives Full CPU lengths and
+            # would both overwrite that view and mutate an in-flight reader.
+            return
+
         if attn_metadata is None:
             return
 

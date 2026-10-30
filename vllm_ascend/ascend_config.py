@@ -720,11 +720,22 @@ class AscendConfig:
                 "when --prefill-context-parallel-size is greater than 1."
             )
         if self.enable_dsa_cp and vc.use_v2_model_runner:
-            raise ValueError(
-                "DSA-CP is not supported by Model Runner V2. "
-                "Remove enable_dsa_cp from additional_config and use "
-                "prefill context parallelism (PCP) instead."
-            )
+            from vllm_ascend.utils import model_uses_sfa_sparse
+
+            # MRV2 supplies padded model-input counts to the SFA TP-token
+            # projection. Compressed DSA and composed PP/DCP routes have
+            # different metadata/communication contracts; retain their guard.
+            if (
+                not model_uses_sfa_sparse(vc.model_config)
+                or not getattr(vc.model_config, "use_mla", False)
+                or not vc.parallel_config.use_sequence_parallel_moe
+                or vc.parallel_config.decode_context_parallel_size != 1
+                or vc.parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError(
+                    "MRV2 DSA-CP requires uncompressed SFA MLA, sequence-parallel MoE, "
+                    "PP=1 and DCP=1. Other DSA-CP routes remain unsupported."
+                )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
