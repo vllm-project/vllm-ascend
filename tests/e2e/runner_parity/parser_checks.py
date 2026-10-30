@@ -32,7 +32,8 @@ def main():
     assert tool.tools_called and len(tool.tool_calls) == 1
     assert tool.tool_calls[0].function.name == "weather"
     assert json.loads(tool.tool_calls[0].function.arguments) == {"city": "Beijing"}
-    assert not torch.npu.is_initialized()
+    npu = getattr(torch, "npu", None)
+    assert npu is None or not npu.is_initialized()
     result = {
         "reasoning_parser": type(reasoning_parser).__name__,
         "tool_parser": type(tool_parser).__name__,
