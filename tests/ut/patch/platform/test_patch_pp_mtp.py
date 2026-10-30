@@ -5,11 +5,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-import torch
 from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
@@ -391,18 +389,14 @@ def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
         (8192, 4, 8192, True),
     ],
 )
-def test_pp_feedback_skips_only_non_final_prefill(
-    computed, scheduled, prompt_len, expected
-):
+def test_pp_feedback_skips_only_non_final_prefill(computed, scheduled, prompt_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.input_batch = SimpleNamespace(
         req_id_to_index={"req-0": 0},
         num_computed_tokens_cpu=np.array([computed], dtype=np.int32),
         num_prompt_tokens=np.array([prompt_len], dtype=np.int32),
     )
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"req-0": scheduled}
-    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": scheduled})
     assert runner._pp_step_needs_sampled_feedback(scheduler_output) is expected
 
 
@@ -413,14 +407,12 @@ def test_pp_feedback_ignores_unscheduled_or_unknown_requests():
         num_computed_tokens_cpu=np.array([8192], dtype=np.int32),
         num_prompt_tokens=np.array([8192], dtype=np.int32),
     )
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"req-0": 0, "unknown": 4}
-    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 0, "unknown": 4})
     assert runner._pp_step_needs_sampled_feedback(scheduler_output) is False
 
 
 def test_pp_feedback_is_posted_before_last_stage_state_correction() -> None:
     block = inspect.getsource(NPUModelRunner.sample_tokens)
-    assert block.index(
-        "self._pp_broadcast_sampled_tokens_and_accepted_counts("
-    ) < block.index("self._update_states_after_model_execute(")
+    assert block.index("self._pp_broadcast_sampled_tokens_and_accepted_counts(") < block.index(
+        "self._update_states_after_model_execute("
+    )
