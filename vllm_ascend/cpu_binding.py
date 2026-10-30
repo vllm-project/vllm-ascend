@@ -567,23 +567,35 @@ class CpuAlloc:
             if npu in self.device_info.running_npu_list
             or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
         ]
+        # Group NPUs by their local (pre-extension) affinity pool so that the
+        # split below can never hand an NPU CPUs from a remote NUMA node.
+        # Extending every single-node pool first and grouping by the extended
+        # pool made the numeric split give the lowest-numbered CPUs to the
+        # lowest NPU id, which is a remote NUMA node for some NPUs when
+        # several NPUs share one NUMA node (e.g. 8x 910B on 4 NUMA nodes).
+        base_pools: dict[int, list[int]] = {}
+        groups: dict[str, list[int]] = defaultdict(list)
         for npu in candidate_npus:
             base_cpu_list = [
                 cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
             ]
             if not base_cpu_list:
                 raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
-            extra_cpu_list = self.extend_numa(base_cpu_list)
-            self.npu_cpu_pool[npu] = extra_cpu_list
+            base_pools[npu] = base_cpu_list
+            groups[str(base_cpu_list)].append(npu)
 
-        groups = defaultdict(list)
-        for npu, cpus in self.npu_cpu_pool.items():
-            groups[str(cpus)].append(npu)
-
+        min_cpus_per_group = self._min_cpus_per_npu()
         final: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
+            pool = base_pools[npu_list[0]]
+            # Only extend to the next NUMA node when the local pool is too
+            # small to host the whole group with per-NPU role reservations.
+            if len(pool) < min_cpus_per_group * len(npu_list):
+                pool = self.extend_numa(pool)
+            for npu in npu_list:
+                self.npu_cpu_pool[npu] = pool
             if len(npu_list) == 1:
-                final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
+                final[npu_list[0]] = pool
             else:
                 final.update(self.average_distribute({key: npu_list}))
         # Keep only visible NPUs in the final binding pool. Non-visible NPUs are used only to avoid overlap.

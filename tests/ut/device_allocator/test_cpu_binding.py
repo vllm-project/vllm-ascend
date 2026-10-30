@@ -813,20 +813,17 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             cpu_alloc.device_info.running_npu_list = [visible_npu]
             cpu_alloc.device_info.allowed_cpus = list(range(144, 192))
             cpu_alloc.device_info.npu_affinity = {
-                0: list(range(144, 168)),
-                1: list(range(0, 24)),
-                2: list(range(144, 168)),
-                3: list(range(0, 24)),
-                4: list(range(96, 120)),
-                5: list(range(48, 72)),
-                6: list(range(96, 120)),
-                7: list(range(48, 72)),
+                0: list(range(144, 192)),
+                1: list(range(0, 48)),
+                2: list(range(144, 192)),
+                3: list(range(0, 48)),
+                4: list(range(96, 144)),
+                5: list(range(48, 96)),
+                6: list(range(96, 144)),
+                7: list(range(48, 96)),
             }
 
-            with (
-                patch.object(cpu_alloc, "build_cpu_node_map"),
-                patch.object(cpu_alloc, "extend_numa", return_value=list(range(144, 192))),
-            ):
+            with patch.object(cpu_alloc, "build_cpu_node_map"):
                 cpu_alloc.build_cpu_pools()
                 cpu_alloc.allocate()
             return cpu_alloc
@@ -840,6 +837,48 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.assertFalse(set(npu0_process.assign_main[0]) & set(npu2_process.assign_main[2]))
         self.assertFalse(set(npu0_process.assign_acl[0]) & set(npu2_process.assign_acl[2]))
         self.assertFalse(set(npu0_process.assign_rel[0]) & set(npu2_process.assign_rel[2]))
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_mode_keeps_split_on_local_numa_node(self, _mock_get_device_type):
+        # NPUs sharing one NUMA node must be split within that node, never across.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1, 2, 3]
+        cpu_alloc.device_info.running_npu_list = [0, 1, 2, 3]
+        cpu_alloc.device_info.allowed_cpus = list(range(192))
+        cpu_alloc.device_info.npu_affinity = {
+            0: list(range(144, 192)),
+            1: list(range(0, 48)),
+            2: list(range(144, 192)),
+            3: list(range(0, 48)),
+        }
+
+        def fake_build_cpu_node_map():
+            for node, cpus in enumerate((range(0, 48), range(48, 96), range(96, 144), range(144, 192))):
+                cpu_alloc.numa_to_cpu_map[node] = list(cpus)
+                for cpu in cpus:
+                    cpu_alloc.cpu_node[cpu] = node
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map", side_effect=fake_build_cpu_node_map),
+            patch.object(cpu_alloc, "extend_numa", wraps=cpu_alloc.extend_numa) as mock_extend,
+        ):
+            cpu_alloc.build_cpu_pools()
+            cpu_alloc.allocate()
+
+        # Every NPU stays on its own affinity CPUs...
+        for npu, pool in cpu_alloc.npu_cpu_pool.items():
+            self.assertTrue(set(pool) <= set(cpu_alloc.device_info.npu_affinity[npu]))
+        # ...pools are pairwise disjoint (no two workers share CPUs)...
+        pools = [set(pool) for pool in cpu_alloc.npu_cpu_pool.values()]
+        for i in range(len(pools)):
+            for j in range(i + 1, len(pools)):
+                self.assertFalse(pools[i] & pools[j])
+        # ...the split is even...
+        self.assertEqual(sorted(len(p) for p in pools), [24, 24, 24, 24])
+        # ...and the local pools are large enough, so no NUMA extension is needed.
+        mock_extend.assert_not_called()
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
