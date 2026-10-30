@@ -95,3 +95,11 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
             assert ((blocks >= 0) & (blocks < expected_blocks)).all()
             if expected_blocks <= 2048:
                 torch.testing.assert_close(blocks.sort().values, torch.arange(expected_blocks))
+
+
+@pytest.mark.parametrize("topk", [1, 63, 65, 1024, 2048])
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("mode", [1, 2, 3])
+def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
+    """Exercise partial 64-element widths and the unchanged maximum width."""
+    test_qli_candidate_vector_repeats(queries=5, context=8192, ratio=ratio, mode=mode, topk=topk)

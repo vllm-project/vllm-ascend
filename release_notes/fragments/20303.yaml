@@ -1,6 +1,6 @@
 pr: 20303
 entries:
   - category: performance
-    text: Batched QLI candidate vector operations with AscendC Level-0 repeats to reduce instruction submission overhead on Ascend A3.
+    text: Reduced QLI sorting and merge work with an adaptive Top-K accumulator width, and batched candidate vector operations with AscendC Level-0 repeats on Ascend A3.
     model: DeepSeek-V4.1
     hardware: [A3]
