@@ -18,6 +18,21 @@ FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200
 
 WORKDIR /workspace
 
+# Install CANN 910B (A2) ops-transformer package.
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            OPS_TRANSFORMER_URL="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/package/master/20261028/aarch64/cann-910b-ops-transformer_9.3.0_linux-aarch64.run" ;; \
+        "linux/amd64"|"x86_64") \
+            OPS_TRANSFORMER_URL="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/package/master/20261028/x86_64/cann-910b-ops-transformer_9.3.0_linux-x86_64.run" ;; \
+        *) echo "Skipping unsupported architecture: $ARCH" && exit 0 ;; \
+    esac && \
+    wget --quiet "$OPS_TRANSFORMER_URL" -O /tmp/cann-910b-ops-transformer.run && \
+    chmod +x /tmp/cann-910b-ops-transformer.run && \
+    /tmp/cann-910b-ops-transformer.run --full --quiet --install-for-all && \
+    rm -f /tmp/cann-910b-ops-transformer.run
+
 # Install clang-15 (for triton-ascend)
 RUN apt-get update -y && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
@@ -32,7 +47,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.31.0
+ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
@@ -139,5 +154,16 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     # python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     # rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
     # python3 -m pip cache purge
+
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    git clone https://github.com/MinghuasLab/flash-attention-npu.git /tmp/flash-attention-npu && \
+    cd /tmp/flash-attention-npu && \
+    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git submodule update --init --recursive && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    python3 setup.py install && \
+    cd /workspace && \
+    rm -rf /tmp/flash-attention-npu
 
 CMD ["/bin/bash"]

@@ -70,48 +70,14 @@ class MmcDirect(Enum):
 
 
 # =========================================================================
-# Layerwise transfer protocol
+# Layerwise key helpers
 # =========================================================================
 # The generic layers (worker / scheduler / layout) resolve these functions
-# through backend/__init__.py:get_layerwise_protocol -- a module-convention
-# lookup, they never import this module by name. The key strings are wire
+# through the backend class; the key strings are wire
 # formats shared with deployed clusters: a single character of drift turns
 # hits into misses after an upgrade.
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
-
-LAYERWISE_DATA_PLANE = "gva"
-
-
-def bind_layerwise_keys(
-    *,
-    vllm_config: Any,
-    kv_cache_config: Any,
-    model_name: str,
-    use_hybrid: bool,
-    grouped_block_size: list[int],
-) -> LayerwiseKeyBuilder:
-    """Bind GVA key identity behind the same interface as block-key stores."""
-    num_groups = len(grouped_block_size)
-    pp_size = vllm_config.parallel_config.pipeline_parallel_size
-
-    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
-        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
-
-    return LayerwiseKeyBuilder(make_key, pp_size)
-
-
-def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the connector's extra config when it opts into the layerwise
-    transfer, None otherwise.
-
-    Called by the generic layout layer through the backend registry; the
-    protocol itself owns the opt-in check so the layout layer never spells
-    out the gate.
-    """
-    if extra_config.get("use_layerwise", False):
-        return extra_config
-    return None
 
 
 def make_full_key(
@@ -133,20 +99,6 @@ def make_full_key(
     if num_groups > 1:
         return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
     return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
-
-
-def make_partial_key(
-    model_name: str,
-    req_id: str,
-    group_id: int,
-    block_index: int,
-    end_token: int,
-    head_or_tp_rank: int,
-    pp_rank: int = 0,
-    pp_size: int = 1,
-) -> str:
-    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
-    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
 
 
 def make_hit_check_keys(
@@ -190,6 +142,41 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
 
 
 class MemcacheBackend(Backend):
+    layerwise_data_plane = "gva"
+
+    @classmethod
+    def bind_layerwise_keys(
+        cls,
+        *,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        model_name: str,
+        use_hybrid: bool,
+        grouped_block_size: list[int],
+    ) -> LayerwiseKeyBuilder:
+        num_groups = len(grouped_block_size)
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
+    @classmethod
+    def make_partial_key(
+        cls,
+        model_name: str,
+        req_id: str,
+        group_id: int,
+        block_index: int,
+        end_token: int,
+        head_or_tp_rank: int,
+        pp_rank: int = 0,
+        pp_size: int = 1,
+    ) -> str:
+        pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
+        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+
     def __init__(
         self,
         parallel_config: ParallelConfig,
