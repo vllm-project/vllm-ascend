@@ -10,12 +10,13 @@ Triton replaces the native gather/clear and scatter kernels on eligible A5
 caches, not chunk math, recurrent decode, GLM KDA or unrelated kernels.
 
 Flow: worker binds cache -> choose fused / masked byte-copy fallback
--> prepare disposable samples -> seal all plans -> publish -> prefill gather ->
-unchanged chunk math -> scatter. Preparation failure aborts startup; it must not
-silently publish a partially ready worker.
+-> register compile keys -> seal and publish plans -> `JitWarmupRegistry` compiles
+-> prefill gather -> unchanged chunk math -> scatter. Preparation or warmup
+failure aborts startup.
 
-Both V1 and V2 runners invoke initialization after cache binding. A Kimi layer
-cannot serve until initialization has completed. Unsupported contiguous and
+Both V1 and V2 runners register state-copy keys after cache binding inside their
+registry window. The worker runs unified `kernel_warmup` before model dummy runs
+and ACL graph capture. Unsupported contiguous and
 strided caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
 batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
 Invalid inner layouts remain rejected by the strided fallback, as in the PR.
@@ -37,7 +38,7 @@ Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 - The fallback gathers invalid indices as zero and skips invalid scatter
   destinations, including contiguous unsupported caches.
 
-## Startup preparation and no serving recompilation
+## Registry compilation and prepared launches
 
 `KDAStateCopyPlan` prepares exactly four compiled variants per bound cache layout:
 INT32/INT64 indices multiplied by gather/scatter. All variants use fixed cache
@@ -45,16 +46,20 @@ metadata and block size 8192. Gather flags are aligned contiguous BOOL. Index
 values and selected counts are runtime data; launch grid is rebound without a
 JIT call. `0 <= selected <= scheduler.max_num_seqs` does not expand the plan variant table.
 
-Preparation uses one disposable payload row and small metadata tensors. The
-actual row count, stride and alignment are scalar/layout information only; all
-kernel pointers refer to scratch allocations. Index zero ensures the scratch
-never needs to span the live cache. Startup synchronizes before releasing it.
-The strided fallback separately prepares one byte-copy variant with scratch
-source/destination pointers, not live cache pointers.
+Preparation builds immutable `StateCopyCompileKey` values containing the device,
+scalar arguments and `TritonWarmupTensor` pointer metadata. It allocates no
+scratch tensors and does not launch kernels or touch live cache contents.
+A worker-owned `StateCopyJitKernel` registers four fused keys per unique layout,
+or one INT64 pointer-vector key for the byte-copy fallback. The registry drives
+compile-only `kernel.warmup` and stores compiled launchers plus their ABI constants.
+These wrappers compile serially because signature inspection needs completed
+compiled objects rather than asynchronous compiler futures.
 
-Serving invokes only stored compiled objects. An unsealed plan, changed cache
+With JIT warmup enabled, serving invokes only stored compiled objects. An unsealed plan, changed cache
 layout, excess selected count, or unexpected JIT hook is rejected before launch.
-No request can add a variant or evict one. Different worker layouts require
+No request can add a variant or evict one. If `kernel_config.enable_jit_warmup`
+is disabled, the framework compiles each admitted key on first use and caches
+the same launcher; the numerical contract and layout checks still apply. Different worker layouts require
 reinitialization; equal layouts may share plans. Plans retain no request tensors,
 stream handles or live data pointers.
 
@@ -138,9 +143,9 @@ additional hardware validation. Full-model compilation/Inductor acceptance is
 not established by operator tracing tests. The no-JIT guarantee here covers
 prepared state-copy routes, not unrelated model kernels.
 
-There is one lifecycle: `KDAStateCopyPlan.prepare` compiles four variants on
-scratch, `seal` validates startup configuration, and the worker publishes only
-after all layer plans are ready. Tests instantiate the same plan independently.
+There is one lifecycle: `KDAStateCopyPlan.prepare` registers four compile keys,
+`seal` validates startup configuration, and `JitWarmupRegistry` compiles the
+registered variants. Tests use the same registry and plans.
 `ops/triton/kda_state_copy_kernel.py` retains only the kernel and common metadata
 validation, not a process-global launcher registry, signature budget, lock,
 per-call environment scan, or mutation of the JIT object's `run` method.

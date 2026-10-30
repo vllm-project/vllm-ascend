@@ -2,8 +2,8 @@
 """Production-plan copy correctness adapted from PR #17301 at 5bcbad36fdc3.
 
 Retain the original 17 parameterized cases and exact assertions. A test-local
-set of worker-owned plans is prepared on disposable scratch during setup,
-sealed, then exercised while compiler entry points are forbidden.
+set of worker-owned plans is registered and compiled through JitWarmupRegistry
+during setup, then exercised while compiler entry points are forbidden.
 """
 
 import importlib
@@ -11,6 +11,7 @@ import importlib
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -189,7 +190,10 @@ def prepared_state_copy():
                 # preparing a new plan (or entering JIT) during formal tests.
                 production._validate_cache_layout(state)
                 raise AssertionError("Unprepared production cache layout")
-            plan = production.KDAStateCopyPlan.prepare(state, 129)
+            registry = JitWarmupRegistry(None)
+            with registry.activate():
+                plan = production.KDAStateCopyPlan.prepare(state, 129)
+            registry.warmup()
             plan.seal()
             plan._layer_name = "standalone_test"
             plans[signature] = plan
