@@ -622,7 +622,8 @@ class TestDSAMetadataBuilders(TestCase):
             return_value=self.common.replace(
                 num_actual_tokens=0,
                 num_input_tokens=0,
-                query_start_loc_cpu=torch.tensor([0, 0]),
+                query_start_loc=torch.tensor([0, 0], dtype=torch.int32),
+                query_start_loc_cpu=torch.tensor([0, 0], dtype=torch.int32),
             )
         )
         shared: dict[Any, Any] = {}
@@ -637,6 +638,8 @@ class TestDSAMetadataBuilders(TestCase):
         self.assertIs(builder.common_ratio_to_sas_metadata, shared)
         self.assertNotIn("req_preamble", shared["pcp_global"])
         self.assertEqual(shared["pcp_local"], {})
+        for offsets in shared["pcp_local_offsets"]:
+            torch.testing.assert_close(offsets, torch.tensor([0, 0], dtype=torch.int32))
 
     def test_full_pcp_builders_share_base_cache_without_sharing_graph_preparation(self):
         shared: dict[Any, Any] = {}

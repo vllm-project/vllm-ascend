@@ -1803,9 +1803,11 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     global_block_tables = (torch.empty(0), global_block_table)
     global_slot_mappings = torch.arange(14, dtype=torch.int64).view(2, 7)
     global_slot_mapping = global_slot_mappings[1, : global_batch.num_tokens]
+    local_query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
     local_common = SimpleNamespace(
         attn_state="local",
-        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+        query_start_loc=local_query_start_loc,
+        query_start_loc_cpu=local_query_start_loc.clone(),
         num_actual_tokens=2,
         num_input_tokens=3,
         num_reqs=2,
