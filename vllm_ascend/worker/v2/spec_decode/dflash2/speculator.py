@@ -16,12 +16,20 @@
 #
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
 )
+
+try:
+    from vllm.v1.worker.gpu.sample.gumbel import spec_step_seed as _selector_step_seed
+except ImportError:
+    # Older vLLM selectors pass the request seed directly, without step mixing.
+    @triton.jit
+    def _selector_step_seed(seed, step):
+        return seed
 
 
 @triton.jit
@@ -82,7 +90,7 @@ def _selector_walk_kernel_ascend(
                 scores,
                 candidates,
                 mask & valid,
-                spec_step_seed(seed, step),
+                _selector_step_seed(seed, step),
                 position,
                 effective_temp,
                 IS_DRAFTING=True,

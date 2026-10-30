@@ -55,7 +55,12 @@ def _make_config(
         use_multi_module_mtp=MagicMock(return_value=False),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
     )
-    return SimpleNamespace(speculative_config=speculative_config)
+    return SimpleNamespace(
+        speculative_config=speculative_config,
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+    )
 
 
 def _mock_speculator_module(monkeypatch, module_name, class_name):
@@ -135,13 +140,15 @@ def test_init_speculator_dspark(monkeypatch):
     speculator_cls.assert_called_once_with(config, device)
 
 
-def test_init_speculator_dflash2(monkeypatch):
+@pytest.mark.parametrize("enforce_eager", [None, False, True])
+def test_init_speculator_dflash2(monkeypatch, enforce_eager):
     """Test dispatching DFlash2DraftModel to AscendDFlash2Speculator."""
     config = _make_config(
         "dflash",
         use_dflash=True,
         architectures=["DFlash2DraftModel"],
     )
+    config.speculative_config.enforce_eager = enforce_eager
     device = torch.device("cpu")
     speculator_cls = _mock_speculator_module(
         monkeypatch,
@@ -152,7 +159,15 @@ def test_init_speculator_dflash2(monkeypatch):
     result = init_speculator(config, device)
 
     assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
+    speculator_cls.assert_called_once()
+    draft_config, draft_device = speculator_cls.call_args.args
+    assert draft_device == device
+    assert draft_config is not config
+    assert draft_config.speculative_config is config.speculative_config
+    assert draft_config.compilation_config is not config.compilation_config
+    assert draft_config.compilation_config.mode == CompilationMode.NONE
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
 def test_init_speculator_dflash(monkeypatch):

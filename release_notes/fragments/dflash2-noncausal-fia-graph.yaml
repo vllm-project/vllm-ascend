@@ -2,3 +2,7 @@ pr: null
 entries:
   - category: bugfix
     text: Fixed non-causal DFlash2 sliding-window attention to retain bidirectional window bounds with the FIA compressed band mask. Eager execution, workspace queries, and captured tasks now share the same sparse parameters instead of dropping the window to avoid capture errors.
+  - category: bugfix
+    text: Fixed non-causal full-attention layers incorrectly receiving a shared sliding-window mask during FIA graph execution. Mask selection now follows each layer without modifying shared KV-group metadata.
+  - category: bugfix
+    text: Fixed DFlash2 startup with vLLM versions that do not expose spec_step_seed while preserving the installed upstream selector seed policy.
