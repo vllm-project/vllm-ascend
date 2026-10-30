@@ -37,6 +37,7 @@ def make_builder(cls, ratio=0):
         model_config=builder.model_config,
         compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)),
     )
+    builder.use_pcp = True
     builder._device_metadata_enabled = False
     builder.compressor_metadata_buffers = None
     builder._sas_variant_buffers = {}
@@ -72,6 +73,14 @@ class TestDSAMetadataBuilders(TestCase):
     def setUp(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
+        stack.enter_context(
+            patch.object(
+                dsa_v1.AscendDSAMetadataBuilder,
+                "_dspark_swa_indices_fast_path_eligible",
+                return_value=False,
+            )
+        )
+        stack.enter_context(patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=False))
         self.builder = make_builder(dsa_v1.AscendDSASWAMetadataBuilder)
         self.common = CommonMetadata(
             num_reqs=1,
@@ -213,6 +222,39 @@ class TestDSAMetadataBuilders(TestCase):
         self.assertIsNone(req.start_pos)
         self.assertIsNone(req.slot_mapping)
         self.qli_op.assert_not_called()
+
+    def test_sparse_flash_draft_preserves_logical_indices_and_lengths(self):
+        self.builder.dspark_swa_topk_lengths_buffer = torch.zeros(8, dtype=torch.int32)
+        indices = torch.ones((2, 1, 8), dtype=torch.int32)
+        lengths = self.builder.dspark_swa_topk_lengths_buffer[:2]
+        self.indices_op.return_value = (indices, lengths)
+        with (
+            patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=True),
+            patch.object(
+                self.builder,
+                "_build_dspark_sparse_flash_mla_metadata",
+                return_value=torch.full_like(self.builder.sas_metadata_buffer, 7),
+            ) as sparse,
+        ):
+            req = self.build_req()
+        self.assertIs(req.dspark_swa_indices, indices)
+        self.assertIs(req.dspark_swa_topk_lengths, lengths)
+        self.assertTrue(self.indices_op.call_args.kwargs["use_logical_indices"])
+        self.assertIs(sparse.call_args.kwargs["ori_topk_length"], lengths)
+        self.assertEqual(sparse.call_args.kwargs["ori_topk"], 8)
+        self.assertTrue(torch.all(req.sas_metadata == 7))
+        self.sas_op.assert_not_called()
+
+    def test_cache_only_skips_sparse_flash_preparation(self):
+        with (
+            patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=True),
+            patch.object(self.builder, "_build_dspark_sparse_flash_mla_metadata") as sparse,
+        ):
+            req = self.build_req(build_query=False)
+        self.assertIsNone(req.sas_metadata)
+        self.assertIsNone(req.dspark_swa_indices)
+        sparse.assert_not_called()
+        self.indices_op.assert_not_called()
 
     def test_causal_and_noncausal_sas_do_not_alias(self):
         self.common.causal = True
@@ -448,9 +490,7 @@ class TestDSAMetadataBuilders(TestCase):
                         builder._build_local_common_attn_metadata = Mock(return_value=self.common.replace(causal=True))
                         result = builder.build(
                             0,
-                            self.common.replace(causal=True),
-                            pcp_context=context,
-                            pcp_cache_group_idx=group,
+                            self.common.replace(causal=True).replace(pcp_context=context, pcp_cache_group_idx=group),
                             num_actual_reqs=1,
                             common_ratio_to_sas_metadata=shared,
                         )
@@ -507,9 +547,7 @@ class TestDSAMetadataBuilders(TestCase):
             for index, builder in enumerate(builders):
                 builder.build(
                     0,
-                    self.common,
-                    pcp_context=context,
-                    pcp_cache_group_idx=index,
+                    self.common.replace(pcp_context=context, pcp_cache_group_idx=index),
                     num_actual_reqs=1,
                     common_ratio_to_sas_metadata=shared,
                 )
@@ -554,9 +592,7 @@ class TestDSAMetadataBuilders(TestCase):
             results.append(
                 builder.build(
                     0,
-                    self.common,
-                    pcp_context=context,
-                    pcp_cache_group_idx=group,
+                    self.common.replace(pcp_context=context, pcp_cache_group_idx=group),
                     num_actual_reqs=1,
                     common_ratio_to_sas_metadata=shared,
                     full_graph_mode=True,
@@ -592,9 +628,7 @@ class TestDSAMetadataBuilders(TestCase):
         shared: dict[Any, Any] = {}
         result = builder.build(
             0,
-            self.common,
-            pcp_context=context,
-            pcp_cache_group_idx=0,
+            self.common.replace(pcp_context=context, pcp_cache_group_idx=0),
             num_actual_reqs=0,
             common_ratio_to_sas_metadata=shared,
         )
@@ -630,9 +664,7 @@ class TestDSAMetadataBuilders(TestCase):
                 builder._build_local_dsa_metadata = Mock(side_effect=build_local)
                 builder.build(
                     0,
-                    self.common,
-                    pcp_context=context,
-                    pcp_cache_group_idx=index,
+                    self.common.replace(pcp_context=context, pcp_cache_group_idx=index),
                     num_actual_reqs=1,
                     common_ratio_to_sas_metadata=shared,
                 )
