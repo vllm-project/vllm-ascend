@@ -5467,5 +5467,46 @@ def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatc
     assert captured[0]["cache_mode"] == "Norm"
 
 
+def test_stash_pending_reformat_merges_batches_arriving_separately():
+    """Regression test: groups of one shard become transfer-complete in
+    different pull tasks (single-pull groups end on their first pull, multi-pull
+    groups on their last), so _stash_pending_reformat is called more than once
+    per shard from different executor threads. A later call must merge into the
+    stash instead of overwriting the groups stashed earlier."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.pending_reformat = defaultdict(dict)
+    receiver.pending_reformat_lock = threading.Lock()
+
+    # (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
+    indexer_group = (0, [[10, 11]], 1, [0])
+    mla_group = (1, [[10, 11]], 1, [1])
+    gqa_group = (2, [[12, 13], [14, 15]], 8, [2, 3, 4])
+
+    # Single ready batch: stash keeps the exact entries (original behavior).
+    receiver._stash_pending_reformat("req-single", 0, [indexer_group, mla_group, gqa_group])
+    assert receiver.pending_reformat["req-single"][0] == [indexer_group, mla_group, gqa_group]
+
+    # Batches arriving separately for the same shard are merged in arrival order.
+    receiver._stash_pending_reformat("req-split", 0, [indexer_group, mla_group])
+    receiver._stash_pending_reformat("req-split", 0, [gqa_group])
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # A group already stashed is not duplicated by a repeated arrival.
+    receiver._stash_pending_reformat("req-split", 0, [gqa_group, mla_group])
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # Shards of the same request keep independent stashes.
+    receiver._stash_pending_reformat("req-split", 1, [gqa_group])
+    assert receiver.pending_reformat["req-split"][1] == [gqa_group]
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # The consumer drains every stashed group of the request exactly once.
+    applied = []
+    receiver._apply_kv_cache_reformat = applied.append
+    receiver._reformat_pending_kv_caches("req-split")
+    assert applied == [[indexer_group, mla_group, gqa_group], [gqa_group]]
+    assert "req-split" not in receiver.pending_reformat
+
+
 if __name__ == "__main__":
     unittest.main()

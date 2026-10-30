@@ -1095,7 +1095,17 @@ class KVCacheRecvingThread(threading.Thread):
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
     ) -> None:
         with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+            # Attention groups of the same shard can become transfer-complete in
+            # different pull tasks running on different executor threads, each
+            # of which stashes once. Merge instead of overwriting so
+            # earlier-stashed groups survive until _reformat_pending_kv_caches
+            # consumes them; skip groups already stashed so a group is
+            # reformatted exactly once.
+            stashed = self.pending_reformat[request_id].setdefault(shard_idx, [])
+            stashed_group_ids = {entry[0] for entry in stashed}
+            stashed.extend(
+                entry for entry in ready_attention_group_reformat_block_ids if entry[0] not in stashed_group_ids
+            )
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
