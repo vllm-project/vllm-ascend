@@ -240,6 +240,7 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
+    from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
@@ -249,6 +250,10 @@ def patch_upstream_ple_short_conv() -> None:
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
+
+    from .ple_embedding import AscendPLEHostEmbedding
+
+    upstream_ple.Qwen4ExpPLEPinnedHostEmbedding = AscendPLEHostEmbedding
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
