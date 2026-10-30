@@ -115,8 +115,8 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-    echo "Install triton-ascend..." && \
-    python3 -m pip install "$TRITON_ASCEND_URL" && \
+#     echo "Install triton-ascend..." && \
+#     python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
