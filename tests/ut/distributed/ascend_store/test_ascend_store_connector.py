@@ -33,6 +33,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import As
 # isort: on
 
 
+class TestKVPoolWorkerConstruction(unittest.TestCase):
+    def test_factory_passes_only_current_constructor_arguments(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
+
+        config, cache = MagicMock(), MagicMock()
+        for layerwise, name in ((False, "KVPoolWorker"), (True, "LayerwiseKVPoolWorker")):
+            with self.subTest(layerwise=layerwise), patch.object(connector, name, autospec=True) as worker:
+                self.assertIs(connector.create_kv_pool_worker(config, layerwise, cache), worker.return_value)
+                worker.assert_called_once_with(config, layerwise, cache)
+
+    def test_layerwise_constructor_matches_base_signature(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        config, cache = MagicMock(), MagicMock()
+        with (
+            patch.object(KVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
+            patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
+        ):
+            worker = LayerwiseKVPoolWorker(config, True, cache)
+            initialize.assert_called_once_with(worker, config, True, cache)
+            configure.assert_called_once_with()
+
+
 def _mock_events(num_workers=1):
     events = AscendStoreKVEvents(num_workers=num_workers)
     events._aggregator = MagicMock()

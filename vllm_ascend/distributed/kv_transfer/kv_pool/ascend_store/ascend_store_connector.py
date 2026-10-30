@@ -70,14 +70,12 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
-    memcache_dp_init_barrier: bool = True,
 ) -> KVPoolWorker:
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
     return worker_class(
         vllm_config,
         use_layerwise,
         kv_cache_config,
-        memcache_dp_init_barrier=memcache_dp_init_barrier,
     )
 
 
