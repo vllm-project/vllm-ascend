@@ -1640,11 +1640,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
             block_table=block_table,
         )
-        if self.qk_rope_head_dim == 0:
-            # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
-            assert isinstance(output, torch.Tensor)
-            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
-            output = output.masked_fill(~valid[:, None, None], 0)
         return output
 
     def _record_query_gather_context(
