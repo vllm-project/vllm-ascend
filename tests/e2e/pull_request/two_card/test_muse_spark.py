@@ -17,6 +17,8 @@ being a single shared row-wise norm, which commutes with the dispatch
 permutation; ``tests/ut/models/test_muse_spark.py`` pins that property.
 """
 
+from typing import Any, cast
+
 import pytest
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -34,7 +36,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 TENSOR_PARALLEL_SIZE = 2
-NUM_EXPERTS = TEXT_CONFIG["num_local_experts"]
+# TEXT_CONFIG is the on-disk config dict, so its values are untyped.
+NUM_EXPERTS = cast(int, TEXT_CONFIG["num_local_experts"])
 EXPERTS_PER_RANK = NUM_EXPERTS // TENSOR_PARALLEL_SIZE
 # The comm selector is a function of the token count, so ask it about a batch
 # the size of the decodes this test actually runs.
@@ -44,8 +47,8 @@ DECODE_TOKENS = 2
 class MuseSparkExpertParallelWorker:
     """Read-only checks of how the MoE is laid out on this rank."""
 
-    model_runner: object  # Supplied by the worker extension host at runtime.
-    vllm_config: object
+    model_runner: Any  # Supplied by the worker extension host at runtime.
+    vllm_config: Any
 
     def check_muse_spark_expert_parallel(self) -> str:
         from vllm_ascend.ascend_forward_context import select_moe_comm_method
