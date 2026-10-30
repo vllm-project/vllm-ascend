@@ -533,7 +533,9 @@ def test_selector_seed_policy_matches_installed_vllm():
     if hasattr(gumbel_module, "spec_step_seed"):
         assert _selector_step_seed is gumbel_module.spec_step_seed
     else:
+        # UT's mocked jit may return a plain function instead of a JITFunction.
+        seed_fn = getattr(_selector_step_seed, "fn", _selector_step_seed)
         # Older upstream does not mix steps; preserve even the seed's high bits.
         for seed in (13, 13 + (1 << 48), -(1 << 55) + 9):
             for step in (0, 3):
-                assert _selector_step_seed.fn(seed, step) == seed
+                assert seed_fn(seed, step) == seed
