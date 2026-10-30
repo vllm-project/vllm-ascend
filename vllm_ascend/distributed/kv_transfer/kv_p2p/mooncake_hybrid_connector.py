@@ -162,8 +162,7 @@ def _reconstruct_shared_pages(
             continue
 
         descriptor_base = min(
-            _min_data_ptr(layer_tensors) - placement_start
-            for _, placement_start, layer_tensors in descriptor_layers
+            _min_data_ptr(layer_tensors) - placement_start for _, placement_start, layer_tensors in descriptor_layers
         )
         for layer_name, placement_start, layer_tensors in descriptor_layers:
             layer_start = descriptor_base + placement_start
