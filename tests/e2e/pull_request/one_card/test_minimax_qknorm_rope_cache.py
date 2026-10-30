@@ -5,8 +5,10 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import torch_npu
 from vllm.triton_utils import triton
 
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.msa import minimax_qknorm_rope_cache as fused_module
 from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
@@ -395,3 +397,60 @@ def test_layout_variants_compile_once_then_reuse(isolated_fused_kernel):
         assert jit_variant_count(kernel) == len(layouts), layout
         assert compile_spy.call_count == len(layouts), layout
     print(f"layout sweep: variants={len(layouts)}, revisit_compile_entries=0")
+
+
+@pytest.mark.parametrize("tokens", [8, 128, 192])
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@torch.inference_mode()
+def test_dspark_prepare_matches_unfused_a5_chain(tokens, cache_dtype):
+    if not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
+        pytest.skip("This differential reference uses the A5 RMSNorm path")
+    init_device_properties_triton()
+    torch.manual_seed(29)
+    hd, qh, kh, ih, actual = 128, 8, 1, 1, tokens - 3
+    packed = torch.randn(tokens, 12 * hd, dtype=torch.bfloat16, device="npu")
+    weights = [torch.randn(hd, dtype=packed.dtype, device="npu") * 0.1 for _ in range(4)]
+    angles = torch.randn(1024, 32, device="npu")
+    cs = torch.cat((angles.cos(), angles.sin()), -1).to(packed.dtype)
+    positions = torch.arange(tokens, device="npu") + 31
+    # Scheduler-sized main pages and 128-token indexer pages are independent.
+    key = torch.zeros((4, 512, kh, hd), dtype=cache_dtype, device="npu")
+    value = torch.zeros_like(key)
+    index = torch.zeros((16, 128, hd), dtype=cache_dtype, device="npu")
+    slots = torch.randperm(2048, device="npu")[:tokens].long()
+    index_slots = torch.randperm(2048, device="npu")[:tokens].long()
+    slots[::7] = -1
+    index_slots[::11] = -1
+    q, iq = minimax_qknorm_rope_cache(
+        packed, cs, positions, *weights, key, value, index, slots, index_slots, actual, qh, kh, ih, 1e-6
+    )
+    parts = list(packed.split([qh * hd, kh * hd, kh * hd, ih * hd, hd], -1))
+    for part, weight in zip([0, 1, 3, 4], weights):
+        x = parts[part].reshape(-1, hd).contiguous()
+        parts[part] = torch_npu.npu_rms_norm(x, 1.0 + weight, 1e-6)[0].reshape(tokens, -1)
+    parts[0], parts[1] = rope_forward_oot(positions, parts[0], parts[1], cs, hd, 64, True)
+    parts[3], parts[4] = rope_forward_oot(
+        positions,
+        parts[3],
+        parts[4],
+        cs,
+        hd,
+        64,
+        True,
+        out_dtype=cache_dtype if cache_dtype == torch.float8_e4m3fn else None,
+    )
+    comparisons = [("q", q, parts[0]), ("index_q", iq, parts[3])]
+    for name, cache, part, mapping in [
+        ("k", key, parts[1], slots),
+        ("v", value, parts[2], slots),
+        ("index_k", index, parts[4], index_slots),
+    ]:
+        gold = torch.zeros(cache.shape, dtype=cache.dtype)
+        part = part.cpu().float().clamp(-448, 448).to(cache.dtype)
+        for token, slot in enumerate(mapping.cpu().tolist()[:actual]):
+            if slot >= 0:
+                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0])
+        comparisons.append((name, cache, gold))
+    for name, result, expected in comparisons:
+        x, y = result.cpu().float(), expected.cpu().float()
+        torch.testing.assert_close(x, y, atol=0.25 if result.dtype == torch.float8_e4m3fn else 0.032, rtol=0.01)
