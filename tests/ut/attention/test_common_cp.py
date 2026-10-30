@@ -1,15 +1,18 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend.attention.context_parallel import common_cp
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
+    use_dcp_q_replicate,
 )
 
 
@@ -237,3 +240,43 @@ def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
     torch.testing.assert_close(out_pe, torch.cat([k_pe] * 4, dim=0))
     impl.tp_group.all_gather.assert_not_called()
     impl.dcp_group.all_gather.assert_called_once()
+
+
+class TestDCPQReplicationConfig(unittest.TestCase):
+    @staticmethod
+    def _make_dcp_q_replicate_config(requested=True):
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                dcp_q_replicate=requested,
+                decode_context_parallel_size=2,
+                prefill_context_parallel_size=1,
+            ),
+            lora_config=None,
+        )
+
+    def test_request_precedence(self):
+        for requested, legacy, expected in [
+            (False, None, False),
+            (True, None, True),
+            (False, True, True),
+            (True, False, False),
+        ]:
+            with (
+                self.subTest(requested=requested, legacy=legacy, expected=expected),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertIs(
+                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested), SimpleNamespace()),
+                    expected,
+                )
+
+    def test_sparse_q_replication_is_rejected(self):
+        with (
+            patch.object(common_cp.envs, "is_set", return_value=False),
+            self.assertRaisesRegex(ValueError, "only supports dense MLA; SFA is not supported"),
+        ):
+            use_dcp_q_replicate(
+                self._make_dcp_q_replicate_config(),
+                SimpleNamespace(index_topk=2048),
+            )

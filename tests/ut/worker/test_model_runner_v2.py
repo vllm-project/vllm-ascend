@@ -860,6 +860,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.use_flashmla = False
         impl.use_pcp = False
         impl.use_dcp = False
+        impl.dcp_q_replicate_enabled = False
         impl.supports_prolog_v3_writer = lambda: True
         layer.impl = impl
         layer.indexer = None
