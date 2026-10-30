@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as module
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
 def make_method(scale_alg):
@@ -17,18 +18,21 @@ def make_method(scale_alg):
     with (
         patch.object(module, "get_current_vllm_config", return_value=config),
         patch.object(module, "get_ascend_config"),
-        patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg),
+        patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg) as get_scale_alg,
     ):
-        return module.AscendW8A8MXFP8DynamicFusedMoEMethod()
+        method = module.AscendW8A8MXFP8DynamicFusedMoEMethod()
+    get_scale_alg.assert_called_once_with(config)
+    return method
 
 
-@pytest.mark.parametrize("scale_alg", [0, 1])
-def test_fused_clipped_activation_depends_only_on_scale_algorithm(scale_alg):
+@pytest.mark.parametrize("scale_alg", list(DynamicMXQuantScaleAlg))
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_fused_activation_dispatch(scale_alg, activation):
     method = make_method(scale_alg)
-    assert method.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE) == (scale_alg == 1)
-    assert method.supports_fused_activation(MoEActivation.SILU)
-    for activation in (MoEActivation.SWIGLUOAI, MoEActivation.SITU, MoEActivation.GELU, MoEActivation.SWIGLUSTEP):
-        assert not method.supports_fused_activation(activation)
+    expected = activation == MoEActivation.SILU or (
+        scale_alg == DynamicMXQuantScaleAlg.CEIL and activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+    )
+    assert method.supports_fused_activation(activation) == expected
 
 
 def test_enabling_one_model_does_not_change_other_instances():
