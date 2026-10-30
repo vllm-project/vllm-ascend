@@ -63,6 +63,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # the group-agreed capacity and trim the logits back (no _sample_sequential
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
+    # compute_draft_logits trims alignment rows before Gumbel sampling writes
+    # to the per-request draft logits cache.
+    _lmhead_tp_probabilistic_sampling_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)

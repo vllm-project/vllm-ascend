@@ -12,7 +12,8 @@ from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead
 class LmheadTPDraftSamplingMixin:
     """Group-aligned draft LM-head sampling for lmhead TP (V1 parity): pad
     the greedy hidden states to the ``lmhead_tp_max_num_logits`` capacity and
-    trim back; probabilistic sampling (fixed-size buffers) is rejected at init."""
+    trim back. Speculators that trim logits before sampling may opt into
+    probabilistic sampling without exposing padding rows to fixed-size buffers."""
 
     # Attributes injected by the hosting speculator; annotated for standalone
     # mypy analysis.
@@ -22,10 +23,11 @@ class LmheadTPDraftSamplingMixin:
     use_local_argmax_reduction: bool
     enable_adaptive_verification: bool
 
-    # Speculators whose sampling bypasses sample_draft cannot be row-aligned;
-    # they opt out and are rejected at construction (DSpark:
-    # compute_draft_logits, DFlash2: get_top_k_tokens on the sharded head).
+    # Families bypassing sample_draft must align their own head inputs.
+    # DSpark wraps compute_draft_logits; DFlash2 opts out.
     _lmhead_tp_sample_draft_supported = True
+    # Opt in only when alignment rows are trimmed before probability-cache writes.
+    _lmhead_tp_probabilistic_sampling_supported = False
 
     def _lmhead_tp_max_num_logits(self) -> int:
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
@@ -40,11 +42,13 @@ class LmheadTPDraftSamplingMixin:
                 "sampling does not go through sample_draft, so the "
                 "group-aligned row padding cannot be applied."
             )
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if (
+            self.speculative_config.draft_sample_method == "probabilistic"
+            and not self._lmhead_tp_probabilistic_sampling_supported
+        ):
             raise NotImplementedError(
-                "lmhead TP does not support draft_sample_method='probabilistic': "
-                "the gumbel path writes into fixed-size draft buffers that cannot "
-                "hold the group-aligned padding rows."
+                f"lmhead TP probabilistic drafting is not supported for {type(self).__name__}: "
+                "its sample_draft path passes alignment rows to fixed-size Gumbel buffers."
             )
         if self.use_local_argmax_reduction:
             raise NotImplementedError(

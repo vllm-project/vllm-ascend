@@ -1,0 +1,4 @@
+pr: 20148
+entries:
+  - category: bugfix
+    text: Enabled probabilistic DSpark draft sampling with LM-head tensor parallelism in Model Runner V2 while preserving sampling guards for other draft methods.

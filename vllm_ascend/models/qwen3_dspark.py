@@ -66,7 +66,9 @@ def align_draft_weights(model, projection, vllm_config):
             # be aliased; only the embedding needs its own copy.
             continue
         with torch.device(weight.device):
-            layer = layer_cls(target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype)
+            layer = layer_cls(
+                target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype, prefix=f"draft.{name}"
+            )
         load_quarot_target_layer(layer, vllm_config.model_config.model, weight_names, rotation, f"draft {name}.weight")
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)
