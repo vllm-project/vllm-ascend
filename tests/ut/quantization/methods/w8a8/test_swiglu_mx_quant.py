@@ -40,7 +40,26 @@ def test_enabling_one_model_does_not_change_other_instances():
     other_model = make_method(0)
     assert enabled.supports_fused_activation("swigluoai_uninterleave")
     assert not other_model.supports_fused_activation("swigluoai_uninterleave")
+    assert "fused_activations" not in vars(enabled)
+    assert "fused_activations" not in vars(other_model)
     assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu"})
+
+
+@pytest.mark.parametrize("scale_alg", [0, 1])
+def test_activation_quantization_reuses_cached_scale_algorithm(scale_alg):
+    method = make_method(scale_alg)
+    hidden_states = torch.randn(4, 64, dtype=torch.bfloat16)
+    quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
+    scales = torch.ones(4, 1, 2, dtype=torch.uint8)
+    with (
+        patch.object(module, "get_dynamic_mx_quant_scale_alg", side_effect=AssertionError("unexpected scale lookup")),
+        patch.object(module.torch_npu, "npu_dynamic_mx_quant", return_value=(quantized, scales)) as quant,
+    ):
+        assert method.supports_fused_activation("swigluoai_uninterleave") == (scale_alg == 1)
+        result, result_scale = method.apply_act_quant(None, hidden_states)
+    quant.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=scale_alg)
+    assert result is quantized
+    assert result_scale is scales
 
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
@@ -61,6 +80,7 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
         swiglu_beta=0.5,
     )
     with (
+        patch.object(module, "get_dynamic_mx_quant_scale_alg", side_effect=AssertionError("unexpected scale lookup")),
         patch.object(module.torch_npu, "npu_swiglu_mx_quant", return_value=(quantized, scales), create=True) as fused,
         patch("vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.clipped_swiglu", return_value="activated") as legacy,
         patch("vllm_ascend.ops.fused_moe.moe_mlp.maybe_record_event", return_value=None),

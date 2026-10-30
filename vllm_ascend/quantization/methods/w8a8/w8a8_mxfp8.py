@@ -292,11 +292,16 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+
+    def supports_fused_activation(self, activation) -> bool:
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the
-        # fused clipped activation. Other models retain
-        # their existing activation and quantization implementations.
-        if get_dynamic_mx_quant_scale_alg(vllm_config) == DynamicMXQuantScaleAlg.CEIL:
-            self.fused_activations = self.fused_activations | {MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}
+        # fused clipped activation. Keep the scale and activation requirements
+        # together without changing the supported activations of other models.
+        return super().supports_fused_activation(activation) or (
+            self._dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL
+            and getattr(activation, "value", activation) == MoEActivation.SWIGLUOAI_UNINTERLEAVE.value
+        )
 
     @staticmethod
     def get_weight(
@@ -545,7 +550,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 glu_alpha=mlp_compute_input.swiglu_alpha,
                 glu_bias=mlp_compute_input.swiglu_beta,
                 dst_type=self.act_quant_type,
-                scale_alg=DynamicMXQuantScaleAlg.CEIL,
+                scale_alg=self._dynamic_mx_quant_scale_alg,
             )
             return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
 
@@ -596,7 +601,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            hidden_states, dst_type=self.act_quant_type, scale_alg=get_dynamic_mx_quant_scale_alg()
+            hidden_states, dst_type=self.act_quant_type, scale_alg=self._dynamic_mx_quant_scale_alg
         )
         return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
