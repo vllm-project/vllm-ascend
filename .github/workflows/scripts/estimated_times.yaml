@@ -68,6 +68,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
   tests/e2e/pull_request/one_card/test_ec_mooncake_fallback.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
+  tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 280
   tests/e2e/pull_request/one_card/test_minicpm.py: 180

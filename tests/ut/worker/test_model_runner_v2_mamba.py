@@ -905,6 +905,9 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
+
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
@@ -956,6 +959,9 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
+
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1013,7 +1019,10 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         additional_config={},
     )
     layers = {
-        name: SimpleNamespace(get_kv_cache_spec=lambda _config, spec=spec: spec)
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
+        )
         for name, spec in original_specs.items()
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)

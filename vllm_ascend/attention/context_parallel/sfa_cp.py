@@ -1339,6 +1339,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
             metadata.pcp_prolog_local_slots = local_slots
             metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+            # Native KV gather keeps one decode prefix before all prefill rows.
+            metadata.slot_mapping = metadata.pcp_prolog_global_slots
+            if num_decode_tokens:
+                metadata.slot_mapping = torch.cat((rank_slots[0, :num_decode_tokens], metadata.slot_mapping))
         return metadata
 
 
@@ -1701,9 +1705,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
         slots = attn_metadata.dcp_context.slot_mapping
-        # PCP gathers prefill KV rows; retain their full DCP mapping.
+        # PCP stores gathered KV with the mapping prepared by the builder.
         if isinstance(self, AscendSFAPCPImpl) and self._has_prefill(attn_metadata):
-            return slots
+            return attn_metadata.slot_mapping
         return slots[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
