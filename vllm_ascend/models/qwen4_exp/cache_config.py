@@ -58,9 +58,7 @@ def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
         return True
     text_config = getattr(draft_model_config, "hf_text_config", None)
     text_architectures = tuple(getattr(text_config, "architectures", ()) or ())
-    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or (
-        "Qwen4ExpMTP" in text_architectures
-    )
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in text_architectures)
 
 
 def annotate_qwen4_exp_mtp_groups(
@@ -113,10 +111,7 @@ def annotate_qwen4_exp_mtp_groups(
             group.is_eagle_group = True
 
     if not any(group.is_eagle_group for group in kv_cache_groups):
-        raise ValueError(
-            "Qwen4Exp MTP is enabled, but no KV cache group contains "
-            f"its draft layer(s) {draft_markers}."
-        )
+        raise ValueError(f"Qwen4Exp MTP is enabled, but no KV cache group contains its draft layer(s) {draft_markers}.")
 
 
 @dataclass(frozen=True)
