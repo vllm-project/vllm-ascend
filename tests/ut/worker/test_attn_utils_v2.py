@@ -2279,7 +2279,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm_ascend.core import kv_cache_placement
-    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+    from vllm_ascend.patch.worker import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)

@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "../op_kernel/arch35/qsfa_a5_address_precompute.h"
 #include <map>
 #include <vector>
 #include <numeric>
@@ -554,12 +555,21 @@ void QSFAMlaTiling::GetWorkspaceSize()
         workspaceSize_ = libapiSize_;
         constexpr uint32_t TRIPLE_BUFFER_NUM = 3;
         constexpr uint32_t S2_BASE_SIZE = 128;            // S2轴基本块大小
-        constexpr uint32_t D_SIZE = 576;
+        const uint32_t dSize = qsfaInfo_->qHeadDim;
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
         uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
         if (qsfaInfo_->gSize > 64) { // G大于64时核间切G，V0结果出核，需申请GM空间
-            workspaceSize_ += (S2_BASE_SIZE * D_SIZE * GetTypeSize(qsfaInfo_->inputQType) \
+            workspaceSize_ += (S2_BASE_SIZE * dSize * GetTypeSize(qsfaInfo_->inputQType) \
                 * TRIPLE_BUFFER_NUM * (aicNum >> 1));
+        }
+        if (qsfaInfo_->inputKvType == ge::DT_INT8 && qsfaInfo_->kvLayout == QSFALayout::PA_BSND &&
+            qsfa_a5::CanPrecomputeAddresses(qsfaInfo_->blockSize, qsfaInfo_->maxBlockNumPerBatch,
+                qsfaInfo_->sparseBlockCount, qsfaInfo_->sparseMode,
+                qsfaInfo_->gSize > 64, qsfaInfo_->qHeadDim == 512)) {
+            const uint64_t queryRows = qsfaInfo_->qLayout == QSFALayout::TND ? qsfaInfo_->s1Size :
+                static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+            workspaceSize_ += queryRows *
+                qsfaInfo_->sparseBlockCount * sizeof(int64_t);
         }
     } else {
         uint32_t mmResElemSize = 4;         // 4:fp32

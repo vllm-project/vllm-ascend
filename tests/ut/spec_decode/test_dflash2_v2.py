@@ -260,7 +260,7 @@ def test_dflash_loader_temporarily_disables_profiling_chunk(monkeypatch, fail):
 def test_patch_swaps_upstream_selector_walk_kernel():
     import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream
 
-    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
+    import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
 
     assert upstream._selector_walk_kernel is _selector_walk_kernel_ascend
 
