@@ -102,11 +102,16 @@ def _prepare_qsa_mask_words_kernel(
     group = tl.load(compact_indices + row * stride_row + columns * stride_column, columns < GROUPS, other=-1)
     valid = (columns < GROUPS) & (group >= 0) & (group < visible // 4)
     residual = visible % 4
+    valid_count = tl.sum(valid.to(tl.int32), 0)
     if GROUPS >= 512:
         if residual != 0:
-            # Stable prefix rank matches GBSA's final full-group replacement.
-            valid = valid & (tl.cumsum(valid.to(tl.int32), 0) < GROUPS)
-    selected = (tl.sum(valid.to(tl.int32), 0) > 0) | (residual != 0)
+            # GBSA replaces the final selected full group with its residual
+            # group only when all GROUPS entries are valid. Dropping the
+            # rightmost valid lane is equivalent to the old prefix cumsum,
+            # but avoids a full-width scan for every query row.
+            last_valid_column = tl.max(tl.where(valid, columns, -1), 0)
+            valid = valid & ((valid_count < GROUPS) | (columns != last_valid_column))
+    selected = (valid_count > 0) | (residual != 0)
     # Each complete four-token group is one aligned int32 mask word. Keep
     # row-local targets so ScatterElementsV2 can use its efficient dim=1 path.
     target = tl.where(valid, group, mask_words + columns)
