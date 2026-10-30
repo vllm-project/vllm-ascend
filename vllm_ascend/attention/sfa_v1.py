@@ -167,9 +167,12 @@ def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch
         raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
 
 
-def sparse_mla(query, cache, indices, metadata, scale):
+def sparse_mla(query, cache, indices, metadata, scale, *, return_lse=False, sparse_mode=3, sinks=None):
     """Attend to original latent KV, using the platform's NoPE operator."""
     cache = _view_cache_as_operator_pages(cache, metadata.block_size)
+    # FULL decode metadata can append a dummy request beyond the query bucket.
+    # Bound every device-side cumulative length before either kernel reads it.
+    cu_seqlens_q = metadata.query_start_loc.clamp(max=query.shape[0])
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -187,10 +190,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
         # A Python token count used here would freeze at the captured batch size.
         valid = metadata.smla_valid_mask[: query.shape[0]]
         topk_length.copy_((sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).masked_fill(~valid, 0))
-        cu_seqlens_q = metadata.query_start_loc
-        if query.shape[0] != metadata.smla_topk_length.shape[0]:
-            # Eager and piecewise execution trim graph-padding query rows.
-            cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
         build_smla_metadata(
             metadata,
             metadata.smla_metadata,
@@ -208,7 +207,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             cu_seqlens_q=cu_seqlens_q,
             seqused_ori_kv=metadata.seq_lens,
             ori_topk_length=topk_length,
-            sinks=metadata.smla_sinks,
+            sinks=metadata.smla_sinks if sinks is None else sinks,
             metadata=metadata.smla_metadata,
             softmax_scale=scale,
             cmp_ratio=1,
@@ -220,7 +219,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             layout_q="TND",
             layout_kv="PA_BBND",
             topk_value_mode=1,
-            return_softmax_lse=False,
+            return_softmax_lse=return_lse,
         )
     else:
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
@@ -231,16 +230,28 @@ def sparse_mla(query, cache, indices, metadata, scale):
             scale_value=scale,
             sparse_block_size=1,
             block_table=metadata.block_table,
-            actual_seq_lengths_query=metadata.query_start_loc[1:].to(torch.int32),
+            actual_seq_lengths_query=cu_seqlens_q[1:].to(torch.int32),
             actual_seq_lengths_kv=metadata.seq_lens.to(torch.int32),
             query_rope=None,
             key_rope=None,
             layout_query="TND",
             layout_kv="PA_BSND",
-            sparse_mode=3,
+            sparse_mode=sparse_mode,
             attention_mode=2,
-            return_softmax_lse=False,
+            return_softmax_lse=return_lse,
         )
+    if return_lse:
+        has_local_keys = (indices >= 0).any(dim=-1, keepdim=True)
+        if metadata.smla_metadata is not None:
+            has_local_keys &= metadata.smla_valid_mask[: query.shape[0]].unsqueeze(-1)
+        output = result[0].masked_fill(~has_local_keys, 0)
+        if metadata.smla_metadata is not None:
+            # SparseFlashMla returns LSE directly; SFA returns max and sum.
+            lse = result[1].permute(1, 2, 0)
+            sink_values = metadata.smla_sinks if sinks is None else sinks
+            return output, torch.where(has_local_keys, lse, sink_values.view(1, -1, 1))
+        lse = (result[1] + torch.log(result[2])).permute(1, 0, 2).reshape(query.shape[0], query.shape[1], 1)
+        return output, lse.masked_fill(~has_local_keys, -torch.inf)
     return result[0]
 
 
@@ -264,9 +275,15 @@ class SparseMLAMetadataState:
         self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
-        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        table_width = (
+            cdiv(vllm_config.model_config.max_model_len, cache_block_size * dcp_size) * dcp_size * expand_factor
+        )
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
-        table_rows = max([vllm_config.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        if dcp_size > 1 and vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            max_num_reqs *= 2
+        table_rows = max([max_num_reqs + 1, *capture_sizes])
         self.block_table_buffer = torch.empty(table_rows, table_width, dtype=torch.int32, device=device)
         if self.use_smla:
             config = vllm_config.model_config.hf_text_config

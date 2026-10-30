@@ -67,6 +67,7 @@ def view_compressed_indexer_cache(
     indexer_kernel_block_size = kernel_block_size // compression_ratio
     num_blocks = raw_single.numel() // kv_cache_spec.page_size_bytes
     num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // indexer_kernel_block_size
+    num_blocks_per_kv_block *= getattr(kv_cache_spec, "dcp_replication_size", 1)
     shape = tuple(
         attn_backend.get_kv_cache_shape(
             num_blocks * num_blocks_per_kv_block,
