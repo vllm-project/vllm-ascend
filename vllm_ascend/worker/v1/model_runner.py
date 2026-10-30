@@ -73,7 +73,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
@@ -156,7 +155,7 @@ from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
@@ -266,12 +265,12 @@ from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
-# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.31.0 lane
+# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.32.0 lane
 # still ships `AscendMedusaProposer`. Keep the name for the drafter type union
 # on both lanes, but on main never resolve it at runtime: the dispatch below
 # short-circuits on the version first, and the config rejects `method="medusa"`
 # before a proposer could be constructed.
-if vllm_version_is("0.31.0"):
+if vllm_version_is("0.32.0"):
     from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer  # type: ignore[import-not-found]
 
 
@@ -558,7 +557,18 @@ class NPUModelRunner(GPUModelRunner):
         _enpu = get_c_env("ENPU_ENABLE")
         self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
-        self._set_up_drafter()
+        # Upstream captures JIT warmup registrations inside GPUModelRunner's
+        # own __init__ windows, which the overrides here bypass. The v1
+        # spec-decode stack (rejection sampler + sampling kernels) is instead
+        # registered in one window around _set_up_drafter, matching upstream's
+        # registration-during-construction style.
+        from vllm_ascend.model_executor.warmup.kernel_warmup import (
+            register_v1_sampling_warmup,
+        )
+
+        with self.jit_warmup_registry.activate():
+            register_v1_sampling_warmup(vllm_config)
+            self._set_up_drafter()
 
         # Backends that consume CPU seq_lens (AscendAttentionBackend,
         # AscendMLABackend, and DSV4 compressed attention metadata) need
@@ -2074,7 +2084,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
-        elif vllm_version_is("0.31.0") and isinstance(self.drafter, AscendMedusaProposer):
+        elif vllm_version_is("0.32.0") and isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
                 # maximum when the feature is disabled).
@@ -4683,21 +4693,27 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def _jit_warmup_window(self) -> AbstractContextManager[None]:
+        """Registry collection window; optional for partial runners.
+
+        Unit tests build runners with ``__new__`` (no upstream ``__init__``)
+        and call ``load_model`` directly; those have no registry and the
+        window degrades to a no-op instead of failing on an unrelated
+        attribute.
+        """
+        registry = getattr(self, "jit_warmup_registry", None)
+        return registry.activate() if registry is not None else nullcontext()
+
     def load_model(self) -> None:
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
-            join_early_kernel_warmup,
-            start_early_kernel_warmup,
-        )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
         )
 
-        # Overlap the one-off NZ cast and Triton compile with weight I/O.
-        # Every model goes through here. Both threads are joined before this
-        # method returns, which is before memory profiling.
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here. The thread is joined before this method returns,
+        # which is before memory profiling.
         start_nz_warm_thread("thread")
-        start_early_kernel_warmup()
 
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -4716,7 +4732,10 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
-            self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            # Model construction (e.g. the DSV4.1 indexer) registers its JIT
+            # warmup kernels under this window.
+            with self._jit_warmup_window():
+                self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -4726,7 +4745,7 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                with get_tp_context(self.drafter):
+                with get_tp_context(self.drafter), self._jit_warmup_window():
                     self.drafter.load_model(self.model)
 
             pp_group = get_pp_group()
@@ -4873,7 +4892,6 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data()
 
         join_nz_warm_thread()
-        join_early_kernel_warmup("load_model")
 
         load_model_total_time = time.perf_counter() - load_model_start_time
         logger.info(
@@ -4917,7 +4935,11 @@ class NPUModelRunner(GPUModelRunner):
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
-        self.initialize_attn_backend(kv_cache_config)
+        # Attention backends / metadata builders (e.g. the DSA builder owning
+        # the fused Q-RMS kernel) register their JIT warmup kernels during
+        # construction; keep a registry window open across both creation paths.
+        with self.jit_warmup_registry.activate():
+            self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # K3's packed layout keeps Mamba specs inside UniformType groups, so the
         # old first-spec scan over attn_groups cannot recognize them.
@@ -4925,9 +4947,9 @@ class NPUModelRunner(GPUModelRunner):
 
         kernel_block_sizes = prepare_ascend_kernel_block_sizes(kv_cache_config, self.attn_groups)
         self.kernel_block_sizes = kernel_block_sizes
-        if not vllm_version_is("0.31.0"):
-            # vLLM #57169/main splits metadata-builder creation out of
-            # `initialize_attn_backend`; builders need the kernel block sizes.
+        # vLLM #57169/main splits metadata-builder creation out of
+        # `initialize_attn_backend`; builders need the kernel block sizes.
+        with self.jit_warmup_registry.activate():
             self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
             self._init_device_metadata_providers()
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
@@ -4946,11 +4968,15 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
-        kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config,
-            kernel_block_sizes=kernel_block_sizes,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        kv_caches = None
+        # Capture warmup registrations that depend on allocated KV-cache
+        # strides (mirrors upstream).
+        with self.jit_warmup_registry.activate():
+            kv_caches = self.initialize_kv_cache_tensors(
+                kv_cache_config,
+                kernel_block_sizes=kernel_block_sizes,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
         # Cache layouts are final and bound now; prepare on disposable
         # scratch storage before any warmup forward, graph capture or request.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
@@ -4985,18 +5011,15 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDraftModelProposer,
             )
             kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer) or not vllm_version_is("0.31.0"):
-                # On main, create_metadata_builders() selects the kernel block
-                # size via select_common_block_size(), which requires an int.
-                # 310P keeps per-group candidate lists (e.g. [[128], [0]]), so
-                # collapse each group to its first candidate.
-                candidate_sizes = cast("list[int] | list[list[int]] | int", kernel_block_sizes)
-                sizes = candidate_sizes if isinstance(candidate_sizes, list) else [candidate_sizes]
-                draft_kernel_block_sizes = [
-                    int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
-                ]
-            else:
-                draft_kernel_block_sizes = kernel_block_sizes
+            # On main, create_metadata_builders() selects the kernel block
+            # size via select_common_block_size(), which requires an int.
+            # 310P keeps per-group candidate lists (e.g. [[128], [0]]), so
+            # collapse each group to its first candidate.
+            candidate_sizes = cast("list[int] | list[list[int]] | int", kernel_block_sizes)
+            sizes = candidate_sizes if isinstance(candidate_sizes, list) else [candidate_sizes]
+            draft_kernel_block_sizes = [
+                int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
+            ]
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if (
@@ -6453,28 +6476,55 @@ class NPUModelRunner(GPUModelRunner):
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
-            self.input_batch = NPUInputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                is_spec_decode=bool(self.vllm_config.speculative_config),
-                logitsprocs=self.input_batch.logitsprocs,
-                is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=(
-                    self.vllm_config.speculative_config.num_speculative_tokens
-                    if self.vllm_config.speculative_config
-                    else 0
-                ),
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                kv_cache_groups=kv_cache_config.kv_cache_groups,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
-            )
+            # Capture warmup registrations that depend on the final KV-cache
+            # geometry (mirrors upstream's InputBatch window). Runners built
+            # without the upstream __init__ (tests, partial mocks) have no
+            # registry; the window is optional for them.
+            registry = getattr(self, "jit_warmup_registry", None)
+            window = registry.activate() if registry is not None else nullcontext()
+            with window:
+                self.input_batch = NPUInputBatch(
+                    max_num_reqs=self.max_num_reqs,
+                    max_model_len=max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=block_sizes,
+                    is_spec_decode=bool(self.vllm_config.speculative_config),
+                    logitsprocs=self.input_batch.logitsprocs,
+                    is_pooling_model=self.is_pooling_model,
+                    num_speculative_tokens=(
+                        self.vllm_config.speculative_config.num_speculative_tokens
+                        if self.vllm_config.speculative_config
+                        else 0
+                    ),
+                    kernel_block_sizes=kernel_block_sizes,
+                    max_num_blocks_per_req=max_num_blocks,
+                    kv_cache_groups=kv_cache_config.kv_cache_groups,
+                    cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
+                )
+
+    def initialize_metadata_builders(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+    ) -> None:
+        # Upstream also initializes the drafter here, but Ascend creates one
+        # only on the last PP stage and initializes it after binding KV tensors
+        # in initialize_kv_cache. Target builders are needed on every stage.
+        for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    kernel_block_sizes[kv_cache_group_id]
+                    if kv_cache_group_id < len(kernel_block_sizes)
+                    else None,
+                    num_metadata_builders=1
+                    if not self.parallel_config.use_ubatching
+                    else self.parallel_config.num_ubatches,
+                )
+        self.calculate_reorder_batch_threshold()
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -6558,30 +6608,17 @@ class NPUModelRunner(GPUModelRunner):
             for group_key, layer_names in attn_backends_map.items():
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
-                if vllm_version_is("0.31.0"):
-                    attn_metadata_builders = [
-                        attn_backend.get_builder_cls()(
-                            kv_cache_spec,
-                            layer_names,
-                            self.vllm_config,
-                            self.device,
-                        )
-                    ]
-                    attn_group = AttentionGroup(
-                        attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
-                    )
-                else:
-                    # vLLM #57169/main inserted `kernel_block_size` (et al.)
-                    # before `metadata_builders`, so the builders are no longer
-                    # the 5th positional field. On main they are created later
-                    # by `initialize_metadata_builders` (which also needs the
-                    # kernel block sizes).
-                    attn_group = AttentionGroup(
-                        backend=attn_backend,
-                        layer_names=layer_names,
-                        kv_cache_spec=kv_cache_spec,
-                        kv_cache_group_id=kv_cache_group_id,
-                    )
+                # vLLM #57169/main inserted `kernel_block_size` (et al.)
+                # before `metadata_builders`, so the builders are no longer
+                # the 5th positional field. On main they are created later
+                # by `initialize_metadata_builders` (which also needs the
+                # kernel block sizes).
+                attn_group = AttentionGroup(
+                    backend=attn_backend,
+                    layer_names=layer_names,
+                    kv_cache_spec=kv_cache_spec,
+                    kv_cache_group_id=kv_cache_group_id,
+                )
                 attn_groups.append(attn_group)
             return attn_groups
 
@@ -6599,15 +6636,6 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
-
-        # On main the metadata builders are created later, in
-        # `initialize_metadata_builders` (called from `initialize_kv_cache`),
-        # so the device-metadata providers and the reorder threshold are set up
-        # there instead.
-        if vllm_version_is("0.31.0"):
-            self._init_device_metadata_providers()
-            # Calculate reorder batch threshold (if needed)
-            self.calculate_reorder_batch_threshold()
 
     def _init_device_metadata_providers(self) -> None:
         device_metadata_providers = {
@@ -6845,9 +6873,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         # vLLM #60517 removed `PassConfig.enable_sp` on main; the
         # `enable_sp(self.vllm_config)` term already covers Ascend SP there.
-        pass_sp = (
-            self.compilation_config.pass_config.enable_sp if vllm_version_is("0.31.0") else False
-        )
+        pass_sp = False
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and (enable_dsa_cp() or enable_sp(self.vllm_config) or pass_sp)
@@ -6875,20 +6901,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with update_pass_config(self):
             tensor_parallel_size = self.parallel_config.tensor_parallel_size
-            resolver_tensor_parallel_size = tensor_parallel_size
             if self._should_align_cudagraph_capture_sizes():
                 graph_alignment = math.lcm(self.uniform_decode_query_len, tensor_parallel_size)
-                # vLLM #60517 dropped the `tensor_parallel_size` argument on
-                # main; the SP-aware lcm is computed here instead.
-                if vllm_version_is("0.31.0"):
-                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
-                else:
-                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
-                resolver_tensor_parallel_size = 1
+                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
             # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
-            resolve_kwargs = (
-                {"tensor_parallel_size": resolver_tensor_parallel_size} if vllm_version_is("0.31.0") else {}
-            )
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
@@ -6896,7 +6912,6 @@ class NPUModelRunner(GPUModelRunner):
                 use_v2_model_runner=False,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
-                **resolve_kwargs,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
@@ -7089,14 +7104,5 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 
 @contextmanager
 def update_pass_config(model_runner):
-    # vLLM #60517 removed `PassConfig.enable_sp` on main; the pass-based SP this
-    # context manager toggled no longer exists there, so it is a no-op.
-    if not vllm_version_is("0.31.0"):
-        yield
-        return
-    try:
-        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
-        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
-        yield
-    finally:
-        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
+    # vLLM #60517 removed PassConfig.enable_sp in both supported revisions.
+    yield

@@ -1,6 +1,6 @@
 test_cases:
-  - name: "Qwen3.6-27B-W8A8"
-    model: "Eco-Tech/Qwen3.6-27B-w8a8"
+  - name: "Qwen3.6-27B-W8A8-310P"
+    model: "Eco-Tech/Qwen3.6-27B-W8A8-310P"
     envs:
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:

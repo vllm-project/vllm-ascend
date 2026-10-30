@@ -43,7 +43,7 @@ test_cases:
       - "deepseek_v41"
       - "--enable-auto-tool-choice"
       - "--safetensors-load-strategy"
-      - "prefetch"
+      - "lazy"
       - "--block-size"
       - "128"
       - "--enable-chunked-prefill"

@@ -11,8 +11,8 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1 import utils as v1_utils
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive import sparse_kv_offload
-from vllm_ascend.worker.v2.spec_decode.autoregressive.sparse_kv_offload import SparseKVOffloadMetadata
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import sparse_kv_offload
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
 
 
 @pytest.fixture(autouse=True)

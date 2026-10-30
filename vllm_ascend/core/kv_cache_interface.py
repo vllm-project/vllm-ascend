@@ -9,7 +9,6 @@ from typing import Any
 import torch
 from typing_extensions import Self
 from vllm.config import CacheConfig, VllmConfig
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
@@ -24,8 +23,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
-from vllm_ascend.utils import vllm_version_is
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -44,10 +41,6 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
     if isinstance(kv_cache_spec, MLAAttentionSpec):
-        # vLLM #57169 removed the MLA `storage_block_size` override on main.
-        if vllm_version_is("0.31.0"):
-            storage_block_size = kv_cache_spec.storage_block_size
-            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
         return kv_cache_spec.block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
@@ -135,19 +128,10 @@ def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | 
         # silent here too: the feature is not part of this model, and no user
         # can have turned it on for it.
         return False
-    if not getattr(cache_config, "swa_bounded_replay", False):
-        # Absent from the release lane, where the feature does not exist at all:
-        # no switch to turn on, no spec field for the flag to reach, so there is
-        # nothing to warn about. Probed rather than read, so the lane does not
-        # have to be named here.
-        return False
-    if (
-        vllm_config.parallel_config.prefill_context_parallel_size > 1
-        and vllm_config.parallel_config.data_parallel_size > 1
-    ):
-        logger.warning_once("SWA bounded replay with PCP currently requires DP=1.")
-        return False
-    return True
+    # The switch is absent from release lanes without bounded replay. PCP and
+    # DP share the same cache contract; decoder batch coordination is handled
+    # by DecoderReplayState rather than disabling the cache feature here.
+    return bool(getattr(cache_config, "swa_bounded_replay", False))
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:

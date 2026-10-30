@@ -391,6 +391,17 @@ class EplbExpertTensorList(list[torch.Tensor]):
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
 
+    def element_size(self) -> int:
+        # Upstream registers expert weights via
+        # `w.view(torch.uint8) if w.element_size() == 1 else w`, so the
+        # container must expose the underlying per-expert item size.
+        return self[0].element_size()
+
+    def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
+        # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
+        # the per-expert container (and its aliasing semantics) intact.
+        return type(self)(tensor.view(dtype) for tensor in self)
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if func is torch.empty_like and not kwargs:
@@ -455,7 +466,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 draft_model_config.draft_moe_quant_type = self.quant_type
 
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+    def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
         except AttributeError as exc:

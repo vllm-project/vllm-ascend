@@ -36,7 +36,6 @@ from vllm_ascend.distributed.eplb.eplb_state import (
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.utils import vllm_version_is
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
@@ -581,6 +580,7 @@ def _wrap_async_worker(original_worker):
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
                 model_state.communicator.set_stream(stream)
+                previous_consumed_event = None
                 with stream if stream is not None else nullcontext():
                     old_mapping = model_state.physical_to_logical_map.cpu()
                 new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
@@ -629,7 +629,14 @@ def _wrap_async_worker(original_worker):
                         "layer_idx": layer_idx,
                         transfer_stream_parameter: stream,
                     }
-                    metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    communicator = model_state.communicator
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        communicator.set_consumed_event(previous_consumed_event)
+                    try:
+                        metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    finally:
+                        if isinstance(communicator, AscendHixlEplbCommunicator):
+                            communicator.set_consumed_event(None)
                     with gpu_sync_allowed():
                         stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
@@ -644,11 +651,14 @@ def _wrap_async_worker(original_worker):
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
-                    if not vllm_version_is("0.31.0") and index == len(changed_layers) - 1:
-                        # On main, the last workspace move may be performed by
-                        # upstream's own helper instead of the wrapped commit
-                        # path, so report completion from the worker there. The
-                        # v0.31.0 lane keeps logging it from that wrapper.
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        # record() replaces the underlying event. Capture it only
+                        # after wait() has observed the foreground acknowledgement.
+                        previous_consumed_event = consumed_event._event
+                    if index == len(changed_layers) - 1:
+                        # On both supported lanes, the last workspace move may
+                        # use upstream's helper instead of the wrapped commit
+                        # path, so report completion from this worker.
                         if rank == 0:
                             logger.info(
                                 "%s: model=%s",
@@ -811,45 +821,6 @@ def _wrap_move_to_workspace(original_move):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
                 _clear_transfer_target(model_state.communicator)
-                if bound.arguments["ep_rank"] == 0 and vllm_version_is("0.31.0"):
-                    if full_target is None:
-                        logger.info(
-                            "%s: model=%s",
-                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                            model_state.model_name,
-                        )
-                    else:
-                        source_ranks = np.asarray(full_target.source_rank_ids)
-                        destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
-                        rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
-                        imbalance = getattr(full_target, "predicted_imbalance_summary", None)
-                        rank_node_ids = getattr(full_target, "rank_node_ids", None)
-                        if imbalance is None or rank_node_ids is None:
-                            logger.info(
-                                "%s: model=%s rank_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                rank_transfers,
-                            )
-                        else:
-                            rank_node_ids = np.asarray(rank_node_ids)
-                            cross_node_transfers = np.count_nonzero(
-                                rank_node_ids[source_ranks] != rank_node_ids[destination_ranks]
-                            )
-                            mean_before, p95_before, mean_after, p95_after = imbalance
-                            logger.info(
-                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d "
-                                "rank_transfers=%d cross_node_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                mean_before,
-                                mean_after,
-                                p95_before,
-                                p95_after,
-                                full_target.changed_layer_count,
-                                rank_transfers,
-                                cross_node_transfers,
-                            )
                 hixl_timings = getattr(model_state.communicator, "_eplb_hixl_phase_timings", [])
                 if hixl_timings and bound.arguments["ep_rank"] == 0:
                     logger.info(
