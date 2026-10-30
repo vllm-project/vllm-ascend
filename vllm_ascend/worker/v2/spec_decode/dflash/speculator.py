@@ -17,8 +17,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
-from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionMetadataBuilder, AscendMetadata
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import DFlashKVGroup, prepare_dflash_inputs_triton

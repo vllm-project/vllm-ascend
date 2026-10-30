@@ -409,9 +409,7 @@ def test_capture_preserves_upstream_context_kv_callback(monkeypatch, has_context
     monkeypatch.setattr(graph_module, "communicator_switch", lambda: nullcontext())
     monkeypatch.setattr(graph_module, "model_capture_wrapper", lambda *args: nullcontext())
     callback = MagicMock() if has_context_prefix else None
-    prefix_kwargs = (
-        {"precompute_context_kv": callback} if vllm_version_is("0.31.0") else {"prepare_forward": callback}
-    )
+    prefix_kwargs = {"precompute_context_kv": callback} if vllm_version_is("0.31.0") else {"prepare_forward": callback}
     manager.capture(
         MagicMock(),
         input_buffers=MagicMock(),

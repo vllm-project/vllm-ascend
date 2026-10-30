@@ -14,7 +14,6 @@ not here: this file only guards the write path.
 
 import pytest
 import torch
-import torch_npu
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.device.device_op import DeviceOperator
@@ -56,9 +55,7 @@ def test_context_padding_slots_skip_cache_writes(num_slots):
     for (key_cache, value_cache), slots in zip(cached, layer_slots):
         # Reference: same real rows only, into a fresh cache.
         ref_key, ref_value = _new_cache(), _new_cache()
-        DeviceOperator.reshape_and_cache(
-            key[:actual], value[:actual], ref_key, ref_value, slots[:actual]
-        )
+        DeviceOperator.reshape_and_cache(key[:actual], value[:actual], ref_key, ref_value, slots[:actual])
         torch.npu.synchronize()
         # Padding wrote nothing: the padded pass is identical to real-only.
         torch.testing.assert_close(key_cache, ref_key, rtol=1e-2, atol=1e-2)
