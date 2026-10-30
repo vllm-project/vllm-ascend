@@ -1021,7 +1021,8 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    return bool(getattr(parallel_config, "use_sequence_parallel_moe", False))
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
