@@ -1149,6 +1149,7 @@ class MooncakeLayerwiseConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
+        self._local_prefix_cache_tokens: dict[str, int] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.circular_group_ids = {
@@ -1269,6 +1270,9 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % min(self.block_size) == 0
+            # The scheduler has not updated request.num_computed_tokens yet.
+            # Refresh this on every lookup in case allocation is retried.
+            self._local_prefix_cache_tokens[request.request_id] = num_computed_tokens
             count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
 
@@ -1290,7 +1294,7 @@ class MooncakeLayerwiseConnectorScheduler:
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
-            remote_cached_tokens = request.num_computed_tokens
+            remote_cached_tokens = self._local_prefix_cache_tokens.pop(request.request_id)
             # Get unhashed blocks to pull from remote.
             logger.debug(
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need recv queue", request.request_id
@@ -1461,6 +1465,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._local_prefix_cache_tokens.pop(request.request_id, None)
         # layer_wise push, not need delay_free_blocks
         return False, None
 
@@ -1473,6 +1478,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._local_prefix_cache_tokens.pop(request.request_id, None)
         # layer_wise push, not need delay_free_blocks
         return False, None
 
@@ -1495,11 +1501,7 @@ class MooncakeLayerwiseConnectorWorker:
             vllm_config.parallel_config.tensor_parallel_size,
             vllm_config.parallel_config.prefill_context_parallel_size,
         )
-        self.use_component_transfer = (
-            _requires_component_transfer(kv_cache_config)
-            or vllm_config.parallel_config.prefill_context_parallel_size > 1
-            or vllm_config.parallel_config.decode_context_parallel_size > 1
-        )
+        self.use_component_transfer = _requires_component_transfer(kv_cache_config)
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
         self.local_engine_id: str = " "
