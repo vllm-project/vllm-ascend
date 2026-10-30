@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+name: Prepare GDN package cache
+
+on:
+  workflow_call:
+    inputs:
+      test_groups:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+    secrets:
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
+
+jobs:
+  plan:
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      targets: ${{ steps.plan.outputs.targets }}
+      has_targets: ${{ steps.plan.outputs.has_targets }}
+    steps:
+      - id: plan
+        env:
+          TEST_GROUPS: ${{ inputs.test_groups }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          targets = {}
+          for group in json.loads(os.environ["TEST_GROUPS"]):
+              if group["npu_type"].lower() != "310p":
+                  continue
+              label = group["runner"].lower()
+              if "aarch64" in label or "arm64" in label:
+                  arch, runner = "aarch64", "linux-arm64-cpu-16"
+              elif "amd64" in label or "x86" in label:
+                  arch, runner = "x86_64", "linux-amd64-cpu-16-hk"
+              else:
+                  raise ValueError(f"Unknown 310P runner architecture: {label}")
+              tag = group["image_tag"]
+              if "-ubuntu" not in tag:
+                  raise ValueError(f"Add package-manager support before using GDN cache for {tag}")
+              targets[(arch, tag)] = dict(arch=arch, runner=runner, image_tag=tag)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("targets=" + json.dumps(list(targets.values())), file=output)
+              print("has_targets=" + str(bool(targets)).lower(), file=output)
+          PY
+
+  prepare:
+    needs: plan
+    if: needs.plan.outputs.has_targets == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    runs-on: ${{ matrix.target.runner }}
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.target.image_tag }}
+    env:
+      GDN_IMAGE_TAG: ${{ matrix.target.image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Prepare cache tooling
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          apt-get update -y
+          apt-get install -y git zstd build-essential cmake patch unzip
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          test "$(uname -m)" = '${{ matrix.target.arch }}'
+      - id: key
+        run: |
+          KEY="$(bash .github/workflows/scripts/gdn_packages.sh key)"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+      - name: Look up GDN packages
+        id: cache
+        uses: runs-on/cache/restore@v5
+        with:
+          path: .cache/gdn-packages
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Check cache writer credentials
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+        run: |
+          if [ -z "$OBS_CACHE_WRITE_ACCESS_KEY_ID" ] || [ -z "$OBS_CACHE_WRITE_SECRET_ACCESS_KEY" ]; then
+            echo '::error::GDN cache is missing; configure HW_OBS_AK/HW_OBS_SK for the cache producer.'
+            exit 1
+          fi
+      - name: Build GDN packages on cache miss
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash .github/workflows/scripts/gdn_packages.sh build
+      - name: Save GDN packages
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+        with:
+          path: .cache/gdn-packages
+          key: ${{ steps.key.outputs.key }}
