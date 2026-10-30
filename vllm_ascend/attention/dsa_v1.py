@@ -316,16 +316,7 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        from vllm_ascend.utils import enable_dsa_cp
-
-        use_dsa_cp = enable_dsa_cp()
         use_pcp = is_pcp_enabled()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
-
-            return AscendDSACPMetadataBuilder
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
 
@@ -348,16 +339,7 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
-        from vllm_ascend.utils import enable_dsa_cp
-
-        use_dsa_cp = enable_dsa_cp()
         use_pcp = is_pcp_enabled()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
-
-            return AscendDSACPImpl
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
 

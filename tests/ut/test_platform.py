@@ -940,12 +940,9 @@ class TestNPUPlatform(TestBase):
         _mock_refresh_block_size,
     ):
         ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.enable_dsa_cp = False
         mock_init_ascend.return_value = ascend_config
         vllm_config = TestNPUPlatform.mock_vllm_config()
-        # A raw string is truthy in Python, but the platform must pass the
-        # validated False value from AscendConfig to the compile backend.
-        vllm_config.additional_config = {"enable_dsa_cp": "false"}
+        vllm_config.additional_config = {}
         vllm_config.scheduler_config.max_num_seqs = 77
         vllm_config.scheduler_config.max_num_batched_tokens = 1024
         vllm_config.compilation_config = CompilationConfig(
@@ -969,7 +966,7 @@ class TestNPUPlatform(TestBase):
         vllm_config._set_cudagraph_sizes = lambda: VllmConfig._set_cudagraph_sizes(vllm_config)
         vllm_config._set_cudagraph_sizes()
 
-        with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend) as mock_setup:
+        with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend):
             self.platform.check_and_update_config(vllm_config)
 
         self.assertEqual(
@@ -980,7 +977,6 @@ class TestNPUPlatform(TestBase):
         dispatcher = CudagraphDispatcher(vllm_config)
         dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL_DECODE_ONLY)
         self.assertEqual(dispatcher.dispatch(77, uniform_decode=True)[0], CUDAGraphMode.FULL)
-        self.assertIs(mock_setup.call_args.kwargs["enable_dsa_cp"], False)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3))
@@ -1023,16 +1019,14 @@ class TestNPUPlatform(TestBase):
 
     def test_setup_compile_backend_aligns_tp_token_layout_capture_sizes(self):
         cases = [
-            (True, False, False, True),
-            (False, True, False, True),
-            (False, False, True, True),
-            (False, False, False, False),
+            (True, False, True),
+            (False, True, True),
+            (False, False, False),
         ]
-        for upstream_sp, enable_shared_expert_dp, enable_dsa_cp, should_align in cases:
+        for upstream_sp, enable_shared_expert_dp, should_align in cases:
             with self.subTest(
                 upstream_sp=upstream_sp,
                 enable_shared_expert_dp=enable_shared_expert_dp,
-                enable_dsa_cp=enable_dsa_cp,
             ):
                 vllm_config = TestNPUPlatform.mock_vllm_config()
                 compilation_config = vllm_config.compilation_config
@@ -1057,7 +1051,6 @@ class TestNPUPlatform(TestBase):
                         vllm_config,
                         compile_backend="test_backend",
                         enable_shared_expert_dp=enable_shared_expert_dp,
-                        enable_dsa_cp=enable_dsa_cp,
                     )
 
                 if should_align:
@@ -2266,11 +2259,11 @@ class TestNPUPlatform(TestBase):
                         ) as mock_get_hardware_profile:
                             for tp_size in (1, 2, max_tp_size):
                                 vllm_config.parallel_config.tensor_parallel_size = tp_size
-                                _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+                                _validate_deepseek_v4_tp_config(vllm_config)
 
                             vllm_config.parallel_config.tensor_parallel_size = max_tp_size + 1
                             with pytest.raises(ValueError, match=rf"{variant} supports at most TP{max_tp_size}"):
-                                _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+                                _validate_deepseek_v4_tp_config(vllm_config)
 
                         mock_get_hardware_profile.assert_not_called()
 
@@ -2297,35 +2290,7 @@ class TestNPUPlatform(TestBase):
                     ),
                     pytest.raises(ValueError, match=r"V4\.1 supports at most TP8"),
                 ):
-                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
-
-    def test_validate_deepseek_v4_tp_config_allows_v1_dsa_cp(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = False
-        vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=256)
-        vllm_config.model_config.hf_text_config = None
-        vllm_config.parallel_config.tensor_parallel_size = 32
-
-        with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_get_hardware_profile:
-            _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=True))
-
-        mock_get_hardware_profile.assert_not_called()
-
-    def test_validate_deepseek_v4_tp_config_does_not_exempt_v2_dsa_cp(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
-        vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=384)
-        vllm_config.model_config.hf_text_config = None
-        vllm_config.parallel_config.tensor_parallel_size = 17
-
-        with (
-            patch(
-                "vllm_ascend.platform.get_current_hardware_profile",
-                return_value=get_hardware_profile(AscendDeviceType.A2),
-            ),
-            pytest.raises(ValueError, match="V4 Pro supports at most TP16"),
-        ):
-            _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=True))
+                    _validate_deepseek_v4_tp_config(vllm_config)
 
     def test_validate_deepseek_v4_tp_config_ignores_unrelated_models(self):
         for model_type, num_experts in (("deepseek_v4", 128), ("deepseek_v3", 256)):
@@ -2340,7 +2305,7 @@ class TestNPUPlatform(TestBase):
                 vllm_config.parallel_config.tensor_parallel_size = 32
 
                 with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_get_hardware_profile:
-                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+                    _validate_deepseek_v4_tp_config(vllm_config)
 
                 mock_get_hardware_profile.assert_not_called()
 
