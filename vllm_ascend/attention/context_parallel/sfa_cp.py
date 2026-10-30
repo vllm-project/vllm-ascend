@@ -41,7 +41,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_dcp,
+    is_dcp_enabled,
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -369,9 +369,20 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         num_replicated_tokens = get_pcp_num_replicated_tokens(
             attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
         )
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-            (kv_no_split, cos, sin), slots, num_replicated_tokens
-        )
+        if self.qk_rope_head_dim == 0:
+            # NoPE projects only the actual local tokens, while PCP slots keep
+            # the padded rank stride. Keep KV and slots in the same gather
+            # order: scatter writes do not require causal token order.
+            pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad_tokens < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad_tokens:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
+            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
+        else:
+            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+                (kv_no_split, cos, sin), slots, num_replicated_tokens
+            )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
@@ -916,7 +927,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -1136,7 +1147,7 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=(
-                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
             ),
         )
         kv_gather_block_ids = None
@@ -1978,12 +1989,12 @@ def resolve_sfa_metadata_builder(
     """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
+    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
     if dsa_cp_enabled:
         return AscendSFADSACPMetadataBuilder
-    if pcp_enabled and dcp_enabled:
+    if use_pcp and dcp_enabled:
         return AscendSFAPCPDCPMetadataBuilder
     if dcp_enabled:
         return AscendSFADCPMetadataBuilder
@@ -1994,15 +2005,15 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
     """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
+    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl
     if dsa_cp_enabled:
         return AscendSFADSACPImpl
-    if pcp_enabled and dcp_enabled:
+    if use_pcp and dcp_enabled:
         return AscendSFAPCPDCPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
-    if pcp_enabled:
+    if use_pcp:
         return AscendSFAPCPImpl
     return AscendSFAImpl

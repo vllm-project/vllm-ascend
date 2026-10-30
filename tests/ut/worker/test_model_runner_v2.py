@@ -529,7 +529,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the whole descriptor through the retained
-    # v0.31 PCPManager API (vLLM #57980).
+    # PCPManager API (vLLM #57980), also retained in v0.32.0.
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
@@ -868,13 +868,16 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.enable_mlapo = False
         impl.fa_quant_layer = False
         impl.use_flashmla = False
-        impl.pcp_enabled = False
-        impl.dcp_enabled = False
+        impl.use_pcp = False
+        impl.use_dcp = False
         impl.supports_prolog_v3_writer = lambda: True
         layer.impl = impl
         layer.indexer = None
         layer.kv_cache_dtype = "auto"
         layer.head_size = 3
+        # Set by ``MLAAttention.__init__`` on vLLM main; this stub bypasses
+        # ``__init__`` but ``get_kv_cache_spec`` reads it.
+        layer.topk_buffer_width = None
         layer.sliding_window = None
         layer.non_causal_multi_token_decode = False
 
@@ -1005,7 +1008,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
     # execute_model stages dummy inputs before preparing attention metadata.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
     staged = getattr(manager, stage_name)(dummy)
     block_tables, slots = runner.prepare_dummy_attn(staged)
 
@@ -1062,7 +1065,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
@@ -1120,7 +1123,7 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
         has_full_cudagraphs=lambda: full_graph,
     )
     self.model_config = SimpleNamespace(enforce_eager=not full_graph, architecture="Qwen3_5ForConditionalGeneration")
-    self.speculative_config = object() if speculative else None
+    self.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     self.use_pp = use_pp
     self.is_last_pp_rank = True
     self.pp_handler = SimpleNamespace() if use_pp else None
@@ -1178,6 +1181,8 @@ def test_init_without_speculation(use_pp):
     assert runner.req_states == "req"
     assert runner.input_buffers == "buf"
     assert runner.speculator is None
+    assert runner.pd_dspark_aux_layer_ids == ()
+    assert runner._dspark_prefill_progress == {}
     assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
     if use_pp:
@@ -1186,7 +1191,8 @@ def test_init_without_speculation(use_pp):
         assert runner.pp_handler is None
 
 
-def test_init_spec_pp_full_graph_and_speculator():
+@pytest.mark.parametrize("method", ["mtp", "ngram", "ngram_gpu"])
+def test_init_spec_pp_full_graph_and_speculator(method):
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
@@ -1199,6 +1205,11 @@ def test_init_spec_pp_full_graph_and_speculator():
     )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
+
+    def parent_init(self, cfg, dev):
+        _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True)
+        self.speculative_config.method = method
+
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -1207,11 +1218,11 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch.object(
             GPUModelRunner,
             "__init__",
-            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True),
+            parent_init,
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
-        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
-        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
+        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator) as speculator_factory,
+        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req") as request_state_cls,
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
@@ -1233,6 +1244,10 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
+    assert runner.pd_dspark_aux_layer_ids == ()
+    assert runner._dspark_prefill_progress == {}
+    speculator_factory.assert_called_once_with(vllm_config, runner.device, runner.req_states)
+    assert request_state_cls.call_args.kwargs["use_dense_all_token_ids"] is (method in ("ngram", "ngram_gpu"))
     assert speculator.update_stream is runner.update_stream
     assert runner.sync_spec_pp_cpu_counts is True
     assert vars(runner.pp_handler) == {}
@@ -1336,7 +1351,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
-    assert runner.speculator.pcp_manager is runner.pcp_manager
 
 
 def test_initialize_kv_cache_forwards_allocation_context():

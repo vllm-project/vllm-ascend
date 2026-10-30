@@ -78,7 +78,7 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils` (v0.31.0) /
+#   1. `vllm.v1.core.kv_cache_utils` (v0.32.0) /
 #      `vllm.v1.core.kv_cache_planning` (main, vLLM #61183)
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache

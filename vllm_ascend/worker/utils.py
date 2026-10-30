@@ -19,8 +19,6 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
@@ -118,10 +116,6 @@ def prepare_ascend_kernel_block_sizes(
         List of kernel block sizes for each cache group.
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-    if vllm_version_is("0.31.0"):
-        # The release lane predates #57169 and always splits; its
-        # ``select_common_block_size`` also takes no per-group specs.
-        return kernel_block_sizes
 
     # Upstream drops only encoder-only groups, so this index tracks its output.
     index = 0

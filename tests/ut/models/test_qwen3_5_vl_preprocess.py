@@ -13,10 +13,13 @@ Covers the review-critical configurations:
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from PIL import Image
-from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
+from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer, Qwen3VLMultiModalProcessor
 
+from vllm_ascend.models import qwen3_5_vl
 from vllm_ascend.models.qwen3_5_vl import (
     _DEVICE_PREPROCESS_DONE,
     AscendQwen2VLImageProcessor,
@@ -411,3 +414,88 @@ def test_resize_and_patchify_empty_input():
         torch.zeros((0, 3), dtype=torch.long),
     )
     assert out.shape == (0, PATCH_DIM)
+
+
+class _ReachedPatchEmbed(Exception):
+    """Stop the real upstream ViT forward before allocating transformer layers."""
+
+
+class _VisionNormProbe:
+    device = torch.device("cpu")
+    dtype = torch.float16
+
+    def __init__(self, norm):
+        self.input_norm = norm
+        self.seen = None
+
+    def patch_embed(self, pixels):
+        self.seen = pixels
+        raise _ReachedPatchEmbed
+
+    def __call__(self, *args, **kwargs):
+        return Qwen3_VisionTransformer.forward(self, *args, **kwargs)
+
+
+def _initialized_norm_probe(monkeypatch, enabled):
+    """Run the real Ascend constructor over a small upstream-model stand-in."""
+
+    def build_norm(config):
+        return _CountingNorm() if enabled else IdentityInputNorm()
+
+    class ModelBase:
+        def __init__(self, *, vllm_config, prefix):
+            self.model_config = SimpleNamespace(multimodal_config=SimpleNamespace(mm_device_do_normalize=enabled))
+            self.config = SimpleNamespace(
+                vision_config=SimpleNamespace(
+                    in_channels=C, patch_size=PS, temporal_patch_size=TPS, spatial_merge_size=MS
+                )
+            )
+            self.visual = _VisionNormProbe(build_norm(self.model_config))
+            self.use_data_parallel = False
+
+        get_input_modality = _StubVLModel.get_input_modality
+        _get_grid_thw_by_modality = _StubVLModel._get_grid_thw_by_modality
+
+    class Model(_AscendVLPreprocessMixin, ModelBase):
+        pass
+
+    monkeypatch.setattr(qwen3_5_vl, "build_mm_input_norm", build_norm)
+    return Model(vllm_config=None, prefix="model")
+
+
+@pytest.mark.parametrize("path", ["image", "video", "raw_image", "graph_image", "graph_video", "graph_raw_image"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_normalization_through_upstream_vision(monkeypatch, path, enabled):
+    """Exercise constructor + preprocessing + real upstream ViT normalization.
+
+    Earlier tests replaced _run_visual, hiding v0.32's second normalization.
+    Stop at patch embedding and check the actual values and dtype it receives.
+    """
+    if "raw" in path and not enabled:
+        pytest.skip("Raw uint8 offload is only selected with device normalization enabled")
+    model = _initialized_norm_probe(monkeypatch, enabled)
+    video = "video" in path
+    pv_key = "pixel_values_videos" if video else "pixel_values"
+    grid_key = "video_grid_thw" if video else "image_grid_thw"
+    pixels = torch.full((16, PATCH_DIM), 255.0)
+    expected = _affine_norm(pixels, model.visual.dtype)
+    inputs = {pv_key: pixels if enabled else expected.float(), grid_key: torch.tensor([[1, 4, 4]])}
+    if "raw" in path:
+        inputs[pv_key] = torch.full((C * 56 * 56,), 255, dtype=torch.uint8)
+        inputs["image_hw"] = torch.tensor([[56, 56]])
+
+    with pytest.raises(_ReachedPatchEmbed):
+        if path.startswith("graph"):
+            selected = model.select_encoder_cudagraph_items(inputs, [0])
+            # The graph manager can select the same items again for DP packing.
+            selected = model.select_encoder_cudagraph_items(selected, [0])
+            model.visual(selected[pv_key], grid_thw=selected[grid_key])
+        elif video:
+            model._process_video_input({"type": pv_key, **inputs})
+        else:
+            model._process_image_input({"type": pv_key, **inputs})
+
+    torch.testing.assert_close(model.visual.seen, expected)
+    assert model.visual.seen.dtype == model.visual.dtype
+    if enabled:
+        assert model.input_norm.calls == 1

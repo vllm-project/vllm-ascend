@@ -1,9 +1,15 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_batch_memcpy(dtype):
     element_size = 2 if dtype == torch.bfloat16 else 4

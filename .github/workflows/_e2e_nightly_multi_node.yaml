@@ -305,7 +305,7 @@ jobs:
           if [ "${{ inputs.soc_version }}" = "a5" ]; then
               npu_per_node=8
               npu_resource_name=huawei.com/npu
-              shared_volume_path=/mnt/share
+              shared_volume_path=/mnt/weight
           elif [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
               pvc_name=gy005-az5-vllm-ascend
@@ -646,6 +646,33 @@ jobs:
           (steps.profiling.outputs.parse != 'true' || steps.profile_bundle.outcome != 'success' ||
            steps.profile_artifact.outcome != 'success')
         run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
+
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          SRC="${LOG_PREFIX}/nightly_bisect_runs"
+          if [ -d "$SRC" ]; then
+            cp -a "$SRC" "$DEST/bisect_runs"
+          fi
+          for log in "${LOG_PREFIX}"/node_*_pytest.log; do
+            if [ -f "$log" ]; then
+              cp "$log" "$DEST/"
+            fi
+          done
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-aop-bisect
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Fetch benchmark results from PVC
         if: always()

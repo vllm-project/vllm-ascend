@@ -30,7 +30,6 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
-    vllm_version_is,
 )
 
 
@@ -855,13 +854,9 @@ class TestNPUPlatform(TestBase):
 
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
                     self.platform.apply_config_platform_defaults(vllm_config)
-
-                if vllm_version_is("0.31.0"):
-                    self.assertEqual(pass_config.sp_min_token_num, 1)
-                else:
-                    # vLLM #60517 removed the PassConfig SP fields on main, so
-                    # the Ascend SP-threshold default no longer applies.
-                    self.assertIsNone(pass_config.sp_min_token_num)
+                # vLLM #60517 removed the PassConfig SP fields on main, so
+                # the Ascend SP-threshold default no longer applies.
+                self.assertIsNone(pass_config.sp_min_token_num)
 
                 pass_config.sp_min_token_num = 512
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
@@ -1028,12 +1023,7 @@ class TestNPUPlatform(TestBase):
                     )
 
                 if should_align:
-                    # vLLM #60517 removed the method on main; platform inlines
-                    # the tp-multiple filtering instead.
-                    if vllm_version_is("0.31.0"):
-                        vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
-                    else:
-                        vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
+                    vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
                     self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
                 else:
@@ -1778,22 +1768,15 @@ class TestNPUPlatform(TestBase):
         cases = (
             (
                 True,
-                True,
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
             ),
             (
                 False,
-                True,
-                "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
-            ),
-            (
-                False,
-                False,
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
             ),
         )
-        for async_scheduling, use_v2_model_runner, expected_scheduler_cls in cases:
-            with self.subTest(async_scheduling=async_scheduling, use_v2_model_runner=use_v2_model_runner):
+        for async_scheduling, expected_scheduler_cls in cases:
+            with self.subTest(async_scheduling=async_scheduling):
                 mock_init_ascend.reset_mock()
 
                 ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
@@ -1803,7 +1786,6 @@ class TestNPUPlatform(TestBase):
                 vllm_config = TestNPUPlatform.mock_vllm_config()
                 vllm_config.kv_transfer_config = None
                 vllm_config.scheduler_config.async_scheduling = async_scheduling
-                vllm_config.use_v2_model_runner = use_v2_model_runner
 
                 from vllm_ascend import platform
 
@@ -1820,39 +1802,6 @@ class TestNPUPlatform(TestBase):
                     vllm_config.scheduler_config.scheduler_cls,
                     expected_scheduler_cls,
                 )
-
-    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch(
-        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType.A3),
-    )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_profiling_chunk_async_requires_v2_runner(
-        self,
-        mock_init_ascend,
-        mock_soc_version,
-        mock_auto_detect,
-    ):
-        from vllm_ascend import platform
-
-        importlib.reload(platform)
-        self.platform = platform.NPUPlatform()
-
-        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
-        mock_init_ascend.return_value = ascend_config
-
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.kv_transfer_config = None
-        vllm_config.scheduler_config.async_scheduling = True
-        vllm_config.use_v2_model_runner = False
-
-        with (
-            pytest.raises(ValueError, match="v2 model runner"),
-            patch.object(platform, "_fix_incompatible_config"),
-            patch.object(platform, "check_kv_extra_config"),
-        ):
-            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(

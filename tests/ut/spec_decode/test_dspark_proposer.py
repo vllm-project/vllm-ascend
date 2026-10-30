@@ -1063,7 +1063,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
             patch.object(AttentionGroup, "create_metadata_builders"),
             patch.object(AttentionGroup, "get_metadata_builder", return_value=builder),
             patch("vllm_ascend.worker.v1.spec_decode.dspark_proposer.AscendDSAMetadataBuilder", DraftBuilder),
-            patch("vllm_ascend.worker.v1.spec_decode.dspark_proposer.enable_pcp", return_value=pcp_enabled),
+            patch("vllm_ascend.worker.v1.spec_decode.dspark_proposer.is_pcp_enabled", return_value=pcp_enabled),
         ):
             proposer.initialize_attn_backend(kv_cache_config)
 

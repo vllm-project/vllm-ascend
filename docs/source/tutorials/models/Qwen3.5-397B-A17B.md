@@ -416,7 +416,7 @@ Common Issues Tip: If the headless node exits immediately, check whether node 0 
 
 If the service starts successfully, the following information is displayed on node 0:
 
-```shell
+```output
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -952,7 +952,7 @@ For Atlas 800I A2 (64 GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwe
 - 1 Prefill node: 1 Atlas 800I A2 (64 GB x 8).
 - 1 Decode node: 1 Atlas 800I A2 (64 GB x 8).
 
-Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
+Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests. For details about how to deploy the agent script, see [Section 5.7](#57-request-forwarding).
 
 #### 5.6.1 Prefill Node
 

@@ -30,9 +30,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 | `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 | `Qwen3.6-35B-A3B-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8) |
 | `Qwen3.6-35B-A3B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8) |
-| `Qwen3.6-35B-A3B-w4a8-mxfp4` (quantized version) | 1 950DT Products (96GB x 8) node | |
+| `Qwen3.6-35B-A3B-w4a8-mxfp` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp) |
 
-It is recommended to download the model weight to `/root/.cache/`.
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -158,7 +158,7 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
 
     ```bash
 
-    # Use the vllm-ascend image
+    # Download the model weight to /root/.cache in advance.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
@@ -362,12 +362,12 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
+    - To enable MTP speculative decoding, use `--speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
 
 ## 6 Functional Verification
 
@@ -388,8 +388,6 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
 ### 7.1 Using AISBench
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
@@ -401,7 +399,7 @@ Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) f
 
 ### 7.2 Using Language Model Evaluation Harness
 
-Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. When using online serving, set `base_url` to the endpoint started in Section 5.
+Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. When using online serving, set `base_url` to the endpoint started in [Section 5](#5-online-service-deployment).
 
 ```shell
 lm_eval \
@@ -449,15 +447,15 @@ After several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-The following configurations are for reference only. The optimal configuration depends on hardware type, maximum input/output length, request concurrency, prefix cache hit rate, and quantization. Tune the parameters in Section 9.2 based on your actual workload.
+The following configurations are for reference only. The optimal configuration depends on hardware type, maximum input/output length, request concurrency, prefix cache hit rate, and quantization. Tune the parameters in [Section 9.2](#92-tuning-guidelines) based on your actual workload.
 
-The 950DT Products and A2/A3 Series configurations below follow their deployment examples in Section 5.1. The NPU count is the number used by the service, rather than the total number available on the node.
+The 950DT Products and A2/A3 Series configurations below follow their deployment examples in [Section 5.1](#51-single-node-online-deployment). The NPU count is the number used by the service, rather than the total number available on the node.
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 | -------- | --------------- | ---------- | -------------- | ------------------ |
 | Long context | Single-node online serving | 2 or more NPUs | W8A8 | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs. |
-| Long context | Single-node online serving | 1 950DT Products NPU | W8A8 MXFP8 | Section 5.1 uses TP=1, DP=1, `--max-model-len 135168`, `--max-num-batched-tokens 4096`, static kernel generation, and MTP with 3 speculative tokens. |
-| Long context | Single-node online serving | 2 A2/A3 Series NPUs | W8A8 | Section 5.1 uses TP=2, DP=1, `--max-model-len 135168`, `--max-num-batched-tokens 4096`, and MTP with 3 speculative tokens. |
+| Long context | Single-node online serving | 1 950DT Products NPU | W8A8 MXFP8 | [Section 5.1](#51-single-node-online-deployment) uses TP=1, DP=1, `--max-model-len 135168`, `--max-num-batched-tokens 4096`, static kernel generation, and MTP with 3 speculative tokens. |
+| Long context | Single-node online serving | 2 A2/A3 Series NPUs | W8A8 | [Section 5.1](#51-single-node-online-deployment) uses TP=2, DP=1, `--max-model-len 135168`, `--max-num-batched-tokens 4096`, and MTP with 3 speculative tokens. |
 | High throughput | Single-node online serving | 8 or more NPUs | W8A8 | Increase local DP groups within one node and tune `--max-num-batched-tokens`. |
 | Low latency | Single-node online serving | 2 or more NPUs | W8A8 | Use smaller `--max-num-batched-tokens`, full decode ACLGraph, and disable speculative decoding by default. |
 
@@ -489,14 +487,14 @@ Recommended tuning order:
 | Hybrid attention support | Enabled by model implementation | Supports Qwen3.6 long-context inference. | Tune context length based on KV cache capacity. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
-| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
+| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
-### Q1: Why does the service report OOM during startup or soon after accepting requests?
+### 10.1 Why does the service report OOM during startup or soon after accepting requests?
 
 **Phenomenon:** The service fails during profile run, or it starts successfully but reports OOM when real traffic arrives.
 
@@ -504,7 +502,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
 
-### Q2: Why does enabling prefix caching not improve performance?
+### 10.2 Why does enabling prefix caching not improve performance?
 
 **Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
 

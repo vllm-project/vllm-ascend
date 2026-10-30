@@ -298,9 +298,11 @@ jobs:
   wait-multi-node-pods-ready:
     name: Wait multi-node pods launched
     # A2-only gate: does NOT wait for multi-node-tests to finish. It polls the
-    # HK001 cluster until the enabled leader pod(s) are Ready, then releases
-    # single-node / accuracy jobs while multi-node Stream logs keep running.
-    # No shared reusable workflow or jinja2 is modified by this job.
+    # HK001 cluster until ALL enabled multi-node leader pods are Ready, then
+    # releases single-node / accuracy jobs while multi-node Stream logs keep
+    # running. Leaders are matched by this run's own config-stem pod-name prefix,
+    # so concurrent nightly/PR runs are not counted. No shared reusable workflow
+    # or jinja2 is modified by this job.
     needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
@@ -327,52 +329,90 @@ jobs:
           MATRIX_JSON="${MATRIX_JSON:-[]}"
           FILTER="${FILTER:-}"
 
-          # Is any multi-node case enabled by the active filter? Pure shell, no
-          # JSON parser: pull each `name` out of the matrix and match the
-          # comma-wrapped filter.
-          MULTI_HIT=0
-          if [ "$FILTER" = "all" ]; then
-            MULTI_HIT=1
-          else
-            while IFS= read -r name; do
-              [ -z "$name" ] && continue
+          # Pure shell, no JSON parser: pull each multi-node case's `name` and
+          # `config_file_path` in JSON order (the matrix emits them as adjacent
+          # keys per case). A leader pod is named vllm-<config-stem>-<rand>-0, so
+          # we derive the per-case stem from config_file_path and count only OUR
+          # enabled cases' leaders; other concurrent nightly/PR runs are excluded.
+          mapfile -t ALL_NAMES < <(printf '%s' "$MATRIX_JSON" \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+          mapfile -t ALL_CFGS < <(printf '%s' "$MATRIX_JSON" \
+            | grep -oE '"config_file_path"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | sed -E 's/.*"config_file_path"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+
+          # Build the enabled config stems from the active filter (all, or the
+          # comma-wrapped name list). EXPECTED is the number of leaders to wait for.
+          STEMS=()
+          for i in "${!ALL_NAMES[@]}"; do
+            name="${ALL_NAMES[$i]}"
+            if [ -z "$name" ]; then continue; fi
+            if [ "$FILTER" != "all" ]; then
               case "$FILTER" in
-                *",${name},"*) MULTI_HIT=1 ;;
+                *",${name},"*) ;;
+                *) continue ;;
               esac
-            done < <(printf '%s' "$MATRIX_JSON" \
-              | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-              | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
-          fi
+            fi
+            cfg="${ALL_CFGS[$i]:-}"
+            if [ -z "$cfg" ]; then continue; fi
+            # Mirror _e2e_nightly_multi_node exactly: drop trailing .yaml, lower,
+            # ./_ -> -, cap 43 chars (no basename, so directory-bearing paths match LWS).
+            stem=$(printf '%s' "${cfg%.yaml}" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+            if [ -z "$stem" ]; then continue; fi
+            STEMS+=("$stem")
+          done
+          EXPECTED=${#STEMS[@]}
 
           # No enabled multi-node case: release single-node immediately.
-          if [ "$MULTI_HIT" -eq 0 ]; then
+          if [ "$EXPECTED" -eq 0 ]; then
             echo "No enabled multi-node case; proceeding to single-node without waiting."
             exit 0
           fi
 
-          # Poll role=leader pods until at least one is Ready. Lenient by design:
-          # a failed/slow launch must not block the independent single-node jobs;
+          echo "Waiting for ${EXPECTED} leader pod stem(s): ${STEMS[*]}"
+
+          # Poll role=leader pods but count ONLY our enabled config stems, so a
+          # concurrent run's leader never inflates READY. Lenient by design: a
+          # failed/slow launch must not block the independent single-node jobs;
           # worker readiness follows once the leader joins the LWS.
-          TIMEOUT=1200
+          TIMEOUT=3600
           INTERVAL=10
           ELAPSED=0
           while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            READY_RAW=$(kubectl get pods -n "$NAMESPACE" -l role=leader \
-              -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null || true)
-            READY=$(printf '%s' "$READY_RAW" | tr ' ' '\n' | grep -c '^true$' || true)
-            READY=${READY:-0}
-            echo "[$(date -u +%FT%TZ)] ready leaders=${READY} (${ELAPSED}s)"
-            if [ "$READY" -ge 1 ]; then
-              echo "Multi-node leader Ready; releasing single-node."
+            mapfile -t ROWS < <(kubectl get pods -n "$NAMESPACE" -l role=leader \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null || true)
+
+            READY=0
+            for stem in "${STEMS[@]}"; do
+              for row in "${ROWS[@]}"; do
+                if [ -z "$row" ]; then continue; fi
+                pname=$(printf '%s' "$row" | cut -f1)
+                pphase=$(printf '%s' "$row" | cut -f2)
+                pready=$(printf '%s' "$row" | cut -f3)
+                # Match the exact leader pod name vllm-<stem>-<6-hex-rand>-0, not a
+                # loose prefix, so stems in a parent/child relation cannot double-count.
+                if [[ "$pname" =~ ^vllm-${stem}-[0-9a-f]{6}-0$ ]]; then
+                  if [ "$pphase" = "Running" ] && printf '%s' "$pready" | grep -q 'true'; then
+                    READY=$((READY + 1))
+                    echo "  matched leader [$pname] ready for stem [$stem]"
+                    break
+                  fi
+                fi
+              done
+            done
+
+            echo "[$(date -u +%FT%TZ)] ready leaders=${READY}/${EXPECTED} (${ELAPSED}s)"
+            if [ "$READY" -ge "$EXPECTED" ]; then
+              echo "All ${EXPECTED} enabled multi-node leaders Ready; releasing single-node."
               exit 0
             fi
             sleep "$INTERVAL"
             ELAPSED=$((ELAPSED + INTERVAL))
           done
 
-          # Lenient fallback: do not fail the whole pipeline if a multi-node
-          # launch does not become Ready in time; single-node runs independently.
-          echo "::warning::Timed out after ${TIMEOUT}s waiting for a ready leader pod; releasing single-node anyway."
+          # Lenient fallback: do not fail the whole pipeline if not every
+          # multi-node launch becomes Ready in time; single-node runs independently.
+          echo "::warning::Timed out after ${TIMEOUT}s waiting for ${EXPECTED} ready leader pods (${READY:-0} seen); releasing single-node anyway."
 
   single-node-tests:
     name: single-node

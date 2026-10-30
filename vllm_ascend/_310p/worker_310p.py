@@ -29,8 +29,8 @@ from vllm_ascend.utils import is_rc_device, vllm_version_is
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 # vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
-# v0.31.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 else:
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups

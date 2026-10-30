@@ -4,9 +4,10 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import divide
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -19,7 +20,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -31,15 +32,75 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
-from vllm_ascend.utils import vllm_version_is
 
-# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
-# package on main; the release lane (v0.31.0) still ships them under
-# `vllm.transformers_utils.configs.glm5_next`.
-if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
-else:
-    from transformers import Glm5NextConfig
+
+class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
+        # recurrent update and restores the PCP-local output afterward.
+        return True
+
+
+def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
+    """Use PCP head sharding only when tensor parallelism is disabled."""
+    # TODO: Support joint TP * PCP head partitioning for projections and state.
+    if parallel_config.tensor_parallel_size == 1:
+        return parallel_config.prefill_context_parallel_size
+    return parallel_config.tensor_parallel_size
+
+
+class PCPColumnParallelLinear(ColumnParallelLinear):
+    """Column-parallel projection using PCP ranks and collectives."""
+
+    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
+        pcp_group = get_pcp_group()
+        super().__init__(
+            input_size,
+            output_size,
+            tp_rank=pcp_group.rank_in_group,
+            tp_size=pcp_group.world_size,
+            **kwargs,
+        )
+        self.tp_group = pcp_group
+
+    def forward(self, input_):
+        bias = self.bias if not self.skip_bias_add else None
+        output = self.quant_method.apply(self, input_, bias)
+        if self.gather_output and self.tp_size > 1:
+            output = self.tp_group.all_gather(output, dim=-1)
+        if not self.return_bias:
+            return output
+        return output, self.bias if self.skip_bias_add else None
+
+
+class PCPRowParallelLinear(RowParallelLinear):
+    """Row-parallel projection reducing head contributions over PCP."""
+
+    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
+        pcp_group = get_pcp_group()
+        # The pinned RowParallelLinear has no rank/size overrides. Allocate
+        # the local input shard, then bind its inherited weight loaders to PCP.
+        super().__init__(divide(input_size, pcp_group.world_size), output_size, disable_tp=True, **kwargs)
+        self.input_size = input_size
+        self.disable_tp = False
+        self.tp_size = pcp_group.world_size
+        self.tp_rank = pcp_group.rank_in_group
+        self.tp_group = pcp_group
+        self.update_param_tp_status()
+
+    def forward(self, input_):
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            input_parallel = input_.chunk(self.tp_size, dim=-1)[self.tp_rank].contiguous()
+        bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
+        output = self.quant_method.apply(self, input_parallel, bias)
+        if self.reduce_results and self.tp_size > 1:
+            output = self.tp_group.all_reduce(output)
+        if not self.return_bias:
+            return output
+        return output, self.bias if self.skip_bias_add else None
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -109,10 +170,31 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
+class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear, PCPColumnParallelLinear):
+    """PCP-sharded Q/K/V/b with replicated low-rank f_a/g_a shards."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        replicated_shard_ids: tuple[int, ...],
+        tp_size: int,
+        **kwargs,
+    ) -> None:
+        self.replicated_shard_ids = set(replicated_shard_ids)
+        self.output_sizes = output_sizes.copy()
+        for sid in self.replicated_shard_ids:
+            self.output_sizes[sid] *= tp_size
+        # MergedColumnParallelLinear's constructor hardcodes the TP group.
+        # Retain its shard loaders while allocating through the PCP column layer.
+        PCPColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     use_contiguous_conv_indices = True
     use_shared_conv_output = True
 
+    tp_size: int
     head_dim: int
     num_heads: int
     conv_size: int
@@ -141,7 +223,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
@@ -164,6 +246,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             raise ValueError("GLM AscendC causal-conv requires kernel width=4 for MTP.")
         if not -5 <= config.linear_lower_bound < 0:
             raise ValueError("GLM AscendC KDA requires linear_lower_bound in [-5, 0).")
+        self.pcp_group = get_pcp_group()
+        self.pcp_size = self.pcp_group.world_size
+        self.pcp_rank = self.pcp_group.rank_in_group
+        self.use_pcp_head_sharding = self.tp_size == 1 and self.pcp_size > 1
+        column_linear = ColumnParallelLinear
+        merged_linear = _Glm5NextMergedColumnParallelLinear
+        row_linear = RowParallelLinear
+        if self.use_pcp_head_sharding:
+            self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
+            self.tp_rank = self.pcp_rank
+            column_linear = PCPColumnParallelLinear
+            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            row_linear = PCPRowParallelLinear
+
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
         self.conv_size = config.linear_conv_kernel_dim
@@ -175,8 +271,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
-        # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
-        self.in_proj_qkvbfg_a = _Glm5NextMergedColumnParallelLinear(
+        # Shards 4 (f_a) and 5 (g_a) are replicated across head-sharding ranks.
+        self.in_proj_qkvbfg_a = merged_linear(
             self.hidden_size,
             [
                 projection_size,  # q (shard 0)
@@ -193,7 +289,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
-        self.f_b_proj = ColumnParallelLinear(
+        self.f_b_proj = column_linear(
             self.head_dim,
             projection_size,
             bias=False,
@@ -202,23 +298,23 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         self.dt_bias = nn.Parameter(torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32))
 
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": self._dt_bias_weight_loader})
 
-        self.q_conv1d = ColumnParallelLinear(
+        self.q_conv1d = column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.q_conv1d",
         )
-        self.k_conv1d = ColumnParallelLinear(
+        self.k_conv1d = column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.k_conv1d",
         )
-        self.v_conv1d = ColumnParallelLinear(
+        self.v_conv1d = column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
@@ -237,9 +333,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
+        set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
 
-        self.g_b_proj = ColumnParallelLinear(
+        self.g_b_proj = column_linear(
             self.head_dim,
             projection_size,
             bias=False,
@@ -256,7 +352,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
-        self.o_proj = RowParallelLinear(
+        self.o_proj = row_linear(
             projection_size,
             self.hidden_size,
             bias=False,
@@ -269,14 +365,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
-        def _a_log_weight_loader(param, loaded_weight):
-            if loaded_weight.dim() == 1:
-                loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
-
-        self.A_log.weight_loader = _a_log_weight_loader
-
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
         self.kda_lower_bound = config.linear_lower_bound
@@ -284,14 +372,37 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
 
+    def _dt_bias_weight_loader(self, param, loaded_weight):
+        shard_size = param.shape[0]
+        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * shard_size, shard_size))
+
+    def _a_log_weight_loader(self, param, loaded_weight):
+        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
+        if loaded_weight.dim() == 1:
+            loaded_weight = loaded_weight.view(1, 1, -1, 1)
+        shard_size = param.shape[2]
+        default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * shard_size, shard_size))
+
     def get_attn_backend(self):
-        return AscendGDNHostMetadataBackend
+        return Glm5NextGDNHostMetadataBackend
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        attn_metadata_raw = get_forward_context().attn_metadata
+        attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
+        pcp_context = getattr(attn_metadata, "pcp_context", None)
+        has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
+        local_num_tokens = hidden_states.size(0)
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            assert pcp_context.padded_gather_idx is not None
+            # PCP assigns the first and last chunks of a prefill to the same
+            # rank. Reconstruct causal order before advancing the head-sharded
+            # recurrent state. With TP=1 each PCP rank owns different heads.
+            hidden_states = self.pcp_group.all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
         num_tokens = hidden_states.size(0)
         # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
         projected = self.in_proj_qkvbfg_a(hidden_states)[0]
@@ -332,7 +443,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        return self.o_proj(core_attn_out)[0]
+        output = self.o_proj(core_attn_out)[0]
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
+                raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
+            local_start = self.pcp_rank * local_num_tokens
+            local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+            output = output[local_indices]
+        return output
 
     @eager_break_during_capture
     def _forward(

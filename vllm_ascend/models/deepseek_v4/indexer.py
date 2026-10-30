@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -54,9 +53,9 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 # vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.31.0 lane still ships it under
+# main; the v0.32.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.31.0"):
+if vllm_version_is("0.32.0"):
     from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
@@ -103,34 +102,35 @@ def _is_mxfp8_dynamic(linear) -> bool:
     return isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
 
 
+# The indexer K cache dtype each Ascend part implements. A5 quantizes to fp8
+# inside ``indexer_compress_epilog_v2``; A3's scatter
+# (``npu_scatter_nd_update_sk``) only takes int8 updates. Same shape as
+# ``DSA_INDEXER_KV_DTYPES`` in ``vllm/v1/attention/backends/mla/indexer.py``.
+_A5_INDEXER_KV_DTYPES = ("fp8",)
+_A3_INDEXER_KV_DTYPES = ("int8",)
+
+
 def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     """Resolve the DeepSeek V4 indexer K cache dtype.
 
-    The indexer K cache has no bf16 write path: the Non-A5 scatter
-    (``npu_scatter_nd_update_sk``) only accepts int8 updates, and A5
-    quantizes to fp8 inside ``indexer_compress_epilog_v2``. Resolve
-    ``indexer_kv_dtype="auto"`` to the platform default and reject
-    unsupported combinations early instead of failing later with a
-    cryptic ACLNN dtype mismatch error.
+    The indexer K cache has no bf16 write path, so ``indexer_kv_dtype="auto"``
+    resolves to the dtype this part implements and any other request is rejected
+    up front, instead of failing later with a cryptic ACLNN dtype mismatch.
     """
-    supports_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-    default_kv_dtype = "fp8" if supports_compressed_cache else "int8"
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        supported, default_kv_dtype, expected_dtype = _A5_INDEXER_KV_DTYPES, "fp8", torch.float8_e4m3fn
+    else:
+        supported, default_kv_dtype, expected_dtype = _A3_INDEXER_KV_DTYPES, "int8", torch.int8
     indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
-    expected_dtype = torch.float8_e4m3fn if supports_compressed_cache else torch.int8
-    error_msg = (
-        f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
-        f"indexer on this platform; expected {default_kv_dtype!r}."
-    )
-    try:
-        k_dtype = kv_cache_dtype_str_to_dtype(indexer_kv_dtype, vllm_config.model_config)
-        dtype_is_supported = k_dtype == expected_dtype
-    except KeyError:
-        # Unknown indexer_kv_dtype string (e.g. not present in
-        # STR_DTYPE_TO_TORCH_DTYPE for this vllm version).
-        dtype_is_supported = False
-    if not dtype_is_supported:
-        raise ValueError(error_msg)
-    return k_dtype
+    if indexer_kv_dtype not in supported:
+        raise ValueError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
+            f"indexer on this platform (expected one of {supported})."
+        )
+    # The compute dtype the indexer kernels expect. Do not derive it from
+    # upstream's ``STR_DTYPE_TO_TORCH_DTYPE``: that table maps ``"fp8"`` to the
+    # storage dtype ``torch.uint8``, not ``torch.float8_e4m3fn``.
+    return expected_dtype
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):

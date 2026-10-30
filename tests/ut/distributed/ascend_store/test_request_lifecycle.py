@@ -352,7 +352,7 @@ def test_raw_sequence_lifecycle(
             scheduler.update_from_output(output, result)
             if drafts:
                 expected_computed = computed_before_update - len(drafts) + accepted
-                if not vllm_version_is("0.31.0"):
+                if not vllm_version_is("0.32.0"):
                     # vLLM main trims ``num_computed_tokens`` to cover only the
                     # tokens actually kept when a request stops mid token-list.
                     appended = request.num_output_tokens - output_tokens_before_update

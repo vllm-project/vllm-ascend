@@ -46,7 +46,6 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -1577,8 +1576,8 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls():

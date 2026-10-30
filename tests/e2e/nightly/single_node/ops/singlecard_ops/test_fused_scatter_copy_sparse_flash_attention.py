@@ -11,6 +11,9 @@ import unittest
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
 torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.utils import enable_custom_op  # noqa: E402
@@ -281,6 +284,10 @@ class TestFusedScatterCopySparseFlashAttentionDynamicTnd(unittest.TestCase):
             atol=0,
         )
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+        reason="The local fused scatter/copy kernel is configured for Ascend A2/A3",
+    )
     def test_heterogeneous_mtp2_mtp3_mtp8_mtp15_n8(self) -> None:
         self.run_case(
             [3, 4, 9, 16],
@@ -288,17 +295,33 @@ class TestFusedScatterCopySparseFlashAttentionDynamicTnd(unittest.TestCase):
             cache_budgets=[2048, 2176, 2304, 2432],
         )
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+        reason="The local fused scatter/copy kernel is configured for Ascend A2/A3",
+    )
     def test_n128(self) -> None:
         self.run_case([1], heads=128)
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+        reason="The local fused scatter/copy kernel is configured for Ascend A2/A3",
+    )
     def test_fp16(self) -> None:
         self.run_case([1], heads=8, dtype=torch.float16)
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+        reason="The local fused scatter/copy kernel is configured for Ascend A2/A3",
+    )
     def test_intermediate_supported_head_counts(self) -> None:
         for heads in (16, 32, 64):
             with self.subTest(heads=heads):
                 self.run_case([1], heads=heads)
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+        reason="The local fused scatter/copy kernel is configured for Ascend A2/A3",
+    )
     def test_heterogeneous_first_fill_graph(self) -> None:
         self.run_case(
             [3, 4, 9],

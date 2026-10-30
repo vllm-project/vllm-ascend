@@ -241,6 +241,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
@@ -254,7 +255,8 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ''
+      #bisect_config_base_path: ''
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
       request_id: ${{ inputs.request_id || '' }}
       download_path: ${{ inputs.download_path }}
       should_run: >-

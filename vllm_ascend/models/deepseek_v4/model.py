@@ -109,9 +109,9 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 # vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.31.0 lane still ships it under
+# main; the v0.32.0 lane still ships it under
 # `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.31.0"):
+if vllm_version_is("0.32.0"):
     from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
 else:
     from transformers import DeepseekV4Config
@@ -341,7 +341,7 @@ class DeepseekV4MoE(nn.Module):
 
         # vLLM main folded `num_hash_layers` into the per-layer `mlp_layer_types`;
         # judge Hash-MoE per layer (it need not be a contiguous prefix) and fall
-        # back to the legacy count on the v0.31.0 lane, which has no
+        # back to the legacy count on the v0.32.0 lane, which has no
         # `mlp_layer_types`.
         if is_draft_layer:
             self.hash = False
@@ -575,13 +575,12 @@ class DeepseekV4Attention(nn.Module):
         else:
             rope_theta = config.rope_theta
             rope_groups = ["default"]
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.31.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.31.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -708,7 +707,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
-        if not vllm_version_is("0.31.0"):
+        if not vllm_version_is("0.32.0"):
             # vLLM #61392 folded `compress_ratios` into `layer_types`; the
             # Ascend helpers and the KV-store metadata still index the legacy
             # field, so restore it.
@@ -725,13 +724,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.31.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.31.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         max_position_embeddings = yarn_rope_parameters.get(
             "original_max_position_embeddings", config.max_position_embeddings
         )

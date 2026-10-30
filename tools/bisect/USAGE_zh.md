@@ -17,7 +17,7 @@
 
 1. 在 **NPU 容器**内、`vllm-ascend` 仓库根目录下运行(例如 `/workspace/vllm-ascend`)。
 2. 直接用 `python -m tools.bisect.auto_bisect ...` 运行(在仓库根目录下,包可被导入)。
-3. **vllm-ascend 必须是 editable 安装**(`pip install -e`)——这样纯 `.py` 改动 checkout 后即时生效、无需重装。nightly 容器默认就是 editable。
+3. **vllm-ascend 必须是 editable 安装**(`uv pip install -e .`)——这样纯 `.py` 改动 checkout 后即时生效、无需重装。nightly 容器默认就是 editable。
 4. **vLLM 不需要改动**,容器里现有的 vLLM 即为配套版本(本工具只切换 vllm-ascend)。
 5. 依赖:`pytest`、`openai`、`aisbench`、`psutil`、`filelock`、`regex`(nightly 容器已具备)。
 
@@ -126,7 +126,7 @@ python -m tools.bisect.auto_bisect \
 每切到一个 commit,工具**根据该 commit 改动的文件类型**决定是否重新编译 vllm-ascend:
 
 - 改动**全是非 native**(`.py`/yaml/md 等)→ **只 `git checkout`,不编译**(editable 安装即时生效);
-- 改动命中 **native/构建文件**(`*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`、`csrc/**`、`CMakeLists.txt`、`setup.py`)→ 执行 `pip install -e .` 重新编译;
+- 改动命中 **native/构建文件**(`*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`、`csrc/**`、`CMakeLists.txt`、`setup.py`)→ 执行 `uv pip install -e .` 重新编译;
 - `requirements*.txt` 变化 → 只重装依赖。
 
 相关开关(一般用默认即可):
@@ -251,7 +251,7 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 - **作用**:按硬件代际过滤 Good 表,避免 A2/A3/310P 的同名用例互相命中。
 - **默认**:`None`;CI workflow 会自动传入。
 
-### 9.4 编译控制(决定何时 `pip install -e .`)
+### 9.4 编译控制(决定何时 `uv pip install -e .`)
 
 #### `--native-check`
 

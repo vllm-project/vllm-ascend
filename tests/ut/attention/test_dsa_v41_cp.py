@@ -663,9 +663,16 @@ class TestPCPMetadata:
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
             builders(dcp=2)
-        builder = builders()["swa"]
-        with pytest.raises(AssertionError, match="global batch context"):
-            builder.build(0, _batch(2, 0, "prefill").local)
+
+    def test_builds_ordinary_metadata_without_pcp_context(self, builders):
+        # A replicated draft decode builds through PCP builders without a
+        # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        common = _batch(2, 0, "decode").local
+        # Replicated drafts keep rank-local slots, unlike target PCP batches.
+        common = common.replace(slot_mapping=common.slot_mapping[: common.num_input_tokens])
+        for builder in builders().values():
+            metadata = builder.build(0, common)
+            assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 
 @pytest.fixture
@@ -1372,7 +1379,7 @@ class TestProjectionLayout:
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
     config = {"legacy": legacy, "pcp": pcp}
     monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: config["pcp"])
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
     if legacy and pcp:
         with pytest.raises(ValueError, match="cannot be enabled"):
             dsa_v41_cp.get_v41_cp_classes()

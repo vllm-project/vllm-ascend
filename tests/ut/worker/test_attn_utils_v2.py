@@ -57,7 +57,6 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -679,15 +678,15 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.fa_quant_layer = False
 
-    attn_module.impl.pcp_enabled = True
+    attn_module.impl.use_pcp = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.pcp_enabled = False
+    attn_module.impl.use_pcp = False
 
     attn_module.impl.is_pcp_decode_sharded = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.is_pcp_decode_sharded = False
 
-    attn_module.impl.dcp_enabled = True
+    attn_module.impl.use_dcp = True
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl._dcp_current_kv_buffers = (
@@ -702,7 +701,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
     attn_module.impl._dcp_current_kv_buffers = None
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.dcp_enabled = False
+    attn_module.impl.use_dcp = False
 
     attn_module.impl.enable_kv_nz = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
@@ -773,15 +772,12 @@ def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
     for call in RecordingZeroer.calls:
         [component_group] = call["attn_groups"]
-        if vllm_version_is("0.31.0"):
-            assert component_group == group
-        else:
-            # vLLM main made AttentionGroup identity-comparable, so match on
-            # the fields the zeroer preserves.
-            assert component_group.backend is group.backend
-            assert component_group.layer_names == group.layer_names
-            assert component_group.kv_cache_spec == group.kv_cache_spec
-            assert component_group.kv_cache_group_id == group.kv_cache_group_id
+        # vLLM main made AttentionGroup identity-comparable, so match on
+        # the fields the zeroer preserves.
+        assert component_group.backend is group.backend
+        assert component_group.layer_names == group.layer_names
+        assert component_group.kv_cache_spec == group.kv_cache_spec
+        assert component_group.kv_cache_group_id == group.kv_cache_group_id
     for component_id, call in enumerate(RecordingZeroer.calls):
         assert call["static_forward_context"] == {
             "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
@@ -929,13 +925,12 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
             return launch
 
     monkeypatch.setattr("vllm.v1.worker.utils._zero_kv_blocks_kernel", _CpuZeroKernel())
-    if not vllm_version_is("0.31.0"):
-        # vLLM #60766 made async_tensor_h2d resolve pin memory lazily through
-        # is_pin_memory_available(). The NPU platform advertises pinned-memory
-        # support, so this CPU runner would allocate a PrivateUse1-pinned tensor
-        # and fail. The release lane captures PIN_MEMORY at import (False here),
-        # so only the main lane needs the resolver disabled.
-        monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
+    # vLLM #60766 made async_tensor_h2d resolve pin memory lazily through
+    # is_pin_memory_available(). The NPU platform advertises pinned-memory
+    # support, so this CPU runner would allocate a PrivateUse1-pinned tensor
+    # and fail. The release lane captures PIN_MEMORY at import (False here),
+    # so only the main lane needs the resolver disabled.
+    monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
     zeroer.zero_block_ids([0])
 
     # Block 0 payload: k, k_scale and v are cleared, v_scale is preserved.
@@ -1678,7 +1673,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
-    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=4096)
     state.pcp_manager = None
@@ -1919,13 +1914,9 @@ def test_prepare_ascend_kernel_block_sizes_splits_alias_layouts():
     # (`layer_stride == 0`) while the pages stay dense, so SFA still gets its
     # 128-token kernel blocks instead of the 256-token manager block.
     assert selected_kernel_block_sizes(layer_stride=0, block_stride=page_bytes) == [128]
-    if vllm_version_is("0.31.0"):
-        # The release lane has no packing heuristic and always splits.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [128]
-    else:
-        # Block-outermost packing interleaves the layers' pages between blocks,
-        # which no split can address, so #57169 keeps the manager block size.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
+    # Block-outermost packing interleaves the layers' pages between blocks,
+    # which no split can address, so #57169 keeps the manager block size.
+    assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
 
 
 @pytest.mark.parametrize(
@@ -2038,7 +2029,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.decoder_replay = None
-        # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+        # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
         # model_config.
         model_state.model_config = SimpleNamespace(max_model_len=8)
         model_state.vllm_config = SimpleNamespace(

@@ -17,6 +17,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mem
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_kvpp_lookup_covers_every_owner_and_uses_separate_layout_keys(self):
+        for pp_size in (1, 2):
+            for num_groups in (1, 2):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups):
+                    config = self.make_config(pp_size)
+                    config.additional_config = {"enable_kvpp": True}
+                    config.parallel_config.prefill_context_parallel_size = 1
+                    cache = self.make_cache_config(num_groups)
+                    args = dict(
+                        vllm_config=config,
+                        kv_cache_config=cache,
+                        model_name="model",
+                        use_hybrid=num_groups > 1,
+                        grouped_block_size=[16 * (group + 1) for group in range(num_groups)],
+                    )
+                    kvpp_keys = mooncake_layerwise.bind_layerwise_keys(**args)
+                    config.additional_config = {"enable_kvpp": False}
+                    replicated_keys = mooncake_layerwise.bind_layerwise_keys(**args)
+                    for group in range(num_groups):
+                        owners = [
+                            kvpp_keys.make_full_key(group, "hash", owner, stage)
+                            for stage in range(pp_size)
+                            for owner in range(2)
+                        ]
+                        self.assertEqual(kvpp_keys.make_hit_check_keys(group, "hash", 2), owners)
+                        ordinary = replicated_keys.make_hit_check_keys(group, "hash", 1)
+                        self.assertTrue(set(owners).isdisjoint(ordinary))
+
     @staticmethod
     def make_config(pp_size=1):
         return SimpleNamespace(

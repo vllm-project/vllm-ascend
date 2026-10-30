@@ -21,6 +21,7 @@ class TestReusePublicationFence(unittest.TestCase):
                 with self.subTest(transfer=transfer, reuse=reuse, tp_size=tp_size, empty=not requests):
                     worker = module.KVPoolWorker.__new__(module.KVPoolWorker)
                     worker.use_layerwise = True
+                    worker.use_kvpp = False
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
                     worker.tp_size = tp_size

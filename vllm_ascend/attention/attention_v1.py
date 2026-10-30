@@ -51,10 +51,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
-    enable_dcp,
+    is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    uses_pcp_sharded_layout,
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
@@ -64,7 +65,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
-from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache, vllm_version_is
+from vllm_ascend.utils import MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, is_minimax_m3_fp8_kv_cache
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -84,12 +85,12 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if enable_dcp():
+        if is_dcp_enabled():
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 
             return AscendAttentionDCPImpl
@@ -97,7 +98,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if enable_dcp():
+        if is_dcp_enabled():
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
 
             return AscendAttentionDCPMetadataBuilder
@@ -237,6 +238,8 @@ class AscendMetadata:
     # the metadata op executes inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
     pcp_local_num_input_tokens: int | None = None
+    # Resolved by the builder; execution must not infer layout from tensor sizes.
+    uses_pcp_sharded_layout: bool = False
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -263,7 +266,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_enabled = self.pcp_size > 1
+        self.use_pcp = self.pcp_size > 1
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -308,7 +311,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=not self.pcp_enabled,
+            treat_short_extends_as_decodes=not self.use_pcp,
         )
 
     def _build_backend_metadata(
@@ -335,7 +338,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMetadata:
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        pcp_shard_slot_mapping = (
+            common_attn_metadata.slot_mapping if uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp) else None
+        )
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
@@ -463,9 +468,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
         )
-        if self.pcp_enabled:
-            assert expanded_slot_mapping is not None
-            self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
+        if pcp_shard_slot_mapping is not None:
+            self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata
 
     def _finalize_pcp_metadata(
@@ -486,6 +490,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
+        metadata.uses_pcp_sharded_layout = True
         metadata.slot_mapping = expanded_slot_mapping
         metadata.pcp_local_num_input_tokens = local_num_input_tokens
         if metadata.num_prefills > 0:
@@ -578,7 +583,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
-        self.pcp_enabled = (
+        self.use_pcp = (
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
@@ -1355,7 +1360,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            if self.pcp_enabled:
+            # Only PCP-context metadata expands the slot mapping to every
+            # rank's tokens; a replicated draft decode writes its local slots.
+            if attn_metadata.uses_pcp_sharded_layout:
+                assert attn_metadata.pcp_local_num_input_tokens is not None, "PCP metadata must be finalized."
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output
                 )

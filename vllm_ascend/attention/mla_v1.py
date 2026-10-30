@@ -50,13 +50,14 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
-    enable_dcp,
     enabling_mlapo,
+    is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     supports_strided_mla_cache,
+    uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -112,13 +113,13 @@ class AscendMLABackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_builder_cls():
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = is_dcp_enabled()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
             return AscendMlaDCPMetadataBuilder
@@ -136,8 +137,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = is_dcp_enabled()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 
             return AscendMlaDCPImpl
@@ -267,6 +268,8 @@ class AscendMLAMetadata:
     # sharded-decode PCP KV gather.
     pcp_cos: torch.Tensor | None = None
     pcp_sin: torch.Tensor | None = None
+    # Resolved by the builder; execution must not infer layout from tensor sizes.
+    uses_pcp_sharded_layout: bool = False
     external_flashmla: FlashMLADecode | None = None
 
     def __post_init__(self):
@@ -308,9 +311,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             supports_dcp_with_varlen,
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_enabled = self.pcp_size > 1
+        self.use_pcp = self.pcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -585,7 +588,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if self.flashmla_state is not None:
             return self._build_external_flashmla(common_prefix_len, common_attn_metadata)
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        pcp_shard_slot_mapping = (
+            common_attn_metadata.slot_mapping if uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp) else None
+        )
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -595,10 +600,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.pcp_enabled or self.dcp_enabled)
+                    not (self.use_pcp or self.use_dcp)
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
-                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                    or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 ),
             )
         )
@@ -650,9 +655,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
-        if self.pcp_enabled:
-            assert expanded_slot_mapping is not None
-            self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
+        if pcp_shard_slot_mapping is not None:
+            self._finalize_pcp_metadata(metadata, pcp_shard_slot_mapping)
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch
                 # can refresh the graph-stable RoPE buffer that decode uses.
@@ -679,6 +683,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
+        metadata.uses_pcp_sharded_layout = True
         metadata.slot_mapping = expanded_slot_mapping
         if metadata.num_prefills > 0:
             prefill_metadata = metadata.prefill
@@ -900,7 +905,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        if (self.dcp_enabled or self.flashmla_state is not None) and capture_metadata.is_prefilling is None:
+        if (self.use_dcp or self.flashmla_state is not None) and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
         if self.flashmla_state is not None:
             assert capture_metadata.num_reqs <= capture_metadata.num_actual_tokens * self.reorder_batch_threshold
@@ -1000,11 +1005,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
-        self.use_output_gate = self.g_proj is not None
+        # vLLM main fuses Kimi-K3's output gate into the QKV-A projection as a
+        # trailing shard, making its per-rank layout ``[q_a | kv_a | gate]`` and
+        # dropping the standalone ``g_proj``. Release v0.32.0 keeps the separate
+        # ``g_proj`` and a two-shard projection.
+        if vllm_version_is("0.32.0"):
+            self.qkv_a_gate_fused = False
+            self.use_output_gate = self.g_proj is not None
+        else:
+            # The plain MLA projection also only has the two latent shards, so
+            # the shard count identifies the fused layout without importing the
+            # Kimi-specific linear class.
+            fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
+            self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
+            self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
-        self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1019,6 +1037,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
+        if self.qkv_a_gate_fused and self.enable_mlapo:
+            # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
+            # and has no slot for the extra output-gate shard.
+            self.enable_mlapo = False
+            logger.warning_once(
+                "Kimi-K3 output gate is fused into the QKV-A projection; MLAPO is disabled for these layers."
+            )
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
@@ -1055,7 +1080,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # History sees all Q heads in the DCP group; current uses local heads.
-        if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
             return False
@@ -1275,24 +1300,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         # scenario the graph is captured once, so every later weight update
         # reload has to refresh the stored tensors in place instead of
         # rebinding the attributes to freshly allocated tensors.
-        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
-        # copies into the existing storage while the new value stays
+        # `replace_parameter(..., prefer_copy=True)` does exactly that on
+        # v0.32.0: it copies into the existing storage while the new value stays
         # compatible, and rebinds only when shape/dtype/device actually
-        # changes. This mirrors how upstream vLLM refreshes
+        # changes. vLLM main (#62326) dropped `prefer_copy` and keeps the
+        # parameter object by default. This mirrors how upstream vLLM refreshes
         # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
         # raise on a shape mismatch.
-        replace_parameter(
-            self,
-            "W_UV",
-            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
-            prefer_copy=True,
-        )
-        replace_parameter(
-            self,
-            "W_UK_T",
-            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
-            prefer_copy=True,
-        )
+        w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
+        w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
+        if vllm_version_is("0.32.0"):
+            replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
+            replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
+        else:
+            replace_parameter(self, "W_UV", w_uv)
+            replace_parameter(self, "W_UK_T", w_uk_t)
         self.mlapo_W_UK_T = self.W_UK_T
 
         if self.enable_mlapo:
@@ -1334,7 +1356,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # captured tensor addresses remain valid while the values follow
             # the reloaded source weights and scales.
             self._refresh_prolog_v3_weights()
-        elif not getattr(self, "dcp_enabled", False):
+        elif not getattr(self, "use_dcp", False):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
         if self.use_flashmla and self.supports_prolog_v3_writer():
@@ -1421,8 +1443,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.num_heads_padded * self.qk_head_dim,
                 )
 
+        # A Kimi-K3 output gate appended to the fused projection is not part of
+        # the latent q/kv weights consumed by MLAPO, so bound the KV-A slice.
+        kv_end = self._fused_qkv_a_kv_end
         self.weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
-        self.weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
+        self.weight_dkv_kr = fused_weight[..., self.q_lora_rank : kv_end].contiguous()
         self.weight_uq_qr = weight_uq_qr.contiguous()
         self.weight_dq = torch_npu.npu_format_cast(self.weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_uq_qr = torch_npu.npu_format_cast(self.weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
@@ -1437,12 +1462,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
             weight_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1).flatten(1)
             self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank, ...]
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :, ...]
+            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank : kv_end, ...]
         else:
             self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
             weight_scale = self.fused_qkv_a_proj.weight_scale  # type: ignore[union-attr]
             self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
-            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank :].to(torch.float).unsqueeze(0)
+            self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank : kv_end].to(torch.float).unsqueeze(0)
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
@@ -1457,7 +1482,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
-            and not enable_dcp()
+            and not self.use_dcp
             # Sharded PCP uses the unfused projections to gather current KV.
             and not self.is_pcp_decode_sharded
             and self.vllm_config.kv_transfer_config is not None
@@ -1886,6 +1911,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             and hasattr(torch_npu, "npu_mla_prolog_v3")
             and self.supports_prolog_v3_projection()
             and self.supports_prolog_v3_quantization()
+            and not getattr(self, "qkv_a_gate_fused", False)
             and not getattr(self.q_proj, "_chunk_size", 0)
         )
 
@@ -1907,8 +1933,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and input_size not in PROLOG_V3_SUPPORTED_INPUT_SIZES
             and self.support_fp8_attention
             and self.is_draft_model
-            and not self.pcp_enabled
-            and not self.dcp_enabled
+            and not self.use_pcp
+            and not self.use_dcp
             and self.num_kv_heads == 1
             and self._supports_strided_mla_projection()
         )
@@ -2000,6 +2026,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.q_lora_rank is not None, "PROLOG_V3 requires q_lora_rank"
         assert self.q_a_layernorm is not None, "PROLOG_V3 requires q_a_layernorm"
         assert self.kv_a_layernorm is not None, "PROLOG_V3 requires kv_a_layernorm"
+        # Bound the KV-A slice when Kimi-K3 fused its output gate into the
+        # projection; the gate shard must not leak into the PROLOG_V3 weights.
+        kv_end = self._fused_qkv_a_kv_end
         if getattr(self.q_proj, "_chunk_size", 0):
             raise RuntimeError("PROLOG_V3 does not support chunked q_proj weights.")
 
@@ -2069,7 +2098,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 fused_weight[..., : self.q_lora_rank].contiguous(), ACL_FORMAT_FRACTAL_NZ
             ),
             "weight_dkv_kr": torch_npu.npu_format_cast(
-                fused_weight[..., self.q_lora_rank :].contiguous(), ACL_FORMAT_FRACTAL_NZ
+                fused_weight[..., self.q_lora_rank : kv_end].contiguous(), ACL_FORMAT_FRACTAL_NZ
             ),
             "weight_uq_qr": torch_npu.npu_format_cast(weight_uq_qr.contiguous(), ACL_FORMAT_FRACTAL_NZ),
             "weight_uk": weight_uk.contiguous(),
@@ -2084,7 +2113,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             uq_scale = self.q_proj.weight_scale.data.to(torch.float).unsqueeze(0)
             prepared.update(
                 dequant_scale_w_dq=fused_scale[..., : self.q_lora_rank],
-                dequant_scale_w_dkv_kr=fused_scale[..., self.q_lora_rank :],
+                dequant_scale_w_dkv_kr=fused_scale[..., self.q_lora_rank : kv_end],
                 dequant_scale_w_uq_qr=uq_scale,
             )
         elif quant_type is AscendW8A8MXFP8DynamicLinearMethod:
@@ -2094,7 +2123,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             uq_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
             prepared.update(
                 dequant_scale_w_dq=fused_scale[: self.q_lora_rank, ...],
-                dequant_scale_w_dkv_kr=fused_scale[self.q_lora_rank :, ...],
+                dequant_scale_w_dkv_kr=fused_scale[self.q_lora_rank : kv_end, ...],
                 dequant_scale_w_uq_qr=uq_scale,
             )
 
@@ -2420,6 +2449,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.layer_name is not None
 
         if self.layerwise_kv_cache_hook is not None:
+            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+                wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
         if num_decode_tokens > 0:
@@ -2475,7 +2506,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_actual_tokens > num_decode_tokens:
             if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
                 raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
-            wait_for_kv_layer_from_connector(self.layer_name)
+            if self.layerwise_kv_cache_hook is None or not getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+                wait_for_kv_layer_from_connector(self.layer_name)
             prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
             num_prefill_tokens = num_actual_tokens - num_decode_tokens
             # Metadata can include graph padding beyond the actual prefill rows.
@@ -2612,7 +2644,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: AscendMLAMetadata | None = None,
     ):
         pcp_local_range = None
-        if self.pcp_enabled:
+        if self.use_pcp:
             assert attn_metadata is not None
             # Gather before any RoPE-specific writer. use_mla_rope=False used
             # to return first and store rank-local KV with the expanded slots.
@@ -2661,7 +2693,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.qk_rope_head_dim == 0:
                 # The PCP gather carries rank padding with slot -1.
                 k_pe, k_nope = self._exec_kv_mla_nope(
-                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.pcp_enabled
+                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.use_pcp
                 )
             else:
                 cache_mode = "PA"
@@ -3118,7 +3150,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         attn_metadata: AscendMLAMetadata,
     ) -> int:
-        if self.pcp_enabled:
+        if self.use_pcp:
             prefill_metadata = attn_metadata.prefill
             assert prefill_metadata is not None
             local_num_input_tokens = prefill_metadata.pcp_local_num_input_tokens
@@ -3215,6 +3247,54 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_k_pe=current_k_pe,
         )
 
+    # vLLM main fuses Kimi-K3's output gate into the trailing shard of the
+    # QKV-A projection; v0.32.0 never has that shard, so the release lane keeps
+    # the original two-way ``[q_a | kv_a]`` split.
+    if vllm_version_is("0.32.0"):
+
+        @property
+        def _fused_qkv_a_kv_end(self) -> int | None:
+            """v0.32.0 keeps the plain two-shard QKV-A projection."""
+            return None
+
+        def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
+            """Split the plain ``[q_a | kv_a]`` QKV-A projection."""
+            q_c, kv_no_split = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            return q_c, kv_no_split, None
+
+    else:
+
+        @property
+        def _fused_qkv_a_kv_end(self) -> int | None:
+            """End offset of the KV-A shard inside the fused QKV-A projection.
+
+            Kimi-K3 appends its output gate after ``[q_a | kv_a]``. ``None`` means
+            the plain two-shard layout, where the KV-A shard runs to the end.
+            """
+            if not getattr(self, "qkv_a_gate_fused", False):
+                return None
+            return self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
+
+        def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
+            """Split the fused QKV-A projection into ``q_c`` and ``kv_no_split``.
+
+            Kimi-K3 appends its output gate as a trailing shard; when that layout is
+            detected the gate is peeled off first and returned so the caller can
+            apply it after attention. ``None`` is returned for the plain layout.
+            """
+            gate = None
+            kv_end = self._fused_qkv_a_kv_end
+            if kv_end is not None:
+                qkv_lora, gate = qkv_lora.split([kv_end, qkv_lora.shape[-1] - kv_end], dim=-1)
+            q_c, kv_no_split = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            return q_c, kv_no_split, gate
+
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
         # MLA Preprocess:
         # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
@@ -3229,12 +3309,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_local_query = attn_metadata.num_actual_tokens > 0
         has_decode = has_local_query and attn_metadata.num_decodes > 0
         has_prefill = has_local_query and attn_metadata.num_prefills > 0
+        gate = None
         if self.fused_qkv_a_proj is not None:
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
+            q_c, kv_no_split, gate = self._split_fused_qkv_lora(qkv_lora)
             q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
             kv_no_split = kv_no_split.contiguous()
         else:
@@ -3243,8 +3321,10 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
-        # Sharded decode writes other ranks' KV even without local queries.
-        should_write_kv_cache = has_decode or has_prefill or self.is_pcp_decode_sharded
+        # Sharded decode writes other ranks' KV even without local queries; a
+        # replicated draft decode keeps its local slots and per-path writes.
+        writes_sharded_pcp_kv = self.is_pcp_decode_sharded and attn_metadata.uses_pcp_sharded_layout
+        should_write_kv_cache = has_decode or has_prefill or writes_sharded_pcp_kv
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
@@ -3252,7 +3332,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Wait for the broadcast before reading or updating the cache.
             self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
         written_kv = None
-        if self.is_pcp_decode_sharded:
+        if writes_sharded_pcp_kv:
             # No local token is replicated, so decode and prefill rows share
             # one PCP gather and cache write.
             written_kv = self.exec_kv_prefill(
@@ -3274,7 +3354,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # implement on_kv_cache_written; the decision to actually transfer is made
         # by the connector/scheduler, not here.
         notify_kv_cache_written(layer_name)
-        return decode_preprocess_res, prefill_preprocess_res
+        return decode_preprocess_res, prefill_preprocess_res, gate
 
     def get_num_actual_tokens(self, attn_metadata: M):
         return attn_metadata.num_actual_tokens
@@ -3337,8 +3417,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         gate = None
-        if self.use_output_gate:
-            assert self.g_proj is not None
+        # ``use_output_gate`` is True whenever a standalone ``g_proj`` exists on
+        # either lane. On vLLM main a Kimi-K3 gate fused into the QKV-A
+        # projection also sets it, but ``g_proj`` stays None there and the gate
+        # is instead produced by ``_mla_preprocess``.
+        if getattr(self, "use_output_gate", False) and self.g_proj is not None:
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
@@ -3349,12 +3432,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_tokens = max(num_actual_tokens - num_decode_tokens, 0)
         use_prolog_v3_strided_cache = (
             self._cache_requires_prolog_v3_writer(kv_cache)
-            and not self.pcp_enabled
+            and not self.use_pcp
             and not self.is_pcp_decode_sharded
-            and (not decode_requires_current_kv or self.dcp_enabled)
-            and (not prefill_requires_current_kv or self.dcp_enabled)
+            and (not decode_requires_current_kv or self.use_dcp)
+            and (not prefill_requires_current_kv or self.use_dcp)
             and (
-                not self.dcp_enabled
+                not self.use_dcp
                 or (
                     dcp_current_kv_buffers is not None
                     and num_decode_tokens <= dcp_current_kv_buffers[2].numel()
@@ -3380,7 +3463,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
-            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
         elif (
@@ -3389,6 +3472,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.
             and not self.is_pcp_decode_sharded
+            # The fused prolog cannot carry a QKV-A-fused output gate.
+            and not getattr(self, "qkv_a_gate_fused", False)
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
@@ -3398,7 +3483,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         else:
-            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
         if decode_preprocess_res is not None:
