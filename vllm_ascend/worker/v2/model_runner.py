@@ -21,7 +21,7 @@ import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -324,7 +324,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return batch_desc, dp_sync_state
 
-        setattr(dispatch_and_sync_with_sp, "_ascend_sp_token_padding", True)
+        cast(Any, dispatch_and_sync_with_sp)._ascend_sp_token_padding = True
         vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_and_sync_with_sp
 
     @property
