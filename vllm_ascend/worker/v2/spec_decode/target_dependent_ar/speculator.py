@@ -391,12 +391,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             if backend is None:
                 raise ValueError("Draft attention groups have no executable backend")
             self.attn_backend = backend
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
         if issubclass(backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(backend, AscendMLABackend):
             self.attn_architecture = "MLA"
         elif issubclass(backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
+        elif issubclass(backend, AscendQSABackend):
+            self.attn_architecture = "QSA"
         elif issubclass(backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
@@ -765,7 +769,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if attn_metadata is None:
             return
 
-        if self.attn_architecture in ("DSA", "SFA"):
+        # DSA/SFA manage draft state in their metadata builders; QSA has no
+        # host-side FIA fields to patch here.
+        if self.attn_architecture in ("DSA", "SFA", "QSA"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))

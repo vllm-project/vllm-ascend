@@ -63,10 +63,26 @@ class SingleNodeKVPoolManager:
     def _ready_ports(self) -> tuple[int, ...]:
         raise NotImplementedError
 
+    @property
+    def log_path(self) -> Path:
+        return self.runtime_dir / f"{self.config.type}.log"
+
     def _start_process(self, cmd: list[str], extra_env: dict[str, str]) -> None:
         env = {**os.environ, **extra_env}
         print(f"Starting {self.config.type} KV pool: {' '.join(cmd)}")
-        self.process = subprocess.Popen(cmd, env=env, start_new_session=True)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        print(f"KV pool service log: {self.log_path}")
+        # A surviving service must not keep pytest's CI output pipe open.
+        # Close the parent's log handle immediately; the child owns its copy.
+        with self.log_path.open("w", encoding="utf-8") as service_log:
+            self.process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=service_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
     def _wait_ready(self, timeout: int = KV_POOL_READY_TIMEOUT_SECONDS) -> None:
         pending_ports = set(self._ready_ports())
@@ -74,7 +90,8 @@ class SingleNodeKVPoolManager:
         while time.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(
-                    f"{self.config.type} service exited before becoming ready with code {self.process.returncode}"
+                    f"{self.config.type} service exited before becoming ready with code {self.process.returncode}. "
+                    f"See {self.log_path}"
                 )
             for port in tuple(pending_ports):
                 try:
@@ -86,7 +103,9 @@ class SingleNodeKVPoolManager:
                 print(f"{self.config.type} KV pool is ready")
                 return
             time.sleep(1)
-        raise TimeoutError(f"Timed out waiting for {self.config.type} KV pool; ports={sorted(pending_ports)}")
+        raise TimeoutError(
+            f"Timed out waiting for {self.config.type} KV pool; ports={sorted(pending_ports)}. See {self.log_path}"
+        )
 
     @staticmethod
     def _write_text_atomic(path: Path, content: str) -> None:

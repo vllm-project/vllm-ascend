@@ -113,6 +113,7 @@ def contract(request, monkeypatch):
         "AscendDSACPMetadataBuilder",
         "AscendDSAV41MetadataBuilder",
         "AscendSFAMetadataBuilder",
+        "QSAMetadataBuilder",
         "GDNAttentionMetadataBuilder",
     ):
         scope[name] = type(name, (), {})
