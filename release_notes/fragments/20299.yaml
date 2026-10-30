@@ -1,0 +1,4 @@
+pr: 20299
+entries:
+  - category: feature
+    text: Added an experimental opt-in DeepInfer MegaMoE backend with fused shared experts for DeepSeek V4.1 on Ascend 950, using TP1 and linear EP8.
