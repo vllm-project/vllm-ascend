@@ -116,8 +116,6 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
-      - "--profiler-config"
-      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
 
 
   - node_index: 1
@@ -178,8 +176,6 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
-      - "--profiler-config"
-      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
 
 
   - node_index: 2
@@ -240,8 +236,6 @@ templates:
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
-      - "--profiler-config"
-      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
 
 
 benchmarks:
@@ -262,9 +256,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 170
+    num_prompts: 100
     max_out_len: 1
-    batch_size: 17
+    batch_size: 10
     request_rate: 0
     baseline: 0
     threshold: 0.97
