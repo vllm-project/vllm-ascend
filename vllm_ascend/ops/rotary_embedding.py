@@ -691,38 +691,42 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
+        q_in, k_in = query, key
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
-            return self.forward_triton(positions, query, key)
+            query, key = self.forward_triton(positions, query, key)
+        elif self.mrope_section != [16, 24, 24]:
+            query, key = super().forward_oot(positions, query, key)
+        else:
+            import torch_npu
 
-        if self.mrope_section != [16, 24, 24]:
-            return super().forward_oot(positions, query, key)
+            mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
 
-        import torch_npu
+            if self.cos_sin_cache.device != query.device:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                    query.device
+                )  # type: ignore
 
-        mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
+            if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                    query.dtype
+                )  # type: ignore
 
-        if self.cos_sin_cache.device != query.device:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.device
-            )  # type: ignore
+            query, key = torch_npu.npu_mrope(
+                positions.contiguous(),
+                query.contiguous(),
+                key.contiguous(),
+                self.cos_sin_cache.contiguous(),
+                self.head_size,
+                mrope_section=mrope_section,
+                rotary_mode="half",
+            )
 
-        if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.dtype
-            )  # type: ignore
-
-        query, key = torch_npu.npu_mrope(
-            positions.contiguous(),
-            query.contiguous(),
-            key.contiguous(),
-            self.cos_sin_cache.contiguous(),
-            self.head_size,
-            mrope_section=mrope_section,
-            rotary_mode="half",
-        )
-
-        return query, key
+        # Upstream DFlash/DSpark assumes RoPE is in-place and discards the
+        # return value; copy the rotated values back so that assumption holds.
+        q_in.copy_(query.view(q_in.shape))
+        k_in.copy_(key.view(k_in.shape))
+        return q_in, k_in
 
 
 class AscendApplyRotaryEmb(ApplyRotaryEmb):
