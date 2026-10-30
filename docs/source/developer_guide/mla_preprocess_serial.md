@@ -158,6 +158,11 @@ replays, discard5 and retain20, alternating order. Speed is the smaller
 group-mean ratio. The event interval includes Graph runtime gaps, not pure
 kernel sum. Weight preparation and CPU reference are outside timing.
 
+The baseline weight-preparation harness requests ALLOW_INTERNAL_FORMAT=enable;
+timing uses that common setup for all three implementations. The separate
+disable run establishes accuracy and Graph support only, not performance
+for that configuration. The delivered helper never changes this option.
+
 Workload MACs is `T*D*(L+576)+T*L*H*(P+64)+T*H*P*512`; FLOPs is2*MACs.
 It describes projection work and excludes vector/cache traffic. Rows sort by
 MACs then T/H, not by observed latency. Costs can reverse locally with shape,
