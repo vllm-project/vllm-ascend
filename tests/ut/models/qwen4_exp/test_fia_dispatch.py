@@ -150,15 +150,15 @@ def test_route_uses_explicit_phase_not_query_or_kv_length(implementation, query_
         (1, 24575, True),
         (1, 24576, True),
         (1, 24577, False),
-        (4, 24578, False),
+        (4, 24578, True),
         (4096, 24576, True),
-        (4096, 28671, False),
+        (4096, 28671, True),
         (4096, 28672, False),
         (4096, 32768, False),
-        (131072, 131072, False),
+        (131072, 131072, True),
     ],
 )
-def test_total_kv_policy_including_large_initial_prefill(implementation, query_length, kv_length, expected_fia):
+def test_chunk_start_policy_including_large_initial_prefill(implementation, query_length, kv_length, expected_fia):
     plan = implementation["build_qsa_request_plan"](
         torch.tensor([0, query_length]), torch.tensor([kv_length]), query_length, torch.tensor([True])
     )
@@ -212,7 +212,8 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
     for phase, query_length, kv_length in zip(phases, query_lengths, kv_lengths):
         fia_rows = 0
         if phase:
-            fia_rows = query_length if kv_length <= 24576 else 0
+            kv_before_query = kv_length - query_length
+            fia_rows = query_length if kv_before_query < 24576 else 0
         expected.extend([3] * fia_rows)
         expected.extend([7] * (query_length - fia_rows))
     torch.testing.assert_close(out.flatten(), torch.tensor(expected, dtype=torch.float32))
@@ -221,7 +222,7 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
 
 def test_pure_prefill_routes_by_logical_kv_length(implementation):
     calls = run_stub_batch(implementation, [True, True, True], [2, 4, 1], [4096, 24578, 24577])
-    assert calls == [("fia", [0, 1]), ("gbsa", [2, 3, 4, 5, 6])]
+    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("gbsa", [6])]
 
 
 def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
