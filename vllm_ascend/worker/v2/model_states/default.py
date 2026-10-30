@@ -28,7 +28,6 @@ import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
@@ -76,7 +75,6 @@ class AscendModelState(DefaultModelState):
     pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
-    _needs_raw_input_ids: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
 
     def finish_execution(self, *, failed: bool) -> None:
@@ -86,12 +84,6 @@ class AscendModelState(DefaultModelState):
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
-        self._raw_input_ids: torch.Tensor | None = None
-        self._needs_raw_input_ids = (
-            vllm_config.parallel_config.pipeline_parallel_size > 1 and requires_raw_input_tokens(model)
-        )
-        if self._needs_raw_input_ids:
-            model.register_forward_pre_hook(self._restore_raw_input_ids, with_kwargs=True)
         self._offload_req_ids: CpuGpuBuffer | None = None
         self._offload_token_to_req: CpuGpuBuffer | None = None
         self._offload_pool_slots: CpuGpuBuffer | None = None
@@ -344,34 +336,6 @@ class AscendModelState(DefaultModelState):
         ):
             yield
 
-    def _bind_raw_input_ids(self, input_batch: AscendInputBatch) -> None:
-        if self._needs_raw_input_ids:
-            self._raw_input_ids = input_batch.input_ids[: input_batch.num_tokens_after_padding]
-
-    def _restore_raw_input_ids(self, model, args, kwargs):
-        # Upstream clears IDs on non-first PP ranks after prepare_inputs.
-        # Vision/hash routing still needs the native, graph-stable ID buffer.
-        if kwargs.get("input_ids") is not None or (args and args[0] is not None):
-            return None
-        positions = kwargs.get("positions")
-        if positions is None and len(args) > 1:
-            positions = args[1]
-        if positions is None:
-            return None
-        input_ids = self._raw_input_ids
-        if input_ids is None:
-            if positions.numel() == 0:
-                return None
-            raise RuntimeError("Raw input token IDs were not prepared before the model forward")
-        num_tokens = positions.shape[-1]
-        if num_tokens > input_ids.shape[0]:
-            raise ValueError("Raw input token IDs do not cover the padded model positions")
-        input_ids = input_ids[:num_tokens]
-        if args:
-            return (input_ids, *args[1:]), kwargs
-        kwargs["input_ids"] = input_ids
-        return None
-
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
         if self._offload_request_states is not None:
@@ -424,7 +388,6 @@ class AscendModelState(DefaultModelState):
         return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
-        self._bind_raw_input_ids(input_batch)
         model_inputs = super().prepare_inputs(input_batch, req_states)
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
         return model_inputs
@@ -466,9 +429,6 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
-        # FULL capture calls prepare_dummy_inputs before constructing its
-        # native dummy batch, then reaches this hook before the forward.
-        self._bind_raw_input_ids(input_batch)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:
