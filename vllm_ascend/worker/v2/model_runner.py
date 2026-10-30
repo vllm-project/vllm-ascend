@@ -1643,6 +1643,7 @@ class NPUModelRunner(GPUModelRunner):
                 PleShortConvAttentionMetadataBuilder,
             )
 
+            from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
             from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAImpl
             from vllm_ascend.ops.gdn_attn_builder import (
                 AscendGDNAttentionBackend,
@@ -1652,9 +1653,17 @@ class NPUModelRunner(GPUModelRunner):
                 AscendGDNHostMetadataBuilder,
             )
 
+            qsa_state_builders: tuple[type[AttentionMetadataBuilder], ...] = (QSAMetadataBuilder,)
+            # A5's Ascend owner can expose this audited state-cache builder.
+            # Its MRV2 build branch delegates directly to QSAMetadataBuilder;
+            # its other branch only adapts the V1 physical manager pages.
+            # Admit that exact exported class, never arbitrary subclasses.
+            ascend_qsa_state_builder = getattr(ascend_qsa, "AscendQSAStateMetadataBuilder", None)
+            if isinstance(ascend_qsa_state_builder, type) and issubclass(ascend_qsa_state_builder, QSAMetadataBuilder):
+                qsa_state_builders += (ascend_qsa_state_builder,)
             self._qwen_mrv2_allowed_backend_builders = {
                 AscendQSABackend: (Qwen4ExpQSAMetadataBuilder,),
-                QSAStateBackend: (QSAMetadataBuilder,),
+                QSAStateBackend: qsa_state_builders,
                 AscendGDNAttentionBackend: (AscendGDNAttentionMetadataBuilder,),
                 AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),
                 AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),

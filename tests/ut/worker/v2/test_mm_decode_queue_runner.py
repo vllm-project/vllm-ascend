@@ -474,6 +474,65 @@ class TestMMConsumerPolicy(unittest.TestCase):
                     namespace["get_kv_transfer_group"] = object
                 self.assertFalse(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc))
 
+    def test_optional_a5_state_builder_requires_exact_audited_identity(self):
+        class StateBuilder:
+            pass
+
+        class AscendQSAStateMetadataBuilder(StateBuilder):
+            pass
+
+        class UnknownChild(AscendQSAStateMetadataBuilder):
+            pass
+
+        class CPUReadingOverride(AscendQSAStateMetadataBuilder):
+            def build(self, state):
+                return state.num_computed_tokens_cpu.numpy()
+
+        class StateBackend:
+            pass
+
+        for export, actual_builder, admitted in (
+            (AscendQSAStateMetadataBuilder, AscendQSAStateMetadataBuilder, True),
+            (AscendQSAStateMetadataBuilder, UnknownChild, False),
+            (AscendQSAStateMetadataBuilder, CPUReadingOverride, False),
+            (None, AscendQSAStateMetadataBuilder, False),
+            (42, AscendQSAStateMetadataBuilder, False),
+            (object, AscendQSAStateMetadataBuilder, False),
+            (None, StateBuilder, True),
+        ):
+            with self.subTest(export=export, actual_builder=actual_builder):
+                runner, current_batch, output, desc = self.queue_runner([])
+                qsa_backend = runner._qwen_mrv2_qsa_backend
+                target_builder = runner._qwen_mrv2_allowed_backend_builders[qsa_backend][0]
+                runner._qwen_mrv2_allowed_backend_builders = None
+                qsa_exports = NS(AscendQSABackend=qsa_backend, AscendQSAImpl=NS)
+                if export is not None:
+                    qsa_exports.AscendQSAStateMetadataBuilder = export
+                modules = {
+                    "vllm.models.qwen4_exp.amd.qsa": NS(Qwen4ExpQSAMetadataBuilder=target_builder),
+                    "vllm.models.qwen4_exp.common.qsa_cache": NS(
+                        QSAMetadataBuilder=StateBuilder, QSAStateBackend=StateBackend
+                    ),
+                    "vllm.v1.attention.backends.short_conv_attn": NS(
+                        PleShortConvAttentionBackend=type("PleBackend", (), {}),
+                        PleShortConvAttentionMetadataBuilder=type("PleBuilder", (), {}),
+                    ),
+                    "vllm_ascend.models.qwen4_exp": NS(qsa=qsa_exports),
+                    "vllm_ascend.models.qwen4_exp.qsa": qsa_exports,
+                    "vllm_ascend.ops.gdn_attn_builder": NS(
+                        AscendGDNAttentionBackend=type("GDNBackend", (), {}),
+                        AscendGDNAttentionMetadataBuilder=type("GDNBuilder", (), {}),
+                        AscendGDNFusedAttentionBackend=type("GDNFused", (), {}),
+                        AscendGDNHostMetadataBackend=type("GDNHost", (), {}),
+                        AscendGDNHostMetadataBuilder=type("GDNHostBuilder", (), {}),
+                    ),
+                }
+                runner.attn_groups[0].append(
+                    NS(backend=StateBackend, get_metadata_builder=lambda _, builder=actual_builder: builder())
+                )
+                with patch.dict(sys.modules, modules):
+                    self.assertEqual(runner._qwen_mrv2_can_queue_decode(output, current_batch, desc), admitted)
+
     def test_mm_extension_requires_new_flag_and_exact_certificate(self):
         media = [
             NS(data=object(), modality="image", identifier="photo", mm_position=NS(offset=20, length=30, is_embed=None))

@@ -118,7 +118,10 @@ positions, sequence lengths, KV slots, rejection state, and subsequent writes ke
 their dependencies. It does not change MTP graph capture or sampling.
 
 Admission is deliberately restricted to the audited Qwen model state, MTP speculator,
-and target/draft attention backend and builder pairs. It requires DCP1, PCP1,
+and target/draft attention backend and builder pairs. The optional Ascend A5
+`AscendQSAStateMetadataBuilder` is admitted by exact exported class identity;
+its MRV2 branch delegates to the original state builder. Arbitrary subclasses
+and overrides retain synchronized submission. It requires DCP1, PCP1,
 fixed positive MTP K, and a uniform local FULL decode batch. Both asynchronous and
 synchronous scheduling are admitted; synchronous scheduling may offer less overlap.
 Prefix caching, Mamba cache modes, and the global KV-sharing fast-prefill setting
@@ -247,8 +250,8 @@ using the same model, environment, and request set. A shorter gap in one profili
 trace is insufficient to establish an end-to-end speedup or generation correctness.
 
 Hardware validation of the latest automatic-grid and stable-PD changes on server 62
-(Ascend A5) is pending release of the intended resources by the user. No A5 result
-is claimed for this revision. The historical TP4 and server-101 observations below
+(Ascend A5) is not yet complete. No A5 result is claimed for this revision.
+The historical TP4 and server-101 observations below
 predate these changes and do not validate them.
 
 The historical single-variant collection on server 101 used multimodal inputs of
