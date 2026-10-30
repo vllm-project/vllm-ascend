@@ -495,10 +495,10 @@ class AscendConfig:
                 "full_mode": false
             },
             "finegrained_tp_config": {
-                "oproj_tensor_parallel_size": 0,
-                "lmhead_tensor_parallel_size": 0,
-                "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0
+                "oproj_tensor_parallel_size": 1,
+                "lmhead_tensor_parallel_size": 1,
+                "embedding_tensor_parallel_size": 1,
+                "mlp_tensor_parallel_size": 1
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,
@@ -834,7 +834,7 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 1
-            or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
+            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
@@ -961,7 +961,7 @@ class AscendConfig:
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
         # whole-group LM-head collective path; the two are mutually exclusive.
         if vc.parallel_config.enable_batch_sharded_sampling:
-            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 1:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
@@ -1340,12 +1340,16 @@ class FinegrainedTPConfig:
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
     business validation stays out of pydantic). ``vllm_config`` is no longer a
     member field.
+
+    Size semantics follow vLLM ``ParallelConfig``: ``1`` (the default) means no
+    sharding and only sizes > 1 enable a knob. ``0`` is tolerated as a disabled
+    alias for older configs but is not part of the documented range.
     """
 
-    oproj_tensor_parallel_size: int = 0
-    lmhead_tensor_parallel_size: int = 0
-    embedding_tensor_parallel_size: int = 0
-    mlp_tensor_parallel_size: int = 0
+    oproj_tensor_parallel_size: int = 1
+    lmhead_tensor_parallel_size: int = 1
+    embedding_tensor_parallel_size: int = 1
+    mlp_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1417,16 +1421,16 @@ class FinegrainedTPConfig:
                     str(capture_bound),
                     max_step,
                 )
-                self.oproj_tensor_parallel_size = 0
-                self.mlp_tensor_parallel_size = 0
+                self.oproj_tensor_parallel_size = 1
+                self.mlp_tensor_parallel_size = 1
             else:
                 if self.oproj_tensor_parallel_size > 1:
                     enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
                 if self.mlp_tensor_parallel_size > 1:
                     enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
-        if self.lmhead_tensor_parallel_size > 0:
+        if self.lmhead_tensor_parallel_size > 1:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
-        if self.embedding_tensor_parallel_size > 0:
+        if self.embedding_tensor_parallel_size > 1:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
@@ -1440,11 +1444,11 @@ class FinegrainedTPConfig:
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
             # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
-            if module_tp_size > 0 and not vc.model_config.is_moe:
+            if module_tp_size > 1 and not vc.model_config.is_moe:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
-            if module_tp_size > 0 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
+            if module_tp_size > 1 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
-        if any(size > 0 for size in module_tp_sizes) and enabled_configs:
+        if any(size > 1 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 
