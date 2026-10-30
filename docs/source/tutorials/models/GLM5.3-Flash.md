@@ -12,6 +12,10 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
+GLM-5.3-Flash is officially supported in vLLM-Ascend v0.30.0.
+This guide follows the `releases/v0.30.0` deployment configurations;
+use a build containing the maintenance updates required by the selected scenario.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
