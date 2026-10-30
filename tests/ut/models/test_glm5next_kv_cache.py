@@ -7,12 +7,14 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.attention.indexer_kpool as backend_module
+from vllm_ascend.attention.attention_v1 import AscendCommonAttentionMetadata
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
@@ -185,14 +187,18 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
         dtype=torch.float32,
     )
     pool = BlockPool(8, True, 4)
-    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
+    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16, needs_kv_cache_zeroing=True)
     blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, spec, False, 16)
     assert blocks == ([], []) and hit == 0
-    manager.allocate_external_computed_blocks("hit", 1024, 0)
+    manager.allocate_external_computed_blocks("hit", 1024, 0, record_for_zeroing=False)
     assert len(manager.req_to_blocks["hit"]) == 1
+    assert manager.take_new_block_ids() == []
     manager.allocate_external_computed_blocks("hit", 1024, 512)
     assert len(manager.req_to_blocks["hit"]) == 1
     manager.free("hit")
+    manager.allocate_external_computed_blocks("zero", 0, 512, record_for_zeroing=True)
+    assert manager.take_new_block_ids() == [manager.req_to_blocks["zero"][0].block_id]
+    manager.free("zero")
 
 
 @pytest.mark.parametrize("ratio", [0, 1, 3])
@@ -210,6 +216,10 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     spec = AscendMLAAttentionSpec(
         block_size=logical_size,
@@ -227,6 +237,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split)).reshape(1, -1).int()
     expanded[:, -split:] = -1
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=1,
         num_input_tokens=4,
         num_actual_tokens=3,
@@ -254,6 +266,73 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     assert refreshed.block_table.data_ptr() == address
     torch.testing.assert_close(refreshed.block_table, common.block_table_tensor[:1])
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
+
+
+def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatch, keypool_kernels):
+    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: True)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.indexer_kpool.get_tp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=256),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+        model_version="glm5_next",
+    )
+    tail_spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+    tail_builder = AscendIndexerKPoolTailMetadataBuilder(
+        tail_spec, ["layer.indexer.tail_cache"], config, torch.device("cpu")
+    )
+    common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
+        num_reqs=2,
+        num_input_tokens=5,
+        num_actual_tokens=5,
+        query_start_loc=torch.tensor([0, 4, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([4, 1], dtype=torch.int32),
+        _seq_lens_cpu=None,
+        seq_lens_cpu=None,
+        positions=torch.tensor([0, 1, 2, 3, 0]),
+        slot_mapping=torch.tensor([0, 1, 2, 3, 128]),
+        block_table_tensor=torch.tensor([[0], [1]], dtype=torch.int32),
+    )
+    metadata = builder.build(0, common)
+    tail = tail_builder.build(0, common)
+    assert keypool_kernels.build_keypool_metadata.call_args.args[:4] == (
+        common,
+        builder._metadata_buffers[common.slot_mapping.data_ptr()],
+        6,
+        5,
+    )
+    assert metadata.positions.shape == metadata.slot_mapping.shape == (6,)
+    query = metadata.query_metadata
+    assert query.num_actual_tokens == 2
+    assert query.positions.data_ptr() == metadata.positions[3:].data_ptr()
+    assert query.cum_query_lens.shape == (2,)
+    assert keypool_kernels.build_keypool_metadata.call_args.kwargs["local_start"] == 3
+    torch.testing.assert_close(tail.slot_mapping, common.slot_mapping)
+    refreshed = builder.build(0, common).query_metadata
+    assert refreshed.cum_query_lens.data_ptr() == query.cum_query_lens.data_ptr()
+    assert refreshed.positions.data_ptr() == query.positions.data_ptr()
+    assert tail_builder.build(0, common).slot_mapping.data_ptr() == tail.slot_mapping.data_ptr()
 
 
 def test_model_cache_layers_publish_source_compatible_specs():
@@ -303,6 +382,182 @@ def test_model_cache_layers_publish_source_compatible_specs():
     }
 
 
+def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=16,
+            max_num_seqs=2,
+        ),
+        model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            **_ratio_kwargs(16),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([18, 35], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([18, 35], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=3,
+        num_input_tokens=5,
+        max_seq_len=35,
+        block_table_tensor=torch.tensor([[0, -1], [1, 2]], dtype=torch.int32),
+        slot_mapping=torch.tensor([16, 17, 32, 33, 34]),
+        positions=torch.tensor([16, 17, 32, 33, 34]),
+    )
+
+    metadata = builder.build(0, common)
+
+    source = keypool_kernels.build_keypool_metadata.call_args.args[0]
+    assert source is common
+    assert source.query_start_loc.tolist() == [0, 2, 5]
+    assert source.seq_lens.tolist() == [18, 35]
+    assert metadata.cum_query_lens.shape == metadata.raw_seq_lens.shape == metadata.seq_lens.shape == (2,)
+    assert metadata.num_actual_tokens == 5
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("invalid", [None, "group", "layout", "capacity"])
+def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, invalid):
+    """Keep one global CANN write request for two PCP-local query chunks."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=2,
+        ),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            **_ratio_kwargs(4),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32),
+        seq_lens=torch.tensor([2, 8], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([2, 8], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=4,
+        max_query_len=2,
+        num_input_tokens=4,
+        max_seq_len=8,
+        block_table_tensor=torch.tensor([[5, 6], [5, 6]], dtype=torch.int32),
+        slot_mapping=5 * 128 + torch.tensor([0, 1, 6, 7]),
+        positions=torch.tensor([0, 1, 6, 7]),
+    )
+    global_positions = torch.arange(8)
+    global_slots = 5 * 128 + global_positions
+    restore = torch.tensor([0, 1, 4, 5, 6, 7, 2, 3])
+    pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=1,
+            num_tokens=8,
+            query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+            query_start_loc_np=np.array([0, 8], dtype=np.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            positions=global_positions,
+            is_prefilling_np=np.array([True]),
+        ),
+        global_block_tables=(torch.tensor([[5, 6]], dtype=torch.int32),),
+        global_slot_mappings=global_slots.unsqueeze(0),
+        hidden_restore_idx=restore,
+        padded_gather_idx=torch.arange(8),
+    )
+
+    if invalid == "layout":
+        pcp_context.padded_gather_idx = None
+    elif invalid == "capacity":
+        builder._max_num_write_tokens = 4
+
+    common.pcp_context = pcp_context
+    common.pcp_cache_group_idx = None if invalid == "group" else 0
+
+    def build(local_common=common):
+        if capture:
+            return builder.build_for_cudagraph_capture(local_common)
+        return builder.build(0, local_common)
+
+    if invalid is not None:
+        match = {"group": "cache-group index", "layout": "gathered-token layout", "capacity": "buffer capacity"}
+        with pytest.raises(RuntimeError, match=match[invalid]):
+            build()
+        return
+
+    metadata = build()
+
+    assert metadata.block_table.tolist() == [[5, 6], [5, 6]]
+    write = metadata.write_metadata
+    assert write.block_table.tolist() == [[5, 6]]
+    assert write.keypool_state_table.shape == (1, 3)
+    assert metadata.keypool_state_table.shape == (2, 2)
+    assert write.positions.data_ptr() != metadata.positions.data_ptr()
+    local_call, global_call = keypool_kernels.build_keypool_metadata.call_args_list
+    assert local_call.args[0] is common
+    global_common = global_call.args[0]
+    torch.testing.assert_close(global_common.positions, global_positions)
+    torch.testing.assert_close(global_common.slot_mapping, global_slots)
+    assert global_common.query_start_loc.tolist() == [0, 8]
+    assert global_common.seq_lens.tolist() == [8]
+    assert global_common.max_query_len == 8
+    torch.testing.assert_close(metadata.pcp_hidden_restore_indices, restore)
+    assert metadata.pcp_local_token_count == 4
+    refreshed = build()
+    assert refreshed.write_metadata.positions.data_ptr() == write.positions.data_ptr()
+    assert refreshed.write_metadata.keypool_state_table.data_ptr() == write.keypool_state_table.data_ptr()
+    other_step = build(common.replace(slot_mapping=common.slot_mapping.clone()))
+    assert other_step.write_metadata.positions.data_ptr() != write.positions.data_ptr()
+    assert other_step.write_metadata.keypool_state_table.data_ptr() != write.keypool_state_table.data_ptr()
+
+    tail_builder = AscendIndexerKPoolTailMetadataBuilder(
+        AscendIndexerKPoolTailSpec(
+            block_size=4,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float32,
+        ),
+        ["model.layers.0.indexer.tail_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    tail_metadata = tail_builder.build_for_cudagraph_capture(common) if capture else tail_builder.build(0, common)
+    torch.testing.assert_close(tail_metadata.write_block_table, pcp_context.global_block_tables[0][:, :1])
+    torch.testing.assert_close(tail_metadata.write_slot_mapping, global_slots)
+    tail_common = keypool_kernels.build_tail_inputs.call_args.args[0]
+    assert tail_common.num_reqs == 1
+    assert tail_common.query_start_loc.tolist() == [0, 8]
+    torch.testing.assert_close(tail_common.slot_mapping, global_slots)
+
+
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
@@ -311,6 +566,10 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
         AscendMLAAttentionSpec(
@@ -326,6 +585,8 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
         torch.device("cpu"),
     )
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=4,
         num_input_tokens=4,
         num_actual_tokens=2,
@@ -353,6 +614,10 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
         AscendMLAAttentionSpec(
@@ -368,6 +633,8 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         torch.device("cpu"),
     )
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=1,
         num_input_tokens=2,
         num_actual_tokens=2,
@@ -428,6 +695,7 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
 
 def _config():
     return SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -454,6 +722,8 @@ class _Common(SimpleNamespace):
 
 def _common():
     return _Common(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=2,
         num_input_tokens=10,
         num_actual_tokens=8,

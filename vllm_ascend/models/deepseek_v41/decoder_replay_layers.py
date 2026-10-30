@@ -36,6 +36,11 @@ class AscendDecoderReplayLayers:
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
+            if self.context_factory is not None:
+                # A peer DP replica compacted its batch. Keep our original PCP
+                # layout, but use the decoder's new cross-DP token counts.
+                with self.context_factory():
+                    return self.run_layers(*states)
             return self.run_layers(*states)
         assert self.context_factory is not None
         positions = states[2]
@@ -100,9 +105,7 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     cut = max(model.config.kv_source_layer_ids)
     if cut >= model.end_layer - 1:
         return None
-    if parallel.prefill_context_parallel_size > 1 and parallel.data_parallel_size > 1:
-        reason = "PCP decoder replay currently requires DP=1"
-    elif (
+    if (
         (model.use_sequence_parallel and not enable_dsa_cp())
         or parallel.pipeline_parallel_size > 1
         or parallel.decode_context_parallel_size > 1

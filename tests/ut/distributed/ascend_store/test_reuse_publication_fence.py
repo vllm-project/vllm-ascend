@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker as module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import pool_worker as module
 
 
 class TestReusePublicationFence(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestReusePublicationFence(unittest.TestCase):
         ]:
             for requests in ([], [object()]):
                 with self.subTest(transfer=transfer, reuse=reuse, tp_size=tp_size, empty=not requests):
-                    worker = module.KVPoolWorker.__new__(module.KVPoolWorker)
+                    worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
                     worker.use_layerwise = True
                     worker.use_kvpp = False
                     worker.use_layerwise_transfer = transfer
@@ -39,7 +39,7 @@ class TestReusePublicationFence(unittest.TestCase):
                     self.assertEqual(calls, ["drain", "barrier", "prepare"] if sync else ["drain", "prepare"])
 
     def test_failed_local_save_does_not_query(self):
-        worker = module.KVPoolWorker.__new__(module.KVPoolWorker)
+        worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
         worker.use_layerwise = True
         with (
             patch.object(worker, "_drain_deferred_last_save", side_effect=RuntimeError("save failed")),

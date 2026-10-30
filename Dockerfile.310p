@@ -30,7 +30,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.31.0
+ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.config import CompilationMode
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3 import (
@@ -127,6 +128,44 @@ def _make_decoder_layer(*, use_sequence_parallel: bool, is_moe: bool = True) -> 
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_dspark_receives_residual_added_auxiliary_states(self):
+        class _TargetLayer(nn.Module):
+            use_sequence_parallel = False
+
+            def forward(self, positions, hidden_states, residual, input_is_sequence_parallel=False):
+                return hidden_states + 1, hidden_states * 10
+
+        module = "vllm_ascend.models.minimax_m3.minimax_m3"
+        text_config = SimpleNamespace(vocab_size=16, hidden_size=4, num_hidden_layers=6, rms_norm_eps=1e-6)
+        for method in (None, "eagle3", "dspark"):
+            config = SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=text_config),
+                cache_config=None,
+                quant_config=None,
+                speculative_config=SimpleNamespace(method=method) if method else None,
+                compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+            )
+            with (
+                self.subTest(method=method),
+                patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_first_rank=True, is_last_rank=True)),
+                patch(f"{module}.VocabParallelEmbedding", return_value=nn.Embedding(16, 4)),
+                patch(f"{module}.make_layers", return_value=(0, 6, nn.ModuleList([_TargetLayer() for _ in range(6)]))),
+                patch(f"{module}.GemmaRMSNorm", return_value=_PairNorm()),
+                patch(f"{module}.make_pp_empty_intermediate_tensors"),
+            ):
+                model = MiniMaxM3Model(vllm_config=config)
+                model.set_aux_hidden_state_layers((1, 2, 3, 4, 5, 6))
+                result = model.forward(None, torch.arange(2), None, inputs_embeds=torch.ones(2, 4))
+
+                if method is None:
+                    self.assertIsInstance(result, torch.Tensor)
+                else:
+                    hidden, auxiliary = result
+                    self.assertEqual(len(auxiliary), 6)
+                    torch.testing.assert_close(hidden, torch.full((2, 4), 7.0))
+                    for index, state in enumerate(auxiliary):
+                        torch.testing.assert_close(state, torch.full((2, 4), 12.0 + 11 * index))
+
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_shard")
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     def test_decoder_enters_sequence_parallel(

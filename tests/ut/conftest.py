@@ -340,8 +340,8 @@ def _mock_ascend_store_deps(request):
 
     _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
     with (
-        patch(f"{_pfx}.pool_worker.get_attention_compute_start_gate"),
-        patch(f"{_pfx}.pool_worker.reset_attention_compute_start_gate"),
-        patch(f"{_pfx}.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
+        patch(f"{_pfx}.layerwise.pool_worker.get_attention_compute_start_gate"),
+        patch(f"{_pfx}.layerwise.pool_worker.reset_attention_compute_start_gate"),
+        patch(f"{_pfx}.layerwise.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
     ):
         yield

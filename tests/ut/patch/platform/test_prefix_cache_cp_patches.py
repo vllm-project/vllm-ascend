@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import inspect
 import math
 from dataclasses import replace
 from types import SimpleNamespace
@@ -45,6 +44,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_annotate_eagle_groups,
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kv_cache_config_deepseek_v4_main,
@@ -54,16 +54,11 @@ from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
-# that prefix caching requires `mamba_cache_mode="align"`; the v0.31.0 lane still
-# allowed `"none"` together with `enable_caching=True`.
-_MAMBA_CACHING_MODE = "none" if vllm_version_is("0.31.0") else "align"
+# that prefix caching requires `mamba_cache_mode="align"` in both supported lanes.
+_MAMBA_CACHING_MODE = "align"
 
-# vLLM #42309 gives the upstream admission helper a leading `builder` argument;
-# v0.31.0 and older main checkouts keep the two-argument form. `vllm_version_is`
-# cannot tell two main dev builds apart, so probe the live upstream signature.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = (
-    "builder" in inspect.signature(kv_cache_utils_patch._orig_max_memory_usage_bytes_from_groups).parameters
-)
+# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
+_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -1024,18 +1019,13 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
-            # vLLM main (#57169) resolves the KV cache layout when computing the
-            # pool bytes per block; v0.31.0 has no such argument.
+            # Both supported lanes (#57169) resolve the KV cache layout when
+            # computing the pool bytes per block.
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
         )
     )
-
-    if vllm_version_is("0.31.0"):
-        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
-        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
-    else:
-        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     live_module = kv_cache_utils_patch._kv_cache_planning
     assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
@@ -1270,6 +1260,161 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
 
     assert coordinator.single_type_managers[1].use_eagle is True
     assert coordinator.single_type_managers[0].use_eagle is False
+
+
+def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
+    target_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(
+            ["model.layers.0.self_attn.attn"],
+            target_spec,
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.48.self_attn.attn"],
+            target_spec,
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.linear_attn"],
+            mamba_spec,
+        ),
+    ]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["Qwen4ExpMTP"],
+            hf_text_config=SimpleNamespace(
+                mtp_num_hidden_layers=1,
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+    kv_cache_spec = {layer_name: group.kv_cache_spec for group in groups for layer_name in group.layer_names}
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+    )
+
+    assert [group.is_eagle_group for group in groups] == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    ("text_model_type", "text_architectures"),
+    [
+        ("qwen4_exp_mtp", []),
+        ("qwen4_exp_text", ["Qwen4ExpMTP"]),
+    ],
+)
+def test_qwen4_exp_mtp_text_config_fallback_annotation(
+    text_model_type,
+    text_architectures,
+) -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [
+        KVCacheGroupSpec(["mtp.layers.48.self_attn.attn"], spec),
+    ]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=[],
+            hf_text_config=SimpleNamespace(
+                model_type=text_model_type,
+                architectures=text_architectures,
+                mtp_num_hidden_layers=1,
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        {groups[0].layer_names[0]: spec},
+        groups,
+    )
+
+    assert groups[0].is_eagle_group is True
+
+
+def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [KVCacheGroupSpec(["model.layers.48.self_attn.attn"], spec)]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["OtherMTP"],
+            hf_text_config=SimpleNamespace(
+                model_type="other_mtp",
+                architectures=["OtherMTP"],
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        {groups[0].layer_names[0]: spec},
+        groups,
+    )
+
+    assert groups[0].is_eagle_group is False
+
+
+def test_qwen4_exp_mtp_missing_draft_group_fails_fast() -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [KVCacheGroupSpec(["model.layers.47.self_attn.attn"], spec)]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["Qwen4ExpMTP"],
+            hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    with pytest.raises(ValueError, match="no KV cache group"):
+        _ascend_annotate_eagle_groups(
+            vllm_config,
+            {groups[0].layer_names[0]: spec},
+            groups,
+        )
 
 
 def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:

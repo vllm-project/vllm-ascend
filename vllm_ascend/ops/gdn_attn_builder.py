@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -470,12 +470,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if non_spec_cache_indices is None:
             raise RuntimeError("Expected non_spec_cache_indices for Ascend GDN prefill conv1d path.")
         prefill_num_rows = attn_metadata.non_spec_query_start_loc.size(0) - 1
-        pcp_size = getattr(self.vllm_config.parallel_config, "prefill_context_parallel_size", 1)
-        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        if pcp_rank > 0 and attn_metadata.num_prefills > 0:
-            prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
-            initial_state_mode = initial_state_mode.clone()
-            initial_state_mode[prefill_seq_offset:] = True
+        # MRV2 builds complete request metadata for recurrent attention.
+        # Fresh requests must ignore reused convolution state on every rank.
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
@@ -711,10 +707,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # vLLM #58737 derives num_reqs from the block table and asserts that
         # seq_lens has the same number of rows. Ascend's unpadded() intentionally
         # keeps the padded block-table rows, so on vLLM main pass only the real
-        # request rows. v0.31.0's align path already derives its output rows from
+        # request rows. v0.32.0's align path already derives its output rows from
         # seq_lens, so the result is unchanged there.
         if (
-            not vllm_version_is("0.31.0")
+            not vllm_version_is("0.32.0")
             and mamba_cache_mode != "none"
             and mamba_block_table.shape[0] != m.seq_lens.shape[0]
         ):
@@ -1100,6 +1096,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
+        metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         if self._conv_output_buffer is not None:
             # Layers in this group consume the same decode rows in sequence.
             # Clear once per step, including inactive captured branches: rows
@@ -1130,7 +1127,20 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+    def get_builder_cls() -> type[GDNAttentionMetadataBuilder]:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config.hf_text_config.model_type in (
+            "glm5_next",
+            "glm5_next_text",
+        ):
+            # The RecoverSSM builder imports these host descriptors. Resolve it
+            # lazily. Selection only reads the opt-in validated at config init.
+            from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+
+            if use_glm_recoverssm(vllm_config):
+                from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+
+                return AscendKDARecoverSSMMetadataBuilder
         return AscendGDNHostMetadataBuilder
 
 
