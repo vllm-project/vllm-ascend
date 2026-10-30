@@ -10,7 +10,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
+import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
