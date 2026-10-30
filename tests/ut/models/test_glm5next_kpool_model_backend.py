@@ -12,12 +12,16 @@ from torch import nn
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
+import vllm_ascend.ops.linear as linear_module
+import vllm_ascend.utils as utils_module
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolMetadata,
     AscendIndexerKPoolQueryMetadata,
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 with patch.dict(
     "sys.modules",
@@ -155,6 +159,74 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
 def test_kpool_cache_backends_support_pcp() -> None:
     assert backend_module.AscendIndexerKPoolBackend.supports_pcp()
     assert backend_module.AscendIndexerKPoolTailBackend.supports_pcp()
+
+
+@pytest.mark.parametrize("weight_nz_mode", [0, 1, 2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weight_nz_mode, dtype):
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    for module in (backend_module, linear_module, utils_module):
+        monkeypatch.setattr(module, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(utils_module, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=weight_nz_mode))
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
+
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=2,
+        head_dim=4,
+        topk_tokens=8,
+        q_lora_rank=4,
+        index_kpool=4,
+        wq_b=nn.Linear(4, 8, bias=False, dtype=dtype),
+        wk_weights_proj=nn.Linear(8, 6, bias=False, dtype=dtype),
+        k_norm=nn.LayerNorm(4, dtype=dtype),
+        softmax_scale=0.5,
+        index_kpool_compress_ape=nn.Parameter(torch.zeros(4, 4, dtype=dtype)),
+        index_kpool_compress_gate=nn.Parameter(torch.randn(4, 8, dtype=dtype)),
+        k_cache=SimpleNamespace(prefix="indexer.k_cache"),
+        tail_cache=SimpleNamespace(prefix="indexer.tail"),
+        topk_indices_buffer=None,
+    )
+    source.wk_weights_proj.prefix = "model.layers.0.indexer.wk_weights_proj"
+    source.wq_b.prefix = "model.layers.0.indexer.wq_b"
+    backend = Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    original_weight = source.wk_weights_proj.weight.detach().clone()
+    nz_weights = []
+
+    def format_cast(weight, fmt, **kwargs):
+        # Fail at the device boundary if Linear tries to convert the source
+        # before KPool can derive its FP32 head weights (the A5 failure path).
+        if weight.data_ptr() == source.wk_weights_proj.weight.data_ptr():
+            raise AssertionError("KPool source converted to NZ before FP32 head-weight extraction")
+        nz_weights.append(weight.data_ptr())
+        return weight
+
+    monkeypatch.setattr(utils_module.torch_npu, "npu_format_cast", format_cast)
+    method = linear_module.AscendUnquantizedLinearMethod()
+    # Match the loader's ordering: Linear hooks first, then attention hooks.
+    for layer in (source.wk_weights_proj, source.wq_b):
+        method.process_weights_after_loading(layer)
+    expected_nz_weights = [source.wq_b.weight.data_ptr()] if weight_nz_mode == 2 else []
+    assert nz_weights == expected_nz_weights
+
+    # Repeated post-processing must not encounter an NZ source on the next cast.
+    for _ in range(2):
+        backend.process_weights_after_loading()
+        # CANN key weights and FP32 head weights must stay in ND, including
+        # when post-processing is repeated.
+        assert nz_weights == expected_nz_weights
+        assert backend._key_weight.dtype == dtype
+        assert backend._head_weight_f32.dtype == torch.float32
+        assert backend._key_weight.is_contiguous()
+        assert backend._head_weight_f32.is_contiguous()
+        torch.testing.assert_close(backend._key_weight, original_weight[: source.head_dim])
+        torch.testing.assert_close(backend._head_weight_f32, original_weight[source.head_dim :].float())
+        torch.testing.assert_close(backend._gate_weight, source.index_kpool_compress_gate.detach())
+        torch.testing.assert_close(backend._norm_weight_f32, source.k_norm.weight.detach().float())
+        torch.testing.assert_close(backend._norm_bias_f32, source.k_norm.bias.detach().float())
+    torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])

@@ -10,6 +10,9 @@ from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_pool_bytes_per_block,
+)
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
@@ -19,4 +22,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         # their combined physical block cost from unequal tensor sizes.
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+        qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+        if qwen_bytes is not None:
+            return qwen_bytes
         return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
