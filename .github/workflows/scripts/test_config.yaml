@@ -10,6 +10,11 @@
 #
 # - ``curated_tests:``   named lists of test paths (e.g. ``a5``) selected via
 #                        ``select_tests.py --curated <name>``.
+# - ``precision_only_e2e:`` directory of operator E2E tests that ``--all-tests``
+#                        does not scan. When ``--test-list-file`` names a path
+#                        under ``root``, that path is copied onto each listed
+#                        single-card runner. Chip selection is the test's own
+#                        ``skipif``. These tests are outside coverage collection.
 # - ``skip_tests:``      test files that are removed after test collection,
 #                        regardless of how they were selected.
 # - ``accuracy_tests:``  the accuracy test files. When at least one of them
@@ -47,6 +52,18 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
+
+# === Precision-only E2E ===
+# Operator tests under ``root`` are omitted from ``--all-tests`` because that
+# mode only scans tests/ut and tests/e2e/pull_request. A precision
+# recommendation (``--test-list-file``) that names one of these paths schedules
+# the same file on every partition below. The tests skip themselves when the
+# machine chip does not match.
+precision_only_e2e:
+  root: tests/e2e/nightly/single_node/ops/singlecard_ops
+  partitions:
+    - a3-1
+    - a5-1
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -128,6 +145,9 @@ runner_mapping:
 # Maps logical test buckets to exact labels from runner_label.json and controls
 # how many load-balanced groups are created for each bucket.
 partition:
+  a5-1:
+    runner_label: linux-aarch64-a5-1
+    count: 1
   a5-4:
     runner_label: linux-aarch64-a5-4
     count: 1
@@ -143,6 +163,9 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b1b3-1-hk-001
     count: 7
+  a3-1:
+    runner_label: linux-aarch64-a3-1
+    count: 1
   a3-2:
     runner_label: linux-aarch64-a3-2
     count: 5

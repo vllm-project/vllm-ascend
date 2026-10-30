@@ -152,6 +152,10 @@ automatically from the test tree.
 
 The directory determines the runner. No configuration change is needed.
 
+## Recommending a Single-card Operator Test
+
+Operator tests live under `tests/e2e/nightly/single_node/ops/singlecard_ops/`. `--all-tests` does not scan that directory. When a precision recommendation lists one of these files, `select_tests.py --test-list-file` copies it onto both `linux-aarch64-a3-1` and `linux-aarch64-a5-1`. Each test skips itself with `skipif` when the machine chip does not match. `test_selector.py` has to emit the path in `recommended_pytest_paths.txt`; the directory alone does not.
+
 ## Adding a Curated Suite
 
 Add a named list to `curated_tests` in `.github/workflows/scripts/test_config.yaml`:

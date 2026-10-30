@@ -23,7 +23,10 @@ Test selection is driven by the coverage/AST based precision testing pipeline
   pytest target per line (UT or E2E). Lines starting with ``#`` and
   blank lines are ignored. Supports file paths, directories, and
   ``::nodeid`` suffixes for test classes or methods. This mode is used by
-  the precision-testing recommendation flow.
+  the precision-testing recommendation flow. A path under
+  ``precision_only_e2e.root`` (single-card operator tests) is copied onto
+  each configured single-card runner. ``--all-tests`` does not scan that
+  directory.
 
 - ``--explicit-e2e-tests``: Slash-command driven. The input is a list of
   e2e test paths (files or directories) supplied via the ``/e2e`` PR
@@ -91,6 +94,19 @@ class RunnerInfo:
 class PartitionInfo:
     runner_label: str
     count: int
+
+
+@dataclass(frozen=True)
+class PrecisionOnlyE2E:
+    """E2E tests recommended explicitly and scheduled onto several runners.
+
+    ``root`` is outside the ``--all-tests`` scan. ``partitions`` are existing
+    logical partitions; a recommended path under ``root`` is placed in each
+    of them.
+    """
+
+    root: str = ""
+    partitions: tuple[PartitionKey, ...] = ()
 
 
 PartitionKey = str
@@ -211,6 +227,78 @@ def _is_ut_path(path: str) -> bool:
 
 def _is_e2e_path(path: str) -> bool:
     return path == "tests/e2e" or path.startswith("tests/e2e/")
+
+
+def _load_precision_only_e2e(
+    meta: dict,
+    partition_config: dict[PartitionKey, PartitionInfo],
+) -> PrecisionOnlyE2E:
+    """Load the precision-only E2E directory and its runner partitions."""
+    raw = meta.get("precision_only_e2e") or {}
+    if not raw:
+        return PrecisionOnlyE2E()
+    if not isinstance(raw, dict):
+        raise ValueError("precision_only_e2e must be a mapping with root and partitions")
+    root = _as_posix_path(str(raw.get("root", ""))).rstrip("/")
+    partitions = raw.get("partitions") or []
+    if not root or not isinstance(partitions, list) or not partitions:
+        raise ValueError("precision_only_e2e requires a root and a non-empty partitions list")
+    if not all(isinstance(partition, str) and partition for partition in partitions):
+        raise ValueError("precision_only_e2e partitions must be partition names")
+    unknown = sorted({partition for partition in partitions if partition not in partition_config})
+    if unknown:
+        raise ValueError(
+            "precision_only_e2e references undefined logical partition(s): " + ", ".join(unknown)
+        )
+    return PrecisionOnlyE2E(root=root, partitions=tuple(partitions))
+
+
+def _is_precision_only_e2e_path(path: str, root: str) -> bool:
+    """Return whether *path* is the precision-only E2E root or a file under it."""
+    if not root:
+        return False
+    file_path = _as_posix_path(_pytest_node_file_path(path)).rstrip("/")
+    return file_path == root or file_path.startswith(root + "/")
+
+
+def _route_precision_only_e2e_target(
+    target: str,
+    groups: dict[PartitionKey, list[str]],
+    spec: PrecisionOnlyE2E,
+) -> None:
+    """Schedule one recommended precision-only target onto each configured runner.
+
+    A directory expands to its ``test_*.py`` files. Each file or ``::nodeid``
+    is appended to every partition in ``spec`` so the later resolver emits one
+    matrix entry per runner label.
+    """
+    file_path = _pytest_node_file_path(target)
+    path = Path(file_path)
+    if not path.exists():
+        print(
+            f"Warning: Path does not exist: {target}",
+            file=sys.stderr,
+        )
+        return
+
+    if "::" in target or path.is_file():
+        scheduled = [_as_posix_path(target)]
+    else:
+        scheduled = [
+            _as_posix_path(str(test_file))
+            for test_file in sorted(path.rglob("test_*.py"))
+            if "__pycache__" not in test_file.parts
+        ]
+        if not scheduled:
+            print(
+                f"Warning: No test_*.py files under precision-only E2E path: {target}",
+                file=sys.stderr,
+            )
+            return
+
+    for item in scheduled:
+        for partition in spec.partitions:
+            groups[partition].append(item)
 
 
 def _is_test_path(path: str) -> bool:
@@ -355,26 +443,37 @@ def _route_explicit_test_target(
     )
 
 
-def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
+def _dedup_groups(groups: dict[PartitionKey, list[str]], multi_home_root: str = "") -> None:
     """Deduplicate exact targets and file/nodeid containment across groups.
 
     A bare file target already executes every test in that file, so any
     ``file.py::nodeid`` target for the same file must be discarded. This is
     intentionally global: selection paths can add the two targets to different
     logical partitions before pinned routes are applied.
+
+    Targets under *multi_home_root* are the exception. Precision-only E2E
+    tests are copied into several partitions on purpose, so those paths are
+    deduplicated inside each partition and kept on every partition that
+    received them.
     """
     bare_files = {_as_posix_path(target) for tests in groups.values() for target in tests if "::" not in target}
-    seen: set[str] = set()
+    seen_global: set[str] = set()
     for key in groups:
         deduped: list[str] = []
+        seen_local: set[str] = set()
         for target in groups[key]:
             normalized = _as_posix_path(target)
             if "::" in normalized and _pytest_node_file_path(normalized) in bare_files:
                 continue
-            if normalized in seen:
-                continue
+            if _is_precision_only_e2e_path(normalized, multi_home_root):
+                if normalized in seen_local:
+                    continue
+                seen_local.add(normalized)
+            else:
+                if normalized in seen_global:
+                    continue
+                seen_global.add(normalized)
             deduped.append(target)
-            seen.add(normalized)
         groups[key] = deduped
 
 
@@ -776,6 +875,7 @@ def main():
     accuracy_tests = _load_accuracy_tests(meta)
     curated_tests = _load_curated_tests(meta)
     skip_tests = _load_skip_tests(meta)
+    precision_only_e2e = _load_precision_only_e2e(meta, partition_config)
     _validate_runner_config(runners, partition_config)
 
     all_groups: dict[PartitionKey, list[str]] = defaultdict(list)
@@ -804,7 +904,10 @@ def main():
                 file=sys.stderr,
             )
         for target in explicit_targets:
-            _route_explicit_test_target(target, all_groups)
+            if _is_precision_only_e2e_path(target, precision_only_e2e.root):
+                _route_precision_only_e2e_target(target, all_groups, precision_only_e2e)
+            else:
+                _route_explicit_test_target(target, all_groups)
     elif args.all_tests:
         matched_modules = ["all"]
         for root in _ALL_TESTS_ROOTS:
@@ -835,7 +938,7 @@ def main():
         for target in curated_tests[args.curated]:
             _route_explicit_test_target(target, all_groups)
 
-    _dedup_groups(all_groups)
+    _dedup_groups(all_groups, precision_only_e2e.root)
 
     if skip_tests:
         for key in list(all_groups.keys()):
@@ -853,11 +956,11 @@ def main():
                 else:
                     filtered.append(t)
             all_groups[key] = filtered
-        _dedup_groups(all_groups)
+        _dedup_groups(all_groups, precision_only_e2e.root)
 
     # Normalize every input mode. A bare file contains all of its nodeids,
     # even when the targets came from different selection modes.
-    _dedup_groups(all_groups)
+    _dedup_groups(all_groups, precision_only_e2e.root)
 
     # Full-suite runs (ready-all) and any run that includes accuracy tests
     # (files listed in accuracy_tests) are pinned to 560T machines: replace
