@@ -14,15 +14,12 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerPool
 from vllm_ascend.worker.v2.spec_decode.draft_window_plan import compute_draft_window_plan, freeze_eagle_window_plan
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import DraftWindowPolicyDecision
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource, materialize_direct_prefix
-
-logger = init_logger(__name__)
-
 
 class _NPUCompletion:
     def __init__(self) -> None:
