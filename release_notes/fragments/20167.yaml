@@ -5,5 +5,7 @@ entries:
       Added native MiniMax M3.1 Flash DSpark draft configuration and loading
       for BF16 and MXFP8 checkpoints, with guarded A5 eager FlashAttention support
       and optional A2/A3 ecosystem FA3 attention for compatible target/draft layers.
+      DSpark retains fused sparse QKNorm/RoPE/cache preparation for supported
+      BF16 and FP8 caches.
     model: minimax-m3.1-flash
     hardware: [A2, A3, A5]
