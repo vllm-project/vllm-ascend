@@ -29,7 +29,6 @@ from vllm.v1.worker.gpu.sample import gumbel as gumbel_module
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
-import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -324,7 +323,9 @@ def test_init_speculator_routes_dflash2_draft_model():
     [
         ("DFlash2DraftModel", "dflash2.speculator.AscendDFlash2Speculator", True),
         ("DFlash2DraftModel", "dflash2.speculator.AscendDFlash2Speculator", False),
-        pytest.param("LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator", True, marks=REQUIRES_LILICORR),
+        pytest.param(
+            "LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator", True, marks=REQUIRES_LILICORR
+        ),
     ],
 )
 def test_speculator_keeps_target_compilation_and_graph_config(architecture, speculator_path, enforce_eager):
@@ -661,7 +662,9 @@ def test_selector_seed_policy_matches_installed_vllm():
     if hasattr(gumbel_module, "spec_step_seed"):
         assert _selector_step_seed is gumbel_module.spec_step_seed
     else:
+        # UT's mocked jit may return a plain function instead of a JITFunction.
+        seed_fn = getattr(_selector_step_seed, "fn", _selector_step_seed)
         # Older upstream does not mix steps; preserve even the seed's high bits.
         for seed in (13, 13 + (1 << 48), -(1 << 55) + 9):
             for step in (0, 3):
-                assert _selector_step_seed.fn(seed, step) == seed
+                assert seed_fn(seed, step) == seed
