@@ -15,11 +15,12 @@ import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
 @pytest.mark.parametrize("context", [1536, 8192, 32768])
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", [1, 2, 3])
+@pytest.mark.parametrize("topk", [64, 512])
 @torch.inference_mode()
-def test_qli_candidate_vector_repeats(queries, context, ratio, mode):
+def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
     """Check candidate padding, partial causal blocks and strided PA caches."""
     generator = torch.Generator().manual_seed(1234)
-    heads, width, topk = 32, 128, 512
+    heads, width = 32, 128
     block_size = 128 if ratio == 1 else 64
     query_cpu = torch.randint(-90, 90, (queries, heads, width), dtype=torch.int8, generator=generator)
     key_cpu = torch.randint(
