@@ -50,16 +50,17 @@ def normalize(record):
     prompt_logs = choice.get("prompt_logprobs")
     if record.get("request", {}).get("prompt_logprobs") is not None:
         assert prompt_logs, "Requested fixed-history prompt logprobs are missing from the choice"
+    assert len(ids) == response["usage"]["completion_tokens"]
     if prompt_logs is not None:
         assert len(prompt_logs) == response["usage"]["prompt_tokens"]
-        result += ([None if step is None else {int(k): v for k, v in step.items()} for step in prompt_logs],)
+        prompt_result = [None if step is None else {int(k): v for k, v in step.items()} for step in prompt_logs]
         assert all(
             math.isfinite(value["logprob"] if isinstance(value, dict) else value)
-            for step in result[3]
+            for step in prompt_result
             if step is not None
             for value in step.values()
         ), "Non-finite prompt logprob"
-    assert len(ids) == response["usage"]["completion_tokens"]
+        return (*result, prompt_result)
     return result
 
 
