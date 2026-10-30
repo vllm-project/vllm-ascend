@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Isolated DFlash2 reference: retain history required by its native consumer."""
 
+from typing import Any
+
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, SlidingWindowSpec, replace_as
 
 
-def apply_dflash2_reference_kv_specs(specs: dict[str, KVCacheSpec], speculator: object) -> dict[str, KVCacheSpec]:
+def apply_dflash2_reference_kv_specs(specs: dict[str, KVCacheSpec], speculator: Any) -> dict[str, KVCacheSpec]:
     if not getattr(speculator, "_dflash2_full_kv_reference", False):
         return specs
     result = specs.copy()

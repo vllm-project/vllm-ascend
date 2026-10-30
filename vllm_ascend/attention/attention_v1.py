@@ -479,7 +479,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if device_read is not None:
             # Only the dedicated eager reader consumes these capacity lengths.
             # Device exact lengths/mask remain separately owned by the proposal.
-            attn_metadata._draft_window_device_read = device_read
+            # This private eager extension is deliberately absent from the
+            # baseline Target/Graph metadata schema and from all OFF objects.
+            private_metadata: Any = attn_metadata
+            private_metadata._draft_window_device_read = device_read
         return attn_metadata
 
     def _finalize_pcp_metadata(
@@ -991,6 +994,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             if not attn_metadata.causal:
                 native_swa_mask = getattr(self, "_dflash2_native_swa_mask", None)
+                native_window = self.sliding_window
+                if native_swa_mask is not None:
+                    assert native_window is not None
+                    native_swa_kwargs = dict(
+                        sparse_mode=4,
+                        atten_mask=native_swa_mask,
+                        pre_tokens=native_window - 1,
+                        next_tokens=native_window - 1,
+                    )
+                else:
+                    native_swa_kwargs = dict(sparse_mode=0)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1003,16 +1017,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    **(
-                        dict(
-                            sparse_mode=4,
-                            atten_mask=native_swa_mask,
-                            pre_tokens=self.sliding_window - 1,
-                            next_tokens=self.sliding_window - 1,
-                        )
-                        if native_swa_mask is not None
-                        else dict(sparse_mode=0)
-                    ),
+                    **native_swa_kwargs,
                 )
             elif self.sliding_window is not None:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(

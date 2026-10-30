@@ -113,7 +113,7 @@ def test_indexer_and_sparse_attention_forward_same_rebased_read_coordinates(monk
         True,
     )
     BaseDeviceAdaptor.execute_sparse_flash_attention_process(
-        SimpleNamespace(scale=1.0),
+        SimpleNamespace(scale=1.0, qk_rope_head_dim=4),
         query,
         query,
         (cache, cache),
@@ -132,6 +132,8 @@ def test_indexer_and_sparse_attention_forward_same_rebased_read_coordinates(monk
 
 
 class TestSFAImpl:
+    indexer: SimpleNamespace
+    kv_sharing_target_layer_name: str | None
     runtime_has_indexer = True
     skip_topk = False
     use_index_cache = False

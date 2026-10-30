@@ -16,8 +16,15 @@ import numpy as np
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerPool
-from vllm_ascend.worker.v2.spec_decode.draft_window_plan import compute_draft_window_plan, freeze_eagle_window_plan
+from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import (
+    DraftWindowOwner,
+    DraftWindowOwnerPool,
+)
+from vllm_ascend.worker.v2.spec_decode.draft_window_plan import (
+    DraftWindowPlan,
+    compute_draft_window_plan,
+    freeze_eagle_window_plan,
+)
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import DraftWindowPolicyDecision
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource, materialize_direct_prefix
 
@@ -60,7 +67,7 @@ class DraftWindowRuntime:
     """One speculator's bounded ownership and fresh metadata projection seam."""
 
     def __init__(self, speculator: Any, policy: DraftWindowPolicyDecision) -> None:
-        if not policy.enabled:
+        if not policy.enabled or policy.effective_window_size is None:
             raise ValueError("An OFF Draft Window policy must not allocate a runtime")
         self.method = policy.normalized_method
         self.static_k = speculator.num_speculative_steps if self.method == "eagle3" else None
@@ -102,17 +109,17 @@ class DraftWindowRuntime:
         self.anchor_block_span = int(speculator.block_tables.kernel_block_sizes[read_groups[0]])
         self._native_swa_built: set[int] = set()
         self.pool = DraftWindowOwnerPool(int(speculator.vllm_config.max_concurrent_batches))
-        self._owner = None
-        self._input_batch = None
+        self._owner: DraftWindowOwner | None = None
+        self._input_batch: Any = None
         self._bypass = False
         self._build_count = 0
-        self._eagle_plans = None
-        self._eagle_frozen_starts = None
-        self._eagle_first_pass_pair = None
-        self._eagle_full_prefill_base = None
-        self._eagle_prompt_exact_base = None
+        self._eagle_plans: tuple[DraftWindowPlan, ...] | None = None
+        self._eagle_frozen_starts: torch.Tensor | None = None
+        self._eagle_first_pass_pair: torch.Tensor | None = None
+        self._eagle_full_prefill_base: tuple[Any, torch.Tensor] | None = None
+        self._eagle_prompt_exact_base: tuple[Any, torch.Tensor] | None = None
         self._next_step = 0
-        self._proposal_mapping = None
+        self._proposal_mapping: tuple[tuple[str, ...], tuple[int, ...]] | None = None
         narrowed_native_windows = tuple(
             sorted(
                 {
@@ -165,11 +172,12 @@ class DraftWindowRuntime:
         # padding and Full write coordinates; actual CP builders are excluded
         # by the provider inventory rather than a target-global CP switch.
         routes = require_direct_prefix_routes(speculator, window_size=self.window_size)
-        self.native_swa_intersections = {
-            route.gid: route.native_window
-            for route in routes
-            if route.status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
-        }
+        self.native_swa_intersections = {}
+        for route in routes:
+            if route.status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION:
+                if route.native_window is None:
+                    raise ValueError("A native SWA provider must identify its native window")
+                self.native_swa_intersections[route.gid] = route.native_window
         if self.native_swa_intersections:
             if self.window_size < speculator.num_query_per_req:
                 raise ValueError("DFlash draft_window_size must cover its query width")
@@ -382,6 +390,8 @@ class DraftWindowRuntime:
         retained base, advancing and clamping exactly as prepare_decode_inputs.
         """
         owner, batch = self._owner, self._input_batch
+        if owner is None:
+            raise RuntimeError("Full prefill metadata has no active Draft Window proposal")
         mapping = (tuple(batch.req_ids), tuple(int(row) for row in batch.idx_mapping_np[:num_reqs]))
         progress = tuple(int(value) for value in batch.num_computed_prefill_tokens_np[:num_reqs])
         scheduled = tuple(int(value) for value in batch.num_scheduled_tokens[:num_reqs])
@@ -413,6 +423,7 @@ class DraftWindowRuntime:
                 raise RuntimeError("Full prefill request mapping changed within a proposal")
             if full_exact is None:
                 full_exact = common.seq_lens
+            assert full_exact is not None
             if common.seq_lens.data_ptr() != full_exact.data_ptr():
                 raise ValueError("Full prefill groups must share current preparation lengths")
             if hasattr(common, "_draft_window_read") or hasattr(common, "_draft_window_device_read"):
@@ -434,11 +445,13 @@ class DraftWindowRuntime:
         from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
 
         owner = self._owner
+        if owner is None:
+            raise RuntimeError("Dense metadata has no active Draft Window proposal")
         seen = set()
         mapping = None
-        full_exact = None
+        full_exact: torch.Tensor | None = None
         use_device = None
-        sources = None
+        sources: dict[int, DirectPrefixSource] | None = None
         full_rows_cpu = None
         packed_query_cpu = packed_query_device = None
         query_width = 1 if eagle_step is not None else self.speculator.num_query_per_req
@@ -511,13 +524,16 @@ class DraftWindowRuntime:
                 return
             if current != mapping or (self._proposal_mapping is not None and self._proposal_mapping != mapping):
                 raise RuntimeError("Dense Draft request mapping changed within a proposal")
+            assert full_exact is not None and sources is not None
             if common.seq_lens.data_ptr() != full_exact.data_ptr():
                 raise ValueError("Dense Draft groups must share current preparation lengths")
-            if packed_query_cpu is not None and (
-                not torch.equal(common.query_start_loc_cpu[: num_reqs + 1], packed_query_cpu)
-                or common.query_start_loc.data_ptr() != packed_query_device.data_ptr()
-            ):
-                raise ValueError("Dense Draft groups must share current packed query boundaries")
+            if packed_query_cpu is not None:
+                assert packed_query_device is not None
+                if (
+                    not torch.equal(common.query_start_loc_cpu[: num_reqs + 1], packed_query_cpu)
+                    or common.query_start_loc.data_ptr() != packed_query_device.data_ptr()
+                ):
+                    raise ValueError("Dense Draft groups must share current packed query boundaries")
             self._proposal_mapping = mapping
             retain = lambda *objects: self.pool.retain(owner, *objects)
             first_pass = self._eagle_first_pass_pair if eagle_step == 0 else None
@@ -567,6 +583,8 @@ class DraftWindowRuntime:
         ):
             raise ValueError("Eagle3 Window requires current one-dimensional prepared positions and last query indices")
         owner = self._owner
+        if owner is None:
+            raise RuntimeError("Eagle3 length preparation has no active Draft Window proposal")
         indices = indices.to(dtype=torch.int64)
         self.pool.retain(owner, indices)
         last_positions = positions.index_select(0, indices)
@@ -597,8 +615,11 @@ class DraftWindowRuntime:
         pair = self._eagle_first_pass_pair
         if pair is None:
             pair = self._eagle_first_pass_device_lengths(native_extent, num_reqs)
+        owner = self._owner
+        if owner is None:
+            raise RuntimeError("Eagle3 length snapshot has no active Draft Window proposal")
         snapshot = pair.to(device="cpu", dtype=torch.int32, copy=True)
-        self.pool.retain(self._owner, snapshot)
+        self.pool.retain(owner, snapshot)
         extent_cpu, live_cpu = snapshot[0], snapshot[1]
         if bool(((live_cpu <= 0) | (live_cpu > extent_cpu) | (extent_cpu - live_cpu > self.static_k)).any()):
             raise ValueError("Eagle3 prepared live queries disagree with the current native padding extent")
@@ -614,6 +635,9 @@ class DraftWindowRuntime:
         Reader selection and per-row Full/window rules remain unchanged.
         """
         batch = self._input_batch
+        owner = self._owner
+        if owner is None:
+            raise RuntimeError("Prompt exact lengths have no active Draft Window proposal")
         if not self._dense_device_reads or not getattr(self.speculator, "advance_draft_positions", False):
             return None
         if getattr(self.speculator, "replicated_pcp", False):
@@ -654,11 +678,11 @@ class DraftWindowRuntime:
                 return None
             base = torch.tensor(ends, dtype=torch.int32, device="cpu")
             self._eagle_prompt_exact_base = identity, base
-            self.pool.retain(self._owner, base)
+            self.pool.retain(owner, base)
         if self._eagle_prompt_exact_base[0] != identity:
             raise RuntimeError("Prompt-only exact preparation changed within a proposal")
         exact = torch.clamp(self._eagle_prompt_exact_base[1] + step, max=self.speculator.max_model_len)
-        self.pool.retain(self._owner, exact)
+        self.pool.retain(owner, exact)
         return exact
 
     def _host_metadata_callback(
@@ -749,6 +773,7 @@ class DraftWindowRuntime:
                 elif prompt_exact is not None:
                     exact = prompt_exact
                 elif prepared_exact_cpu is not None:
+                    assert prepared_exact_device is not None
                     if mapping != prepared_mapping:
                         raise RuntimeError("Prepared exact lengths belong to another request mapping")
                     if (
@@ -779,6 +804,7 @@ class DraftWindowRuntime:
                             # native/live pair. A later legacy consumer may
                             # copy that pair, never infer the anchor from E-W.
                             _, proposal_exact = self._eagle_first_pass_lengths(self._eagle_first_pass_pair[0], num_reqs)
+                        assert proposal_exact is not None
                         self._eagle_plans = tuple(
                             freeze_eagle_window_plan(
                                 proposal_exact_end=int(end),
@@ -886,6 +912,7 @@ class DraftWindowRuntime:
                 return builder
             if self._owner is not owner:
                 raise RuntimeError("Draft Window builder callback belongs to a stale proposal")
+            assert self._dsa_builders is not None
             owned = self._dsa_builders.select(builder, layer_names=layer_names, lane=owner.lane, step=step)
             if self.method != "eagle3" and hasattr(owned, "set_dspark_num_query_per_req"):
                 owned.set_dspark_num_query_per_req(self.speculator.num_query_per_req)

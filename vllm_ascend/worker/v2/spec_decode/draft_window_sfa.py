@@ -10,8 +10,8 @@ def validate_sfa_read_consumers(
     layers: Mapping[str, Any],
     routes: Sequence[Any],
     *,
-    sfa_impl_type: type | None = None,
-    indexer_impl_type: type | None = None,
+    sfa_impl_type: type[Any] | None = None,
+    indexer_impl_type: type[Any] | None = None,
 ) -> None:
     """Require an independently selecting indexer in the Draft metadata set.
 

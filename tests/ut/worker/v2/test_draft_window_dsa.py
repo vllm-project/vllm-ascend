@@ -73,7 +73,8 @@ def test_real_dsa_constructor_owns_complete_lane_and_step_buffers(cp):
     name = "AscendDSACPMetadataBuilder" if cp else "AscendDSAMetadataBuilder"
     namespace = extract(
         path,
-        functions=("_aligned_dspark_index_width", "build_dspark_swa_indices"),
+        functions=("_aligned_dspark_index_width", "build_dspark_swa_indices")
+        + (() if cp else ("_draft_uses_sparse_flash_mla",)),
         class_name=name,
         methods=(
             "__init__",
@@ -85,7 +86,9 @@ def test_real_dsa_constructor_owns_complete_lane_and_step_buffers(cp):
         globals_={
             "build_dspark_swa_indices_triton": None,
             "get_storage_block_size": lambda spec: spec.block_size,
-            "get_dsa_attn_kv_plan": lambda config: SimpleNamespace(requires_block_offset_slots=True),
+            "get_dsa_attn_kv_plan": lambda config: SimpleNamespace(
+                requires_block_offset_slots=True, uses_sparse_flash_mla=True
+            ),
             "DSA_METADATA_BUFFER_SIZE": 1024,
             "SAS_METADATA_SIZE": 1024,
             "AscendDSAMetadata": SimpleNamespace,
@@ -122,9 +125,11 @@ def test_real_dsa_constructor_owns_complete_lane_and_step_buffers(cp):
     if cp:
         assert first.spec_local_seq_lens[0].data_ptr() != second.spec_local_seq_lens[0].data_ptr()
     else:
-        assert all(builder.dspark_swa_indices_buffer is None for builder in (original, first, second, next_step))
-        # Only a noncausal consumer requests this large buffer; its first use
-        # allocates once and subsequent uses keep the baseline stable address.
+        # The main lane preallocates these buffers; release builds may still
+        # allocate them on first use. Both paths must keep lane/step ownership.
+        initial = tuple(builder.dspark_swa_indices_buffer for builder in (original, first, second, next_step))
+        if all(buffer is not None for buffer in initial):
+            assert len({buffer.data_ptr() for buffer in initial}) == 4
         args = (torch.tensor([[5, 6]]), 3, 4, 4, torch.tensor([0, 4]), torch.tensor([8]), 4)
         result, lengths = first._build_dspark_swa_indices_eager(args)
         buffer = first.dspark_swa_indices_buffer
@@ -134,7 +139,9 @@ def test_real_dsa_constructor_owns_complete_lane_and_step_buffers(cp):
         assert repeated.data_ptr() == buffer.data_ptr()
         assert buffer is first._get_dspark_swa_indices_buffer()
         assert buffer.data_ptr() != second._get_dspark_swa_indices_buffer().data_ptr()
-        assert original.dspark_swa_indices_buffer is next_step.dspark_swa_indices_buffer is None
+        for builder, previous in zip((original, first, second, next_step), initial):
+            if previous is not None:
+                assert builder.dspark_swa_indices_buffer is previous
     original._device_metadata_enabled = True
     with pytest.raises(NotImplementedError, match="executor completion"):
         owners.select(original, layer_names=["draft.layer"], lane=0, step=0)
@@ -255,8 +262,13 @@ def test_actual_native_call_receives_window_read_and_original_full_write():
     captured = []
     full_slots = torch.tensor([187, 192])
     kwargs = {}
+
+    def sparse_attention(query, **values):
+        captured.append(values)
+        return (query,)
+
     plan = SimpleNamespace(
-        get_dsa_sparse_attn_op=lambda: lambda query, **values: (captured.append(values) or query,),
+        get_dsa_sparse_attn_op=lambda: sparse_attention,
         get_dsa_sparse_attn_base_kwargs=lambda: {},
     )
     ns = extract(
@@ -270,6 +282,7 @@ def test_actual_native_call_receives_window_read_and_original_full_write():
             ),
             "DeviceMetadataStage": SimpleNamespace(ATTENTION="attention"),
             "notify_kv_cache_written": lambda layer: None,
+            "record_attention_compute_start": lambda: None,
             "wait_for_device_metadata": lambda *args: None,
             "_dsa_swa_only_cmp_ratio": lambda *args: 1,
             "_dsa_layout_kv": lambda config: "PA_BSND",
@@ -288,6 +301,7 @@ def test_actual_native_call_receives_window_read_and_original_full_write():
         sas_metadata=torch.zeros(4),
         dspark_swa_indices=torch.tensor([[[172, 173, 174, 175, 216, 217]]] * 2),
         vision_swa_indices=None,
+        use_sparse_flash_mla_for_draft=False,
     )
     item = SimpleNamespace(req_metadata=req, num_prefills=0)
 
@@ -326,9 +340,13 @@ def test_actual_cp_native_call_preserves_global_writes_and_local_reads():
         def __call__(self, value):
             return value
 
+    def sparse_attention(query, **values):
+        captured.append(values)
+        return (query,)
+
     plan = SimpleNamespace(
         dsa_kv_compress_scatter=lambda cache, values, slots: writes.append(slots),
-        get_dsa_sparse_attn_op=lambda: lambda query, **values: (captured.append(values) or query,),
+        get_dsa_sparse_attn_op=lambda: sparse_attention,
         get_dsa_sparse_attn_base_kwargs=lambda: {},
     )
     fake_torch = SimpleNamespace(

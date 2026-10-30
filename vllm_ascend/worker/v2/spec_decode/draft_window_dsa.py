@@ -107,7 +107,7 @@ def freeze_dsa_rotary_reads(metadata: Any, layer_names: Sequence[str]) -> tuple[
     copy_to_buffers API copies a typed cos/sin pair into independent storage.
     """
     seen: set[int] = set()
-    retained = []
+    retained: list[Any] = []
     for layer in layer_names:
         item = metadata.get(layer)
         if item is None or id(item) in seen:

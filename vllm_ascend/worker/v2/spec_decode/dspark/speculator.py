@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, cast
 
 import numpy as np
@@ -345,8 +345,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if self.attn_architecture not in ("GQA", "MLA"):
             # These consumers keep their existing preparation. Window changes
             # only the fresh common read view and its private builder owner.
-            with (
-                build_attn_metadata_factory(
+            metadata_scope: AbstractContextManager = nullcontext()
+            if runtime is not None:
+                assert self.input_batch is not None
+                metadata_scope = build_attn_metadata_factory(
                     self.input_buffers.positions,
                     batch_desc.num_tokens,
                     torch.from_numpy(self.input_batch.is_prefilling_np),
@@ -354,9 +356,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     common_metadata_callback=runtime.metadata_callback(step, num_reqs),
                     metadata_builder_callback=runtime.metadata_builder_callback(step),
                 )
-                if runtime is not None
-                else nullcontext()
-            ):
+            with metadata_scope:
                 metadata = super()._build_attn_metadata(
                     num_reqs=num_reqs,
                     batch_desc=batch_desc,

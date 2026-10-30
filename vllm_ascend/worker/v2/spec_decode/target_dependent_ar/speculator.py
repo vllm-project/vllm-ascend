@@ -387,14 +387,17 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
             # Use the first executable draft attention layer as the architecture
             # discriminator and cache it for ACL graph parameter updates.
-            self.attn_backend = _get_graph_update_backend(self.attn_groups)
-        if issubclass(self.attn_backend, AscendDSABackend):
+            backend = _get_graph_update_backend(self.attn_groups)
+            if backend is None:
+                raise ValueError("Draft attention groups have no executable backend")
+            self.attn_backend = backend
+        if issubclass(backend, AscendDSABackend):
             self.attn_architecture = "DSA"
-        elif issubclass(self.attn_backend, AscendMLABackend):
+        elif issubclass(backend, AscendMLABackend):
             self.attn_architecture = "MLA"
-        elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
+        elif issubclass(backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
-        elif issubclass(self.attn_backend, AscendAttentionBackend):
+        elif issubclass(backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
@@ -561,6 +564,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             build_metadata=not window_active,
         )
         if window_active:
+            assert self.input_batch is not None
             attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=BatchExecutionDescriptor(

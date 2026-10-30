@@ -262,6 +262,7 @@ def prepare_dense_draft_read(
         raise ValueError("Packed queries require current CPU and device boundaries")
     widths = None
     if query_start_loc_cpu is not None:
+        assert query_start_loc_device is not None
         if (
             query_start_loc_cpu.device.type != "cpu"
             or query_start_loc_cpu.dtype not in (torch.int32, torch.int64)
@@ -275,7 +276,7 @@ def prepare_dense_draft_read(
         if int(query_start_loc_cpu[0]) != 0 or bool(((widths <= 0) | (widths > query_width)).any()):
             raise ValueError("Packed query widths exceed their current allocation bound")
     if full_rows_cpu is not None and full_rows_cpu.any():
-        groups = {}
+        groups: dict[tuple[bool, int, int], list[int]] = {}
         for row in range(n):
             full = bool(full_rows_cpu[row])
             # U selects allocation geometry only. Padding every unfinished

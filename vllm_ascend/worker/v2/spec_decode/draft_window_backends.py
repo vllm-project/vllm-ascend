@@ -85,7 +85,7 @@ class DraftWindowBackendTypes:
     dense_backend: type
     dense_builder: type
     full_attention_spec: type
-    uniform_spec: type
+    uniform_spec: type[Any]
     builder_families: tuple[tuple[type, str], ...]
     storage_block_size: Callable[[Any], int]
     compression_ratio: Callable[[Any], int]
@@ -497,7 +497,7 @@ def select_native_swa_subset_routes(
     max_query_tokens: int,
     future_offset_bound: int,
     context: Any,
-    dense_impl_type: type,
+    dense_impl_type: type[Any],
     group_causal: dict[int, bool] | bool = True,
     noncausal_dflash2: bool = False,
     query_width: int | None = None,
