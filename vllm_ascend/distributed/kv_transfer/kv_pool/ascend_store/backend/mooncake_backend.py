@@ -16,6 +16,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
@@ -25,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
     set_scheduler_device,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -303,6 +305,77 @@ def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
 
 
 class MooncakeBackend(Backend):
+    layerwise_data_plane = "block_key"
+    LAYERWISE_SEND_FENCE_BACKLOG = 8
+
+    @classmethod
+    def bind_layerwise_keys(
+        cls,
+        *,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        model_name: str,
+        use_hybrid: bool,
+        grouped_block_size: list[int],
+    ) -> LayerwiseKeyBuilder:
+        parallel = vllm_config.parallel_config
+
+        def parallel_size(name: str) -> int:
+            value = getattr(parallel, name, 1)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+        dimensions = (
+            ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
+            ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
+        )
+        unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
+        if unsupported:
+            raise ValueError(
+                "Mooncake block-key layerwise supports TP/PP, but not context parallelism; unsupported "
+                + ", ".join(unsupported)
+            )
+        mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
+        namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
+        pp_size = parallel.pipeline_parallel_size
+        if pp_size > 1:
+            logger.info(
+                "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
+                namespace,
+                parallel.rank,
+                pp_size,
+                vllm_config.cache_config.block_size,
+                [mooncake_layerwise.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
+                if kv_cache_config is not None
+                else [],
+            )
+        if use_hybrid:
+            layout = mooncake_layerwise.hybrid_layout_id(
+                kv_cache_config, parallel.tensor_parallel_size, namespace=namespace
+            )
+            block_sizes = tuple(grouped_block_size)
+
+            def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+                return mooncake_layerwise.hybrid_block_key(
+                    model_name,
+                    layout,
+                    group,
+                    block_sizes[group],
+                    block_hash,
+                    head,
+                    pp_rank=stage if pp_size > 1 else None,
+                )
+
+            return LayerwiseKeyBuilder(make_key, pp_size)
+
+        def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
+
+        return LayerwiseKeyBuilder(make_single_group_key, pp_size)
+
+    @classmethod
+    def send_fence_backlog(cls) -> int:
+        return cls.LAYERWISE_SEND_FENCE_BACKLOG
+
     def __init__(
         self,
         parallel_config: ParallelConfig,

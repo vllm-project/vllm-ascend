@@ -55,6 +55,10 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-PD-no-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD_weekly.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
@@ -354,6 +358,10 @@ a3:
         os: linux-aarch64-a3-800t-16
         config_file_path: GLM-5.1-w8a8c8-MTP-offload-test-perf.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
+      - name: DS-V4-Flash-W8A8-A3-Mooncake
+        os: linux-aarch64-a3-800t-16
+        config_file_path: DS-V4-Flash-W8A8-A3-Mooncake.yaml
+        config_base_path: tests/e2e/cases/features/kv_pool
 310p:
   single_node:
     test_config:

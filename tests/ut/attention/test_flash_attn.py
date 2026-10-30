@@ -7,10 +7,31 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.compilation.backends import set_model_tag
+from vllm.model_executor.layers.attention.attention import Attention
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.models.minimax_m3 import msa_m3
+from vllm_ascend.worker.v2 import attn_utils
+
+
+def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForCausalLM"])),
+        cache_config=SimpleNamespace(cache_dtype="fp8", kv_cache_dtype_skip_layers=["0", "1", "2"]),
+    )
+    monkeypatch.setattr(msa_m3, "get_current_vllm_config_or_none", lambda: config)
+    monkeypatch.setattr(msa_m3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    for backend in (
+        msa_m3.AscendMiniMaxM3DenseBackend,
+        msa_m3.AscendMiniMaxM3SparseBackend,
+        msa_m3.AscendMiniMaxM3IndexerBackend,
+    ):
+        assert backend.get_supported_kernel_block_sizes() == [64, 128]
+    assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
+    assert AscendFlashAttentionBackend.get_supported_kernel_block_sizes() == [128]
 
 
 @pytest.fixture
@@ -45,13 +66,39 @@ def select_flash_attn(monkeypatch):
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
 
-    def select(config, selector):
+    def select(config, selector, tag="dflash_head"):
         monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
-        with set_model_tag("dflash_head"):
+        with monkeypatch.context() as context:
+            context.setattr("vllm.compilation.backends.model_tag", tag)
             backend = platform.NPUPlatform.get_attn_backend_cls(None, selector)
         return backend == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
     return select, profile
+
+
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_minimax_m3_dspark_selects_flash_attn_for_eager_and_graph_drafts(
+    select_flash_attn, dflash2_config, architecture, enforce_eager
+):
+    select, _ = select_flash_attn
+    config = dflash2_config
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.enforce_eager = enforce_eager
+    spec.target_model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture]))
+    spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+
+    assert select(config, selector, "dspark_head")
+    assert not select(config, selector, "backbone")
+    assert not select(config, selector, "dflash_head")
+    assert not select(config, selector._replace(kv_cache_dtype="fp8"), "dspark_head")
+    spec.draft_model_config.architectures = ["DFlash2DraftModel"]
+    assert not select(config, selector, "dspark_head")
+    spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    spec.target_model_config.hf_config.architectures = ["OtherModel"]
+    assert not select(config, selector, "dspark_head")
 
 
 def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
@@ -280,3 +327,62 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
     assert ops.flash_attn_metadata.call_count == len(geometries)
     assert ops.flash_attn.call_count == 2 * len(geometries)
+
+
+@pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, AscendAttentionBackend], ids=["flash", "fia"])
+@pytest.mark.parametrize("is_draft", [False, True], ids=["target", "draft"])
+@pytest.mark.parametrize("window", [None, 1024], ids=["full", "swa"])
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.parametrize("padding_kind", ["none", "undersized", "exact", "surplus"])
+def test_only_undersized_draft_swa_pages_drop_inherited_padding(
+    monkeypatch, backend, is_draft, window, num_kv_heads, padding_kind
+):
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    layer.attn_type = AttentionType.DECODER
+    layer.attn_backend = backend
+    layer.is_draft_layer = is_draft
+    layer.kv_cache_dtype = "bfloat16"
+    layer.kv_cache_torch_dtype = torch.bfloat16
+    layer.sliding_window = window
+    layer.num_kv_heads = num_kv_heads
+    layer.head_size = layer.head_size_v = 128
+    natural_page = 128 * num_kv_heads * 128 * 2 * 2
+    padding = {"none": None, "undersized": 32768, "exact": natural_page, "surplus": natural_page * 2}[padding_kind]
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
+    )
+    original = layer.get_kv_cache_spec(config)
+    incompatible = window is not None and padding_kind == "undersized"
+    if incompatible:
+        with pytest.raises(AssertionError):
+            _ = original.page_size_bytes
+    get_spec = Mock(wraps=layer.get_kv_cache_spec)
+    monkeypatch.setattr(layer, "get_kv_cache_spec", get_spec)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+
+    recover = incompatible and is_draft
+    if incompatible and not is_draft:
+        with pytest.raises(AssertionError):
+            _ = spec.page_size_bytes
+    else:
+        expected_padding = None if recover else original.page_size_padded
+        assert spec.page_size_bytes == (expected_padding or natural_page)
+        assert spec.page_size_padded == expected_padding
+    # v0.32.0 has no draft marker; check propagation when upstream supports it.
+    if hasattr(original, "is_draft"):
+        assert spec.is_draft is is_draft
+    assert config.cache_config.skip_page_size_padded == padding
+    assert get_spec.call_count == (2 if recover else 1)
+    assert get_spec.call_args_list[0].args[0] is config
+    if recover:
+        layer_config = get_spec.call_args_list[1].args[0]
+        assert layer_config is not config
+        assert layer_config.cache_config is not config.cache_config
+        assert layer_config.cache_config.skip_page_size_padded is None
