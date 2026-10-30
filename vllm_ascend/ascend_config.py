@@ -567,6 +567,9 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Optional private shared-filesystem generation published by shared_engram.
+    # Default None retains the existing HBM/host-UVA placement paths.
+    engram_shared_host_dir: str | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -661,6 +664,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.engram_shared_host_dir is not None and not os.path.isabs(self.engram_shared_host_dir):
+            raise ValueError("engram_shared_host_dir must be an absolute generation directory")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
@@ -687,6 +692,11 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        if self.engram_shared_host_dir is not None:
+            if not engram_config or not engram_config.cpu_offload:
+                raise ValueError("engram_shared_host_dir requires Engram cpu_offload")
+            if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
+                raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory
