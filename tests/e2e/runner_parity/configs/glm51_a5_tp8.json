@@ -1,0 +1,89 @@
+{
+  "status": "bounded_paired_run_in_progress_not_accepted",
+  "profile": "common-minimal-a5-tp8-ep8",
+  "model_revision": "b54a6d54803fa2cb4c28a73423061d882d9c06b3",
+  "env": {
+    "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+    "HCCL_BUFFSIZE": "400",
+    "HCCL_INTRA_ROCE_ENABLE": "0",
+    "HCCL_OP_EXPANSION_MODE": "AIV",
+    "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    "TASK_QUEUE_ENABLE": "1",
+    "OMP_NUM_THREADS": "1",
+    "VLLM_BATCH_INVARIANT": "0",
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "0",
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "0",
+    "DYNAMIC_EPLB": "false",
+    "EXPERT_MAP_RECORD": "false"
+  },
+  "args": {
+    "host": "127.0.0.1",
+    "distributed-executor-backend": "mp",
+    "served-model-name": "glm51-runner-parity",
+    "tensor-parallel-size": 8,
+    "data-parallel-size": 1,
+    "pipeline-parallel-size": 1,
+    "prefill-context-parallel-size": 1,
+    "decode-context-parallel-size": 1,
+    "enable-expert-parallel": true,
+    "dtype": "bfloat16",
+    "quantization": "ascend",
+    "kv-cache-dtype": "fp8",
+    "attention_config.indexer_kv_dtype": "fp8",
+    "max-model-len": 40960,
+    "max-num-seqs": 32,
+    "max-num-batched-tokens": 8192,
+    "gpu-memory-utilization": 0.9,
+    "seed": 1024,
+    "enable-prefix-caching": false,
+    "async-scheduling": false,
+    "enable-chunked-prefill": true,
+    "enable-eplb": false,
+    "generation-config": "vllm",
+    "trust-remote-code": true,
+    "additional-config": {
+      "enable_dsa_cp": false,
+      "enable_flashcomm1": false,
+      "enable_fused_mc2": false,
+      "enable_mlapo": false,
+      "multistream_overlap_shared_expert": false,
+      "eplb_config": {}
+    },
+    "port": 8131,
+    "compilation-config": {
+      "cudagraph_mode": "FULL_DECODE_ONLY",
+      "cudagraph_capture_sizes": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ]
+    }
+  },
+  "feature_defaults": {
+    "speculative_config": null,
+    "enable_eplb": false,
+    "index_topk_freq": "checkpoint/default=1; no hf-overrides",
+    "reasoning_or_tool_parser": "disabled for raw-token baseline; enabled in parser-specific tests"
+  },
+  "runner_env": {
+    "v1": {
+      "VLLM_USE_V2_MODEL_RUNNER": "0"
+    },
+    "v2": {
+      "VLLM_USE_V2_MODEL_RUNNER": "1"
+    }
+  },
+  "frozen_stack": {
+    "vllm_ascend": "5bd7714b5ef39315cc26867bc67826d42ac0760a",
+    "vllm": "544f182d9f0c9bfe8bd7645525951d5e3692a542",
+    "model": "Eco-Tech/GLM-5.1-w4a4c8-mxfp4",
+    "model_revision": "b54a6d54803fa2cb4c28a73423061d882d9c06b3",
+    "local_image_id": "sha256:9ba5ae6d13dec301c4aa0e4e4358101968db95ccf1279f3d5c3f14927e316714",
+    "local_runtime_patch": "Shared FP8 mapping fallback included in patch/worker/patch_kv_cache_dtype.py",
+    "patched_file_sha256": "c93af27a2b23168268cf46fa552effcfbb9017d26c0fd3183934127646542e0a",
+    "note": "Both arms include the same local FP8 mapping compatibility patch; stock source is not the tested baseline."
+  }
+}
