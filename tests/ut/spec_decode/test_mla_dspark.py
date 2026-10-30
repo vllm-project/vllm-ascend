@@ -103,6 +103,32 @@ def test_dspark_context_suffix_selection_uses_mrv2_batch(monkeypatch):
     np.testing.assert_array_equal(spec._context_cu_lens.value, [0, 6, 139, 140, 169])
 
 
+def test_dspark_context_suffix_selection_skips_packing_for_long_requests(monkeypatch):
+    spec = make_speculator()
+    spec.model = SimpleNamespace(get_draft_context_window=lambda: 128)
+    spec.num_speculative_steps = 5
+    spec.dcp_size = 1
+    spec.pcp_manager = None
+    spec._context_cu_lens = FakeUvaBufferPool()
+    packed_selector = MagicMock()
+    uniform_selector = MagicMock(return_value=(torch.tensor([1]), torch.tensor([True])))
+    monkeypatch.setattr(shared, "select_context_window_indices", packed_selector)
+    monkeypatch.setattr(shared, "select_uniform_context_window_indices", uniform_selector)
+    context_lens = np.array([65536, 65536], dtype=np.int32)
+    batch = SimpleNamespace(
+        num_tokens=int(context_lens.sum()),
+        num_scheduled_tokens=context_lens,
+        query_start_loc=torch.tensor([0, 65536, 131072], dtype=torch.int32),
+    )
+
+    selection = spec._select_context_suffix(batch, num_reqs=2, dummy_run=False)
+
+    assert selection is uniform_selector.return_value
+    uniform_selector.assert_called_once_with(batch.query_start_loc, 2, 133)
+    packed_selector.assert_not_called()
+    assert spec._context_cu_lens.value is None
+
+
 @pytest.mark.parametrize(
     "override",
     [

@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 )
 from vllm_ascend.ops.triton.v2.spec_decode.select_context_window import (
     select_context_window_indices,
+    select_uniform_context_window_indices,
 )
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -164,20 +165,21 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         num_reqs: int,
         dummy_run: bool,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        model = getattr(self, "model", None)
-        context_window = getattr(model, "get_draft_context_window", None)
+        num_target_tokens = input_batch.num_tokens
         if (
             dummy_run
+            or num_reqs == 0
             or self.replicated_pcp
             or self.use_dcp
             or getattr(self, "dcp_size", 1) != 1
             or getattr(self, "pcp_manager", None) is not None
-            or context_window is None
+            or num_target_tokens <= 2 * num_reqs * (self.num_speculative_steps + 1)
         ):
             return None
 
-        num_target_tokens = input_batch.num_tokens
-        if num_target_tokens <= 2 * num_reqs * (self.num_speculative_steps + 1):
+        model = getattr(self, "model", None)
+        context_window = getattr(model, "get_draft_context_window", None)
+        if context_window is None:
             return None
 
         keep = int(context_window()) + self.num_speculative_steps
@@ -185,6 +187,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         num_context_tokens = int(kept_lens.sum())
         if num_target_tokens <= 2 * num_context_tokens:
             return None
+        if num_context_tokens == num_reqs * keep:
+            return select_uniform_context_window_indices(
+                input_batch.query_start_loc,
+                num_reqs,
+                keep,
+            )
 
         cu_context_lens = np.empty(num_reqs + 1, dtype=np.int64)
         cu_context_lens[0] = 0

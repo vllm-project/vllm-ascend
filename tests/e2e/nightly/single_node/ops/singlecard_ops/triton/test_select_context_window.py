@@ -6,7 +6,10 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 
-from vllm_ascend.ops.triton.v2.spec_decode.select_context_window import select_context_window_indices
+from vllm_ascend.ops.triton.v2.spec_decode.select_context_window import (
+    select_context_window_indices,
+    select_uniform_context_window_indices,
+)
 
 
 @pytest.mark.parametrize("lengths", [[16384], [6, 16348, 1, 29], [0, 132, 133, 134], [1, 6, 29]])
@@ -46,6 +49,11 @@ def test_context_suffix_keeps_rejected_anchor_window(lengths, pointer_offset, sp
             accepted_end = end - rejected
             needed = set(range(max(begin, accepted_end - window), accepted_end))
             assert needed <= selected
+            for graph_prefix in (0, 48):
+                eager = {index for index in selected if graph_prefix <= index < accepted_end}
+                graph = set(range(begin, min(graph_prefix, accepted_end)))
+                assert needed <= eager | graph
+                assert eager.isdisjoint(graph)
     torch.testing.assert_close(indices.cpu(), expected_indices, atol=0, rtol=0)
     torch.testing.assert_close(valid.cpu(), expected_valid, atol=0, rtol=0)
 
@@ -65,3 +73,18 @@ def test_context_suffix_uses_device_request_boundaries():
     expected = torch.cat((torch.arange(3), torch.arange(3958, 4091), torch.tensor([4091])))
     torch.testing.assert_close(indices[valid].cpu(), expected, atol=0, rtol=0)
     assert valid.sum().item() == 137
+
+
+def test_uniform_context_suffix_uses_device_request_boundaries():
+    query_start_loc = torch.tensor([0, 3, 4091, 4092], dtype=torch.int32, device="npu")
+
+    indices, valid = select_uniform_context_window_indices(
+        query_start_loc,
+        num_reqs=3,
+        keep=133,
+    )
+
+    expected = torch.cat((torch.arange(3), torch.arange(3958, 4091), torch.tensor([4091])))
+    torch.testing.assert_close(indices[valid].cpu(), expected, atol=0, rtol=0)
+    assert valid.sum().item() == 137
+    assert indices.shape == (3 * 133,)
