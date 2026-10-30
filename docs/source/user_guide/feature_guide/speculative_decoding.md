@@ -412,6 +412,8 @@ Both the plain and convolutional LiLiCorr checkpoint variants are supported.
 The real-weight CI test pairs `Qwen/Qwen3.8-27B` with the ModelScope draft
 `niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0`, using TP=2 and seven
 speculative tokens. Both models are listed in the A2/A3 download catalog.
+The PR requires the `model-dataset-download` label to populate the shared
+runner cache; offline CI skips this E2E test until the draft config is cached.
 After the CI model-download job has populated the cache, run:
 
 ```shell

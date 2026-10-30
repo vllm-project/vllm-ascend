@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
 
@@ -104,3 +104,26 @@ def precompute_and_store_context_kv(
 
 DFlashQwen3Model._project_context_kv = _project_context_kv
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
+
+_orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
+
+
+def _read_mask_embedding(self) -> torch.Tensor | None:
+    try:
+        return _orig_read_mask_embedding(self)
+    except Exception as exc:
+        # The optional override is absent in many DFlash checkpoints. The
+        # ModelScope Hugging Face adapter raises NotExistError for this case,
+        # while the upstream helper expects a missing file to return None.
+        # Keep malformed files, missing repositories, and other errors visible.
+        missing_override = (
+            type(exc).__module__ == "modelscope.hub.errors"
+            and type(exc).__name__ == "NotExistError"
+            and str(exc).startswith("The file path: mask_embedding.pt not exist in:")
+        )
+        if not missing_override:
+            raise
+        return None
+
+
+DFlashQwen3ForCausalLM._read_mask_embedding = _read_mask_embedding

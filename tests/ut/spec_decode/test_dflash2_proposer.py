@@ -153,6 +153,27 @@ def test_dflash_mask_embedding_errors_are_not_silently_ignored(monkeypatch, mask
             read_mask(model)
 
 
+@pytest.mark.parametrize("missing_file", ["mask_embedding.pt", "config.json"])
+def test_dflash_mask_embedding_handles_only_missing_modelscope_override(monkeypatch, missing_file):
+    import vllm.model_executor.models.qwen3_dflash as upstream_dflash
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    modelscope_not_exist = type("NotExistError", (Exception,), {"__module__": "modelscope.hub.errors"})
+    error = modelscope_not_exist(f"The file path: {missing_file} not exist in: draft/checkpoint")
+    monkeypatch.setattr(upstream_dflash, "get_hf_file_bytes", MagicMock(side_effect=error))
+    model = SimpleNamespace(
+        model=SimpleNamespace(mask_token_id=3),
+        draft_model_config=SimpleNamespace(model="draft/checkpoint", revision="main"),
+    )
+    read_mask = upstream_dflash.DFlashQwen3ForCausalLM._read_mask_embedding
+    if missing_file == "mask_embedding.pt":
+        assert read_mask(model) is None
+    else:
+        with pytest.raises(modelscope_not_exist):
+            read_mask(model)
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("v_scale", [None, 0.5])
 @pytest.mark.parametrize("mapping_kind", ["shared", "per_layer", "dummy"])

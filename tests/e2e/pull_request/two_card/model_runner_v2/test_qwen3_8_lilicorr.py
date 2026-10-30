@@ -50,6 +50,20 @@ RUNNER_KWARGS: _RunnerKwargs = {
 @pytest.fixture(scope="module", autouse=True)
 def mrv2_environment():
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"}):
+        if os.environ.get("HF_HUB_OFFLINE") == "1" and os.environ.get("VLLM_USE_MODELSCOPE", "").lower() in (
+            "1",
+            "true",
+        ):
+            # Selected-test runners are offline. The model downloader populates
+            # their shared cache only after the PR gets model-dataset-download.
+            from modelscope.hub.file_download import model_file_download
+
+            try:
+                model_file_download(DRAFT_MODEL, "config.json", local_files_only=True)
+            except ValueError as exc:
+                if "Cannot find the requested files in the cached path" not in str(exc):
+                    raise
+                pytest.skip(f"LiLiCorr draft {DRAFT_MODEL} is missing from the offline ModelScope cache")
         yield
 
 
