@@ -4794,7 +4794,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                     if hasattr(inner_model, "model"):
                         inner_model = inner_model.model
-                    from vllm_ascend.patch.worker.patch_eagle3_pp_aux import (
+                    from vllm_ascend.patch.worker.patch_v1.patch_eagle3_pp_aux import (
                         patch_eagle3_pp_aux_propagation,
                     )
 

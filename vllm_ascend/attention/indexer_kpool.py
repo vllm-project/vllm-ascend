@@ -591,6 +591,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.index_kpool: int = vllm_indexer.index_kpool
         self.wq_b = vllm_indexer.wq_b
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
+        # Linear post-processing runs before the attention backend's hook.
+        # Keep the fused source in ND for slicing and FP32 head-weight casts:
+        # ACLNN-only devices cannot cast NZ weights to FP32. The key slice is
+        # consumed directly by CANN key_pool, rather than the linear method.
+        self.wk_weights_proj.skip_weight_nz_conversion = True
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         self.index_kpool_compress_ape = vllm_indexer.index_kpool_compress_ape
