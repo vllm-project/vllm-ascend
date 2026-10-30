@@ -5,7 +5,8 @@ import io
 import json
 
 import pytest
-from client import stream_completion
+
+from tests.e2e.runner_parity.client import stream_completion
 
 
 def stream_bytes(events):
@@ -21,8 +22,10 @@ def test_special_tokens_have_latency_even_without_visible_text(monkeypatch):
         {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2}},
     ]
     ticks = iter((0.0, 0.1, 0.2, 0.3, 0.4))
-    monkeypatch.setattr("client.time.perf_counter", lambda: next(ticks))
-    monkeypatch.setattr("client.urllib.request.urlopen", lambda *args, **kwargs: stream_bytes(events))
+    monkeypatch.setattr("tests.e2e.runner_parity.client.time.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr(
+        "tests.e2e.runner_parity.client.urllib.request.urlopen", lambda *args, **kwargs: stream_bytes(events)
+    )
     result = stream_completion("http://local", {"max_tokens": 2})
     assert result["generated_token_ids"] == [7, 8]
     assert result["ttft_s"] == pytest.approx(0.1)
@@ -32,7 +35,9 @@ def test_special_tokens_have_latency_even_without_visible_text(monkeypatch):
 
 def test_incomplete_stream_is_saved_and_rejected(monkeypatch, tmp_path):
     events = [{"choices": [{"text": "", "token_ids": [7]}]}]
-    monkeypatch.setattr("client.urllib.request.urlopen", lambda *args, **kwargs: stream_bytes(events))
+    monkeypatch.setattr(
+        "tests.e2e.runner_parity.client.urllib.request.urlopen", lambda *args, **kwargs: stream_bytes(events)
+    )
     with pytest.raises(AssertionError, match="stream/usage"):
         stream_completion("http://local", {"max_tokens": 2}, error_dir=tmp_path)
     files = list(tmp_path.glob("stream-error-*.json"))
