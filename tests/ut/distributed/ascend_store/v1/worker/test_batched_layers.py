@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import W
 
 
 @pytest.mark.parametrize("mode", ("key_range", "gva"))
-def test_partition_batches_preserve_payload_fanout_and_independent_layer_membership(mode):
+def test_partition_batches_preserve_payload_fanout_and_independent_layer_membership(mode, monkeypatch):
     topology = make_topology(group_ids=(0, 1), physical_layers=(2, 5, 9))
     topology = replace(
         topology,
@@ -36,10 +36,12 @@ def test_partition_batches_preserve_payload_fanout_and_independent_layer_members
             replace(topology.groups[1], layers=topology.groups[1].layers[1:]),
         ),
     )
-    backend = TensorRangeBackend() if mode == "key_range" else FakeGVABackend()
-    if mode == "gva":
+    backend: TensorRangeBackend | FakeGVABackend = TensorRangeBackend() if mode == "key_range" else FakeGVABackend()
+    if isinstance(backend, FakeGVABackend):
         backend.native_store = TensorGVAStore()
-        backend.exists = lambda keys: tuple(region is not None for region in backend.query_gva_regions(keys))
+        monkeypatch.setattr(
+            backend, "exists", lambda keys: tuple(region is not None for region in backend.query_gva_regions(keys))
+        )
     caches = {
         layer.layer_names[0]: torch.arange(64, dtype=torch.float32).reshape(8, 4, 2, 1)
         + 1000 * (group.group_id * 3 + index)
@@ -93,6 +95,7 @@ def test_gva_batch_addition_preserves_python_integer_addresses():
     selection = worker.load._prepare((command,))
     size = worker.context.remote[0][0]["size_bytes"]
     base = (1 << 64) - 16
+    assert backend.native_store is not None
     backend.native_store.objects[selection.keys[0]] = (base, size, True)
     try:
         worker.begin_step(KVTransferStep((command,)))

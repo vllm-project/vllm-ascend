@@ -40,7 +40,7 @@ def make_worker(*, backend=None, topology=None, event_factory=FakeEvent, gate_fa
         else make_backend_spec(requires_exists_before_put=requires_exists)
     )
     if isinstance(backend, FakeGVABackend):
-        backend.exists = lambda keys: tuple(region is not None for region in backend.query_gva_regions(keys))
+        vars(backend)["exists"] = lambda keys: tuple(region is not None for region in backend.query_gva_regions(keys))
     resources = FakeResources(backend, spec, topology)
     worker = Worker(
         topology,
@@ -58,10 +58,10 @@ def layer_names(worker):
     return tuple(name for name, _ in sorted(worker.context.layer_ids_by_name.items(), key=lambda item: item[1]))
 
 
-def test_lookup_keeps_sparse_recovery_points_and_plans_only_the_missing_load_range():
+def test_lookup_keeps_sparse_recovery_points_and_plans_only_the_missing_load_range(monkeypatch):
     topology = make_align_state_topology(attention_block_size=16, state_block_size=32, hash_block_size=8, tp_size=1)
     backend = FakeBackend()
-    backend.exists = lambda keys: tuple(not key.endswith("@04") for key in keys)
+    monkeypatch.setattr(backend, "exists", lambda keys: tuple(not key.endswith("@04") for key in keys))
     query = LookupRequest(
         end_token=32,
         transfer_group_ids=(0, 1),
@@ -84,13 +84,14 @@ def test_lookup_keeps_sparse_recovery_points_and_plans_only_the_missing_load_ran
         block_ids_by_group=((1, 2), (3,)),
         request_token_count=40,
     )
+    assert cold is not None
     assert cold.start_token == 0 and cold.end_token == command.end_token
 
 
 def test_lookup_does_not_require_remote_keys_for_a_valid_local_prefix():
     topology = make_topology(physical_layers=(2,))
     backend = FakeBackend()
-    backend.presence = (True, True)
+    backend.presence = [True, True]
     query = LookupRequest(
         end_token=16, transfer_group_ids=(0,), block_hashes=(b"a", b"b", b"c", b"d"), local_available_tokens=8
     )
@@ -100,6 +101,7 @@ def test_lookup_does_not_require_remote_keys_for_a_valid_local_prefix():
     command = plan_load(
         topology.config, query, result, request_id="r", block_ids_by_group=((1, 2, 3, 4),), request_token_count=20
     )
+    assert command is not None
     assert command.start_token == 8 and command.end_token == 16
     assert (
         plan_load(
@@ -293,6 +295,7 @@ def test_gva_uses_the_same_prepared_objects_and_only_publishes_after_all_layers(
     worker.end_step()
     worker.close()
     assert resources.closed
+    assert backend.native_store is not None
     operations = [call[0] for call in backend.native_store.calls]
     assert operations.count("copy") == 4
     assert operations.count("publish") == 1

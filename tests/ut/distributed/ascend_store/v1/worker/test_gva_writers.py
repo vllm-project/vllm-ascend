@@ -61,7 +61,9 @@ def cluster(tp=2, pcp=1, dcp=2, put_step=2, *, separate_allocations=False):
     members = tuple(
         ContextRank(rank, index % tp, ((index % tp) * pcp + index // tp) % dcp) for index, rank in enumerate(ranks)
     )
-    objects, readable, outcomes = {}, set(), {}
+    objects: dict[str, object] = {}
+    readable: set[str] = set()
+    outcomes: dict[int, object] = {}
     barrier = threading.Barrier(len(ranks))
     workers, resources, sdks, channels, topologies, sources = [], [], [], [], [], []
     try:
@@ -351,10 +353,20 @@ def test_worker_owns_channel_before_binding_buffers_and_closes_it_after_sessions
     monkeypatch.setattr(worker_module, "CollectiveGroup", acquire)
     sessions = backend.create_sessions()
     close_sessions = sessions.close
-    monkeypatch.setattr(sessions, "close", lambda: (trace.append("sessions"), close_sessions()))
+
+    def close_session():
+        trace.append("sessions")
+        close_sessions()
+
+    monkeypatch.setattr(sessions, "close", close_session)
     monkeypatch.setattr(backend, "create_sessions", Mock(return_value=sessions))
     close_backend = backend.close
-    monkeypatch.setattr(backend, "close", lambda: (trace.append("backend"), close_backend()))
+
+    def close_client():
+        trace.append("backend")
+        close_backend()
+
+    monkeypatch.setattr(backend, "close", close_client)
     prepare = owner.prepare_kv_caches
 
     def prepare_buffers(caches):

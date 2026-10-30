@@ -77,6 +77,7 @@ class AttentionComputeStartGate:
                 return True
             event = self._event
 
+        assert event is not None
         event.synchronize()
         return True
 

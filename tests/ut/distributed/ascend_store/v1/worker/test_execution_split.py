@@ -21,7 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
 
 @pytest.mark.parametrize("layerwise", (False, True))
 def test_request_admission_is_retained_until_its_result_is_collected(layerwise):
-    worker, _, _ = (make_layerwise if layerwise else make_bulk)()
+    worker, _, _ = make_layerwise() if layerwise else make_bulk()
     command = LoadCommand("r", 0, 4, ((1,),), (b"a",))
     try:
         worker.begin_step(KVTransferStep((command,)))

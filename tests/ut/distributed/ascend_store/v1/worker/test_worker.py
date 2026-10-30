@@ -429,7 +429,7 @@ def test_store_result_interpretation_error_is_not_converted_to_a_write_failure(a
     event.record()
     try:
         prepared = worker.transfer.executor._read.submit(worker.store._prepare, (command,))
-        ready = Future()
+        ready: Future[FakeEvent] = Future()
         ready.set_result(event)
         future = worker.transfer.executor._read.submit(
             worker.transfer._read, StoreBatch((command,)), prepared.result, ready.result, worker.store._complete
@@ -563,14 +563,15 @@ def test_store_only_consumes_the_boundary_supplied_by_its_caller(monkeypatch):
     worker, resources, _ = make_worker()
     event = FakeEvent()
     event.record()
-    monkeypatch.setattr(event, "record", Mock(side_effect=AssertionError("Store must not record the producer stream")))
+    record = Mock(side_effect=AssertionError("Store must not record the producer stream"))
+    monkeypatch.setattr(event, "record", record)
     command = RangeStoreCommand("store", 0, 4, ((1,),), (b"a",), 4, 17)
     try:
         assert worker.store.submit((command,))
         worker.transfer.read_all_layers(lambda: event)
         (result,) = worker.fence_previous_store()
         assert result.succeeded and result.source_release_confirmed and event.synchronized
-        event.record.assert_not_called()
+        record.assert_not_called()
         assert worker.take_released_store_job_ids() == {17}
     finally:
         worker.close()

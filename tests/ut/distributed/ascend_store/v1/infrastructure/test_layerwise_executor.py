@@ -30,7 +30,7 @@ def make_execution(queues):
     instances = []
 
     def create(depth=2, gate_type=FakeGate):
-        gates = {}
+        gates: dict[int, FakeGate] = {}
 
         def gate():
             value = gate_type()
@@ -53,7 +53,8 @@ def make_execution(queues):
 )
 def test_sparse_prefetch_window_and_aliases(depth, counts, make_execution, queues):
     execution, gates = make_execution(depth)
-    copied, finish = [], Mock()
+    copied: list[int] = []
+    finish = Mock()
     execution.start_write(lambda: (2, 5, 9), copied.append, finish)
     for layer, count in zip((0, 0, 2, 2, 3, 3, 5, 5, 8, 9, 9, 12), counts, strict=True):
         execution.wait_for_layer(layer, object, read_at_compute_start=False)
@@ -269,7 +270,8 @@ def test_read_finalizer_receives_execution_facts_even_on_failure(stage, make_exe
 @pytest.mark.parametrize("read_first", (False, True))
 def test_compute_boundary_releases_prefetch_and_submits_one_read(read_first, make_execution, queues):
     execution, gates = make_execution()
-    copied, read, record, finish = [], Mock(), Mock(return_value=object()), Mock()
+    copied: list[int] = []
+    read, record, finish = Mock(), Mock(return_value=object()), Mock()
     execution.start_write(lambda: (2, 5), copied.append, finish)
     execution.start_read(lambda: None, read, lambda _: True, lambda: (2,), lambda *_: None)
     if read_first:
@@ -379,7 +381,8 @@ def test_failed_gate_cancel_still_seals_reads_and_stops_prefetch(make_execution,
             raise error
 
     execution, gates = make_execution(3, BrokenCancelGate)
-    copied, writes_finished, reads_finished = [], Mock(), Mock()
+    copied: list[int] = []
+    writes_finished, reads_finished = Mock(), Mock()
     execution.start_write(lambda: (2, 5, 9), copied.append, writes_finished)
     execution.start_read(lambda: None, lambda *_: None, lambda _: False, lambda: (), reads_finished)
     execution.wait_for_layer(0, object, read_at_compute_start=False)

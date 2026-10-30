@@ -141,7 +141,7 @@ def test_gva_success_never_expands_layer_result_indices(monkeypatch):
 
 
 @pytest.mark.parametrize("groups", ((0,), (0, 1)))
-def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_holes(groups):
+def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_holes(groups, monkeypatch):
     topology = make_topology(group_ids=groups)
     backend, coordinator = FakeBackend(), make_coordinator(topology)
     lookup = LookupService(topology, backend, coordinator)
@@ -168,8 +168,10 @@ def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_hol
     for end in range(1, 14):
         for local in range(end + 1):
             for hits in product((False, True), repeat=3):
-                backend.exists = lambda keys, hits=hits: tuple(
-                    hits[int(key.rsplit("@", 1)[1], 16) - ord("a")] for key in keys
+                monkeypatch.setattr(
+                    backend,
+                    "exists",
+                    lambda keys, hits=hits: tuple(hits[int(key.rsplit("@", 1)[1], 16) - ord("a")] for key in keys),
                 )
                 recovered = lookup(
                     LookupRequest(
@@ -183,7 +185,7 @@ def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_hol
     assert seen
 
 
-def test_lookup_deduplicates_cross_family_aliases_and_reduces_all_partitions():
+def test_lookup_deduplicates_cross_family_aliases_and_reduces_all_partitions(monkeypatch):
     topology = make_topology(pp_size=2)
     backend, coordinator = FakeBackend(), make_coordinator(topology)
     lookup = LookupService(topology, backend, coordinator)
@@ -195,7 +197,7 @@ def test_lookup_deduplicates_cross_family_aliases_and_reduces_all_partitions():
         calls.append(tuple(keys))
         return tuple(key != "abx" for key in keys)
 
-    backend.exists = exists
+    monkeypatch.setattr(backend, "exists", exists)
     result = lookup(
         LookupRequest(end_token=12, transfer_group_ids=(0,), block_hashes=("x", "ab", "x"), local_available_tokens=0)
     )
@@ -234,7 +236,12 @@ def test_gva_address_preparation_preserves_integer_precision_and_publication_own
     resolve = Mock(return_value=regions)
     monkeypatch.setattr(worker.transfer, "_store_regions", resolve)
     calls = []
-    monkeypatch.setattr(worker.transfer, "_store_gva", lambda remote, local, lengths: calls.append(remote) or 0)
+
+    def copy(remote, local, lengths):
+        calls.append(remote)
+        return 0
+
+    monkeypatch.setattr(worker.transfer, "_store_gva", copy)
     try:
         plan, codes, opened = worker.transfer.open(selection, to_remote=True, keep_regions=keep_regions)
         resolve.assert_called_once_with(tuple(selection.keys), sizes)
@@ -242,7 +249,7 @@ def test_gva_address_preparation_preserves_integer_precision_and_publication_own
         assert plan.regions == (dict(zip(selection.keys, regions)) if keep_regions else {})
         for layer in plan.layers:
             worker.transfer._copy_gva(plan, layer, to_remote=True)
-            expected = []
+            expected: list[int] = []
             for coordinate in plan.layers[layer]:
                 offsets = worker.transfer._geometry[layer][coordinate][2].ravel().tolist()
                 expected.extend(

@@ -23,7 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.
 def test_lookup_binds_and_queries_without_local_buffers_or_resource_owner():
     topology = make_topology()
     backend = FakeBackend()
-    backend.presence = (True, False)
+    backend.presence = [True, False]
     lookup = LookupService(topology, backend, make_coordinator(topology))
     assert (
         lookup(
@@ -35,10 +35,10 @@ def test_lookup_binds_and_queries_without_local_buffers_or_resource_owner():
     assert not backend.closed
 
 
-def test_lookup_resolves_partial_checkpoints_without_local_block_assignments():
+def test_lookup_resolves_partial_checkpoints_without_local_block_assignments(monkeypatch):
     topology = make_align_state_topology(attention_block_size=16, state_block_size=32, hash_block_size=8, tp_size=1)
     backend = FakeBackend()
-    backend.exists = lambda keys: tuple(not key.endswith("@04") for key in keys)
+    monkeypatch.setattr(backend, "exists", lambda keys: tuple(not key.endswith("@04") for key in keys))
     lookup = LookupService(topology, backend, make_coordinator(topology))
     result = lookup(
         LookupRequest(
@@ -148,7 +148,12 @@ def test_worker_uses_drain_reports_and_attempts_both_services(mode, monkeypatch)
         return DrainResult(False, None if mode == "unknown" else error)
 
     monkeypatch.setattr(worker.store, "drain", drain_store)
-    monkeypatch.setattr(worker.load, "drain", lambda: trace.append("load") or DrainResult(True))
+
+    def drain_load():
+        trace.append("load")
+        return DrainResult(True)
+
+    monkeypatch.setattr(worker.load, "drain", drain_load)
     with pytest.raises(RuntimeError) as raised:
         worker.close()
     if mode == "unknown":

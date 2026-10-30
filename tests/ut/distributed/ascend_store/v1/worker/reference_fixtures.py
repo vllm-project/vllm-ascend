@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def normalize(value):
-    if dataclasses.is_dataclass(value):
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return normalize(dataclasses.asdict(value))
     if isinstance(value, dict):
         return {str(k): normalize(v) for k, v in value.items()}

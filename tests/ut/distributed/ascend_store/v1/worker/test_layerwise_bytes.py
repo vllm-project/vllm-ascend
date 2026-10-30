@@ -131,6 +131,7 @@ def test_bulk_and_layerwise_share_complete_objects_and_preserve_local_prefix(pro
             block_ids_by_group=((5, 6),),
             request_token_count=12,
         )
+        assert command is not None
         assert command.start_token == 4
         consumer.begin_step(KVTransferStep((command,)))
         consumer.start_load()
