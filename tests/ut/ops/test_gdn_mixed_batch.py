@@ -135,11 +135,12 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
             [1.0, 2.0, 11.0, 12.0, 21.0, 22.0],  # decode
             [3.0, 4.0, 13.0, 14.0, 23.0, 24.0],  # prefill
             [5.0, 6.0, 15.0, 16.0, 25.0, 26.0],  # prefill
-        ]
+        ],
+        dtype=torch.bfloat16,
     )
     a = torch.zeros(3, 1)
     b = torch.zeros(3, 1)
-    core_attn_out = torch.empty(3, 1, 2)
+    core_attn_out = torch.empty(3, 1, 2, dtype=torch.bfloat16)
 
     forward_context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
@@ -162,7 +163,7 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         # Returning V makes the merged output easy to validate.
         return value.clone()
 
-    def chunk_gated_delta_rule(**kwargs):
+    def fla_prefill(**kwargs):
         return kwargs["v"].clone(), kwargs["initial_state"].clone()
 
     # Shape [1, num_tokens, num_heads].
@@ -179,8 +180,9 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         ),
         patch(
             "vllm_ascend.ops.gdn.get_current_hardware_profile",
-            return_value=SimpleNamespace(supports=lambda _: False),
+            return_value=SimpleNamespace(supports=lambda _: True),
         ),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=object()),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
             return_value=gating,
@@ -188,7 +190,6 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True),
         patch.object(AscendGatedDeltaNetAttention, "_chunk_gated_delta_rule_fused") as fused_chunk_mock,
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch(
             "vllm_ascend.ops.gdn.gather_ssm_states",
             side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
@@ -196,9 +197,15 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
             ),
         ),
         patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
-            side_effect=chunk_gated_delta_rule,
-        ) as chunk_mock,
+            "vllm_ascend.ops.gdn.scatter_ssm_states_",
+            side_effect=lambda state, indices, values: state.index_copy_(
+                0, indices.to(torch.long), values.to(state.dtype)
+            ),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill",
+            side_effect=fla_prefill,
+        ) as fla_mock,
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
         patch(
             "vllm_ascend.ops.gdn.causal_conv1d_fn",
@@ -224,15 +231,15 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     decode_call = recurrent_calls[0]
     torch.testing.assert_close(
         decode_call["query"],
-        torch.tensor([[[1.0, 2.0]]]),
+        torch.tensor([[[1.0, 2.0]]], dtype=torch.bfloat16),
     )
     torch.testing.assert_close(
         decode_call["key"],
-        torch.tensor([[[11.0, 12.0]]]),
+        torch.tensor([[[11.0, 12.0]]], dtype=torch.bfloat16),
     )
     torch.testing.assert_close(
         decode_call["value"],
-        torch.tensor([[[21.0, 22.0]]]),
+        torch.tensor([[[21.0, 22.0]]], dtype=torch.bfloat16),
     )
 
     # Each convolution sees only its own token slice and state rows.
@@ -252,19 +259,22 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     else:
         assert prefill_conv.call_args.kwargs["has_initial_state"] is None
     torch.testing.assert_close(decode_conv.call_args.kwargs["query_start_loc"], torch.tensor([0, 1], dtype=torch.int32))
-    prefill_call = chunk_mock.call_args.kwargs
+    prefill_call = fla_mock.call_args.kwargs
     fused_chunk_mock.assert_not_called()
     torch.testing.assert_close(
         prefill_call["q"],
-        torch.tensor([[[[3.0, 4.0]], [[5.0, 6.0]]]]),
+        torch.tensor(
+            [[[[3.0, 4.0]], [[5.0, 6.0]]]],
+            dtype=torch.bfloat16,
+        ),
     )
     torch.testing.assert_close(
         prefill_call["k"],
-        torch.tensor([[[[13.0, 14.0]], [[15.0, 16.0]]]]),
+        torch.tensor([[[[13.0, 14.0]], [[15.0, 16.0]]]], dtype=torch.bfloat16),
     )
     torch.testing.assert_close(
         prefill_call["v"],
-        torch.tensor([[[[23.0, 24.0]], [[25.0, 26.0]]]]),
+        torch.tensor([[[[23.0, 24.0]], [[25.0, 26.0]]]], dtype=torch.bfloat16),
     )
 
     # Decode and prefill outputs are stitched back in original token order.
@@ -275,7 +285,8 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
                 [[21.0, 22.0]],
                 [[23.0, 24.0]],
                 [[25.0, 26.0]],
-            ]
+            ],
+            dtype=torch.bfloat16,
         ),
     )
 
@@ -360,7 +371,7 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
         conv_meta.query_start_loc = metadata.prefill_query_start_loc
         conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
         conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
-    packed = torch.arange(9 * head_dim, dtype=torch.float32).reshape(3, 3 * head_dim)
+    packed = torch.arange(9 * head_dim, dtype=torch.bfloat16).reshape(3, 3 * head_dim)
     expected_head_num = 3 if head_dim == 16 else 0
 
     def conv(x, *args, **kwargs):
@@ -382,11 +393,15 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
         attn_metadata={layer.prefix: metadata},
         slot_mapping={},
     )
-    output = torch.empty(3, 1, head_dim)
+    output = torch.empty(3, 1, head_dim, dtype=torch.bfloat16)
     with (
         override_forward_context(context),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: True),
+        ),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=object()),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
@@ -397,9 +412,20 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
             side_effect=lambda x, *args, **kwargs: x.clone(),
         ) as update_mock,
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            "vllm_ascend.ops.gdn.gather_ssm_states",
+            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
+                0, indices.to(torch.long)
+            ),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.scatter_ssm_states_",
+            side_effect=lambda state, indices, values: state.index_copy_(
+                0, indices.to(torch.long), values.to(state.dtype)
+            ),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill",
             side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]),
         ),
         patch(

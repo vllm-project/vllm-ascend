@@ -45,10 +45,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
-from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
-from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 from vllm_ascend.utils import vllm_version_is
 
@@ -242,9 +239,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         """Whether ``torch_npu.npu_chunk_gated_delta_rule`` can actually be used.
 
         The interface must exist AND a minimal smoke call must succeed (the op is
-        unavailable on some CANN builds / devices). Any failure disables the
-        fused path so we fall back to the Triton pipeline. The result is cached
-        on the class, so only the first layer runs the smoke call.
+        unavailable on some CANN builds / devices). A failed probe makes the
+        CANN path unavailable; prefill requires a usable fused kernel. The
+        result is cached on the class, so only the first layer runs the smoke call.
         """
         if cls._fused_chunk_available is not None:
             return cls._fused_chunk_available
@@ -306,8 +303,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
 
-        Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
-        (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
         The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
         or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
         and the raw ``g`` is passed through.
@@ -476,6 +471,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # V1 profile run
             return
 
+        assert isinstance(attn_metadata, dict)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        # Reject unsupported prefill requests before convolution, collectives,
+        # or recurrent decode can update any request's cached state.
+        fla_gdn_prefill_op = None
+        if attn_metadata.num_prefills > 0:
+            if mixed_qkv.dtype != torch.bfloat16:
+                raise RuntimeError(
+                    f"GDN prefill requires bfloat16 inputs, got {mixed_qkv.dtype}. Load the model in bfloat16."
+                )
+            if get_pcp_group().world_size != 1:
+                raise RuntimeError("GDN prefill requires PCP world_size == 1; disable prefill context parallelism.")
+            if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL):
+                fla_gdn_prefill_op = _get_fla_gdn_prefill_op()
+            # The built-in fused operator is NPU-only. Avoid probing it on CPU,
+            # including when a previous worker cached a successful probe.
+            if fla_gdn_prefill_op is None and (
+                mixed_qkv.device.type == "cpu" or not AscendGatedDeltaNetAttention._probe_fused_chunk()
+            ):
+                raise RuntimeError(
+                    "No usable GDN prefill kernel: install a supported fla_npu prefill kernel or use an NPU "
+                    "with torch_npu.npu_chunk_gated_delta_rule available."
+                )
+
         # Layerwise KV pool hooks must stay inside the custom op body: the
         # forward() caller region is traced by Dynamo in fullgraph mode, and
         # these side effects (thread locks, connector waits) would break the
@@ -484,9 +505,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
 
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
@@ -540,13 +558,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_spec = output_spec
 
         # Ordinary mixed batches keep decode token-major while prefill can
-        # use head-first convolution output. PCP retains its collective path.
-        split_conv = (
-            spec_sequence_masks is None
-            and attn_metadata.num_prefills > 0
-            and attn_metadata.num_decodes > 0
-            and get_pcp_group().world_size == 1
-        )
+        # use head-first convolution output.
+        split_conv = spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
         decode_conv_qkv = None
 
         # 1.2: Process the remaining part
@@ -556,89 +569,49 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query_start_loc_opt = non_spec_causal_conv1d_meta.query_start_loc
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
-                if get_pcp_group().world_size > 1:
-                    non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
-                    assert non_spec_query_start_loc is not None
-                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-                    width = self.conv_kernel_size
-                    state_len = width - 1
-                    num_seqs = non_spec_query_start_loc.shape[0] - 1
-                    prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
-                    prefill_cache_indices = non_spec_state_indices_tensor[prefill_seq_offset:]
-                    mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-                    last_width_prefill_x = extract_last_width(
-                        mixed_qkv_non_spec_T, non_spec_query_start_loc[prefill_seq_offset:], state_len
-                    )
-                    pcp_rank = get_pcp_group().rank_in_group
-                    all_last_width_prefill_x = get_pcp_group().all_gather(
-                        last_width_prefill_x.unsqueeze(0).contiguous(), 0
-                    )
-                    if pcp_rank > 0 and prefill_cache_indices.shape[0] > 0:
-                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
-                            pcp_rank - 1, ...
-                        ].transpose(-1, -2)
-                    mixed_qkv_non_spec_output = causal_conv1d_fn(
-                        mixed_qkv_non_spec,
+                if split_conv:
+                    num_decodes = attn_metadata.num_decodes
+                    num_decode_tokens = attn_metadata.num_decode_tokens
+                    decode_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
+                    decode_input = mixed_qkv_non_spec[:num_decode_tokens]
+                    decode_output = causal_conv1d_update(
+                        decode_input,
+                        self_kv_cache[0],
                         conv_weights_T,
-                        self.conv1d.bias,
-                        conv_states=self_kv_cache[0],
-                        query_start_loc=query_start_loc_opt,
-                        cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
-                        has_initial_state=initial_state_mode_opt,
+                        bias=self.conv1d.bias,
                         activation="silu" if self.activation else None,
-                        pad_slot_id=PAD_SLOT_ID,
+                        conv_state_indices=_normalize_causal_cache_indices(decode_meta.cache_indices[:num_decodes]),
+                        query_start_loc=decode_meta.query_start_loc[: num_decodes + 1],
+                        max_query_len=1,
                         null_block_id=0,
-                        head_num=conv_head_num,
+                        out=torch.empty_like(decode_input),
                     )
-                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
-                    if prefill_cache_indices.shape[0] > 0:
-                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
-                            -1, ...
-                        ].transpose(-1, -2)
-                else:
-                    if split_conv:
-                        num_decodes = attn_metadata.num_decodes
-                        num_decode_tokens = attn_metadata.num_decode_tokens
-                        decode_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
-                        decode_input = mixed_qkv_non_spec[:num_decode_tokens]
-                        decode_output = causal_conv1d_update(
-                            decode_input,
-                            self_kv_cache[0],
-                            conv_weights_T,
-                            bias=self.conv1d.bias,
-                            activation="silu" if self.activation else None,
-                            conv_state_indices=_normalize_causal_cache_indices(decode_meta.cache_indices[:num_decodes]),
-                            query_start_loc=decode_meta.query_start_loc[: num_decodes + 1],
-                            max_query_len=1,
-                            null_block_id=0,
-                            out=torch.empty_like(decode_input),
-                        )
-                        decode_conv_qkv = _rearrange_decode_qkv(
-                            decode_output,
-                            self.key_dim // self.tp_size,
-                            self.value_dim // self.tp_size,
-                            self.head_k_dim,
-                            self.head_v_dim,
-                        )
-                        mixed_qkv_non_spec = mixed_qkv_non_spec[num_decode_tokens:]
-                        query_start_loc_opt = attn_metadata.prefill_query_start_loc
-                        cache_indices_opt = cache_indices_opt[num_decodes:]
-                        if initial_state_mode_opt is not None:
-                            initial_state_mode_opt = initial_state_mode_opt[num_decodes:]
-                    mixed_qkv_non_spec_output = causal_conv1d_fn(
-                        mixed_qkv_non_spec,
-                        conv_weights_T,
-                        self.conv1d.bias,
-                        conv_states=self_kv_cache[0],
-                        query_start_loc=query_start_loc_opt,
-                        cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
-                        has_initial_state=initial_state_mode_opt,
-                        activation="silu" if self.activation else None,
-                        pad_slot_id=PAD_SLOT_ID,
-                        null_block_id=0,
-                        head_num=conv_head_num,
+                    decode_conv_qkv = _rearrange_decode_qkv(
+                        decode_output,
+                        self.key_dim // self.tp_size,
+                        self.value_dim // self.tp_size,
+                        self.head_k_dim,
+                        self.head_v_dim,
                     )
-                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
+                    mixed_qkv_non_spec = mixed_qkv_non_spec[num_decode_tokens:]
+                    query_start_loc_opt = attn_metadata.prefill_query_start_loc
+                    cache_indices_opt = cache_indices_opt[num_decodes:]
+                    if initial_state_mode_opt is not None:
+                        initial_state_mode_opt = initial_state_mode_opt[num_decodes:]
+                mixed_qkv_non_spec_output = causal_conv1d_fn(
+                    mixed_qkv_non_spec,
+                    conv_weights_T,
+                    self.conv1d.bias,
+                    conv_states=self_kv_cache[0],
+                    query_start_loc=query_start_loc_opt,
+                    cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
+                    has_initial_state=initial_state_mode_opt,
+                    activation="silu" if self.activation else None,
+                    pad_slot_id=PAD_SLOT_ID,
+                    null_block_id=0,
+                    head_num=conv_head_num,
+                )
+                mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
@@ -783,27 +756,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
-            # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
-            # Gate on the model dtype so fp16 models (e.g. ColQwen3.5) fall back
-            # to the Triton pipeline instead of hitting an aclnn dtype error.
-            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16
-            use_fla_gdn_prefill = (
-                supports_fused_dtype
-                and get_pcp_group().world_size == 1
-                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
-            )
-            fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
-            # The built-in fused operator is NPU-only. Keep CPU/unit-test
-            # dispatch on the Triton-compatible path even when its availability
-            # probe was cached globally.
-            use_fused_chunk = (
-                fla_gdn_prefill_op is None
-                and supports_fused_dtype
-                and query_non_spec.device.type != "cpu"
-                and AscendGatedDeltaNetAttention._probe_fused_chunk()
-                and get_pcp_group().world_size == 1
-            )
             if fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
@@ -826,7 +778,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     last_recurrent_state.to(ssm_state.dtype).contiguous(),
                 )
-            elif use_fused_chunk:
+            else:
                 # Gather only the selected rows. Generic advanced indexing first
                 # materializes the complete cache when ssm_state has a padded
                 # batch stride under the hybrid KV-cache manager.
@@ -852,25 +804,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state,
                     prefill_state_indices,
                     last_recurrent_state,
-                )
-            else:
-                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=prefill_query_start_loc,
-                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                    head_first=False,
-                    use_qk_l2norm_in_kernel=True,
-                )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
                 )
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
