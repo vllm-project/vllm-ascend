@@ -17,9 +17,14 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     restore_tp_heads,
 )
 from vllm_ascend.attention.dsa_v41 import (
+    AscendDSAV41AttentionMetadataBuilder,
+    AscendDSAV41FoldedIndexMetadataBuilder,
     AscendDSAV41Impl,
+    AscendDSAV41IndexerMetadataBuilder,
     AscendDSAV41Metadata,
     AscendDSAV41MetadataBuilder,
+    AscendDSAV41StateMetadataBuilder,
+    AscendDSAV41SWAMetadataBuilder,
     _config_value,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
@@ -45,6 +50,8 @@ def get_v41_cp_classes():
 class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
     """Keep global cache metadata independent from local query buffers."""
 
+    _local_metadata_builder_cls = AscendDSAV41MetadataBuilder
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, *, build_local_compressor_metadata=False):
         super().__init__(
             kv_cache_spec,
@@ -53,7 +60,7 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             device,
             build_compressor_metadata=build_local_compressor_metadata,
         )
-        self._global_builder = AscendDSAV41MetadataBuilder(
+        self._global_builder = self._local_metadata_builder_cls(
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
 
@@ -275,7 +282,30 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._resize_request_buffers(self, max(self._request_capacity_factor * max_reqs, graph_reqs) + 1)
         self._resize_request_buffers(self._global_builder, max(max_reqs, graph_reqs) + 1)
 
+        self._pcp_context_owner = self
         self._pcp_rope_buffers: dict[str, tuple[torch.Tensor, ...]] = {}
+
+    @staticmethod
+    def prepare_shared_buffers(builders) -> None:
+        """Choose stable batch buffer owners before warmup and graph capture.
+
+        A runtime cache alone is insufficient: a different first builder must
+        not change the addresses referenced by an already captured graph.
+        """
+        by_config: dict[int, list[AscendDSAV41PCPMetadataBuilder]] = {}
+        for builder in builders:
+            by_config.setdefault(id(builder.vllm_config), []).append(builder)
+        for config_builders in by_config.values():
+            config_builders.sort(key=lambda builder: tuple(builder.layer_names))
+            owner = config_builders[0]
+            rope_buffers: dict[tuple[int, int], tuple[torch.Tensor, ...]] = {}
+            for builder in config_builders:
+                builder._pcp_context_owner = owner
+                for layer_name, buffers in builder._pcp_rope_buffers.items():
+                    key = (buffers[0].data_ptr(), buffers[1].data_ptr())
+                    # The model config fixes capacity; the source tables fix
+                    # the remaining dimensions of these preallocated buffers.
+                    builder._pcp_rope_buffers[layer_name] = rope_buffers.setdefault(key, buffers)
 
     @staticmethod
     def _resize_request_buffers(builder, capacity: int) -> None:
@@ -313,14 +343,17 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 by_table[key] = buffers
             self._pcp_rope_buffers[layer_name] = buffers
 
-    def _build_pcp_rope_views(self, common: AscendCommonAttentionMetadata, *, global_cache: bool):
+    def _build_pcp_rope_views(self, common: AscendCommonAttentionMetadata, *, global_cache: bool, shared_rope=None):
         if self._cache_kind != "swa":
             return None
         assert self._pcp_rope_buffers, "Prepare V4.1 PCP RoPE before building attention metadata"
         num_tokens = common.num_input_tokens
-        positions = common.positions[:num_tokens].long()
+        gathered = {} if shared_rope is None else shared_rope
+        positions = gathered.get("positions")
+        if positions is None:
+            positions = common.positions[:num_tokens].long()
+            gathered["positions"] = positions
         cos_views, sin_views = {}, {}
-        gathered: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_name, buffers in self._pcp_rope_buffers.items():
             full_cos, full_sin = buffers[:2]
             key = (full_cos.data_ptr(), full_sin.data_ptr())
@@ -370,6 +403,64 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             causal=common.causal,
         )
 
+    def _prepare_graph_pcp_context(
+        self,
+        pcp_context,
+        full_graph_mode: bool,
+    ):
+        """Prepare graph-stable V4.1 tensors without changing the PCP batch layout."""
+        global_batch = pcp_context.global_batch
+        num_actual_tokens = global_batch.num_tokens
+
+        # FULL graphs replay the fixed padded batch, so the restore indices
+        # must cover every padded row. Other modes run the DSA cache update
+        # with the actual token extent, and compact indices avoid restoring
+        # placeholder rows that would be trimmed before the cache write anyway.
+        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
+        # Use the preallocated buffer to keep the address fixed for graph replay.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
+        hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
+        hidden_restore_idx[num_actual_tokens:].zero_()
+
+        # The upstream dummy path only invalidates gathered slot mappings.
+        # DSA also consumes the scheduler-global mapping, so clear it here.
+        if global_batch.is_dummy:
+            pcp_context.global_slot_mappings.fill_(-1)
+
+        return replace(
+            pcp_context,
+            hidden_restore_idx=hidden_restore_idx,
+        )
+
+    def _build_local_common_attn_metadata(
+        self,
+        pcp_context,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        cache_group_idx: int,
+        has_prefill: bool,
+    ) -> AscendCommonAttentionMetadata:
+        num_local_padded_tokens = common_attn_metadata.num_input_tokens
+        # Sharded decode owns different requests per rank, so it uses the same
+        # rank-local slot slice as prefill. Replicated decode writes every rank.
+        if has_prefill or self._is_decode_sharded:
+            gathered_slot_mapping = common_attn_metadata.slot_mapping
+            if pcp_context.global_batch.is_dummy:
+                gathered_slot_mapping.fill_(-1)
+            local_slot_mapping = gathered_slot_mapping.view(
+                self._pcp_world_size,
+                num_local_padded_tokens,
+            )[self._pcp_rank]
+        else:
+            # Decode tokens are replicated, so every rank must write its own
+            # SWA cache. The gathered mapping masks these writes off rank 0.
+            local_slot_mapping = pcp_context.global_slot_mappings[cache_group_idx]
+            if pcp_context.global_batch.is_dummy:
+                local_slot_mapping.fill_(-1)
+            assert local_slot_mapping.shape[0] == num_local_padded_tokens
+        return common_attn_metadata.replace(
+            slot_mapping=local_slot_mapping,
+        )
+
     def build(
         self,
         common_prefix_len,
@@ -389,67 +480,161 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             return super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
-
-        # Use the global batch so all ranks choose the same prefill/decode path.
-        has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
-        # Sharded decodes have distinct queries but still need complete caches.
-        needs_global_metadata = has_prefill or self._is_decode_sharded
+        batch_shared = kwargs.get("common_v41_batch_metadata")
+        if batch_shared is None:
+            batch_shared = {}
+        # Query variants may carry group-dependent windows or replay bounds.
+        # They still use the optimized builder, with a separate sharing scope.
+        variant = (
+            pcp_cache_group_idx
+            if common_attn_metadata.causal is not True
+            or getattr(common_attn_metadata, "replay_start", None) is not None
+            or kwargs.get("replay_start") is not None
+            or kwargs.get("ori_sparse_indices") is not None
+            else None
+        )
+        shared = batch_shared.setdefault(("v41_pcp_specialized", id(self.vllm_config), variant), {})
+        full_graph_mode = bool(kwargs.get("full_graph_mode", False))
+        signature = (
+            common_attn_metadata.num_reqs,
+            common_attn_metadata.num_input_tokens,
+            common_attn_metadata.num_actual_tokens,
+            num_actual_reqs,
+            full_graph_mode,
+            bool(kwargs.get("skip_ring_state_update", False)),
+        )
+        cached_signature = shared.setdefault("signature", signature)
+        if cached_signature != signature:
+            raise ValueError("V4.1 PCP metadata sharing requires matching batch signatures")
+        mode = shared.get("mode")
+        if mode is None:
+            has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+            mode = (has_prefill, has_prefill or self._is_decode_sharded)
+            shared["mode"] = mode
+        has_prefill, needs_global_metadata = mode
         self._global_builder.take_device_metadata_tasks()
 
         if needs_global_metadata:
-            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
-                self, pcp_context, full_graph_mode=kwargs.get("full_graph_mode", False)
-            )
-            global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
-                pcp_context, pcp_cache_group_idx, common_attn_metadata
-            )
-        local_common = AscendDSAPCPMetadataBuilder._build_local_common_attn_metadata(
-            self, pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
-        )
-
-        # Match graph capture shapes; dummy batches must not advance the C2 ring.
-        if kwargs.get("full_graph_mode", False):
-            local_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(local_common, num_actual_reqs)
-            if needs_global_metadata:
-                global_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
-                    global_common, pcp_context.global_batch.num_reqs
+            prepared_context = shared.get("pcp_context")
+            if prepared_context is None:
+                prepared_context = self._pcp_context_owner._prepare_graph_pcp_context(
+                    pcp_context, full_graph_mode=full_graph_mode
                 )
+                shared["pcp_context"] = prepared_context
+            pcp_context = prepared_context
+            assert pcp_context is not None
+            global_common = shared.get("global_common")
+            if global_common is None:
+                global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
+                    pcp_context, pcp_cache_group_idx, common_attn_metadata
+                )
+                if full_graph_mode:
+                    global_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
+                        global_common, pcp_context.global_batch.num_reqs
+                    )
+                shared["global_common"] = global_common
+            else:
+                global_common = global_common.replace(
+                    block_table_tensor=pcp_context.global_block_tables[pcp_cache_group_idx],
+                    slot_mapping=pcp_context.global_slot_mappings[pcp_cache_group_idx],
+                    max_seq_len=common_attn_metadata.max_seq_len,
+                    causal=common_attn_metadata.causal,
+                )
+
+        local_common = self._build_local_common_attn_metadata(
+            pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
+        )
+        if full_graph_mode:
+            offsets = shared.get("local_graph_offsets")
+            if offsets is None:
+                local_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
+                    local_common, num_actual_reqs
+                )
+                offsets = (local_common.query_start_loc, local_common.query_start_loc_cpu)
+                shared["local_graph_offsets"] = offsets
+            else:
+                local_common = local_common.replace(query_start_loc=offsets[0], query_start_loc_cpu=offsets[1])
+
         kwargs["skip_ring_state_update"] = (
             bool(kwargs.get("skip_ring_state_update", False)) or pcp_context.global_batch.is_dummy
         )
-
-        # Keep global KV RoPE separate from rank-local Q positions.
+        kwargs["common_v41_batch_metadata"] = shared
         if needs_global_metadata:
             global_kwargs = dict(kwargs)
-            global_kwargs["num_actual_reqs"] = pcp_context.global_batch.num_reqs
-            global_rope = self._build_pcp_rope_views(global_common, global_cache=True)
+            global_kwargs.update(
+                num_actual_reqs=pcp_context.global_batch.num_reqs,
+                build_query=False,
+                update_cache=True,
+                build_compressor_metadata=True,
+            )
+            global_rope = self._build_pcp_rope_views(
+                global_common, global_cache=True, shared_rope=shared.setdefault("global_rope", {})
+            )
             if global_rope is not None:
                 global_kwargs["rope_views"] = global_rope
             global_metadata = self._build_global_metadata(common_prefix_len, global_common, fast_build, global_kwargs)
 
-        # Empty Query ranks skip query metadata ops but still retain the global cache view.
         if needs_global_metadata and local_common.num_actual_tokens == 0:
             local_metadata = self._build_empty_local_metadata(local_common)
         else:
             local_kwargs = dict(kwargs)
-            local_kwargs["num_actual_reqs"] = local_common.num_reqs if num_actual_reqs is None else num_actual_reqs
-            # C2 state updates belong to the cache metadata owner.
-            local_kwargs["build_compressor_metadata"] = not needs_global_metadata
+            local_kwargs.update(
+                num_actual_reqs=local_common.num_reqs if num_actual_reqs is None else num_actual_reqs,
+                build_query=True,
+                update_cache=not needs_global_metadata,
+                build_compressor_metadata=not needs_global_metadata,
+            )
             for name in ("common_v41_metadata", "common_v41_batch_metadata"):
-                shared = kwargs.get(name)
-                if shared is not None:
-                    local_kwargs[name] = shared.setdefault("pcp_local", {})
-            local_rope = self._build_pcp_rope_views(local_common, global_cache=False)
+                cache = kwargs.get(name)
+                if cache is not None:
+                    local_kwargs[name] = cache.setdefault("pcp_local", {})
+            local_rope = self._build_pcp_rope_views(
+                local_common, global_cache=False, shared_rope=shared.setdefault("local_rope", {})
+            )
             if local_rope is not None:
                 local_kwargs["rope_views"] = local_rope
             local_metadata = super().build(common_prefix_len, local_common, fast_build, **local_kwargs)
 
-        # Replicated decode needs no hidden gather or separate cache metadata.
         if not needs_global_metadata:
             return local_metadata
         return AscendDSAV41PCPMetadata.from_local_metadata(
             local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx
         )
+
+
+class AscendDSAV41PCPStateMetadataBuilder(
+    AscendDSAV41PCPMetadataBuilder,
+    AscendDSAV41StateMetadataBuilder,
+):
+    _local_metadata_builder_cls = AscendDSAV41StateMetadataBuilder
+
+
+class AscendDSAV41PCPSWAMetadataBuilder(
+    AscendDSAV41PCPMetadataBuilder,
+    AscendDSAV41SWAMetadataBuilder,
+):
+    _local_metadata_builder_cls = AscendDSAV41SWAMetadataBuilder
+
+
+class AscendDSAV41PCPAttentionMetadataBuilder(
+    AscendDSAV41PCPMetadataBuilder,
+    AscendDSAV41AttentionMetadataBuilder,
+):
+    _local_metadata_builder_cls = AscendDSAV41AttentionMetadataBuilder
+
+
+class AscendDSAV41PCPIndexerMetadataBuilder(
+    AscendDSAV41PCPMetadataBuilder,
+    AscendDSAV41IndexerMetadataBuilder,
+):
+    _local_metadata_builder_cls = AscendDSAV41IndexerMetadataBuilder
+
+
+class AscendDSAV41PCPFoldedIndexMetadataBuilder(
+    AscendDSAV41PCPMetadataBuilder,
+    AscendDSAV41FoldedIndexMetadataBuilder,
+):
+    _local_metadata_builder_cls = AscendDSAV41FoldedIndexMetadataBuilder
 
 
 class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
@@ -483,8 +668,13 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
             if get_forward_context().attn_metadata is not None
             else None
         )
-        needs_global_metadata = isinstance(metadata, AscendDSAV41PCPMetadata)
-        has_prefill = needs_global_metadata and metadata.global_metadata.num_prefills > 0
+        if isinstance(metadata, AscendDSAV41PCPMetadata):
+            needs_global_metadata = True
+            assert metadata.global_metadata is not None
+            has_prefill = metadata.global_metadata.num_prefills > 0
+        else:
+            needs_global_metadata = False
+            has_prefill = False
         projector = attn.dsa_attn.dsa_attn.impl
         # V4 owns the quantized O modules and their batch-scoped collective mode.
         # V4.1 already projects padded output even on empty query ranks.
