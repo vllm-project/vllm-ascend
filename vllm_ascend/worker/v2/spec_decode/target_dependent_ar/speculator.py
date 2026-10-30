@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import inspect
 import logging
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
@@ -69,7 +68,6 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
-_UPSTREAM_PREFILL_HAS_SKIP_SAMPLE = "skip_sample" in inspect.signature(TargetDependentARSpeculator._prefill).parameters
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -581,29 +579,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        if not _UPSTREAM_PREFILL_HAS_SKIP_SAMPLE:
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-        else:
-            # vLLM main forwards `skip_sample` so the drafter KV stays in sync
-            # without sampling when num_speculative_tokens == 0.
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-                skip_sample,
-            )
+        # The pinned main API forwards skip_sample to keep the drafter KV in
+        # sync without sampling when num_speculative_tokens == 0.
+        super()._prefill(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+            skip_sample,
+        )
 
     def _build_attn_metadata(
         self,
