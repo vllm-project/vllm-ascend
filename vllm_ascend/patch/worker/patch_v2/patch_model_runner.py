@@ -103,6 +103,12 @@ def initialize_kv_cache(
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
     )
+    # Suffix speculators expose seeded_requests to pin greedy requests whose
+    # sampling must not depend on batched drafts (same contract as upstream).
+    if self.adaptive_verification is not None:
+        self.adaptive_verification.pinned_requests = getattr(
+            self.speculator, "seeded_requests", None
+        )
 
     block_tables_kwargs = {}
     block_tables_kwargs["dcp_sharded"] = dcp_sharded

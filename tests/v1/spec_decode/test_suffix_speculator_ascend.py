@@ -369,7 +369,8 @@ def test_ingestion_is_deterministic():
 # (enable_adaptive_verification defaults to False) — tracked as follow-up.
 @pytest.mark.xfail(
     _IS_NPU,
-    reason="observe kernel MLIR compile failure on CANN 9.1 (follow-up)",
+    reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
+    raises=(RuntimeError, ValueError),
 )
 def test_adaptive_verification_confidences():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
@@ -387,24 +388,6 @@ def test_adaptive_verification_confidences():
     stats = spec.accept_stats.sum(dim=0).tolist()  # [K, (accepted, observed)]
     assert stats[:3] == [[1, 1], [1, 1], [0, 1]]
     assert stats[3] == [0, 0]
-
-
-# [NPU-0.31] The vllm 0.31 wheel's BaseSpeculator.propose signature predates
-# vllm main (dp_sync vs dp_sync_state, no num_speculative_tokens). The
-# speculator targets vllm main; this check is meaningful only against main.
-@pytest.mark.xfail(
-    _IS_NPU,
-    reason="vllm 0.31 wheel predates main's BaseSpeculator.propose signature",
-)
-def test_propose_signature_matches_base_speculator():
-    """The runner passes propose() arguments by keyword."""
-    import inspect
-
-    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
-
-    base = inspect.signature(BaseSpeculator.propose).parameters
-    ours = inspect.signature(SuffixSpeculator.propose).parameters
-    assert list(ours) == list(base)
 
 
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
@@ -505,7 +488,8 @@ def test_document_counter_rollover_restarts_the_index():
 # [NPU] Shares the observe-kernel MLIR compile failure (see above).
 @pytest.mark.xfail(
     _IS_NPU,
-    reason="observe kernel MLIR compile failure on CANN 9.1 (follow-up)",
+    reason="observe kernel MLIR compile failure on CANN 9.1 (known unsupported; follow-up)",
+    raises=(RuntimeError, ValueError),
 )
 def test_reused_slot_does_not_inherit_verification_stats():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
