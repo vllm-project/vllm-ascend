@@ -20,7 +20,14 @@ class AscendStoreBenchmarkWorkerExtension:
         backend = worker.m_store if production else worker._resources.backend
         caches = worker.kv_caches if production else worker._resources.kv_caches
         layerwise = worker.use_layerwise if production else worker._topology.config.use_layerwise
-        self._byte_accuracy = KVByteAccuracy(backend, caches, production, layerwise, directory)
+        self._byte_accuracy = KVByteAccuracy(
+            backend,
+            caches,
+            production,
+            layerwise,
+            directory,
+            transfer=worker.transfer if not production and layerwise else None,
+        )
         return {"status": "installed"}
 
     def finish_ascendstore_byte_accuracy(self, operation: str) -> dict[str, Any]:

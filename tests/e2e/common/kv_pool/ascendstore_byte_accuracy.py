@@ -20,7 +20,9 @@ class KVByteAccuracy:
     request or local-cache reset may reuse its buffers before ``finish``.
     """
 
-    def __init__(self, backend: Any, caches: dict, production: bool, layerwise: bool, directory: str) -> None:
+    def __init__(
+        self, backend: Any, caches: dict, production: bool, layerwise: bool, directory: str, *, transfer: Any = None
+    ) -> None:
         self.backend = backend
         self.caches = tuple(
             tensor for value in caches.values() for tensor in ((value,) if isinstance(value, torch.Tensor) else value)
@@ -28,14 +30,20 @@ class KVByteAccuracy:
         self.directory = Path(directory)
         self.records: dict[str, list] = {"store": [], "load": []}
         self.failures: list[str] = []
-        self.originals: dict[str, Any] = {}
+        self.originals: list[tuple[Any, str, Any]] = []
         methods = ("batch_copy_put", "batch_copy_get") if layerwise else ("put", "get")
         if not production:
             methods = ("copy_key_range_store", "copy_key_range_load") if layerwise else ("store", "load")
         for operation, name in zip(("store", "load"), methods, strict=True):
             original = getattr(backend, name)
-            self.originals[name] = original
-            setattr(backend, name, self._observe(operation, original, production and not layerwise))
+            self.originals.append((backend, name, original))
+            observed = self._observe(operation, original, production and not layerwise)
+            setattr(backend, name, observed)
+            if transfer is not None:
+                # Layerwise Transfer captures these methods when KV buffers are bound.
+                alias = "_store_ranges" if operation == "store" else "_load_ranges"
+                self.originals.append((transfer, alias, getattr(transfer, alias)))
+                setattr(transfer, alias, observed)
 
     def _observe(self, operation: str, original: Any, production_bulk: bool) -> Any:
         def transfer(keys, addresses, sizes, offsets=None):
@@ -126,8 +134,8 @@ class KVByteAccuracy:
         torch.npu.synchronize()
 
     def close(self) -> None:
-        for name, original in self.originals.items():
-            setattr(self.backend, name, original)
+        for owner, name, original in reversed(self.originals):
+            setattr(owner, name, original)
 
 
 def compare_saved_bytes(reference: Path, candidate: Path, expected: dict, actual: dict) -> None:
