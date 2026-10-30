@@ -12,6 +12,7 @@ import math
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -122,12 +123,12 @@ def _aligned_indices_flat_kernel(
 
 def _aligned_index_launch_config(num_groups, num_reqs, max_reqs, state_slots, num_cores):
     """Select small UB tiles and disjoint 32-byte output regions on the CPU."""
-    window = triton.next_power_of_2(state_slots + _ALIGN_ELEMENTS - 1)
+    window = next_power_of_2(state_slots + _ALIGN_ELEMENTS - 1)
     aligned_rows = _ALIGN_ELEMENTS // math.gcd(state_slots, _ALIGN_ELEMENTS)
     max_rows = min(32, _MAX_WINDOW_ELEMENTS // window)
     if max_reqs * state_slots % _ALIGN_ELEMENTS or max_rows < aligned_rows:
         return None
-    rows = triton.next_power_of_2(triton.cdiv(num_reqs * num_groups, num_cores))
+    rows = next_power_of_2(triton.cdiv(num_reqs * num_groups, num_cores))
     block_rows = max(aligned_rows, min(rows, max_rows))
     num_tiles = triton.cdiv(num_reqs, block_rows)
     row_programs = min(num_tiles, max(1, num_cores // num_groups))
@@ -201,7 +202,7 @@ def compute_aligned_state_indices(
             TABLE_COLS=table_cols,
             CACHE_BLOCK_SIZE=cache_block_size,
             STATE_SLOTS=state_slots,
-            BLOCK_SLOTS=triton.next_power_of_2(state_slots),
+            BLOCK_SLOTS=next_power_of_2(state_slots),
             BLOCK_ROWS=block_rows,
             WINDOW=window,
             TILES_PER_PROGRAM=tiles_per_program,
