@@ -78,17 +78,19 @@ class _TPTransferTiming:
             "AscendStoreV1Connector",
         ):
             worker = connector.worker
-            assert worker is not None and worker._topology.tp_partition.tp_mismatch, "v1 did not enable TP mismatch"
+            assert worker is not None and worker._topology.config.tp_partition.tp_mismatch, (
+                "v1 did not enable TP mismatch"
+            )
             backend = worker._resources.backend
             topology = worker._topology
-            rank, size = topology.tp_rank, topology.tp_size
-            slices = topology.tp_partition.key_slices_per_rank
+            rank, size = topology.tp_rank, topology.config.tp_size
+            slices = topology.config.tp_partition.key_slices_per_rank
             if self._producer:
-                self._patch(worker, "_build_store_candidates", "store_candidates")
-                self._patch(worker, "_materialize_store_candidates", "store_plan")
+                self._patch(worker.store, "_candidates", "store_candidates")
+                self._patch(worker.store, "_prepare", "store_plan")
             else:
-                self._patch(worker, "_build_load_batch", "load_plan")
-            self._patch(worker, "_materialize_concrete_bulk_arguments", f"{operation}_arguments")
+                self._patch(worker.load, "_prepare", "load_plan")
+            self._patch(worker.transfer, "arguments", f"{operation}_arguments")
             self._patch(backend, operation, f"backend_{operation}", buffers=True)
         else:
             raise AssertionError(f"Unsupported TP benchmark connector: {kind!r}")
@@ -153,7 +155,7 @@ class _TPTransferTiming:
                 assert not sender.stored_requests, "Producer Store did not drain"
         else:
             self._store_worker.fence_previous_store()
-            assert self._store_worker._pending_store_batch is None, "Producer Store source release is unknown"
+            assert not self._store_worker.store.pending, "Producer Store source release is unknown"
 
     def records(self) -> list[dict[str, Any]]:
         with self._lock:

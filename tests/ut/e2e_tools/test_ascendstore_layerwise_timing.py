@@ -36,6 +36,7 @@ def test_host_timing_preserves_real_layerwise_load_calls_and_captures_background
 
     runner = SimpleNamespace(execute_model=execute_model, sample_tokens=lambda grammar_output: "token")
     timing = LayerwiseLoadTiming(worker, backend, lookup, runner)
+    original_copy = worker.transfer._load_ranges
     try:
         baseline_start = len(backend.calls)
         baseline_lookup = lookup._lookup(lookup_request)
@@ -63,6 +64,7 @@ def test_host_timing_preserves_real_layerwise_load_calls_and_captures_background
             for stage in ("layer_task_host", "layer_io_host", "range_copy", "layer_wait_host"):
                 assert layer["stages"][stage]["calls"] == 1
         assert "start_load" not in vars(worker)
+        assert worker.transfer._load_ranges is original_copy
         assert lookup._lookup == worker.lookup
     finally:
         timing.restore()

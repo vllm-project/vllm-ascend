@@ -97,7 +97,9 @@ def test_worker_drains_the_layerwise_owner_not_the_bulk_sender(monkeypatch, impl
     extension = AscendStoreLayerwiseWorkerExtension()
     store = object()
     backend = SimpleNamespace(store=store, _store=store)
-    worker = SimpleNamespace(_drain_attention_transfers=Mock(), fence_previous_store=Mock(), _pending_store_batch=None)
+    worker = SimpleNamespace(
+        _drain_attention_transfers=Mock(), fence_previous_store=Mock(), store=SimpleNamespace(pending=False)
+    )
     monkeypatch.setattr(extension, "_layerwise_resources", lambda: (worker, backend, implementation))
     assert extension._drain_stores()[:2] == (backend, store)
     if implementation == "production":

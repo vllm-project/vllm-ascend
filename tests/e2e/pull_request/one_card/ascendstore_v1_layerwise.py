@@ -47,7 +47,7 @@ class AscendStoreLayerwiseWorkerExtension(AscendStoreBenchmarkWorkerExtension):
             store = backend.store
         else:
             worker.fence_previous_store()
-            assert worker._pending_store_batch is None, "Store source release is not confirmed"
+            assert not worker.store.pending, "Store source release is not confirmed"
             store = backend._store
         return backend, store, (time.perf_counter() - start) * 1000
 
@@ -69,5 +69,6 @@ class AscendStoreLayerwiseWorkerExtension(AscendStoreBenchmarkWorkerExtension):
             "AscendStoreV1Connector",
         ), f"Unexpected connector: {kind}"
         worker = connector.worker
-        assert worker is not None and type(worker).__name__ == "KeyRangeLayerwiseWorker", "Not the KeyRange route"
+        assert worker is not None and worker._topology.config.use_layerwise, "Layerwise is not enabled"
+        assert not worker.transfer.shared_objects, "Not the KeyRange route"
         return worker, worker._resources.backend, "v1"

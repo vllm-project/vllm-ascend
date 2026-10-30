@@ -19,7 +19,7 @@ class AscendStoreBenchmarkWorkerExtension:
         worker = connector.connector_worker if production else connector.worker
         backend = worker.m_store if production else worker._resources.backend
         caches = worker.kv_caches if production else worker._resources.kv_caches
-        layerwise = worker.use_layerwise if production else type(worker).__name__ == "KeyRangeLayerwiseWorker"
+        layerwise = worker.use_layerwise if production else worker._topology.config.use_layerwise
         self._byte_accuracy = KVByteAccuracy(backend, caches, production, layerwise, directory)
         return {"status": "installed"}
 
@@ -96,7 +96,7 @@ class AscendStoreBenchmarkWorkerExtension:
             assert worker is not None
             backend = worker._resources.backend
             worker.fence_previous_store()
-            assert worker._pending_store_batch is None, "Store source release must be confirmed before cache control"
+            assert not worker.store.pending, "Store source release must be confirmed before cache control"
             store = backend._store
         else:
             raise AssertionError(f"Unsupported benchmark connector: {connector_kind!r}")

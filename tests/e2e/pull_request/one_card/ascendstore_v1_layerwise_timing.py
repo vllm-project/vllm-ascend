@@ -50,15 +50,18 @@ class LayerwiseLoadTiming:
         try:
             self._patch(self._lookup_server, "_lookup", "lookup_service", independent=True)
             self._patch(self._backend, "exists", "lookup_backend_exists", independent=True)
-            self._patch(self._worker, "_build_load_batch", "load_batch_prepare")
+            self._patch(self._worker.load, "_prepare", "load_batch_prepare")
             self._patch(self._worker, "start_load", "load_start_host")
             self._patch(self._worker, "wait_for_layer_load", "layer_wait_host", layer_argument="layer_name")
-            self._patch(self._worker, "_prepare_load_layers", "layer_plan_prepare")
-            self._patch(self._worker, "_copy_load_layer", "layer_io_host", layer_argument="layer_id")
+            self._patch(self._worker.transfer, "_open_write", "layer_plan_prepare")
+            self._patch(self._worker.transfer, "_write_layer", "layer_io_host", layer_argument="layer_id")
             self._patch(self._backend, "start_key_range_load", "session_start")
             self._patch(self._backend, "copy_key_range_load", "range_copy")
+            # Transfer binds this Backend method during KV registration, before the probe is installed.
+            self._replace(self._worker.transfer, "_load_ranges", self._backend.copy_key_range_load)
             self._patch(self._backend, "finish_key_range_load", "session_end")
-            self._replace(self._worker, "_submit_load", self._submit_load_wrapper(self._worker._submit_load))
+            executor = self._worker.transfer.executor
+            self._replace(executor, "_write_layer", self._layer_task_wrapper(executor._write_layer))
             self._replace(self._runner, "execute_model", self._execute_wrapper(self._runner.execute_model))
             self._replace(self._runner, "sample_tokens", self._sample_wrapper(self._runner.sample_tokens))
         except BaseException:
@@ -82,7 +85,7 @@ class LayerwiseLoadTiming:
             if layer_argument is not None:
                 value = args[0] if args else kwargs[layer_argument]
                 if layer_argument == "layer_name":
-                    layer = self._worker._layer_ids_by_name.get(value)
+                    layer = self._worker.context.layer_ids_by_name.get(value)
                 else:
                     layer = value
             self._layer_context.layer = layer
@@ -97,34 +100,15 @@ class LayerwiseLoadTiming:
 
         self._replace(owner, name, timed)
 
-    def _submit_load_wrapper(self, original: Any) -> Any:
+    def _layer_task_wrapper(self, original: Any) -> Any:
         @wraps(original)
-        def submit(*args: Any, **kwargs: Any) -> Any:
-            result = original(*args, **kwargs)
-            session = self._worker._session
-            if session is not None:
-                submit_task = session._load_submit
+        def run_layer(control: Any, layer_id: int, gate: Any) -> Any:
+            step = self._active_step
+            if step is None:
+                return original(control, layer_id, gate)
+            return self._invoke("layer_task_host", step, layer_id, original, (control, layer_id, gate), {})
 
-                @wraps(submit_task)
-                def submit_timed_task(operation: Any, *task_args: Any, **task_kwargs: Any) -> Any:
-                    # Layer tasks receive (layer_id, gate); the finish callback takes no arguments.
-                    if not task_args:
-                        return submit_task(operation, *task_args, **task_kwargs)
-
-                    @wraps(operation)
-                    def run_layer(layer_id: int, gate: Any) -> Any:
-                        step = self._active_step
-                        if step is None:
-                            return operation(layer_id, gate)
-                        return self._invoke("layer_task_host", step, layer_id, operation, (layer_id, gate), {})
-
-                    return submit_task(run_layer, *task_args, **task_kwargs)
-
-                # Observe the injected submit function without depending on the task's private name.
-                self._replace(session, "_load_submit", submit_timed_task)
-            return result
-
-        return submit
+        return run_layer
 
     def _execute_wrapper(self, original: Any) -> Any:
         @wraps(original)
@@ -145,14 +129,11 @@ class LayerwiseLoadTiming:
                 }
             )
             self._active_step = step
-            checkpoint = len(self._restorations)
             try:
                 result = self._invoke("execute_model_host", step, None, original, args, kwargs)
                 self._sample_step = step
                 return result
             finally:
-                # Per-step Session hooks must not retain completed sessions across diagnostic requests.
-                self.restore(keep=checkpoint)
                 self._active_step = None
 
         return execute
@@ -188,8 +169,8 @@ class LayerwiseLoadTiming:
         self._restorations.append((owner, name, name in attributes, attributes.get(name)))
         setattr(owner, name, replacement)
 
-    def restore(self, *, keep: int = 0) -> None:
-        while len(self._restorations) > keep:
+    def restore(self) -> None:
+        while self._restorations:
             owner, name, existed, value = self._restorations.pop()
             if existed:
                 setattr(owner, name, value)

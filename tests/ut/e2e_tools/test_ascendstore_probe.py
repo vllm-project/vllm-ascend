@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from collections import deque
 from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import Mock, create_autospec
@@ -22,7 +23,8 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.worker import BulkWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.store import StoreService
 
 _PRODUCTION_MODULE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
 
@@ -87,11 +89,15 @@ def worker_factory(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], SimpleNam
         elif implementation == "v1":
             connector_type = type("AscendStoreV1Connector", (), {"__module__": _V1_MODULE})
             connector = connector_type()
-            connector.worker = BulkWorker.__new__(BulkWorker)
+            connector.worker = Worker.__new__(Worker)
             connector.worker._resources = SimpleNamespace(kv_caches={"layer": cache}, backend=backend)
-            connector.worker._topology = SimpleNamespace(cache_transfer_granularity=4)
-            connector.worker._store_fatal_error = None
-            connector.worker._pending_store_batch = None
+            connector.worker._topology = SimpleNamespace(config=SimpleNamespace(cache_transfer_granularity=4))
+            service = StoreService.__new__(StoreService)
+            service._fatal_error = None
+            service._pending = deque()
+            service._latest = {}
+            service.transfer = SimpleNamespace(seal_reads=Mock())
+            connector.worker.store = service
             connector.worker.fence_previous_store = Mock(wraps=connector.worker.fence_previous_store)
             wait_for_store = connector.worker.fence_previous_store
             store_method = "store"
@@ -208,7 +214,7 @@ def test_probe_preserves_source_bytes_when_store_fence_fails(
         if implementation == "production":
             worker.connector.connector_worker.kv_send_thread.raise_if_failed.side_effect = RuntimeError("Store failed")
         else:
-            worker.connector.worker._store_fatal_error = RuntimeError("Store failed")
+            worker.connector.worker.store._fatal_error = RuntimeError("Store failed")
         with pytest.raises(RuntimeError):
             clear_worker_local_kv(worker)
         assert torch.equal(worker.cache, expected)

@@ -35,29 +35,30 @@ def _make_timing(*, execute_error=None):
         with ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(operation, *args)
 
-    session = SimpleNamespace(_load_submit=submit_task)
+    executor = SimpleNamespace()
+    transfer = SimpleNamespace(
+        _open_write=Mock(side_effect=lambda *args: backend.start_key_range_load(["key"])),
+        _write_layer=lambda layer_id: backend.copy_key_range_load(["key"], [[100]], [[16]], [[0]]),
+        executor=executor,
+    )
     worker = SimpleNamespace(
-        _prepare_load_layers=Mock(),
-        _copy_load_layer=lambda layer_id: backend.copy_key_range_load(["key"], [[100]], [[16]], [[0]]),
-        _session=session,
-        _layer_ids_by_name={"layer.0": 0},
-        _build_load_batch=Mock(),
+        transfer=transfer,
+        context=SimpleNamespace(layer_ids_by_name={"layer.0": 0}),
+        load=SimpleNamespace(_prepare=Mock()),
     )
 
-    def submit_load(batch):
-        backend.start_key_range_load(["key"])
-        worker._prepare_load_layers(batch)
-
     def start_load():
-        worker._build_load_batch(())
-        worker._submit_load(None)
+        worker.load._prepare(())
+        worker.transfer._open_write(None)
+
+    def run_layer(control, layer_id, gate):
+        return worker.transfer._write_layer(layer_id)
+
+    executor._write_layer = run_layer
 
     def wait_for_layer_load(layer_name):
-        def load(layer_id, gate):
-            return worker._copy_load_layer(layer_id)
-
-        session._load_submit(load, 0, None).result(timeout=5)
-        session._load_submit(lambda: backend.finish_key_range_load(["key"])).result(timeout=5)
+        submit_task(executor._write_layer, None, 0, None).result(timeout=5)
+        submit_task(lambda: backend.finish_key_range_load(["key"])).result(timeout=5)
 
     def execute_model(scheduler_output):
         if scheduler_output.kv_connector_metadata.load_commands:
@@ -68,7 +69,6 @@ def _make_timing(*, execute_error=None):
         return result
 
     worker.start_load = start_load
-    worker._submit_load = submit_load
     worker.wait_for_layer_load = wait_for_layer_load
     runner = SimpleNamespace(execute_model=execute_model, sample_tokens=Mock(return_value=result))
     lookup = SimpleNamespace(_lookup=lambda request: backend.exists(["key"]))
@@ -87,7 +87,7 @@ def _schedule(*request_ids):
 
 def test_timing_preserves_results_and_captures_executor_layers_but_not_decode():
     timing, worker, backend, lookup, runner, result = _make_timing()
-    owners = (worker, backend, lookup, runner, worker._session)
+    owners = (worker, worker.load, worker.transfer, worker.transfer.executor, backend, lookup, runner)
     originals = [dict(vars(owner)) for owner in owners]
     timing.install()
     try:
@@ -138,25 +138,27 @@ def test_timing_preserves_the_exact_exception_and_restores_inherited_methods():
     assert timing._active_step is None
 
 
-def test_timing_releases_per_step_session_hooks_without_accumulating_wrappers():
+def test_timing_does_not_accumulate_executor_wrappers_between_steps():
     timing, worker, _, _, runner, result = _make_timing()
-    original = worker._session._load_submit
+    original = worker.transfer.executor._write_layer
     timing.install()
     installed = len(timing._restorations)
+    observed = worker.transfer.executor._write_layer
     try:
         for index in range(3):
             assert runner.execute_model(_schedule(f"request-{index}")) is result
-            assert worker._session._load_submit is original
+            assert worker.transfer.executor._write_layer is observed
             assert len(timing._restorations) == installed
         assert timing.report()["stages"]["layer_task_host"]["calls"] == 3
     finally:
         timing.restore()
+    assert worker.transfer.executor._write_layer is original
 
 
 def test_partial_install_rolls_back_every_successful_hook():
     timing, worker, backend, lookup, runner, _ = _make_timing()
     del backend.copy_key_range_load
-    owners = (worker, backend, lookup, runner, worker._session)
+    owners = (worker, worker.load, worker.transfer, worker.transfer.executor, backend, lookup, runner)
     originals = [dict(vars(owner)) for owner in owners]
     with pytest.raises(AttributeError):
         timing.install()

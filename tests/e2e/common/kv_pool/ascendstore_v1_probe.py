@@ -49,7 +49,7 @@ def install_worker_io_probe(worker: Any) -> int:
         assert kv_pool_worker is not None
         backend = kv_pool_worker._resources.backend
         kv_caches = kv_pool_worker._resources.kv_caches
-        granularity = kv_pool_worker._topology.cache_transfer_granularity
+        granularity = kv_pool_worker._topology.config.cache_transfer_granularity
         wait_for_store = kv_pool_worker.fence_previous_store
         store_method_name = "store"
         load_method_name = "load"
