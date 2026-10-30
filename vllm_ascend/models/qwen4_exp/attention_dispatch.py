@@ -25,17 +25,16 @@ class QSARequest:
 
     @property
     def use_fia(self) -> bool:
-        """Whether this Prefill chunk starts below the FIA KV limit."""
+        """Whether this Prefill chunk fits the total KV limit."""
         return self.is_prefill and self.fia_query_end > self.query_start
 
     @property
     def fia_query_end(self) -> int:
-        """Route the whole chunk to FIA when its cached prefix is below 24K."""
+        """Route to FIA when historical KV plus this query is at most 24K."""
         if not self.is_prefill:
             return self.query_start
-        query_length = self.query_end - self.query_start
-        kv_before_query = self.kv_length - query_length
-        if kv_before_query < QSA_FIA_MAX_LOGICAL_KV_LENGTH:
+        # kv_length already includes the current query tokens.
+        if self.kv_length <= QSA_FIA_MAX_LOGICAL_KV_LENGTH:
             return self.query_end
         return self.query_start
 
@@ -129,7 +128,7 @@ def dispatch_qsa_attention(
             block_table=table,
         )
 
-    # Every Decode row and each Prefill chunk starting at/above the logical-KV
+    # Every Decode row and each Prefill chunk exceeding the total-KV
     # limit uses GBSA. Coalesce consecutive rows without gathering/copying K/V or
     # changing the original request IDs used to address block tables and lengths.
     gbsa_spans: list[tuple[int, int]] = []
