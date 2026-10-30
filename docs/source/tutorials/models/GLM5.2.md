@@ -55,19 +55,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
-
-**Step 1:** Download the Docker image
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:{tag}
-```
-
-**Step 2:** Start Docker container
-
-Select the `docker run` command for your hardware platform:
-
-Use the same compatible image digest on all nodes.
+Select an image for your hardware and start a container on each node.
+Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
 For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL configuration at `/etc/hccl_rootinfo.json` and `/etc/hixlep/` before mounting it into the containers.
 
@@ -76,7 +65,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -114,7 +103,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -158,7 +147,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -196,7 +185,7 @@ Changing a checkpoint does not transfer accuracy or performance validation
 from one model to the other. Keep thinking enabled for GLM-5.3.
 
 For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
-image tag and container mounts from Section 4. Use the same image on every
+image and container mounts from Section 4. Use the same image on every
 node in a deployment.
 
 <a id="glm-common-parameters"></a>
@@ -319,6 +308,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       --api-server-count 1 \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
+      --enable-expert-parallel \
       --seed 1024 \
       --served-model-name glm \
       --tool-call-parser glm47 \
@@ -347,6 +337,8 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       and indexer KV caches use `int8` in this hardware tab.
     - `FULL_DECODE_ONLY` captures only Decode execution; `deepseek_mtp` uses
       three speculative tokens with an eager draft model.
+    - `--enable-expert-parallel` is required for the requested DSA context
+      parallelism and FlashComm1 with this TP16/DP1 layout.
     - `HCCL_BUFFSIZE=200` follows the common HCCL buffer definition above.
 
 #### 5.1.2 Multi-node Deployment {: #512-multi-node-deployment }
@@ -610,7 +602,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --safetensors-load-strategy prefetch \
         --api-server-count 1 \
         --data-parallel-size 8 \
-        --data-parallel-start-rank 0 \
         --data-parallel-size-local 4 \
         --data-parallel-address $node0_ip \
         --data-parallel-rpc-port 12980 \
@@ -849,7 +840,7 @@ platform-specific group is labeled. Shared parameter meanings are listed in
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
 - `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.
-- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
+- `--data-parallel-start-rank`: Omit this option on API node 0 so rank `0` is inferred and internal DP load balancing is retained. Only headless node 1 explicitly sets `4`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Used on node 1. Node 0 hosts the API server.
@@ -899,6 +890,11 @@ The A2 four-node commands in this section do not enable fused MC2.
 Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
 Topology, role-specific limits and connector settings are explained in each
 hardware tab; apply only the settings for the selected platform.
+
+The proxy commands below use the source tree bundled in the official
+vLLM-Ascend image at `/vllm-workspace/vllm-ascend`. On a separate proxy
+host, run them inside a vLLM-Ascend container. For a source installation,
+replace that prefix with the actual checkout directory.
 
 Select the hardware tab below for the prefill and decode topology. Prefill and decode run on separate node groups and exchange KV cache through Mooncake.
 
@@ -1355,7 +1351,7 @@ layerwise setting and topology.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" "$P2_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -1933,7 +1929,7 @@ layerwise setting and topology.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -1976,7 +1972,7 @@ layerwise setting and topology.
 
     | Role | Nodes | Global DP | TP | PP | Placement | Devices per role |
     | --- | --- | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 | 1 | 16 | 2 | Four nodes | 32 |
+    | Prefill | P0-P3 | 1 | 8 | 4 | Four nodes | 32 |
     | Decode | D0-D3 | 16 | 2 | 1 | Four DP ranks per node, starting at 0/4/8/12 | 32 |
 
     P0 exposes the only Prefill API on port 8077; P1-P3 are headless.
@@ -1984,7 +1980,7 @@ layerwise setting and topology.
     executor with `--nnodes 4`; Decode uses a launcher to start one TP2
     engine per DP rank. Both roles pin the V1 model runner and use int8
     attention and indexer KV caches. This deployment uses pipeline parallelism
-    (PP2); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
+    (PP4); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
     Prepare identical weights and software on all eight nodes, verify
     [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect),
@@ -2086,7 +2082,7 @@ layerwise setting and topology.
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
     source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
-    # Cross-node TP16 uses the NPU RoCE interfaces for device communication.
+    # Cross-node PP4 uses the NPU RoCE interfaces for device communication.
     # Leave HCCL_IF_IP unset and pin the host-side sockets to the business NIC.
     unset HCCL_IF_IP
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -2109,13 +2105,13 @@ layerwise setting and topology.
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
     export VLLM_USE_FASTOKENS=1
-    export VLLM_PP_LAYER_PARTITION="42,36"
+    export VLLM_PP_LAYER_PARTITION="20,20,20,18"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --pipeline-parallel-size 2 \
-      --tensor-parallel-size 16 \
+      --pipeline-parallel-size 4 \
+      --tensor-parallel-size 8 \
       --distributed-executor-backend mp \
       --nnodes 4 \
       --node-rank "$NODE_RANK" \
@@ -2129,8 +2125,8 @@ layerwise setting and topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 135000 \
-      --max-num-batched-tokens 16384 \
+      --max-model-len 200000 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
       --trust-remote-code \
@@ -2142,8 +2138,8 @@ layerwise setting and topology.
       --enable-auto-tool-choice \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
-      --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
+      --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
+      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
@@ -2151,7 +2147,7 @@ layerwise setting and topology.
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+          "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }' \
@@ -2217,7 +2213,7 @@ layerwise setting and topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 135000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 256 \
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.92 \
@@ -2230,7 +2226,7 @@ layerwise setting and topology.
       --enable-auto-tool-choice \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
-      --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true}' \
+      --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --kv-transfer-config '{
@@ -2240,7 +2236,7 @@ layerwise setting and topology.
         "kv_port": "30100",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+          "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }'
@@ -2310,7 +2306,7 @@ layerwise setting and topology.
 
     unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
       --host 0.0.0.0 --port 8000 --workers 8 \
       --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
       --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -2321,7 +2317,7 @@ layerwise setting and topology.
         10010 10011 10012 10013 10010 10011 10012 10013
     ```
 
-    Check the proxy and send requests with model name `glm5`, explicitly
+    Check the proxy and send requests with model name `glm`, explicitly
     bypassing any client-side HTTP proxy:
 
     ```shell
@@ -2337,8 +2333,8 @@ layerwise setting and topology.
       }'
     ```
 
-    Both roles use a 135,000-token maximum length, memory utilization 0.92,
-    and three MTP tokens. Prefill uses eager mode, a 16,384-token batch budget,
+    Both roles use a 200,000-token maximum length, memory utilization 0.92,
+    and three MTP tokens. Prefill uses eager mode, an 8,192-token batch budget,
     64 sequences, DSA CP, and FlashComm1. Decode uses a 256-token
     batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
     and recomputation scheduling.
@@ -2350,7 +2346,7 @@ layerwise setting and topology.
     If Prefill fails during Mooncake KV cache registration with
     `ValueError: Mooncake worker requires a local DP rank`, first verify that
     the conditional single-local-rank fix below is present in the installed
-    worker. This topology uses DP1 with PP2 across P0-P3; it has no separate
+    worker. This topology uses DP1 with PP4 across P0-P3; it has no separate
     global DP ranks, and a PP headless worker may still receive
     `data_parallel_rank_local=None`.
 
@@ -2844,7 +2840,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     D2_IP="<D2_IP>"
     D3_IP="<D3_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -3458,25 +3454,25 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     This A2 pooling reference uses four Prefill nodes and four Decode nodes,
     with eight devices per node. One Prefill instance spans four nodes with
-    TP16 × PP2 and has DP size 1 with one API server. Decode uses one DP16 × TP2
+    TP8 × PP4 and has DP size 1 with one API server. Decode uses one DP16 × TP2
     group across four nodes.
 
     | Role | Nodes | Parallelism | Placement | Devices per role |
     | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 (1 instance) | TP16 × PP2 | One instance on P0-P3 | 32 |
+    | Prefill | P0-P3 (1 instance) | TP8 × PP4 | One instance on P0-P3 | 32 |
     | Decode | D0-D3 | DP16 × TP2 | Four local DP ranks per node, starting at 0/4/8/12 | 32 |
 
     P0 exposes the API on port 8000; P1-P3 are headless PP partners.
     Decode exposes ports 8000-8003 on each node, and the proxy listens on
-    1999. This pooled PP2 layout uses the same Prefill parallelism as the
+    1999. This pooled PP4 layout uses a wider Prefill partition than the
     non-pooled A2 PD deployment and adds MemCache KV pooling.
     Use the A2 image from Section 4 and the
     [A2 Decode launcher](#glm53-pd-a2-launcher).
 
-    The pooled Prefill and Decode engines both use `--max-model-len 128000`,
+    The pooled Prefill and Decode engines both use `--max-model-len 200000`,
     with MTP token counts 1 and 5, respectively.
-    The end-to-end limit is **128,000 tokens**, including input and output.
-    Both roles declare the actual Prefill DP1/PP2/TP16 partition `42,36` and
+    The end-to-end limit is **200,000 tokens**, including input and output.
+    Both roles declare the actual Prefill DP1/PP4/TP8 partition `20,20,20,18` and
     Decode DP16/TP2 topology.
 
     <a id="glm53-pool-a2-prepare"></a>
@@ -3556,7 +3552,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
     PP node rank, API port, local IP, instance leader IP, and visible devices.
-    Both PP stages of one instance use the same master address and partition.
+    All four PP stages of one instance use the same master address and partition.
     The Prefill instance uses its own master address.
 
     ```shell
@@ -3599,7 +3595,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export TASK_QUEUE_ENABLE=1
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_USE_FASTOKENS=1
-    export VLLM_PP_LAYER_PARTITION="42,36"
+    export VLLM_PP_LAYER_PARTITION="20,20,20,18"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
     export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
@@ -3609,9 +3605,9 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --tensor-parallel-size 16 \
+      --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --pipeline-parallel-size 2 \
+      --pipeline-parallel-size 4 \
       --distributed-executor-backend mp \
       --master-addr "$INSTANCE_LEADER_IP" \
       --master-port 7060 \
@@ -3622,8 +3618,8 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 128000 \
-      --max-num-batched-tokens 16384 \
+      --max-model-len 200000 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
       --trust-remote-code \
@@ -3635,7 +3631,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enforce-eager \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
+      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -3650,7 +3646,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30000",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -3743,7 +3739,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 128000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 256 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
@@ -3756,7 +3752,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --reasoning-parser glm47 \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --kv-transfer-config '{
@@ -3772,7 +3768,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30200",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 4, "tp_size": 8, "pp_layer_partition": "20,20,20,18"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -3834,16 +3830,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         python launch_online_dp.py --script ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 8000
         ```
 
-    4. Confirm that the Decode worker logs report completion of the MemCache
-       DP initialization barrier before treating the group as ready:
+    4. Check the logs on every Decode rank for successful MemCache
+       initialization before treating the group as ready.
 
-        ```text
-        All DP MemCache initializations completed
-        ```
-
-        The Prefill instance has DP size 1 and does not enter this DP
-        barrier; check their logs for successful MemCache initialization and
-        verify that P1-P3 joined the Prefill PP instance. They do not expose
+        Check the Prefill worker logs for successful MemCache initialization
+        and verify that P1-P3 joined the Prefill PP instance. They do not expose
         HTTP APIs. On every node, confirm that the active `mmc-local.conf`
         uses `device_rdma` and `dram.size = 40GB`.
 
@@ -3861,7 +3852,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
         unset ftp_proxy FTP_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ALL_PROXY all_proxy
 
-        python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
           --host 0.0.0.0 --port 1999 --workers 8 \
           --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
           --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -4138,7 +4129,7 @@ Select the tab that matches your deployment hardware.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" "$P1_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D1_IP" \
@@ -4638,7 +4629,7 @@ Select the tab that matches your deployment hardware.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -4739,8 +4730,8 @@ settings when comparing results. Scores are specific to the model shown.
 
 ### 7.3 W4A4C8 950DT products Validation Records
 
-Both records below use one 950DT products (96GB × 8), the 2026-10-08 950DT products
-image, TP8/DP1/EP, eager mode, a configured maximum
+Both records below use one 950DT products (96GB × 8), a historical local
+950DT products image, TP8/DP1/EP, eager mode, a configured maximum
 context of 135000, 16384 batched tokens, 20 sequences and FP8 KV/indexer
 caches. On 2026-10-10, `/health`, `/v1/chat/completions` and
 `/v1/completions` returned HTTP 200 for both local checkpoints.
@@ -4791,6 +4782,11 @@ refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 
 ### 9.1 Recommended Configurations {: #91-detailed-node-configuration }
 
+The Colocated rows summarize the multi-node examples in
+[Section 5.1.2](#512-multi-node-deployment). The single-node examples in
+[Section 5.1.1](#511-single-node-deployment) use different parallelism and
+scheduler limits; do not apply the multi-node rows to those examples.
+
 | Scenario | Hardware | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
@@ -4806,10 +4802,10 @@ refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 | 1M PD | A3 | Prefill | 16 | 1 | 1 | 2 | 16 | 64 | 16384 | 1048576 | 1 |
 | 1M PD | A3 | Decode | 4 | 8 | 4 | 1 | 4 | 8 | 48 | 1048576 | 5 |
 | Colocated | A2 | Shared | 8 | 4 | 1 | 1 | 1 | 128 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Prefill | 16 | 2 | 1 | 1 | 1 | 64 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 135000 | 3 |
-| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 2 | 1 | 64 | 16384 | 128000 | 1 |
-| Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 128000 | 5 |
+| Ordinary PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 8192 | 200000 | 1 |
+| Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 200000 | 3 |
+| Pooled PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 8192 | 200000 | 1 |
+| Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 200000 | 5 |
 
 ### 9.2 Tuning Guidelines {: #92-performance-workloads }
 

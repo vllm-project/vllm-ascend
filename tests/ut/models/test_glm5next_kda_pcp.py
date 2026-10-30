@@ -111,6 +111,7 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypat
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
     config = SimpleNamespace(
+        model_type="glm5_next",
         hidden_size=16,
         linear_head_dim=128,
         linear_num_heads=8,
@@ -120,7 +121,7 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypat
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=pcp_size),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=config, hf_text_config=config),
-        cache_config=SimpleNamespace(mamba_cache_dtype="auto"),
+        cache_config=SimpleNamespace(mamba_cache_dtype="auto", use_replayssm=False),
         speculative_config=None,
         quant_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),

@@ -388,6 +388,7 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     batch.is_dummy = is_dummy
     state = state_type.__new__(state_type)
     state.decoder_replay = None
+    state.recoverssm = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )

@@ -628,8 +628,8 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
-          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -646,6 +646,7 @@ jobs:
 
       - name: Upload AISBench outputs
         if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: aisbench-outputs-single-node-${{ steps.bench_ts.outputs.effective_name }}-${{ github.run_id }}-${{ github.run_attempt }}

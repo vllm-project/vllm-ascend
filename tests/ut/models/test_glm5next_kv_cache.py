@@ -187,14 +187,18 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
         dtype=torch.float32,
     )
     pool = BlockPool(8, True, 4)
-    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
+    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16, needs_kv_cache_zeroing=True)
     blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, spec, False, 16)
     assert blocks == ([], []) and hit == 0
-    manager.allocate_external_computed_blocks("hit", 1024, 0)
+    manager.allocate_external_computed_blocks("hit", 1024, 0, record_for_zeroing=False)
     assert len(manager.req_to_blocks["hit"]) == 1
+    assert manager.take_new_block_ids() == []
     manager.allocate_external_computed_blocks("hit", 1024, 512)
     assert len(manager.req_to_blocks["hit"]) == 1
     manager.free("hit")
+    manager.allocate_external_computed_blocks("zero", 0, 512, record_for_zeroing=True)
+    assert manager.take_new_block_ids() == [manager.req_to_blocks["zero"][0].block_id]
+    manager.free("zero")
 
 
 @pytest.mark.parametrize("ratio", [0, 1, 3])

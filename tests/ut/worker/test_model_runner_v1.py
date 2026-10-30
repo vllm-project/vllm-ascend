@@ -1367,11 +1367,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 start_nz_warm_thread=MagicMock(),
                 join_nz_warm_thread=MagicMock(),
             ),
-            patch.multiple(
-                "vllm_ascend.model_executor.warmup.early_kernel_warmup",
-                start_early_kernel_warmup=MagicMock(),
-                join_early_kernel_warmup=MagicMock(),
-            ),
             patch(
                 "vllm_ascend.worker.v1.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
                 return_value=False,

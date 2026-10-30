@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from vllm.config import CompilationMode
 
 import vllm_ascend.models.glm5next.mtp as mtp_module
 import vllm_ascend.utils as ascend_utils
@@ -15,6 +16,7 @@ from vllm_ascend.models.glm5next.mtp import Glm5NextMTP
 def make_mtp(use_rotation):
     model = Glm5NextMTP.__new__(Glm5NextMTP)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(num_hidden_layers=45, num_nextn_predict_layers=1, n_routed_experts=0)
     model.is_rot_weight_used = use_rotation
     if use_rotation:
@@ -86,7 +88,11 @@ def test_mtp_transforms_target_and_recycled_hidden_states(use_rotation):
 def test_rotation_is_gated_by_checkpoint(quant_description, expected):
     config = SimpleNamespace(hidden_size=4)
     quant_config = SimpleNamespace(quant_description=quant_description) if quant_description is not None else None
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config), quant_config=quant_config)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=config),
+        quant_config=quant_config,
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+    )
     with (
         patch.object(mtp_module, "Glm5NextMultiTokenPredictor", return_value=nn.Module()),
         patch.object(Glm5NextMTP, "set_moe_parameters"),

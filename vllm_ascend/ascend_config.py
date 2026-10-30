@@ -264,10 +264,14 @@ class StairConfig:
 class AscendWarmupConfig:
     """Configuration for startup warmup that overlaps weight loading.
 
-    Both threads are joined at the end of ``load_model``, before memory
-    profiling, so they never touch the KV cache budget.
+    The early warmup threads are joined at the end of ``load_model``, before
+    memory profiling, so they never touch the KV cache budget.
     """
 
+    # Deprecated no-op: Triton kernels now register into the upstream
+    # JitWarmupRegistry and compile in ``kernel_warmup`` (see
+    # vllm_ascend/model_executor/warmup/kernel_warmup.py). Kept so existing
+    # additional_config JSON keeps parsing.
     enable_early_kernel_warmup: bool = False
     enable_early_nz_warmup: bool = False
 
@@ -1131,18 +1135,16 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
-        # validated SiTU shape without widening support for unrelated models.
-        supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3 or is_kimi_k3:
-            supported_intermediate_sizes.add(6144)
-        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
-        intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in supported_intermediate_sizes:
+        # intermediate_hidden (the post-activation intermediate width) must be in
+        # [256, 4096] and aligned to 128.
+        # TODO: A5 already meets this requirement, but A3 does not — the A3 operator
+        # only supports [512, 3072] aligned to 256.
+        moe_intermediate_size = int(moe_intermediate_size)
+        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
-                intermediate_hidden,
-                sorted(supported_intermediate_sizes),
+                "mega moe operator is not supported by current a5 config, for moe_intermediate_size %s "
+                "is not in [256, 4096] or not aligned to 128",
+                moe_intermediate_size,
             )
             return False
 

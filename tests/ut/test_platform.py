@@ -312,6 +312,44 @@ def test_visible_device_id_to_physical_device_id():
         load_extension.assert_called_once_with("vllm_ascend.vllm_ascend_C")
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.NONE,
+    ],
+)
+def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=mode,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={"ascend_compilation_config": {}},
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    expected_count = int(mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE))
+    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward") == expected_count
+    if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
+        assert compilation_config.splitting_ops == []
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():

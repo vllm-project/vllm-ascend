@@ -737,6 +737,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        # Declarative JIT warmup for the fused Q-RMS kernel (upstream-style
+        # registry window is held open by the model runner while builders are
+        # constructed; no-op elsewhere).
+        from vllm_ascend.ops.triton.rms_norm import _TRITON_Q_RMS_KERNEL
+
+        _TRITON_Q_RMS_KERNEL.register_warmup(vllm_config)
         self.device = device
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
