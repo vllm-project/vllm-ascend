@@ -97,6 +97,10 @@ on:
         required: false
       SYNC_TOOLS_TOKEN:
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
 
 jobs:
   generate-matrix:
@@ -192,6 +196,13 @@ jobs:
       env:
         SOC: ${{ inputs.soc }}
     steps:
+      # Cache compression participates in the transport version. Match the
+      # central producer and the test images instead of falling back to gzip.
+      - name: Install L1 transport dependency
+        run: |
+          apt-get update -y
+          apt-get install -y zstd
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -264,17 +275,40 @@ jobs:
             --build-arg TAG_SUFFIX="${TAG_SUFFIX}"
           )
 
-          if [ "${{ inputs.should_push }}" = "true" ]; then
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false,push=true" .
-          else
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false" .
-          fi
+          # Keep the exact image locally for the L1 producer. No registry tag
+          # lookup can race another nightly build or select a different image.
+          LOCAL_IMAGE="vllm-ascend-nightly-l1:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}"
+          docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --load -t "$LOCAL_IMAGE" .
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$LOCAL_IMAGE")
 
           {
             echo "image=${FINAL_IMAGE}"
             echo "full_tag=${FULL_TAG}"
             echo "unique_tag=${UNIQUE_TAG}"
+            echo "local_image=${IMAGE_ID}"
+            echo "push_image=${PUSH_IMAGE}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Produce L1 for PR nightly source installs
+        id: nightly-l1
+        continue-on-error: true
+        uses: ./.github/actions/csrc-l1-produce
+        with:
+          image: ${{ steps.build.outputs.local_image }}
+          architecture: ${{ matrix.arch_name }}
+          soc-version: ${{ inputs.target }}
+          nightly: 'true'
+          access-key-id: ${{ github.repository == 'vllm-project/vllm-ascend' && inputs.should_push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (inputs.vllm_ascend_branch == 'main' || startsWith(inputs.vllm_ascend_branch, 'releases/')) && secrets.HW_OBS_AK || '' }}
+          secret-access-key: ${{ github.repository == 'vllm-project/vllm-ascend' && inputs.should_push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (inputs.vllm_ascend_branch == 'main' || startsWith(inputs.vllm_ascend_branch, 'releases/')) && secrets.HW_OBS_SK || '' }}
+
+      - name: Push the verified nightly image
+        if: ${{ inputs.should_push }}
+        env:
+          IMAGE: ${{ steps.build.outputs.local_image }}
+          PUSH_IMAGE: ${{ steps.build.outputs.push_image }}
+        run: |
+          docker tag "$IMAGE" "$PUSH_IMAGE"
+          docker push "$PUSH_IMAGE"
 
       - name: Log image push status
         if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}

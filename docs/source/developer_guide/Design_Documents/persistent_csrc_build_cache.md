@@ -83,7 +83,8 @@ entry validation, that key assumes a fixed compiler-image registry and
 immutable tags. Changing the registry or republishing a tag with different
 contents requires a new L0 key namespace or the full image identity in the
 key; an L1 identity check cannot make an already accepted L0 artifact safe.
-This PR does not change image-build L0 behavior or add L1 to Docker builds.
+The image workflow preserves this L0 contract and uses optional L1 only after
+an L0 miss.
 
 ## Build flow
 
@@ -322,9 +323,11 @@ require both `HW_OBS_AK` and `HW_OBS_SK`; possession of those secrets is the
 only write-authorization boundary. The save action receives the credentials
 explicitly from trusted callers and skips publication when either is absent.
 
-Only the central csrc producer publishes L1 in this integration. Image and
-release-wheel Docker builds retain their existing behavior and do not restore,
-export, or save persistent L1.
+The central csrc producer and trusted image/nightly producers may publish L1.
+Image producers additionally require the upstream repository, a publishing
+build of `main` or `releases/*`, and a non-PR event. Forks, PR image checks,
+arbitrary source refs, and source-consuming PR nightly jobs cannot publish.
+Release-wheel Docker builds retain their existing behavior.
 
 Source-consuming jobs are read-only L1 consumers: they may restore a compatible
 snapshot before their existing source installation, but they do not publish.
@@ -429,10 +432,54 @@ the selected source tree. A historical tree without `build_cache.py` reports
 
 ### Docker builds
 
-Image and release-wheel workflows are not L1 consumers or writers in this PR.
-Their existing Docker build, source compilation, and image L0 behavior remain
-unchanged. A later integration must validate the Docker boundary without
-embedding persistent L1 in a published image.
+Runtime images expose a `csrc-build-base` stage immediately before the source
+copy/install. On an L0 miss, the workflow loads that stage, restores L1, and
+performs a source install in an isolated container made from the stage's image
+ID. Verified native artifacts return to the workspace for the existing
+`COMPILE_CUSTOM_KERNELS=0` handoff. If preparation or compilation fails, the
+ordinary final Docker build still compiles from source. An L0 hit skips this
+extra stage and compilation entirely.
+
+After building a nightly test image, the nightly workflow loads and pins that
+exact image, then compiles the tracked source with the same `uv pip install
+-e . --no-deps` policy used by PR nightly consumers. Trusted builds save changed
+L1 state before publishing the image. This supplies snapshots for the actual
+nightly runtime instead of assuming a CANN base-image producer has the same
+environment. The existing PR nightly restore steps stay read-only.
+
+`csrc-l1-produce` uses the existing restore/save actions and literal transport
+path `csrc/build_cache`. Its `runtime-image` input computes the ordinary runtime
+key inside the pinned compiler image, including CANN metadata and OS/libc. It
+does not substitute an image-name key, which would not match a direct nightly
+consumer. Inner action identity and validation are unchanged.
+Both producer jobs and runtime/test images install `zstd` explicitly, avoiding
+different transport versions caused by a gzip fallback on one side.
+
+`image_csrc_cache.py` copies tracked source and restored L1 into task-owned
+containers rather than binding a job-container path on a sibling Docker daemon.
+It passes no writer credentials, Docker socket, or NPU devices into compilation.
+Only after a successful complete build does it copy the pruned cache back,
+replacing the seed rather than merging deleted hash versions back into it.
+Optional inner JSONL telemetry is copied to the restore action's event-log path.
+Cache contents are excluded by `.dockerignore` and do not enter the final image
+or the registry layer cache. The original Docker source-build fallback also
+removes locally generated L1 in the same install `RUN`, before committing its
+layer. Existing BuildKit layer caching remains separate.
+
+The CPU Docker transport test is opt-in and uses synthetic CANN metadata; it is
+not Ascend acceptance or an OBS authorization test:
+
+```bash
+docker build -t va-local-cpu-csrc-l1-fixture \
+  tests/ut/_tools/fixtures/image_csrc_cache
+VLLM_ASCEND_TEST_COMPILER_IMAGE=va-local-cpu-csrc-l1-fixture \
+  pytest --noconftest -q tests/ut/_tools/test_image_csrc_cache.py
+```
+
+Production acceptance still requires per-environment cold/warm source installs,
+matching producer/PR consumer prefixes, inner HIT evidence, hash retention after
+complete builds, and confirmation that runtime image layers do not contain L1.
+Release-wheel workflows are not changed by this integration.
 
 ## Validation summary
 
@@ -468,3 +515,4 @@ operator namespace. For historical source, check the restore action's
 | Persistent restore and key orchestration | `.github/actions/csrc-l1-restore/action.yaml` |
 | Persistent changed-snapshot publication | `.github/actions/csrc-l1-save/action.yaml` |
 | Central producer | `.github/workflows/_build_csrc_cache.yaml` |
+| Image/nightly producer and native artifact handoff | `.github/actions/csrc-l1-produce/action.yaml`, `.github/workflows/scripts/image_csrc_cache.py` |

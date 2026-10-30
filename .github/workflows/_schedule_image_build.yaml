@@ -70,6 +70,10 @@ on:
       SYNC_TOOLS_TOKEN:
         description: 'GitHub token for dispatching quay.io sync workflow'
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
 
 defaults:
   run:
@@ -126,7 +130,7 @@ jobs:
       id: get_base_image_tag
       run: |
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+        BASE_IMAGE_TAG=$(awk '/^FROM / {print $2; exit}' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
     - name: Get csrc hash
@@ -176,6 +180,36 @@ jobs:
         username: ${{ secrets.SWR_USERNAME }}
         password: ${{ secrets.SWR_PASSWORD }}
 
+    # Build only the dependency stage on L0 MISS. An old release Dockerfile
+    # without this stage, or unavailable L1 infrastructure, keeps the original
+    # Docker source-build fallback below.
+    - name: Load csrc compiler image
+      id: compiler-image
+      if: steps.cache-csrc.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ inputs.dockerfile || 'Dockerfile' }}
+        target: csrc-build-base
+        load: true
+        tags: vllm-ascend-csrc-base:${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.soc }}-${{ inputs.suffix || 'ubuntu' }}-${{ matrix.runner_info.tag }}
+        cache-from: type=registry,ref=${{ inputs.swr_temp_repo }}:${{ steps.cache-tag.outputs.value }}
+        provenance: false
+
+    - name: Build csrc with persistent L1
+      id: image-l1
+      if: steps.compiler-image.outcome == 'success'
+      continue-on-error: true
+      uses: ./.github/actions/csrc-l1-produce
+      with:
+        image: vllm-ascend-csrc-base:${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.soc }}-${{ inputs.suffix || 'ubuntu' }}-${{ matrix.runner_info.tag }}
+        architecture: ${{ steps.get_arch.outputs.arch }}
+        soc-version: ${{ inputs.soc }}
+        artifacts: 'true'
+        access-key-id: ${{ github.repository == 'vllm-project/vllm-ascend' && inputs.should_push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (inputs.branch_ref == 'main' || startsWith(inputs.branch_ref, 'releases/')) && secrets.HW_OBS_AK || '' }}
+        secret-access-key: ${{ github.repository == 'vllm-project/vllm-ascend' && inputs.should_push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (inputs.branch_ref == 'main' || startsWith(inputs.branch_ref, 'releases/')) && secrets.HW_OBS_SK || '' }}
+
     - name: Prepare tag pattern
       id: tag_pattern
       run: |
@@ -199,7 +233,7 @@ jobs:
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
-          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          COMPILE_CUSTOM_KERNELS=${{ (steps.cache-csrc.outputs.cache-hit == 'true' || steps.image-l1.outputs.built == 'true') && '0' || '1' }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".

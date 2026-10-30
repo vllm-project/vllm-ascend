@@ -1,0 +1,2 @@
+# L1 transport stays outside the published image and its Docker build context.
+csrc/build_cache

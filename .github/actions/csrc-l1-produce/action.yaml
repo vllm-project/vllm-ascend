@@ -1,0 +1,69 @@
+name: Build csrc L1 in compiler image
+description: Restore, compile and save L1 using the exact image runtime identity. Writer credentials stay outside Docker.
+inputs:
+  image:
+    required: true
+    description: Locally loaded compiler image, never a mutable registry lookup.
+  architecture:
+    required: true
+    description: Target CPU architecture for the L1 namespace.
+  soc-version:
+    required: true
+    description: Target SOC family (a2, a3, a5, or 310p).
+  nightly:
+    default: 'false'
+    description: Preserve nightly runtime dependencies during the source install.
+  artifacts:
+    default: 'false'
+    description: Copy verified native artifacts back for the runtime image L0 handoff.
+  access-key-id:
+    default: ''
+    description: Optional trusted OBS writer identity; not passed into Docker.
+  secret-access-key:
+    default: ''
+    description: Optional trusted OBS writer credential; not passed into Docker.
+outputs:
+  built:
+    description: True only after a successful native build and requested artifact handoff.
+    value: ${{ steps.build.outputs.built }}
+runs:
+  using: composite
+  steps:
+    - name: Pin the compiler image
+      id: image
+      shell: bash
+      env:
+        COMPILER_IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        identity=$(docker image inspect --format '{{.Id}}' "$COMPILER_IMAGE")
+        echo "identity=$identity" >> "$GITHUB_OUTPUT"
+    - uses: ./.github/actions/csrc-l1-restore
+      id: restore
+      with:
+        cache-dir: csrc/build_cache
+        architecture: ${{ inputs.architecture }}
+        soc-version: ${{ inputs.soc-version }}
+        runtime-image: ${{ steps.image.outputs.identity }}
+    - name: Source build in the actual compiler environment
+      id: build
+      shell: bash
+      env:
+        COMPILER_IMAGE: ${{ steps.image.outputs.identity }}
+        TARGET_SOC: ${{ inputs.soc-version }}
+        NIGHTLY: ${{ inputs.nightly }}
+        ARTIFACTS: ${{ inputs.artifacts }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [ "$NIGHTLY" = true ]; then args+=(--nightly); fi
+        if [ "$ARTIFACTS" = true ]; then args+=(--artifacts); fi
+        python3 .github/workflows/scripts/image_csrc_cache.py \
+          --image "$COMPILER_IMAGE" --soc-version "$TARGET_SOC" \
+          --cache-dir csrc/build_cache "${args[@]}"
+    - uses: ./.github/actions/csrc-l1-save
+      with:
+        cache-dir: csrc/build_cache
+        primary-key: ${{ steps.restore.outputs.primary-key }}
+        access-key-id: ${{ inputs.access-key-id }}
+        secret-access-key: ${{ inputs.secret-access-key }}

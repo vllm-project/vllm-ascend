@@ -268,7 +268,8 @@ concurrency, and snapshot-key tests before requesting an NPU build:
 pytest -q --confcutdir=tests/ut/_tools \
   tests/ut/_tools/test_build_cache.py \
   tests/ut/_tools/test_build_cache_concurrency.py \
-  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py \
+  tests/ut/_tools/test_image_csrc_cache.py
 ```
 
 On CI, a successful restore step only proves that an outer L1 snapshot was

@@ -66,6 +66,8 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   build-a3:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
@@ -79,6 +81,8 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   build-310p:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
@@ -92,6 +96,8 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   build-a5:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
@@ -105,3 +111,5 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

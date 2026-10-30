@@ -18,6 +18,10 @@ inputs:
   source-root:
     required: false
     default: '.'
+  runtime-image:
+    required: false
+    default: ''
+    description: Compute the normal runtime identity inside this locally loaded compiler image, not the outer job container.
   csrc-hash:
     required: false
     default: ''
@@ -48,6 +52,7 @@ runs:
         CACHE_ARCHITECTURE: ${{ inputs.architecture }}
         CACHE_SOC_VERSION: ${{ inputs.soc-version }}
         CACHE_TOOLCHAIN_IMAGE: ${{ inputs.toolchain-image }}
+        CACHE_RUNTIME_IMAGE: ${{ inputs.runtime-image }}
         SOURCE_ROOT: ${{ inputs.source-root }}
         CALLER_CSRC_HASH: ${{ inputs.csrc-hash }}
       run: |
@@ -57,6 +62,7 @@ runs:
           --architecture "$CACHE_ARCHITECTURE" \
           --soc-version "$CACHE_SOC_VERSION" \
           --toolchain-image "$CACHE_TOOLCHAIN_IMAGE" \
+          --runtime-image "$CACHE_RUNTIME_IMAGE" \
           --source-root "$SOURCE_ROOT" \
           --csrc-hash "$CALLER_CSRC_HASH"
 
