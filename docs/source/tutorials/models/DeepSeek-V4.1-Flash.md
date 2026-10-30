@@ -591,6 +591,18 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       Decode path while Prefill remains outside the captured graph.
     - Prefix caching is enabled only on Prefill. Decode disables it and enables
       `recompute_scheduler_enable` so Prefill can recompute unavailable KV cache.
+    - `--prefix-cache-retention-interval` (Prefill only) controls how often, in
+      tokens, the sliding-window (SWA) groups keep a prefix-cache checkpoint. It
+      must be a multiple of `--block-size`. `None` keeps a checkpoint at every
+      block, so the SWA groups cost roughly `12x` the MLA-only footprint and long
+      multi-turn sessions are evicted early under concurrency. `0` (the default
+      when the flag is unset) keeps only the latest prompt boundary and
+      shared-prefix fork points. A positive value `R` additionally keeps one
+      checkpoint per `R` tokens, so a request that diverges mid-prompt
+      recomputes at most `R` tokens. With `--block-size 128`, `8192` is a good
+      default; use `4096` when mid-prompt edits are frequent and contexts stay
+      within 64K. The legacy `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment
+      variable has no effect.
     - Prefill uses the following `--additional-config` options:
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
