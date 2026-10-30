@@ -107,7 +107,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
         memcache_dp_init_barrier: bool = True,
     ) -> None:
-        super().__init__(vllm_config, use_layerwise, kv_cache_config, memcache_dp_init_barrier)
+        super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:

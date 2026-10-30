@@ -45,15 +45,24 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-Select an image for your hardware and start a container on each node.
-Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+**Step 1:** Download the Docker image
+
+```bash
+docker pull quay.io/ascend/vllm-ascend:{tag}
+```
+
+**Step 2:** Start Docker container
+
+Select the `docker run` command for your hardware platform:
 
 === "950DT products"
 
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -91,7 +100,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -134,10 +143,19 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
 
     Start the Docker container on each node.
 
+    If you use the A2 KV Cache Pool deployment with SSD offload, mount a
+    fast, writable host SSD directory into the container on **all four nodes**.
+    The mount is required: creating `/mnt/mooncake_offload` inside the
+    container without it writes to the container's overlay filesystem and can
+    exhaust the container root filesystem. Replace the host path below with a
+    local SSD filesystem that has sufficient capacity and permissions for the
+    container user.
+
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
     export NAME=vllm-ascend
+    export MOONCAKE_SSD_PATH=/path/to/host/ssd
 
     docker run --rm \
     --name $NAME \
@@ -161,8 +179,14 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     -v /usr/local/sbin:/usr/local/sbin \
     -v /etc/hccn.conf:/etc/hccn.conf:ro \
     -v /root/.cache:/root/.cache \
+    -v "$MOONCAKE_SSD_PATH:/mnt/mooncake_offload" \
     -it $IMAGE bash
     ```
+
+    Before starting the pool, verify the mount inside the container with
+    `df -h /mnt/mooncake_offload` and ensure that the path is writable. The
+    `enable_ssd_offload` configuration in the A2 KV Pool section assumes this
+    host-to-container mount is present.
 
     **Check the software stack inside each A2 container**
 
@@ -174,7 +198,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     If startup reports that Transformers does not recognize `glm5_next`, the failure occurs while
     loading the model configuration, before DP engine initialization. Check
     the active software versions and recreate the containers with a compatible
-    image if they still use the legacy `glm-5.3-flash` image or a vLLM
+    image tag if they still use the legacy `glm-5.3-flash` image or a vLLM
     `0.23.0` environment. For source builds, follow the
     [installation guide](../../getting_started/installation.md) and use the
     matching vLLM, vLLM-Ascend, and Transformers dependencies for the checked-out
@@ -663,16 +687,13 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     ##### Start the Proxy
 
-    Run inside a vLLM-Ascend container on a separate host after the Prefill
-    and Decode endpoints are healthy. The official image includes the proxy
-    at the absolute path below; for a source installation, replace the
-    checkout prefix with the actual source directory.
+    Run on a separate host after the Prefill and Decode endpoints are healthy.
 
     ```shell
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
 
-    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -1010,8 +1031,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_SERVER_DEV_MODE=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
     export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -1019,13 +1039,11 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
     export VLLM_RPC_TIMEOUT=3600000
+    export HCCL_INTRA_ROCE_ENABLE=1
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export PYTHONHASHSEED=0
-    export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-    export VLLM_TORCH_PROFILER_WITH_STACK=1
-    export PYTHONPATH="/usr/local/python3.12.13/lib/python3.12/site-packages:${PYTHONPATH:-}"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -1043,21 +1061,18 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --safetensors-load-strategy prefetch \
       --max-model-len 1048576 \
       --max-num-seqs 64 \
-      --max-num-batched-tokens 8192 \
+      --max-num-batched-tokens 4096 \
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.9 \
       --async-scheduling \
-      --enforce-eager \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
-      --profiler-config '{"profiler":"torch","torch_profiler_dir":"./profiling","torch_profiler_with_stack":false}' \
-      --additional-config '{"mc2_comm_alg":"hierarchy","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
+      --additional-config '{"mc2_comm_alg":"hierarchy","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"enable_dsa_cp":true}' \
       ${SERVER_ROLE_ARGS:-} \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
@@ -1146,7 +1161,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
-    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -1154,6 +1168,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
     export VLLM_RPC_TIMEOUT=3600000
+    export HCCL_INTRA_ROCE_ENABLE=1
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     # Reserve disjoint HCCL port ranges per DP rank so multiple engines on
@@ -1185,16 +1200,13 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --quantization ascend \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --gpu-memory-utilization 0.85 \
-      --skip-mm-profiling \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --gpu-memory-utilization 0.9 \
       --async-scheduling \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
-      --profiler-config '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}' \
       --additional-config '{"mc2_comm_alg": "hierarchy","multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_static_kernel": true}}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
@@ -1318,16 +1330,17 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       NPU-to-NPU KV transfer and declares the actual Prefill and Decode
       `{dp_size, tp_size}` topology. The declared values must match the
       real deployment.
-    - Prefill uses `--max-num-seqs 64` and `--max-num-batched-tokens 8192`
-      with `--enforce-eager`; Decode uses `--max-num-seqs 32` and
-      `--max-num-batched-tokens 1024` with `FULL_DECODE_ONLY` graph mode.
+    - Prefill uses `--max-num-seqs 64` and `--max-num-batched-tokens 4096`
+      without `--enforce-eager`; Decode uses `--max-num-seqs 60` and
+      `--max-num-batched-tokens 192` with `FULL_DECODE_ONLY` graph mode.
       Both roles run with `--async-scheduling`.
     - Both roles rely on model runner V1 via
       `VLLM_USE_V2_MODEL_RUNNER=0`, consistent with the other tabs in
       this guide. `VLLM_HOST_IP` advertises the IP that peers use to
       reach each engine for KV transfer.
-    - MTP speculative decoding uses three speculative tokens on A2 series.
-      `enforce_eager: true` keeps the MTP draft model in eager mode.
+    - MTP speculative decoding uses five speculative tokens on A2 series.
+      Prefill uses `enforce_eager: true`; Decode uses `enforce_eager: false`
+      with `FULL_DECODE_ONLY` graph mode.
     - `HCCL_HOST_SOCKET_PORT_RANGE` and `HCCL_NPU_SOCKET_PORT_RANGE` on
       Decode reserve a disjoint 100-port window per DP rank (starting at
       `60000 + rank * 100`). When several engines share one node, these
@@ -1484,6 +1497,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_producer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
+                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "lookup_rpc_port": '"$((37000 + $4))"'
               }
@@ -1516,6 +1530,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_consumer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
+                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "consumer_is_to_load": false,
                 "consumer_is_to_put": false,
@@ -1532,6 +1547,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Decode lookup values are `37100-37103`. Keep the role-specific Mooncake KV
     base ports from [Section 5.3](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
+
+    Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP
+    group. It synchronizes workers after Memcache initialization and before
+    NPU graph capture. Set it in the `AscendStoreConnector` child, as shown
+    above.
 
     ##### Start the Services
 
@@ -1580,17 +1600,23 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### A2 series {: #glm53-flash-5-4-a2 }
 
-    Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
-    DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
-    [Section 5.3](#glm53-flash-5-3-a2). A2 series nodes do not have the A3 series HCCS fabric: the
-    pool runs over the A2 series RoCE network with the `P2PHANDSHAKE` metadata server
-    and the `ascend` protocol, and the A3 series fabric-memory exports do not apply.
+    Use the generated pool suite with `common/pd_pool_engine.sh`, one
+    `run_dp_template.sh` forwarding script per node, and one `start.sh` wrapper
+    per node. This pool layout uses API-serving Prefill nodes P0 and P1, four
+    API-serving Decode engines on each Decode node, and a proxy that addresses
+    both Prefill nodes. Do not reuse the headless P1 wrapper or the ports from
+    the generic A2 PD example in [Section 5.3](#glm53-flash-5-3-a2).
 
-    Retain the Prefill internal-LB settings from [Section 5.3](#glm53-flash-5-3-a2), including
-    P1's `--headless --data-parallel-start-rank 1` wrapper and the P0-only
-    proxy endpoint. The pool fragments derive distinct lookup ports from `$4`;
-    this does not require adding `--data-parallel-rank` to the Prefill serving
-    command.
+    A2 series nodes do not have the A3 series HCCS fabric: the pool runs over
+    the A2 series RoCE network with the `P2PHANDSHAKE` metadata server and the
+    `ascend` protocol, and the A3 series fabric-memory exports do not apply.
+
+    The four-node layout is:
+
+    - P0: Prefill DP rank 0, TP8, API port `8000`;
+    - P1: Prefill DP rank 1, TP8, API port `8000`;
+    - D0: Decode DP ranks 0-3, TP2, API ports `8000-8003`;
+    - D1: Decode DP ranks 4-7, TP2, API ports `8000-8003`.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
     to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
@@ -1599,184 +1625,392 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     The A2 series Docker command in Section 4 already mounts `/etc/hccn.conf`.
     Install the Mooncake backend according to the KV Cache Pool Deployment
-    Guide, then create the following `mooncake.json` on both Prefill nodes.
-    Mooncake Master runs in the first Prefill container at
-    `<PREFILL_NODE0_IP>:50088`.
+    Guide, then create the following `mooncake-ssd.json` on all Prefill and
+    Decode nodes. Mooncake Master runs in the second Prefill container at
+    `<PREFILL_NODE1_IP>:50088`.
 
     ```json
     {
       "metadata_server": "P2PHANDSHAKE",
       "protocol": "ascend",
       "device_name": "",
-      "master_server_address": "<PREFILL_NODE0_IP>:50088",
-      "global_segment_size": "8GB",
-      "preferred_segment": true,
+      "master_server_address": "<PREFILL_NODE1_IP>:50088",
+      "global_segment_size": "24GB",
+      "preferred_segment": false,
       "prefer_alloc_in_same_node": true,
-      "enable_ssd_offload": false,
-      "tenant_id": "default"
+      "enable_ssd_offload": true,
+      "ssd_offload_path": "/mnt/mooncake_offload"
     }
     ```
 
-    On both Decode nodes, use the same JSON configuration with
-    `global_segment_size` set to `0`. Use the same `tenant_id` on all four
-    nodes. `global_segment_size` is registered per worker: with DP2/TP8
-    spread across two Prefill nodes, each node starts 8 workers. The validated
-    example uses `8GB` per worker, a `128GB` pool in total; adjust the
-    per-worker size to the available host memory, keeping each non-zero segment
-    size aligned to `1GB`. Keep `global_segment_size` at `0` in the Decode
-    `mooncake.json`.
+    Use the same JSON configuration on all four nodes and create the SSD
+    directory before starting the services. The deployment package mounts the
+    shared file at the same absolute path on every node:
+
+    ```shell
+    export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+    mkdir -p /mnt/mooncake_offload
+    ```
+
+    `global_segment_size` is registered per worker. With DP2/TP8 spread across
+    two Prefill nodes, each node starts 8 workers; with the same configuration
+    on Decode, the pool also reserves the configured segment size there. Adjust
+    `24GB` only when the available host memory and SSD capacity require a
+    different per-worker value, keeping each non-zero segment size aligned to
+    `1GB`.
 
     ##### Add the Pool Environment Variables
 
-    In both `run_p.sh` and `run_d.sh`, keep the [Section 5.3](#glm53-flash-5-3-a2) environment
-    variables and add the following exports before `exec vllm serve`. Replace
-    `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
-    `mooncake.json`.
+    The generated `pd_pool_engine.sh` sets the common environment for both
+    roles. In addition to the standard A2 communication variables, use the
+    following pool settings. These values are specific to this pool suite;
+    the suite uses `3000` for the execute timeout and `glm45` as its reasoning
+    parser.
 
     ```shell
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export PYTHONHASHSEED=0
-    export MOONCAKE_CONFIG_PATH="<CONFIG_DIRECTORY>/mooncake.json"
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=16106127360
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=16106127360
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    export PYTHON_SITE_PACKAGES=${PYTHON_SITE_PACKAGES:-/usr/local/python3.12.13/lib/python3.12/site-packages}
+    export LD_LIBRARY_PATH="${PYTHON_SITE_PACKAGES}/mooncake:${PYTHON_SITE_PACKAGES}/memfabric_hybrid:${LD_LIBRARY_PATH:-}"
+    export PYTHONPATH="${PYTHON_SITE_PACKAGES}:${PYTHONPATH:-}"
+    mkdir -p /mnt/mooncake_offload
     ```
 
-    All nodes must use the same `PYTHONHASHSEED`. Do not add the A3 series
-    `ASCEND_ENABLE_USE_FABRIC_MEM` export; it applies to the A3 series HCCS fabric
-    only. The general A2 series branch of the KV Cache Pool Deployment Guide also
-    suggests huge pages and `HCCL_INTRA_ROCE_ENABLE`; with the `P2PHANDSHAKE`
-    metadata server and the `ascend` protocol these are not required, and the
-    validated configuration does not set them.
+    All nodes must use the same `PYTHONHASHSEED`, offload limits, and library
+    paths. Keep `HCCL_INTRA_ROCE_ENABLE=1` and source the Ascend toolkit
+    environment when `/usr/local/Ascend/ascend-toolkit/latest/set_env.sh` is
+    available. Do not add the A3 series `ASCEND_ENABLE_USE_FABRIC_MEM` export;
+    it applies to the A3 series HCCS fabric only.
 
-    ##### Update the Prefill and Decode Connectors
+    ##### Configure the Common Pool Engine
 
-    Keep prefix caching and chunked prefill enabled. `use_layerwise` must
-    remain `false` for this model: the GLM-5.3-Flash hybrid KV cache contains a
-    non-prefix-cacheable group, and layer-wise pool transfer requires every
-    group to be cacheable, so the pool stores and loads whole segments. No
-    manual `--mamba-cache-mode` flag is needed either: when the connector list
-    contains `AscendStoreConnector`, the engine switches the mamba cache mode to
-    `align` automatically.
+    Keep prefix caching and chunked prefill enabled. `use_layerwise` remains
+    `false` for this model. The generated common engine derives the connector
+    values from `ROLE` and the launcher DP rank; do not replace them with the
+    fixed engine IDs or per-rank lookup ranges from the generic PD example.
 
-    Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-    following fragment. Keep the remaining Prefill flags from [Section 5.3](#glm53-flash-5-3-a2),
-    including `--max-num-seqs 64`.
+    Save the following as `common/pd_pool_engine.sh`. Replace the default model
+    path and NIC with the values used by your container when they are not
+    already exported by the node wrapper:
 
     ```shell
-      --kv-transfer-config \
-      '{
-        "kv_connector": "MultiConnector",
-        "kv_role": "kv_producer",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-          "connectors": [
-            {
-              "kv_connector": "MooncakeConnectorV2",
-              "kv_role": "kv_producer",
-              "kv_port": "30000",
-              "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {"dp_size": 2, "tp_size": 8},
-                "decode": {"dp_size": 8, "tp_size": 2}
-              }
-            },
-            {
-              "kv_connector": "AscendStoreConnector",
-              "kv_role": "kv_producer",
-              "kv_connector_extra_config": {
-                "backend": "mooncake",
-                "use_layerwise": false,
-                "lookup_rpc_port": '"$((37000 + $4))"'
-              }
-            }
-          ]
-        }
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    ROLE=${ROLE:?set ROLE=p or ROLE=d}
+    LOCAL_IP=${LOCAL_IP:?set LOCAL_IP}
+    MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.3-Flash}
+    NIC_NAME=${NIC_NAME:-eth0}
+    DP_ADDRESS=${5:?launcher did not pass dp address}
+    DP_RPC_PORT=${6:?launcher did not pass dp rpc port}
+    DP_RANK=${4:?launcher did not pass dp rank}
+    PYTHON_SITE_PACKAGES=${PYTHON_SITE_PACKAGES:-/usr/local/python3.12.13/lib/python3.12/site-packages}
+    MOONCAKE_CONFIG_PATH=${MOONCAKE_CONFIG_PATH:-/path/to/mooncake-ssd.json}
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
+    if [ -f /usr/local/Ascend/ascend-toolkit/latest/set_env.sh ]; then
+      source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+    fi
+
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export PYTHONHASHSEED=0
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export MOONCAKE_CONFIG_PATH
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=16106127360
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=16106127360
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    export LD_LIBRARY_PATH="${PYTHON_SITE_PACKAGES}/mooncake:${PYTHON_SITE_PACKAGES}/memfabric_hybrid:${LD_LIBRARY_PATH:-}"
+    export PYTHONPATH="${PYTHON_SITE_PACKAGES}:${PYTHONPATH:-}"
+    mkdir -p /mnt/mooncake_offload
+
+    if [ "$ROLE" = p ]; then
+      KV_PORT=${KV_PORT:-30000}
+      ENGINE_ID=$DP_RANK
+      LOOKUP_PORT=0
+      exec vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 --port "$2" \
+        --data-parallel-size 2 --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DP_ADDRESS" --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size 8 --enable-expert-parallel --enable-chunked-prefill \
+        --enable-prefix-caching --seed 1024 --served-model-name glm \
+        --safetensors-load-strategy prefetch --max-model-len 1048576 \
+        --max-num-seqs 64 --max-num-batched-tokens 4096 --trust-remote-code \
+        --quantization ascend --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 --gpu-memory-utilization 0.9 \
+        --async-scheduling --tool-call-parser glm47 --reasoning-parser glm45 \
+        --enable-auto-tool-choice \
+        --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
+        --additional-config '{"mc2_comm_alg":"hierarchy","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"enable_dsa_cp":true}' \
+        --kv-transfer-config '{
+          "kv_connector":"MultiConnector","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","engine_id":"'"$ENGINE_ID"'",
+          "kv_connector_extra_config":{"connectors":[
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":8,"tp_size":2}}},
+            {"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":false,"lookup_rpc_port":"'"$LOOKUP_PORT"'"}}
+          ]}
+        }' \
+        --prefix-cache-retention-interval None
+    fi
+
+    KV_PORT=${KV_PORT:-31000}
+    ENGINE_ID=$((100 + DP_RANK))
+    LOOKUP_PORT=1
+    exec vllm serve "$MODEL_PATH" \
+      --host 0.0.0.0 --port "$2" \
+      --data-parallel-size 8 --data-parallel-rank "$DP_RANK" \
+      --data-parallel-address "$DP_ADDRESS" --data-parallel-rpc-port "$DP_RPC_PORT" \
+      --tensor-parallel-size 2 --enable-expert-parallel --enable-chunked-prefill \
+      --enable-prefix-caching --seed 1024 --served-model-name glm \
+      --safetensors-load-strategy prefetch --max-model-len 1048576 \
+      --max-num-seqs 60 --max-num-batched-tokens 192 --trust-remote-code \
+      --quantization ascend --kv-cache-dtype int8 \
+      --attention_config.indexer_kv_dtype int8 --gpu-memory-utilization 0.9 \
+      --async-scheduling --tool-call-parser glm47 --reasoning-parser glm45 \
+      --enable-auto-tool-choice --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":false}' \
+      --additional-config '{"mc2_comm_alg":"hierarchy","multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_static_kernel":true}}' \
+      --kv-transfer-config '{
+        "kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","engine_id":"'"$ENGINE_ID"'",
+        "kv_connector_extra_config":{"connectors":[
+          {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":8,"tp_size":2}}},
+          {"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"lookup_rpc_port":"'"$LOOKUP_PORT"'"}}
+        ]}
       }'
     ```
 
-    Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-    following fragment. Keep the remaining Decode flags from [Section 5.3](#glm53-flash-5-3-a2),
-    including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
+    For Prefill, the generated pool engine uses `KV_PORT=30000`, the global DP rank as
+    `ENGINE_ID`, and `LOOKUP_PORT=0`:
 
     ```shell
-      --kv-transfer-config \
-      '{
-        "kv_connector": "MultiConnector",
-        "kv_role": "kv_consumer",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-          "connectors": [
-            {
-              "kv_connector": "MooncakeConnectorV2",
-              "kv_role": "kv_consumer",
-              "kv_port": "30100",
-              "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {"dp_size": 2, "tp_size": 8},
-                "decode": {"dp_size": 8, "tp_size": 2}
-              }
-            },
-            {
-              "kv_connector": "AscendStoreConnector",
-              "kv_role": "kv_consumer",
-              "kv_connector_extra_config": {
-                "backend": "mooncake",
-                "use_layerwise": false,
-                "consumer_is_to_load": false,
-                "consumer_is_to_put": false,
-                "lookup_rpc_port": '"$((37100 + $4))"'
-              }
-            }
-          ]
-        }
-      }'
+    KV_PORT=${KV_PORT:-30000}
+    ENGINE_ID=$DP_RANK
+    LOOKUP_PORT=0
     ```
 
-    Both role templates use the launcher DP-rank argument `$4` for the
-    lookup port. Each engine must have a unique `lookup_rpc_port`. The Prefill
-    lookup ports are `37000-37001`, and the Decode lookup ports are
-    `37100-37107`. The `prefill` and `decode` topology declared in the
-    `MooncakeConnectorV2` fragment must match the real deployment.
+    Its connector configuration is:
+
+    ```json
+    {
+      "kv_connector": "MultiConnector",
+      "kv_role": "kv_producer",
+      "kv_port": "${KV_PORT}",
+      "engine_id": "${ENGINE_ID}",
+      "kv_connector_extra_config": {
+        "connectors": [
+          {
+            "kv_connector": "MooncakeConnectorV2",
+            "kv_role": "kv_producer",
+            "kv_port": "${KV_PORT}",
+            "kv_connector_extra_config": {
+              "use_ascend_direct": true,
+              "prefill": {"dp_size": 2, "tp_size": 8},
+              "decode": {"dp_size": 8, "tp_size": 2}
+            }
+          },
+          {
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {
+              "backend": "mooncake",
+              "use_layerwise": false,
+              "lookup_rpc_port": "${LOOKUP_PORT}"
+            }
+          }
+        ]
+      }
+    }
+    ```
+
+    For Decode, the generated pool engine uses `KV_PORT=31000`, `100 + DP rank` as
+    `ENGINE_ID`, and `LOOKUP_PORT=1`:
+
+    ```shell
+    KV_PORT=${KV_PORT:-31000}
+    ENGINE_ID=$((100 + DP_RANK))
+    LOOKUP_PORT=1
+    ```
+
+    Its connector configuration is:
+
+    ```json
+    {
+      "kv_connector": "MultiConnector",
+      "kv_role": "kv_consumer",
+      "kv_port": "${KV_PORT}",
+      "engine_id": "${ENGINE_ID}",
+      "kv_connector_extra_config": {
+        "connectors": [
+          {
+            "kv_connector": "MooncakeConnectorV2",
+            "kv_role": "kv_consumer",
+            "kv_port": "${KV_PORT}",
+            "kv_connector_extra_config": {
+              "use_ascend_direct": true,
+              "prefill": {"dp_size": 2, "tp_size": 8},
+              "decode": {"dp_size": 8, "tp_size": 2}
+            }
+          },
+          {
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_consumer",
+            "kv_connector_extra_config": {
+              "backend": "mooncake",
+              "use_layerwise": false,
+              "consumer_is_to_load": false,
+              "consumer_is_to_put": false,
+              "lookup_rpc_port": "${LOOKUP_PORT}"
+            }
+          }
+        ]
+      }
+    }
+    ```
+
+    The actual `pd_pool_engine.sh` must use `--reasoning-parser glm45`,
+    `--tool-call-parser glm47`, Prefill `--max-num-batched-tokens 4096`, and
+    Decode `--max-num-seqs 60 --max-num-batched-tokens 192`. The Prefill and
+    Decode connector topology must remain DP2/TP8 and DP8/TP2 respectively.
 
     ##### Start the Services
 
-    Start the services in this order: Mooncake Master → Decode → Prefill →
-    Proxy.
+    Start the services in this order: Mooncake Master on P1 → P0/P1 and D0/D1
+    engine launchers → Proxy.
 
-    1. In a separate terminal in the first Prefill container, start Mooncake
-       Master. Ensure port `50088` is reachable from all four nodes.
+    1. In a separate terminal in the second Prefill container, save and run the
+       following `start_mooncake_master.sh` helper. Ensure port `50088` is
+       reachable from all four nodes.
 
-       ```shell
-       mooncake_master \
-         --port 50088 \
-         --eviction_high_watermark_ratio 0.9 \
-         --eviction_ratio 0.1 \
-         --default_kv_lease_ttl 11000 \
-         --enable_offload=false \
-         --client_ttl=120
-       ```
+           ```shell
+           #!/usr/bin/env bash
+           set -euo pipefail
+           # Start Mooncake Master in the second Prefill container.
+           # Keep the TTL greater than ASCEND_CONNECT_TIMEOUT and ASCEND_TRANSFER_TIMEOUT.
+           mkdir -p /vllm-workspace/logs
+           nohup /usr/local/python3.12.13/bin/mooncake_master --port 50088 \
+             --eviction_high_watermark_ratio 0.9 \
+             --eviction_ratio 0.1 \
+             --default_kv_lease_ttl 11000 \
+             --enable_offload=true --client_ttl=120 \
+             > /vllm-workspace/logs/mooncake_master.log 2>&1 &
+           echo "mooncake_master issued pid=$!"
+           ```
 
-    2. Start D0 and D1 with the [launcher commands from Section 5.3](#glm53-flash-a2-decode-command)
-       (`--dp-rank-start 0` and `4`; four engines per node on ports
-       `9900-9903`). Wait until all eight Decode engines answer
-       `curl /v1/models`.
-    3. Start P0 and P1 with the [launcher commands from Section 5.3](#glm53-flash-a2-prefill-command)
-       (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
-       `9081`, while P1 is headless). Wait until the P0 API endpoint is
-       ready and P1 logs confirm successful initialization.
-    4. Start the [A2 series proxy from Section 5.3](#glm53-flash-a2-proxy). Send inference requests to
-       `<PREFILL_NODE0_IP>:8081` using the examples in [Section 6](#6-functional-verification).
+           Run the helper with `bash start_mooncake_master.sh` and verify
+           `/vllm-workspace/logs/mooncake_master.log` before starting Decode.
+
+    2. Place the following forwarding script in each node's generated pool
+       directory as `run_dp_template.sh`, replacing `<DEPLOYMENT_ROOT>` with
+       the shared deployment root:
+
+           ```shell
+           #!/usr/bin/env bash
+           exec bash <DEPLOYMENT_ROOT>/common/pd_pool_engine.sh "$@"
+           ```
+
+    3. Start P0 and P1 with `ROLE=p`, `KV_PORT=30000`, and the following
+       launcher arguments. Both nodes serve API traffic on port `8000`.
+
+           ```shell
+           # P0
+           export ROLE=p LOCAL_IP="<PREFILL_NODE0_IP>" NIC_NAME="<PREFILL_NODE0_NIC>" KV_PORT=30000
+           export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+           python3 <DEPLOYMENT_ROOT>/common/launch_online_dp.py \
+             --dp-size 2 --tp-size 8 --pp-size 1 --dp-size-local 1 \
+             --dp-rank-start 0 --dp-address "<PREFILL_NODE0_IP>" \
+             --dp-rpc-port 12321 --vllm-start-port 8000
+
+           # P1
+           export ROLE=p LOCAL_IP="<PREFILL_NODE1_IP>" NIC_NAME="<PREFILL_NODE1_NIC>" KV_PORT=30000
+           export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+           python3 <DEPLOYMENT_ROOT>/common/launch_online_dp.py \
+             --dp-size 2 --tp-size 8 --pp-size 1 --dp-size-local 1 \
+             --dp-rank-start 1 --dp-address "<PREFILL_NODE0_IP>" \
+             --dp-rpc-port 12321 --vllm-start-port 8000
+           ```
+
+    4. Start D0 and D1 with `ROLE=d`, `KV_PORT=31000`, and four local engines
+       per node. D0 owns DP ranks 0-3; D1 owns DP ranks 4-7.
+
+           ```shell
+           # D0
+           export ROLE=d LOCAL_IP="<DECODE_NODE0_IP>" NIC_NAME="<DECODE_NODE0_NIC>" KV_PORT=31000
+           export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+           python3 <DEPLOYMENT_ROOT>/common/launch_online_dp.py \
+             --dp-size 8 --tp-size 2 --pp-size 1 --dp-size-local 4 \
+             --dp-rank-start 0 --dp-address "<DECODE_NODE0_IP>" \
+             --dp-rpc-port 12321 --vllm-start-port 8000
+
+           # D1
+           export ROLE=d LOCAL_IP="<DECODE_NODE1_IP>" NIC_NAME="<DECODE_NODE1_NIC>" KV_PORT=31000
+           export MOONCAKE_CONFIG_PATH="<DEPLOYMENT_ROOT>/pd_pool/shared/mooncake-ssd.json"
+           python3 <DEPLOYMENT_ROOT>/common/launch_online_dp.py \
+             --dp-size 8 --tp-size 2 --pp-size 1 --dp-size-local 4 \
+             --dp-rank-start 4 --dp-address "<DECODE_NODE0_IP>" \
+             --dp-rpc-port 12321 --vllm-start-port 8000
+           ```
+
+           Wait until all eight Decode engines answer
+           `curl --fail "$DECODE_NODE_IP:$PORT/v1/models"` and both Prefill
+           endpoints answer on port `8000`.
+
+    5. Start the proxy on the configured proxy host. The generated proxy listens on
+           port `28000`, sends Prefill requests to both Prefill nodes, and forwards
+           Decode work to ports `8000-8003` on D0 and D1.
+
+           ```shell
+           #!/usr/bin/env bash
+           set -euo pipefail
+           PROXY_PY=${PROXY_PY:-<PROXY_SCRIPT_PATH>}
+           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+           exec python3 "$PROXY_PY" \
+             --port 28000 \
+             --host "<PROXY_HOST_IP>" \
+             --prefiller-hosts "<PREFILL_NODE0_IP>" "<PREFILL_NODE1_IP>" \
+             --prefiller-ports 8000 8000 \
+             --decoder-hosts "<DECODE_NODE0_IP>" "<DECODE_NODE0_IP>" "<DECODE_NODE0_IP>" "<DECODE_NODE0_IP>" \
+                             "<DECODE_NODE1_IP>" "<DECODE_NODE1_IP>" "<DECODE_NODE1_IP>" "<DECODE_NODE1_IP>" \
+             --decoder-ports 8000 8001 8002 8003 8000 8001 8002 8003
+           ```
+
+           Send inference requests to `<PROXY_HOST_IP>:28000` using the examples
+           in [Section 6](#6-functional-verification).
 
     ##### Verify KV Cache Reuse
 
     Follow the [A3 KV Cache reuse verification steps](#glm53-flash-pool-reuse). The proxy
-    sends requests to the P0 API while the DP group uses both Prefill ranks. A
-    repeated request can hit a local prefix cache, so confirm pool load/hit
-    information on the other Prefill rank to verify shared pool reuse.
+    sends requests to both Prefill APIs while the DP group uses both Prefill
+    ranks. A repeated request can hit a local prefix cache, so confirm pool
+    load/hit information on the other Prefill rank to verify shared pool reuse.
 
 ## 6 Functional Verification {: #6-functional-verification }
 
 Once the selected deployment is ready, query its service endpoint. For the
 950DT products PD deployment, use the separate proxy host and port `8000`.
 For the A3 series/A2 PD deployment, use the Prefill node IP and proxy
-port `8081`. For a
+port `8081`. For the A2 KV Cache Pool deployment, use the configured
+proxy host and port `28000`. For a
 single-node or A2 series colocated deployment, use the API endpoint exposed by its
 vLLM service.
 
