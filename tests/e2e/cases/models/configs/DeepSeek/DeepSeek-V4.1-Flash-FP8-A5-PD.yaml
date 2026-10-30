@@ -192,7 +192,7 @@ benchmarks:
     threshold: 5
     temperature: 1
     thinking: true
-    reasoning_effort: high
+    reasoning_effort: low
   perf_TPOT50_16k_1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
