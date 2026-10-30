@@ -61,6 +61,10 @@ def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
     return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in text_architectures)
 
 
+# TODO: Remove this v0.32.0 compatibility override after vLLM-Ascend
+# drops vLLM v0.32.0 and every supported vLLM revision includes
+# vllm-project/vllm#61455 (c3de0b37), which propagates draft ownership
+# through KVCacheSpec.is_draft.
 def annotate_qwen4_exp_mtp_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
