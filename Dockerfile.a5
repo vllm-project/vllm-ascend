@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-950-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261025172600-950-ubuntu22.04-py3.12
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -102,8 +102,8 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL} ${PYTORCH_INDEX_URL}" && \
 ARG TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
   linux/arm64) \
-    wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbotdsl-0.6.0+g91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl" -P /tmp && \
-    wget -c "https://raw.githubusercontent.com/GDzhu01/cannbot-wheels/main/cannbot_arena_net_ops-0.1.0-cp312-cp312-linux_aarch64.whl" -P /tmp && \
+    wget -c "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cannbotdsl-0.6.0%2Bg91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl" -P /tmp && \
+    wget -c "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cannbot_arena_net_ops-0.1.0-cp312-cp312-linux_aarch64.whl" -P /tmp && \
     python3 -m pip install /tmp/cannbotdsl-0.6.0+g91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl \
         /tmp/cannbot_arena_net_ops-0.1.0-cp312-cp312-linux_aarch64.whl && \
     rm -f /tmp/cannbot*.whl && \
