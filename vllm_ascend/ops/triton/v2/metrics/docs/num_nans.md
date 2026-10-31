@@ -94,7 +94,7 @@ print(num_nans.cpu())  # 期望 [10, 0, 0, 0]
 ## test ut
 
 精度 UT 位于
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans.py`，
+`tests/e2e/pull_request/one_card/singlecard_ops/triton/test_num_nans.py`，
 直接测试本 Ascend 内核，与 CPU 参考实现
 （`torch.isnan(logits).sum(dim=-1).to(torch.int32)`）逐位比对
 （`rtol=0, atol=0`）：
@@ -111,5 +111,5 @@ print(num_nans.cpu())  # 期望 [10, 0, 0, 0]
   叠加散布 NaN，要求恰好计数，防止 CANN `isnan` 退化为无穷/指数类判断。
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_num_nans.py
 ```

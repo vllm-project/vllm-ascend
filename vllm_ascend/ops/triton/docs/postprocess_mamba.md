@@ -71,8 +71,8 @@
 The test drives the patched `run_fused_postprocess` path against an independent Python reference for 4 requests and 2 layers, covering conv and temporal state types, combinations of scheduled/draft/accepted tokens, cache-block copies, and the `src == dst` accepted-token update.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_postprocess_mamba.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_postprocess_temporal_copy.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_postprocess_mamba.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_postprocess_temporal_copy.py
 ```
 
 The temporal-copy tests compare exact bytes including page guards, aligned and

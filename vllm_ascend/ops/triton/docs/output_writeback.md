@@ -51,5 +51,5 @@ The existing nine-case operator suite compares against an independent CPU PyTorc
 Historical A3 results and performance limits are recorded in PR #17011; this document does not claim a new device run or a stable speedup for every concurrency level.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_output_writeback.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_glm5next_output_writeback.py
 ```

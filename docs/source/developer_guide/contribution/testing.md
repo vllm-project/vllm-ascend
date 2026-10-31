@@ -198,6 +198,9 @@ You can run tests with `pytest` as well. Typical examples:
     # Run all single-card tests
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
+    # Run single-card operator tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/
+
     # Run a certain test script
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
@@ -228,14 +231,6 @@ You can run tests with `pytest` as well. Typical examples:
 === "Local (CPU)"
 
     You can't run the E2E test on CPUs.
-
-=== "Single-card"
-
-    ```bash
-    cd /vllm-workspace/vllm-ascend/
-    # run all single-card op tests
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
-    ```
 
 === "Multi-card"
 

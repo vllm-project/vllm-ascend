@@ -64,5 +64,5 @@ precopy_mamba_align_fused_kernel[grid](
 ## test ut
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_precopy.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_precopy.py
 ```

@@ -177,5 +177,5 @@ torch.npu.synchronize()
 ## test ut
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fill_logprob_token_ids_kernel.py #--noconftest
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_fill_logprob_token_ids_kernel.py #--noconftest
 ```

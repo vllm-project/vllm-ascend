@@ -45,5 +45,5 @@
 The test guards the 1:1 wrapper against `torch.mean` on fp32 CPU, across fp16/bf16/fp32, dimensions exercising multi-block reduction tails, negative `dim`, and `keepdim` (`(3, 1031, 17)` dim 1, `(5, 7, 2051)` dim -1 keepdim, `(2051, 3)` dim 0 keepdim), with unified tolerances (`rtol=2e-3, atol=2e-2` for fp16; `2e-2, 5e-2` for bf16; `1e-4, 1e-4` for fp32). The sibling `test_mean_batch_invariant_multiple_dims` covers the convenience wrapper's multi-dim fallback.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py -k mean_kernel
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_batch_invariant_ops.py -k mean_kernel
 ```

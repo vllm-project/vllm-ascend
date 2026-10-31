@@ -46,5 +46,5 @@
 The test guards the 1:1 wrapper against an fp32 CPU golden, across fp16/bf16, `bias` on/off, and shapes covering a single row, non-aligned sizes, and multi-block tiling (`(m, k, n) = (1, 64, 128)`, `(17, 65, 129)`, `(129, 257, 131)`), with unified tolerances (`rtol=2e-3, atol=2e-2` for fp16; `2e-2, 5e-2` for bf16). Wrapper-level cases for `mm`/`bmm`/`addmm`/`matmul` shape combinations and the `out=` parameter are covered by the sibling tests in the same file.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py -k matmul_bias_persistent
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_batch_invariant_ops.py -k matmul_bias_persistent
 ```

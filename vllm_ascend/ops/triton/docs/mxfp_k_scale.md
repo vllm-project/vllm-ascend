@@ -72,14 +72,14 @@ All three arguments are required. The Python function returns `None` and updates
 The NPU suite is located under the nightly single-card Triton operator directory:
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
 ```
 
 For a focused run that includes the operator fixtures without loading model-level E2E fixtures:
 
 ```bash
 pytest --confcutdir=tests/e2e/nightly/single_node/ops -q \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
+  tests/e2e/pull_request/one_card/singlecard_ops/triton/test_mxfp_k_scale_scatter.py
 ```
 
 The suite defines 64 NPU cases covering:

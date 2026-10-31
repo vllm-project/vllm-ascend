@@ -67,6 +67,6 @@ assert packed.cpu().tolist() == [
 The NPU tests compare copied rows against an independent PyTorch reference for C8 `int8`/FP8 and separate `fp16`/`bf16` caches. They cover empty input, padded slots, multi-row batches, and non-contiguous block layouts. The unit tests cover UB-based row selection.
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pcp_kv_cache.py
+pytest -q tests/e2e/pull_request/one_card/singlecard_ops/triton/test_pcp_kv_cache.py
 pytest -q tests/ut/ops/test_pcp_kv_cache.py
 ```

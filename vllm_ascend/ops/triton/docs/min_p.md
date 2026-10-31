@@ -62,10 +62,10 @@ Source: `vllm_ascend/worker/v2/sample/min_p.py` (host wrapper: `apply_min_p`).
 ## Test Cases
 
 > [!NOTE]
-> Single-operator accuracy test cases are placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
+> Single-operator accuracy test cases are placed under `tests/e2e/pull_request/one_card/singlecard_ops/triton`.
 
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_min_p.py` compares the kernel against a per-row PyTorch reference. Shapes use the vocabulary sizes of the models served on NPU — `(num_reqs, vocab_size)` of `(48, 102400)`, `(96, 102400)`, `(24, 151936)` (Qwen-class) and `(1, 32000)` (single-request decode) — with a reversed `expanded_idx_mapping` so the token-to-request mapping is non-identity, and `min_p` drawn from `[0.01, 0.5]`. Verification is two-fold, following the operator type: the `-inf` mask positions must match **exactly** (`torch.equal` on the `isinf` masks, since the masking decision is a comparison), while the surviving logits use the fp32 tolerance `rtol=1e-4, atol=1e-4`.
+`tests/e2e/pull_request/one_card/singlecard_ops/triton/test_min_p.py` compares the kernel against a per-row PyTorch reference. Shapes use the vocabulary sizes of the models served on NPU — `(num_reqs, vocab_size)` of `(48, 102400)`, `(96, 102400)`, `(24, 151936)` (Qwen-class) and `(1, 32000)` (single-request decode) — with a reversed `expanded_idx_mapping` so the token-to-request mapping is non-identity, and `min_p` drawn from `[0.01, 0.5]`. Verification is two-fold, following the operator type: the `-inf` mask positions must match **exactly** (`torch.equal` on the `isinf` masks, since the masking decision is a comparison), while the surviving logits use the fp32 tolerance `rtol=1e-4, atol=1e-4`.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_min_p.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_min_p.py
 ```

@@ -124,7 +124,7 @@ and the exact issue geometry with vocab151936. Chained penalty cases compare
 FP32 logits with the original independent reference at `rtol=atol=1e-5`.
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bincount.py
+pytest -q tests/e2e/pull_request/one_card/singlecard_ops/triton/test_bincount.py
 ```
 
 The final A3 operator acceptance ran the current product test file through

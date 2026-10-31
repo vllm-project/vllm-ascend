@@ -236,7 +236,7 @@ missing grouped-kernel coverage.
 
 ```bash
 pytest -sv -o junit_family=xunit1 \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py \
+  tests/e2e/pull_request/one_card/singlecard_ops/triton/test_kda_recoverssm_npu.py \
   --junitxml=kda_recoverssm.xml
 ```
 
@@ -363,7 +363,7 @@ device-property cache and does not create a new per-iteration compilation parame
 ## Example
 
 The multi-layer and multi-step cases in
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py`
+`tests/e2e/pull_request/one_card/singlecard_ops/triton/test_kda_recoverssm_npu.py`
 show how to allocate page views, call `kda_recoverssm_verify`, construct a commit
 context and commit accepted prefixes. Model activation and configuration will be
 provided by the framework follow-up. This operator test does not establish

@@ -71,7 +71,7 @@ All parameters are required except `init_blocks` and `local_blocks`, which defau
 ## Test Cases
 
 Accuracy and interface cases are in
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py`.
+`tests/e2e/pull_request/one_card/singlecard_ops/triton/test_msa_m3_index_postprocess.py`.
 
 | Category | Cases |
 | --- | --- |
@@ -89,5 +89,5 @@ counts instead of requiring a particular ordering of equally ranked block IDs.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=8 python -m pytest -q \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py
+  tests/e2e/pull_request/one_card/singlecard_ops/triton/test_msa_m3_index_postprocess.py
 ```

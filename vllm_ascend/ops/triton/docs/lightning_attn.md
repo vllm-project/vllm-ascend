@@ -218,10 +218,10 @@ triggers a recompilation.
 
 ## Test Cases
 
-Numerical tests: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py`
+Numerical tests: `tests/e2e/pull_request/one_card/singlecard_ops/triton/test_lightning_attn.py`
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_lightning_attn.py
 ```
 
 The four kernels have no individual dispatch site, so the tests reach them through the

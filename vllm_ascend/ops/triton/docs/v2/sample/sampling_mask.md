@@ -152,5 +152,5 @@ Request-major cases also cover ragged offsets, inactive slots, empty batches,
 concatenation/slicing and graph replay with updated device metadata.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_sampling_mask.py
 ```
