@@ -1837,9 +1837,10 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
     ):
-        # Qwen4Exp PLE is managed by its model-specific implementation, not
-        # the DeepSeek V4.1 Engram runtime.
-        vllm_config.engram_config = None
+        # Qwen4Exp PLE is managed by its model-specific implementation and the
+        # upstream ngram_embedding, which reads engram_config directly. Keep the
+        # config flowing to upstream instead of clearing it; model/layer/device
+        # validation is already patched in patch_engram_config.py.
         return
     if engram_config is None:
         if (
