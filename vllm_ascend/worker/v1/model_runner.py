@@ -607,6 +607,7 @@ class NPUModelRunner(GPUModelRunner):
                 policy_type=self.policy_type,
                 enable_d2d=True,
                 tp_size=self.parallel_config.tensor_parallel_size,
+                record_only=eplb_config.expert_map_record_path is not None,
             )
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
