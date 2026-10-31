@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+# See the adjacent .md for pinned versions, commands and evidence scope.
+# Manual sequential V1/V2 smoke; this is not an automatic nightly entry.
+
+_envs: &envs
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  HCCL_BUFFSIZE: "400"
+  HCCL_INTRA_ROCE_ENABLE: "0"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  OMP_NUM_THREADS: "1"
+  VLLM_BATCH_INVARIANT: "0"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "0"
+  DYNAMIC_EPLB: "false"
+  EXPERT_MAP_RECORD: "false"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--host"
+  - "127.0.0.1"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "1"
+  - "--pipeline-parallel-size"
+  - "1"
+  - "--prefill-context-parallel-size"
+  - "1"
+  - "--decode-context-parallel-size"
+  - "1"
+  - "--enable-expert-parallel"
+  - "--dtype"
+  - "bfloat16"
+  - "--quantization"
+  - "ascend"
+  - "--kv-cache-dtype"
+  - "fp8"
+  - "--attention_config.indexer_kv_dtype"
+  - "fp8"
+  - "--max-model-len"
+  - "40960"
+  - "--max-num-seqs"
+  - "32"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--seed"
+  - "1024"
+  - "--no-enable-prefix-caching"
+  - "--no-async-scheduling"
+  - "--enable-chunked-prefill"
+  - "--no-enable-eplb"
+  - "--generation-config"
+  - "vllm"
+  - "--trust-remote-code"
+  - "--additional-config"
+  - "{\"enable_dsa_cp\": false, \"enable_flashcomm1\": false, \"enable_fused_mc2\": false, \"enable_mlapo\": false, \"multistream_overlap_shared_expert\": false, \"eplb_config\": {}}"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--compilation-config"
+  - "{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", \"cudagraph_capture_sizes\": [1, 2, 4, 8, 16, 32]}"
+  - "--revision"
+  - "b54a6d54803fa2cb4c28a73423061d882d9c06b3"
+
+_prompts: &prompts
+  - "San Francisco is a"
+  - "Python function to add two numbers:\n"
+  - "\u8bf7\u7528\u4e00\u53e5\u8bdd\u4ecb\u7ecd\u5317\u4eac\u3002"
+
+_api_args: &api_args
+  max_tokens: 32
+  temperature: 0.0
+  seed: 1024
+  logprobs: 5
+
+test_cases:
+  - name: "GLM-5.1-A5-TP8-EP8-v1-smoke"
+    model: "/models/GLM-5.1-w4a4c8-mxfp4"
+    envs:
+      <<: *envs
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+    server_cmd: *server_cmd
+    prompts: *prompts
+    api_keyword_args: *api_args
+    test_content: ["completion"]
+  - name: "GLM-5.1-A5-TP8-EP8-v2-smoke"
+    model: "/models/GLM-5.1-w4a4c8-mxfp4"
+    envs:
+      <<: *envs
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    server_cmd: *server_cmd
+    prompts: *prompts
+    api_keyword_args: *api_args
+    test_content: ["completion"]
