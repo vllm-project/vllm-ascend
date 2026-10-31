@@ -118,6 +118,8 @@ jobs:
       skip_base: ${{ inputs.skip_base || false }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
     secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}

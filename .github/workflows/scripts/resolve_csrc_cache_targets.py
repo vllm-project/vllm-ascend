@@ -46,6 +46,34 @@ def resolve_targets(target_ids: list[str] | None, config_path: Path = _CONFIG_PA
     return targets
 
 
+def resolve_nightly_targets(image: str, soc_version: str, config_path: Path = _CONFIG_PATH) -> list[dict]:
+    configured = list(load_targets(config_path).values())
+    matching = [
+        target["soc_version"]
+        for target in configured
+        if soc_version.lower() in (target["device"].lower(), target["soc_version"].lower())
+    ]
+    if not matching:
+        raise ValueError(f"Unknown nightly SOC: {soc_version!r}")
+    soc = matching[0]
+    targets = []
+    for architecture in dict.fromkeys(target["cache_arch"] for target in configured if target["soc_version"] == soc):
+        template = next(target for target in configured if target["cache_arch"] == architecture)
+        targets.append(
+            {
+                "id": f"nightly-{soc}-{architecture}",
+                "runner": template["runner"],
+                "cache_arch": architecture,
+                "image": image,
+                "image_tag": "nightly",
+                "soc_version": soc,
+                "os": "ubuntu",
+                "nightly": True,
+            }
+        )
+    return targets
+
+
 def write_outputs(targets: list[dict]) -> None:
     outputs = {
         "targets": json.dumps(targets, separators=(",", ":")),
@@ -66,10 +94,17 @@ def main() -> None:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--all", action="store_true", help="Resolve every configured target.")
     selection.add_argument("--target-ids", help="JSON array of target IDs.")
+    parser.add_argument("--nightly-image", default="")
+    parser.add_argument("--soc-version", default="")
     args = parser.parse_args()
 
     target_ids = None if args.all else json.loads(args.target_ids)
-    write_outputs(resolve_targets(target_ids))
+    if args.nightly_image:
+        if target_ids:
+            parser.error("Nightly image cannot be combined with configured target IDs")
+        write_outputs(resolve_nightly_targets(args.nightly_image, args.soc_version))
+    else:
+        write_outputs(resolve_targets(target_ids))
 
 
 if __name__ == "__main__":

@@ -163,8 +163,27 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive
 
+      - name: Checkout nightly cache helpers
+        if: fromJSON(inputs.target).nightly == true
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .csrc-cache-workflow
+          sparse-checkout: |
+            .github/actions/nightly-csrc-l0-restore
+            .github/workflows/scripts/nightly_csrc_l0.py
+            .github/workflows/scripts/prepare_csrc_l1_restore.py
+
+      - name: Restore nightly L0
+        id: nightly-cache
+        if: fromJSON(inputs.target).nightly == true
+        uses: ./.csrc-cache-workflow/.github/actions/nightly-csrc-l0-restore
+        with:
+          architecture: ${{ fromJSON(inputs.target).cache_arch }}
+          soc-version: ${{ fromJSON(inputs.target).soc_version }}
+
       - name: Install system dependencies (ubuntu)
-        if: fromJSON(inputs.target).os == 'ubuntu'
+        if: fromJSON(inputs.target).os == 'ubuntu' && fromJSON(inputs.target).nightly != true
         run: |
           xargs apt-get -y install < packages.txt
           apt-get -y install gcc g++ cmake libnuma-dev clang-15
@@ -173,12 +192,13 @@ jobs:
           pip install uv
 
       - name: Install system dependencies (openeuler)
-        if: fromJSON(inputs.target).os == 'openeuler'
+        if: fromJSON(inputs.target).os == 'openeuler' && fromJSON(inputs.target).nightly != true
         run: |
           yum install -y python3-pip net-tools numactl patch clang
           pip install uv
 
       - name: Restore incremental build cache
+        if: steps.nightly-cache.outputs.cache-hit != 'true'
         id: incremental-cache-restore
         uses: $/.github/actions/csrc-l1-restore
         with:
@@ -188,9 +208,11 @@ jobs:
           csrc-hash: ${{ inputs.csrc_hash }}
 
       - name: Install vllm-ascend
+        if: steps.nightly-cache.outputs.cache-hit != 'true'
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
+          NIGHTLY: ${{ fromJSON(inputs.target).nightly == true }}
         run: |
           mkdir -p "$VLLM_ASCEND_BUILD_CACHE_DIR"
           rm -f "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
@@ -204,11 +226,23 @@ jobs:
           pip install uc-manager
           # Indexes for triton-ascend and the CPU PyTorch wheel come from
           # UV_EXTRA_INDEX_URL. Passing --extra-index-url here would replace it.
-          uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          uv pip install -e .
+          if [ "$NIGHTLY" = "true" ]; then
+            pip uninstall -y vllm-ascend
+            pip install uv
+            uv pip install -r requirements-nightly.txt
+            # Match PR nightly installs without replacing image-pinned packages.
+            grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+              requirements.txt > /tmp/requirements-runtime.txt || true
+            uv pip install -r /tmp/requirements-runtime.txt
+            uv pip install -e . --no-deps
+          else
+            uv pip install -r requirements-dev.txt
+            uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+            uv pip install -e .
+          fi
 
       - name: Verify csrc artifacts
+        if: steps.nightly-cache.outputs.cache-hit != 'true'
         run: |
           if ! find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             echo "::error::The csrc build does not contain a top-level shared library."
@@ -218,6 +252,7 @@ jobs:
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
+        if: steps.nightly-cache.outputs.cache-hit != 'true'
         uses: $/.github/actions/csrc-l1-save
         with:
           cache-dir: ${{ steps.incremental-cache-restore.outputs.cache-dir }}
@@ -225,9 +260,29 @@ jobs:
           access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
           secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
 
+      - name: Record nightly L0 integrity
+        if: fromJSON(inputs.target).nightly == true && steps.nightly-cache.outputs.cache-hit != 'true' && steps.nightly-cache.outputs.key != ''
+        env:
+          CACHE_KEY: ${{ steps.nightly-cache.outputs.key }}
+        run: python3 .csrc-cache-workflow/.github/workflows/scripts/nightly_csrc_l0.py record --key "$CACHE_KEY"
+
+      - name: Save nightly L0 to GitHub Cache
+        if: fromJSON(inputs.target).nightly == true && steps.nightly-cache.outputs.cache-hit != 'true' && steps.nightly-cache.outputs.key != ''
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+            .nightly-csrc-l0.json
+          key: ${{ steps.nightly-cache.outputs.key }}
+
       - name: Save csrc cache
         if: >-
           ${{
+            fromJSON(inputs.target).nightly != true &&
             env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
             env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
           }}

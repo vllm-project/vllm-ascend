@@ -274,9 +274,21 @@ jobs:
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
+  ensure-pr-csrc-cache:
+    needs: [setup-vars, parse-trigger, build-image]
+    if: >-
+      always() && !cancelled() && inputs.request_id != '' &&
+      needs.parse-trigger.outputs.run == 'true' && needs.setup-vars.result == 'success' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      source_ref: ${{ inputs.vllm_ascend_ref }}
+      nightly_image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches)[0] }}-a5"
+      soc_version: "a5"
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&

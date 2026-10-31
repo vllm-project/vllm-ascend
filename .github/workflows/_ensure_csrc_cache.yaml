@@ -22,8 +22,16 @@ on:
     inputs:
       target_ids:
         type: string
-        required: true
+        required: false
+        default: '[]'
         description: 'JSON array of csrc cache target IDs.'
+      nightly_image:
+        type: string
+        default: ''
+        description: 'Published Ubuntu nightly image for L1-assisted L0 production.'
+      soc_version:
+        type: string
+        default: ''
       source_ref:
         type: string
         required: true
@@ -164,9 +172,11 @@ jobs:
         id: targets
         env:
           TARGET_IDS: ${{ inputs.target_ids }}
+          NIGHTLY_IMAGE: ${{ inputs.nightly_image }}
+          SOC_VERSION: ${{ inputs.soc_version }}
         run: |
           python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
-            --target-ids "$TARGET_IDS"
+            --target-ids "$TARGET_IDS" --nightly-image "$NIGHTLY_IMAGE" --soc-version "$SOC_VERSION"
 
       - name: Detect OBS writer credentials
         id: writer-credentials
@@ -242,6 +252,7 @@ jobs:
           P310_CACHE_HIT: ${{ steps.lookup-310p.outputs.cache-hit }}
           A5_CACHE_HIT: ${{ steps.lookup-a5.outputs.cache-hit }}
           TARGETS: ${{ steps.targets.outputs.targets }}
+          NIGHTLY_IMAGE: ${{ inputs.nightly_image }}
         run: |
           python3 - <<'PY'
           import json
@@ -256,6 +267,9 @@ jobs:
           targets = json.loads(os.environ["TARGETS"])
           # Lookup steps are intentionally explicit. Fail when configuration
           # expands before this workflow is taught how to check the new target.
+          if os.environ["NIGHTLY_IMAGE"]:
+              # Nightly producers check their runtime-specific L0 before building.
+              cache_hits = {target["id"]: False for target in targets}
           unsupported = sorted(
               target["id"]
               for target in targets
@@ -294,7 +308,7 @@ jobs:
     needs: prepare-cache-checks
     if: >-
       needs.prepare-cache-checks.outputs.has_missing == 'true' &&
-      needs.prepare-cache-checks.outputs.has_write_credentials == 'true'
+      (inputs.nightly_image != '' || needs.prepare-cache-checks.outputs.has_write_credentials == 'true')
     strategy:
       fail-fast: false
       matrix:

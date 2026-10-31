@@ -83,6 +83,10 @@ on:
         required: false
       SWR_PASSWORD:
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
       SYNC_TOOLS_TOKEN:
         required: false
 
@@ -118,6 +122,8 @@ jobs:
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
     secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}

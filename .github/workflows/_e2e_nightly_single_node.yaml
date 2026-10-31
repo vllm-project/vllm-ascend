@@ -238,9 +238,28 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Checkout nightly cache helpers
+        if: ${{ inputs.request_id != '' }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .csrc-cache-workflow
+          sparse-checkout: |
+            .github/actions/nightly-csrc-l0-restore
+            .github/workflows/scripts/nightly_csrc_l0.py
+            .github/workflows/scripts/prepare_csrc_l1_restore.py
+
+      - name: Restore verified nightly L0
+        id: source-l0
+        if: ${{ inputs.request_id != '' }}
+        uses: ./.csrc-cache-workflow/.github/actions/nightly-csrc-l0-restore
+        with:
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
       - name: Restore incremental cache for source checkout
         id: source-l1
-        if: ${{ inputs.request_id != '' }}
+        if: inputs.request_id != '' && steps.source-l0.outputs.cache-hit != 'true'
         uses: $/.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
@@ -263,6 +282,7 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         env:
           MAX_JOBS: ${{ env.MAX_JOBS }}
+          COMPILE_CUSTOM_KERNELS: ${{ steps.source-l0.outputs.cache-hit == 'true' && '0' || '1' }}
           PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
