@@ -3,14 +3,18 @@
 
 import ast
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
 
 
 class TestContextRopeReturn(unittest.TestCase):
+    precompute: ClassVar[Callable[..., None]]
+
     @classmethod
     def setUpClass(cls):
         source = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_qwen3_dflash.py"
