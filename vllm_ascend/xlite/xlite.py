@@ -715,7 +715,7 @@ class XliteWrapper:
                 self.freq_cis,
                 h,
                 stream,
-                xlite_deepstack_input_embeds,
+                xlite_deepstack_input_embeds,  # type: ignore[arg-type]
             )
             if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
                 self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
