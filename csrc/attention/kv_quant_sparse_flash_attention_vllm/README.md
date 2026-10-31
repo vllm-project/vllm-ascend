@@ -256,10 +256,10 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 在仓库根目录、已编译并安装自定义算子的环境中运行统一测试文件：
 
 ```bash
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
+python -m pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
 ```
 
-[统一测试文件](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py)
+[统一测试文件](../../../tests/e2e/pull_request/one_card/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py)
 保留原有随机golden和精度阈值，并包含已合入同一文件的rope0/64回归用例。
 各测试函数保留各自的设备判断，A5专属用例与A2/A3的rope0/64用例分别执行。
 后者覆盖FP16/BF16、PA与TND、batch与尾块、LSE开关、图捕获/修改KV后的重放，

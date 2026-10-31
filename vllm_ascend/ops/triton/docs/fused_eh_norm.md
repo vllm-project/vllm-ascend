@@ -63,5 +63,5 @@ The test imports the operator from its new location and compares NPU results wit
 - These are NPU tests. Syntax/lint validation on a CPU host does not establish kernel correctness; run the following command in a configured Ascend environment.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_eh_norm.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_fused_eh_norm.py
 ```

@@ -52,7 +52,7 @@
 
 ## Test Cases
 
-Accuracy tests live under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`:
+Accuracy tests live under `tests/e2e/pull_request/one_card/singlecard_ops/triton`:
 
 - `test_compute_token_logprobs.py` — the public entry `compute_token_logprobs`, i.e. the kernel at its production `BLOCK_SIZE = 12944`. Vocabulary sizes are the real ones of mainstream models (LLaMA/LLaMA2/Mistral 32000, GPT-2 50257, ChatGLM 65024, LLaMA3 128256, Qwen2 151936) crossed with the `topk` values the sampler asks for (1, 2, 5, 10, 32, 64) and a batch size from the 1..64 request range. It also covers the `(1, 1)` edge case, extreme logits rows (`+100`, `-100`, all-zero, all-one), run-to-run determinism, and fp16 input.
 - `test_log_softmax.py` — the kernel invoked directly with `BLOCK_SIZE = 1024`, guarding the small-tile configuration.
@@ -61,5 +61,5 @@ Accuracy tests live under `tests/e2e/nightly/single_node/ops/singlecard_ops/trit
 The reference is `torch.nn.functional.log_softmax` in fp32 followed by `torch.gather`. As a reduction-type operator over the vocabulary, the tolerance is `atol=1e-4, rtol=1e-5` for fp32 input and `atol=1e-3, rtol=1e-4` for fp16 input.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_token_logprobs.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_compute_token_logprobs.py
 ```

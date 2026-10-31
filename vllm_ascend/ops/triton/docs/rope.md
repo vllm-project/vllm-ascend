@@ -150,12 +150,12 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton`).
 ## Test Cases
 
 > [!NOTE]
-> Single-operator accuracy test cases are placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
+> Single-operator accuracy test cases are placed under `tests/e2e/pull_request/one_card/singlecard_ops/triton`.
 
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py` covers both wrapper paths — `test_rotary_embedding_triton_kernel` (pre-selected `cos`/`sin`) and `test_rotary_embedding_triton_kernel_with_cos_sin_cache` (`cos_sin_cache` + `positions`, `max_position_embeddings=262144`) — against a PyTorch-native reference. Shapes follow the models served on NPU: `(head_size, rotary_dim)` of `(128, 128)` (full rotary, e.g. Qwen/Llama-class models) and `(64, 32)` (partial rotary), `(num_q_heads, num_k_heads)` of `(64, 1)` and `(96, 8)` (GQA/MQA), `num_tokens` of `1, 4, 8, 16, 1024` (decode through prefill), both `is_neox_style` values, and bf16/fp16. Accuracy comparison uses the unified tolerance for this element-wise fp32-accumulating operator: `atol=rtol=1e-3`.
+`tests/e2e/pull_request/one_card/singlecard_ops/triton/test_rope.py` covers both wrapper paths — `test_rotary_embedding_triton_kernel` (pre-selected `cos`/`sin`) and `test_rotary_embedding_triton_kernel_with_cos_sin_cache` (`cos_sin_cache` + `positions`, `max_position_embeddings=262144`) — against a PyTorch-native reference. Shapes follow the models served on NPU: `(head_size, rotary_dim)` of `(128, 128)` (full rotary, e.g. Qwen/Llama-class models) and `(64, 32)` (partial rotary), `(num_q_heads, num_k_heads)` of `(64, 1)` and `(96, 8)` (GQA/MQA), `num_tokens` of `1, 4, 8, 16, 1024` (decode through prefill), both `is_neox_style` values, and bf16/fp16. Accuracy comparison uses the unified tolerance for this element-wise fp32-accumulating operator: `atol=rtol=1e-3`.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py -k "not siso"
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_rope.py -k "not siso"
 ```
 
 ### FP8 E4M3 output variant
@@ -163,5 +163,5 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py 
 `test_rotary_embedding_triton_kernel_fp8` in the same test file compares `rope_forward_triton(..., out_dtype=torch.float8_e4m3fn)` against a PyTorch-native fp32-accumulating reference followed by clipping and E4M3 conversion. It covers `(num_tokens, num_q_heads, num_k_heads, head_size, rotary_dim)` values of `(1, 2, 1, 128, 128)`, `(17, 8, 1, 128, 64)`, and `(1024, 8, 1, 128, 128)`, spanning single-token decode, partial rotary, a non-power-of-two token count, and multi-row prefill. The position-zero case injects values outside the E4M3 finite range to verify saturation to `+448` and `-448`. Accuracy comparison uses `atol=rtol=0.125` after converting actual and reference E4M3 tensors to fp32.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rope.py -k "fp8"
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_rope.py -k "fp8"
 ```

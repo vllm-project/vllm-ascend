@@ -91,5 +91,5 @@ there is no floating-point tolerance to relax. Run with a compatible CANN
 pooled-indexer custom-op package installed.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_nonempty_keypool_inputs.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_prepare_nonempty_keypool_inputs.py
 ```

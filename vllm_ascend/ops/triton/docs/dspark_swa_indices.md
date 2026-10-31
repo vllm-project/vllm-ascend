@@ -60,5 +60,5 @@
 Accuracy tests use the real inference shapes of DeepSeek V4.1 DSpark drafting (`window_size=944`, `block_size=128`, `index_width=1088`, the DFlash uniform-query contract `num_query_per_req = num_speculative_tokens + 1`, graph-capture pad-row cleanup, the wide-window and narrow-block-table boundary cases) plus a broader generic parameter space (varying request counts, block sizes 4-128, long contexts, 8192-wide block tables). As this is an integer index-building operator, the unified precision tolerance is bit-exact (`rtol=0, atol=0`) on the slot values; the lens output is compared as values (the eager result cast to the kernel's fixed int64) per the intentional dtype difference noted under Parameters.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_swa_indices.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_dspark_swa_indices.py
 ```

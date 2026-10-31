@@ -52,5 +52,5 @@
 The test compares the Triton kernel (through its 1:1 wrapper `fused_gdn_gating_patch`) against the independent PyTorch reference `fused_gdn_gating_pytorch` (from `vllm_ascend/_310p/ops/fla/fused_gdn_gating.py`) for both outputs, fp16 inputs, `num_tokens=37`, `num_heads=8`, unified elementwise tolerance `rtol=atol=1e-2`.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_fused_gdn_gating.py
 ```

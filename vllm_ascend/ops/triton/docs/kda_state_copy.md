@@ -116,9 +116,9 @@ python -m pytest --confcutdir=tests/ut/ops \
   tests/ut/ops/test_kda_state_copy_lifecycle.py \
   tests/ut/ops/test_kda_state_copy_integration.py \
   tests/ut/ops/test_kimi_kda.py
-python -m pytest --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_triton.py
+python -m pytest --confcutdir=tests/e2e/pull_request/one_card/singlecard_ops \
+  tests/e2e/pull_request/one_card/singlecard_ops/triton/test_kda_state_copy_integration.py \
+  tests/e2e/pull_request/one_card/singlecard_ops/triton/test_kda_state_copy_triton.py
 ```
 
 ## Performance acceptance and remaining boundaries

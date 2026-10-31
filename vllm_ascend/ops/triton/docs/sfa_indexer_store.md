@@ -35,5 +35,5 @@
 The operator tests compare cache bits exactly, including invalid/padded slots, changing input graphs, capacities and both slot dtypes. CPU routing tests check native quantization and dependency ordering, with C4 and parallel-layout fallbacks. Operator coverage is distinct from model-level C8 coverage: the checkpoint used by the recorded GLM-5.2 model evaluation did not select this store.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k native_quantized
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_sfa_dcp.py -k native_quantized
 ```

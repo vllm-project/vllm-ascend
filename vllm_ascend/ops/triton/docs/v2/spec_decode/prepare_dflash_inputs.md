@@ -159,7 +159,7 @@ The cases cover the captured DFlash inference shapes plus branch-specific cases:
 The test compares Context mapping, Query construction, Sample mapping, per-request sampling state, and all graph-padding regions against an independent Python reference. Since this operator performs integer indexing and direct state copies, the unified precision requirement is bit-exact (`rtol=0, atol=0`).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_dflash_inputs.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_prepare_dflash_inputs.py
 ```
 
 ## Example

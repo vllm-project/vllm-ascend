@@ -34,5 +34,5 @@
 The single-card matrix covers R2/4/8, both layouts, D127/496/512/513, BF16/FP16/FP32, all-invalid positions and changed-input graph replay against FP64. Distributed exchange tests additionally cover the actual packed payload and collective ordering.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k merge
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_sfa_dcp.py -k merge
 ```

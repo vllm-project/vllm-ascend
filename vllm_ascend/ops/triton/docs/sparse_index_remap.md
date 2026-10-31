@@ -47,5 +47,5 @@
 The current integer-repair tests cover top-k2048, rows1/6/12, every logical DCP2/4/8 rank, INT32/INT64, interleaves1/64/128/256, large integer boundaries, all-invalid rows and changing-input graph replay. Strided tensors, arbitrary leading dimensions and other DCP/interleave configurations are checked against an independent CPU integer oracle. As an index-only operator, the precision requirement is bit-exact (`rtol=0, atol=0`). Historical FP32-reference timing is not evidence for the corrected large-index implementation.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k remap
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_sfa_dcp.py -k remap
 ```

@@ -51,6 +51,6 @@ Host tiling 根据 H、有效行数和 UB 容量选择 RESIDENT 或 RELOAD；
 不增加公开算子入口。模型中的层内和末层调用均使用同一个 Torch 入口。
 
 单卡精度用例位于
-`tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py`，
+`tests/e2e/pull_request/one_card/singlecard_ops/test_attn_res_fwd.py`，
 使用独立 CPU 参考值覆盖 Kimi K3 的 H=7168、decode/prefill、
 可选加法、输出归一化和写回。该用例不代表整网 TP/EP/DSpark 吞吐验收。

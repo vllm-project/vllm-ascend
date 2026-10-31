@@ -55,5 +55,5 @@ Three wrapper regressions cover the strided adapter path through GLM `causal_con
 The file contains 30 cases total: 10 direct operator cases and 20 strided wrapper cases. The other 38 convolution combinations use contiguous or page-strided SD layouts with unit channel stride and do not trigger this repository's `copy_conv_state` path, so they are not restored. The original two direct cases retain their existing tolerances; the other eight direct regressions use exactly representable values with `rtol=0`, `atol=0`. Targeted validation of all 30 cases passed on Ascend910B4-1 (A2) and Ascend950PR (A5), using Python 3.11.10, torch-npu 2.10.0.post7, and Triton Ascend 3.6.0. Historical A3 validation remains recorded in PR #17010.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_copy_conv_state.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_copy_conv_state.py
 ```

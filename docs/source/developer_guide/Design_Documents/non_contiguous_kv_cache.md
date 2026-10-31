@@ -269,6 +269,6 @@ graph, connector, and distributed configuration claimed as supported.
 Representative NPU commands are:
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mamba_state_index.py
+pytest -q tests/e2e/pull_request/one_card/singlecard_ops/triton/test_mamba_state_index.py
 pytest -q tests/ut/worker/test_model_runner_v1.py
 ```

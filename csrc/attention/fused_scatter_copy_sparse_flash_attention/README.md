@@ -150,11 +150,11 @@ Python 接口只调用一个 ACLNN 算子。首次填充、核内同步和 Atten
 ## 测试说明
 
 正确性测试位于
-`tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_scatter_copy_sparse_flash_attention.py`，需要在已经
+`tests/e2e/pull_request/one_card/singlecard_ops/test_fused_scatter_copy_sparse_flash_attention.py`，需要在已经
 编译安装当前代码的 Ascend NPU 环境执行：
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_scatter_copy_sparse_flash_attention.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/test_fused_scatter_copy_sparse_flash_attention.py
 ```
 
 测试覆盖以下场景：

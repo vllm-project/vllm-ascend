@@ -92,7 +92,7 @@ validation errors are also checked.
 From the repository root, with the Ascend environment initialized:
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mamba_state_index.py
+pytest -q tests/e2e/pull_request/one_card/singlecard_ops/triton/test_mamba_state_index.py
 ```
 
 ## Example

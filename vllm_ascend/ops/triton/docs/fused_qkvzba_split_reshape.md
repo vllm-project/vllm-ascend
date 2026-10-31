@@ -54,5 +54,5 @@
 The test covers both real inference shapes (Qwen3-GDN-10B, `gqa_interleaved_layout=True`, TP=1: `num_heads_qk=16`, `num_heads_v=128`, `head_qk=512`, `head_v=512`) and a broader generic parameter space. As this is a pure data-movement operator (no arithmetic), the unified precision tolerance is bit-exact (`rtol=0, atol=0`).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py
 ```

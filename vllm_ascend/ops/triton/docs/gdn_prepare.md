@@ -88,7 +88,7 @@ strided inputs, shrinking batches, graph padding, shared-output clearing and
 compiled-kernel reuse across changing batch counts.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_prepare.py
+pytest -sv tests/e2e/pull_request/one_card/singlecard_ops/triton/test_gdn_prepare.py
 ```
 
 Model accuracy and performance measurements are recorded in
