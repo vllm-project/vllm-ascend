@@ -153,6 +153,35 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
             raise
 
+    def make_sibling_device_group(self, group_desc: str | None = None):
+        if self.backend != "hccl" or group_desc != "pp_broadcast":
+            return super().make_sibling_device_group(group_desc)
+
+        from vllm.distributed.utils import get_distributed_timeout_or_none
+
+        # A non-last PP rank posts this receive before the peer finishes its
+        # forward. An AIV broadcast can occupy Vector Cores while waiting and
+        # stall independent HcPre kernels, even on a separate stream. Keep this
+        # eager sampled-token communicator on HOST; TP/EP retain their policy.
+        device_timeout = get_distributed_timeout_or_none()
+        sibling = None
+        for ranks in self.group_ranks:
+            options = create_hccl_pg_options(group_desc)
+            options.hccl_config = dict(options.hccl_config, hccl_op_expansion_mode=1)
+            # Do not use the reuse registry: this communicator must remain
+            # independent of the PP hidden-state send/recv communicator.
+            pg = torch.distributed.new_group(
+                ranks,
+                backend=self.torch_distributed_backend,
+                pg_options=options,
+                group_desc=group_desc,
+                timeout=device_timeout,
+            )
+            if self.rank in ranks:
+                sibling = pg
+        assert sibling is not None
+        return sibling
+
     def _init_device_groups(self, create_cpu_group: bool) -> None:
         reuse_domain = _resolve_reuse_domain(self.group_name)
         self_device_group = None

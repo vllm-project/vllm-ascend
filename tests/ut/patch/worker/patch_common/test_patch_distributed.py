@@ -102,13 +102,14 @@ def _load_patch_distributed_module():
     torch_distributed: Any = ModuleType("torch.distributed")
     torch_distributed_c10d: Any = ModuleType("torch.distributed.distributed_c10d")
 
-    def new_group(ranks, backend, pg_options=None):
+    def new_group(ranks, backend, pg_options=None, **kwargs):
         backend_name = str(backend)
         new_group_calls.append(
             {
                 "ranks": tuple(ranks),
                 "backend": backend_name,
                 "pg_options": pg_options,
+                **kwargs,
             }
         )
         if get_rank() not in ranks:
@@ -143,7 +144,8 @@ def _load_patch_distributed_module():
     parallel_state_module: Any = ModuleType("vllm.distributed.parallel_state")
 
     class BaseGroupCoordinator:
-        pass
+        def make_sibling_device_group(self, group_desc=None):
+            return ("upstream", group_desc)
 
     def _get_unique_name(group_name: str) -> str:
         unique_name_counter["value"] += 1
@@ -197,6 +199,9 @@ def _load_patch_distributed_module():
         "torch.distributed.distributed_c10d": torch_distributed_c10d,
         "vllm": vllm_module,
         "vllm.distributed": vllm_distributed,
+        "vllm.distributed.utils": SimpleNamespace(
+            get_distributed_timeout_or_none=lambda: timedelta(seconds=10)
+        ),
         "vllm.distributed.parallel_state": parallel_state_module,
         "vllm.distributed.device_communicators.shm_broadcast": shm_broadcast_module,
         "vllm_ascend": vllm_ascend_module,
@@ -288,7 +293,7 @@ def test_group_coordinator_preserves_backend_for_inherited_helpers(module_env):
     coordinator = _make_group(module_env, backend="hccl")
 
     assert coordinator.torch_distributed_backend == "hccl"
-    assert "make_sibling_device_group" not in type(coordinator).__dict__
+    assert coordinator.make_sibling_device_group("tp") == ("upstream", "tp")
 
 
 def test_same_hccl_group_reuses_device_pg_once(module_env):
@@ -625,3 +630,31 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+@pytest.mark.parametrize("expansion_mode", [None, 3])
+def test_pp_broadcast_uses_independent_host_groups(module_env, expansion_mode):
+    config = {"hccl_buffer_size": 200}
+    if expansion_mode is not None:
+        config["hccl_op_expansion_mode"] = expansion_mode
+    module_env.utils_module.create_hccl_pg_options.side_effect = lambda _: RealisticFakeHcclOptions(
+        hccl_config=dict(config)
+    )
+    group = _make_group(module_env, group_ranks=[[0, 1], [2, 3]], group_name="pp")
+    module_env.new_group_calls.clear()
+    first = group.make_sibling_device_group("pp_broadcast")
+    second = group.make_sibling_device_group("pp_broadcast")
+    calls = module_env.new_group_calls
+    assert [entry["ranks"] for entry in calls] == [(0, 1), (2, 3)] * 2
+    for entry in calls:
+        assert entry["pg_options"].hccl_config == dict(config, hccl_op_expansion_mode=1)
+        assert entry["group_desc"] == "pp_broadcast"
+        assert entry["timeout"] == timedelta(seconds=10)
+    assert first is not second
+    assert first is not group.device_group
+    assert group._unshared_hccl_groups == []
+
+
+def test_non_hccl_pp_broadcast_keeps_upstream_policy(module_env):
+    group = _make_group(module_env, backend="nccl")
+    assert group.make_sibling_device_group("pp_broadcast") == ("upstream", "pp_broadcast")
