@@ -1,7 +1,18 @@
 > [!NOTE]
 > **Filling Instructions**
 >
-> - Place V1-only operator documents under `vllm_ascend/ops/triton/v1/docs` and all other operator documents under `vllm_ascend/ops/triton/docs`, named after the operator. If a same-named document already exists, add a suffix to distinguish it.
+> - Place new V2 runner implementations under `vllm_ascend/ops/triton/`, using
+>   functional subdirectories such as `sample/` and `spec_decode/`. Do not create
+>   an `ops/triton/v2/` namespace for new code or documents.
+> - Place V1-only implementations under `vllm_ascend/ops/triton/v1/` and their
+>   documents under `vllm_ascend/ops/triton/v1/docs/`. Place V2, shared, and
+>   runner-independent operator documents under `vllm_ascend/ops/triton/docs/`.
+> - Determine runner ownership from the actual callers. Shared, model-layer,
+>   and utility implementations keep their functional directories. Follow the
+>   [operator layout and inventory](../README.md#adding-or-moving-an-operator)
+>   when adding or moving a module.
+> - Name the document after the operator. If a same-named document already
+>   exists, add a suffix to distinguish it.
 > - Fill in strictly following the template. For items that do not apply, use "N/A"; do not leave them blank or missing.
 
 # Operator name

@@ -15,6 +15,26 @@ Warmup uses the shared upstream JIT registry. The generic
 `ascend_jit_warmup.py` stays at the package root; V1 sampling wrappers register
 only through `register_v1_sampling_warmup` during V1 runner construction.
 
+## Adding or moving an operator
+
+Paths below are relative to `vllm_ascend/ops/triton/`.
+
+| Operator ownership | Implementation | Operator document |
+| --- | --- | --- |
+| V1-only runner operator | `v1/<functional-dir>/<operator>.py` | `v1/docs/<operator>.md` |
+| V2 runner operator | `<functional-dir>/<operator>.py` | `docs/<operator>.md` |
+| Shared runner, model-layer, or utility operator | Existing functional directory | `docs/<operator>.md` |
+
+The functional subdirectory is optional for operators placed directly at the
+package root. New V2 code and documents use the main package rather than a
+`v2/` subdirectory. Choose ownership from the production callers; support for a
+V2 model alone does not make an operator V2-only.
+
+Use the [operator documentation template](docs/triton_description_specification.md)
+for the operator document. When adding or moving a module, update this inventory,
+production imports, warmup registrations, tests and mock targets, and documentation
+examples and links together.
+
 ## V1-only operators
 
 | Module | Runner ownership | Documentation |
