@@ -13,6 +13,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -24,6 +25,13 @@ from vllm.config import CompilationMode, set_current_vllm_config
 from vllm.config.compilation import DynamicShapesType
 
 MODEL_PATH = Path(__file__).resolve().parents[3] / "vllm_ascend/models/qwen3_dflash2.py"
+
+
+@pytest.fixture(autouse=True)
+def cpu_dynamo_stream(monkeypatch):
+    # The Ascend plugin selects the NPU accelerator even in CPU-only test
+    # images. Dynamo must not request a real NPU stream from CPU PyTorch.
+    monkeypatch.setattr("torch.accelerator.current_stream", lambda: MagicMock())
 
 
 def _module(name: str, **attributes) -> ModuleType:

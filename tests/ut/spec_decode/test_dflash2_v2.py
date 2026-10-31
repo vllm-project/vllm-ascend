@@ -468,6 +468,13 @@ def test_candidate_sampler_uses_ascend_walk_and_proposal_cache(monkeypatch, prob
     cache = MagicMock()
     monkeypatch.setattr(upstream_dflash2, "_selector_walk_kernel", walk)
     monkeypatch.setattr(upstream_dflash2, "_cache_draft_logits_kernel", cache)
+    # Keep this CPU sampler test independent of the global Triton compatibility
+    # patch, whose constexpr placeholder is not a type in CPU-only images.
+    monkeypatch.setattr(
+        upstream_dflash2.triton,
+        "next_power_of_2",
+        lambda n: 1 << (n - 1).bit_length(),
+    )
 
     sampler.sample(
         candidate_ids, scores, 2, sample_pos, idx_mapping, temperatures, seeds, draft_tokens, draft_logits, False
