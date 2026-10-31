@@ -182,6 +182,7 @@ class TestCompressorStateCache:
 
         spec = cache.get_kv_cache_spec(vllm_config)
 
+        assert spec.prefix_cacheable is False
         assert spec.block_size == 8
         assert spec.head_size == state_dim
         assert spec.sliding_window == 64
