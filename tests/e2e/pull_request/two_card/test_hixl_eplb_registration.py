@@ -5,6 +5,9 @@
 
 import importlib.util
 import statistics
+import subprocess
+import sys
+import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
@@ -25,6 +28,46 @@ from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 _MIB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "first_module",
+    ["vllm_ascend.distributed.eplb.eplb_state", "vllm_ascend.ops.fused_moe.routed_experts"],
+)
+def test_eplb_imports_in_fresh_process(first_module, tmp_path):
+    # The worker module contains no application imports before the spawn target.
+    script = tmp_path / "check_eplb_imports.py"
+    script.write_text(
+        textwrap.dedent("""
+        import importlib
+        import multiprocessing as mp
+        import sys
+
+        def check_imports(first_module):
+            state_module = "vllm_ascend.distributed.eplb.eplb_state"
+            moe_module = "vllm_ascend.ops.fused_moe.routed_experts"
+            importlib.import_module(first_module)
+            if first_module == state_module:
+                assert "vllm_ascend.ops" not in sys.modules, "EPLB state initialized MoE execution"
+            importlib.import_module(moe_module if first_module == state_module else state_module)
+            import torch
+            assert hasattr(torch.ops.vllm, "ascend_eplb_map_to_physical")
+            assert hasattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens")
+
+        if __name__ == "__main__":
+            worker = mp.get_context("spawn").Process(target=check_imports, args=(sys.argv[1],))
+            worker.start()
+            worker.join(90)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join()
+                raise RuntimeError("spawn import timed out")
+            sys.exit(worker.exitcode)
+        """),
+        encoding="utf-8",
+    )
+    result = subprocess.run([sys.executable, str(script), first_module], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _migrate(communicator, buffers, rank: int) -> None:

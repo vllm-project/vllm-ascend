@@ -39,6 +39,7 @@ from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
+from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
@@ -46,6 +47,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -740,13 +742,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             eplb_state = self.router.eplb_state
             if eplb_state is not None:
                 assert isinstance(eplb_state, AscendEplbLayerState)
+                all_gather_mask = None
+                if use_allgather_eplb():
+                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
                 eplb_state.record_load(
                     fused_experts_results.expert_tokens,
                     fused_experts_results.group_list_type,
                     topk_ids=topk_ids,
                     num_source_tokens=num_source_tokens,
                     is_sequence_parallel=self.moe_config.is_sequence_parallel,
-                    prepare_finalize=moe_comm_method.prepare_finalize,
+                    all_gather_mask=all_gather_mask,
                 )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
