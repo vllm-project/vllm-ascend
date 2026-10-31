@@ -96,4 +96,8 @@ def exchange_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
     dist.all_to_all_single(recv, staged.contiguous(), group=group.device_group)
     # Received chunks are source-rank major; heads are contiguous across EDP.
     rows = recv.view(dp_size, slot, local_heads, dim).permute(1, 0, 2, 3)
-    return rows[:num_tokens].reshape(num_tokens, dp_size * local_heads, dim)
+    # Materialize a contiguous [num_tokens, EDP*local_heads, dim] tensor. The
+    # slice+reshape of a permuted view stays non-contiguous, which downstream
+    # ``tensor_model_parallel_all_gather(dim=1)`` rejects via
+    # ``all_gather_into_tensor`` ("Tensors must be contiguous" on NPU).
+    return rows[:num_tokens].reshape(num_tokens, dp_size * local_heads, dim).contiguous()
