@@ -50,6 +50,12 @@ CHECK_IMPORTS = {
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
         allowed_files={
+            # The check_md_links script is a standalone tool that runs in a
+            # minimal CPU job without third-party dependencies.
+            ".github/workflows/scripts/check_md_links.py",
+            # Stdlib re is faster for these translation patterns and avoids a
+            # third-party regex dependency in website builds.
+            "tools/generate_zh_docs.py",
             # Profiling indexes run in minimal CPU jobs without third-party dependencies.
             "tools/profiling/artifacts.py",
             # Cache key preparation and native build wrappers must work before

@@ -9,11 +9,11 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import regex as re
 import requests
 
 URL_RE = re.compile(r'https?://[^\s\)"\'`\]>]+')

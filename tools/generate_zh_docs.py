@@ -9,10 +9,9 @@ Usage:
     python -m tools.generate_zh_docs
 """
 
+import re
 import sys
 from pathlib import Path
-
-import regex as re
 
 SOURCE_DIR = Path("docs/source")
 LOCALE_DIR = SOURCE_DIR / "locale" / "zh_CN" / "LC_MESSAGES"
@@ -165,7 +164,9 @@ def _reflowed_msgid_pattern(msgid: str) -> re.Pattern:
     return re.compile("".join(parts))
 
 
-def _apply_segment_translations(text: str, translations: list[tuple[str, str]]) -> str:
+def _apply_segment_translations(
+    text: str, translations: list[tuple[str, str]], reflowed_patterns: dict[str, re.Pattern | None]
+) -> str:
     """Apply the longest non-overlapping translations to the source once.
 
     Matches contained entirely in code spans, URLs, or link targets are
@@ -192,8 +193,12 @@ def _apply_segment_translations(text: str, translations: list[tuple[str, str]]) 
         # English paragraph is unchanged. Fall back to a whitespace-tolerant
         # match for prose only; list, quote, table, and heading boundaries keep
         # exact matching because their newlines are structural Markdown.
-        if not matches and _is_reflow_safe(msgid):
-            matches.extend(match.span() for match in _reflowed_msgid_pattern(msgid).finditer(text))
+        if not matches:
+            if msgid not in reflowed_patterns:
+                reflowed_patterns[msgid] = _reflowed_msgid_pattern(msgid) if _is_reflow_safe(msgid) else None
+            pattern = reflowed_patterns[msgid]
+            if pattern is not None:
+                matches.extend(match.span() for match in pattern.finditer(text))
 
         for start, end in matches:
             fully_protected = any(start >= range_start and end <= range_end for range_start, range_end in protected)
@@ -250,13 +255,15 @@ def apply_translations(content: str, translations: dict) -> str:
 
     segments = _split_by_code_blocks(content)
     result_parts = []
+    # Reuse each pattern across prose segments, then release it with this document.
+    reflowed_patterns: dict[str, re.Pattern | None] = {}
 
     for seg_text, is_code in segments:
         if is_code:
             result_parts.append(seg_text)
             continue
 
-        result_parts.append(_apply_segment_translations(seg_text, sorted_items))
+        result_parts.append(_apply_segment_translations(seg_text, sorted_items, reflowed_patterns))
 
     return "".join(result_parts)
 
@@ -279,7 +286,7 @@ def copy_assets():
     import shutil
 
     # Copy shared top-level assets referenced by mkdocs.yml or Markdown.
-    for asset_name in ["logos", "assets", "javascripts"]:
+    for asset_name in ["logos", "assets", "javascripts", "stylesheets"]:
         src = SOURCE_DIR / asset_name
         dst = ZH_DIR / asset_name
         if src.exists():
