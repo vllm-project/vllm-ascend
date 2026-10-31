@@ -33,12 +33,12 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
     AscendDSAC128Backend,
     AscendDSAC128StateBackend,
+    AscendDSAIndexerBackend,
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
@@ -361,6 +361,7 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
     )
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
@@ -1537,20 +1538,6 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
-class _RecordingDSACPMetadataBuilder(AscendDSACPMetadataBuilder):
-    def __init__(self, calls: list[dict[str, Any]], compressor_ratio: int):
-        self.calls = calls
-        self.for_cudagraph_capture = False
-        self.tq_group_block_sizes = None
-        self.compressor_ratio = compressor_ratio
-
-    build = _RecordingDSAMetadataBuilder.build
-
-    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-        self.for_cudagraph_capture = True
-        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
-
-
 def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     layer_names = [
         "model.layers.0.self_attn.compressor",
@@ -1950,7 +1937,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     swa_cache = cast(deepseek_v4_model.AscendDeepseekV4SWACache, SimpleNamespace())
     c4_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c4_cache)
     c128_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c128_cache)
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAC4Backend
+    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAIndexerBackend
     assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c128_indexer) is AscendDSAC128Backend
     assert deepseek_v4_model.AscendDeepseekV4SWACache.get_attn_backend(swa_cache) is AscendDSASWABackend
     assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c4_state) is AscendDSAC4StateBackend
@@ -1973,7 +1960,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
-@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder, _RecordingDSACPMetadataBuilder])
+@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder])
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     monkeypatch,
     caller,
@@ -2278,7 +2265,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm_ascend.core import kv_cache_placement
-    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+    from vllm_ascend.patch.worker import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)
@@ -2693,6 +2680,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
     v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
     other_layer = SimpleNamespace(kv_cache=None)
+    other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
         # V4.1 reshape output: one slot tensor per layer.
         "model.layers.0.self_attn.attn": torch.zeros(4, 2),
@@ -2769,6 +2757,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
 
 def _c8_mxfp_vllm_config(cache_dtype: str = "mxfp8") -> SimpleNamespace:
     return SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),

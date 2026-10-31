@@ -544,7 +544,7 @@ class DeepseekV3XliteModel(Glm4MoeXliteModel):
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 
     _attn_metadata_type = AscendMLAMetadata  # type: ignore[assignment]
-    _supported_architectures = ["DeepseekV3ForCausalLM"]
+    _supported_architectures = ["DeepseekV3ForCausalLM", "Glm4MoeLiteForCausalLM"]
 
     def _build_model_config(self) -> None:
         super()._build_model_config()

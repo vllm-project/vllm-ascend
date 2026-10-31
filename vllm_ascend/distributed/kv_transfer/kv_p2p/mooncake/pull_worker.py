@@ -355,7 +355,8 @@ class MooncakePullRecvingThread(threading.Thread):
             local_dcp_size = self.dcp_size
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
-        # For FA or SWA with kv_heads > 1, must use HND kv_cache layout.
+        # Registration publishes HND-shaped metadata, including byte-equivalent
+        # single-head NHD. Multi-head FA/SWA still requires physical HND.
         elif isinstance(spec, SlidingWindowSpec):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = self.block_shapes[local_layer_index][0][0]

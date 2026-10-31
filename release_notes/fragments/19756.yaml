@@ -1,0 +1,17 @@
+pr: 19756
+entries:
+  - category: bugfix
+    text: >-
+      Fixed FX fusion patterns being registered only for the first compiled
+      model prefix. The draft module of a speculative-decoding deployment was
+      compiled with an empty pattern matcher, silently disabling all graph
+      fusion passes on it.
+  - category: bugfix
+    text: >-
+      Fixed the dynamic norm+quant fusion patterns never matching W8A8 dynamic
+      models whose RMSNorm has no bias.
+  - category: bugfix
+    text: >-
+      Restricted the dynamic norm+quant fusion patterns to int8 so they cannot
+      match INT4/FP8 quantize nodes and replace them with the INT8 fused
+      operator.

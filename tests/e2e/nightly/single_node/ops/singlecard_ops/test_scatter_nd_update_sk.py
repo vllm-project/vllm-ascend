@@ -9,7 +9,7 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.device.device_config import check_ascend_device_type, is_950
+from vllm_ascend.device.device_config import check_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env
@@ -94,10 +94,6 @@ def test_a5_cache_destination_layout(dtype, width, count, row_gap):
     [True],
 )
 def test_scatter_nd_update_sk(a: int, b: int, var_dtype, idx_dtype, contiguous: bool):
-    if is_950() and (a, b) == (77, 128):
-        # x86_64 A5 SIGFPE: CalculateDerivedParams divides before GetPlatformInfo initializes the core count.
-        pytest.skip("A5 host tiling uses the core count before platform initialization")
-
     n = max(1, a // 4)
 
     # unique indices in [0, a)
@@ -141,10 +137,6 @@ def test_scatter_nd_update_sk(a: int, b: int, var_dtype, idx_dtype, contiguous: 
 def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous: bool):
     """Duplicated indices take the sort path; the result is deterministic when
     all updates for the same index are identical."""
-    if is_950() and var_dtype in (torch.float16, torch.bfloat16):
-        # Reproduced on x86_64 A5; the affected two dtypes use the same host tiling path.
-        pytest.skip("A5 host tiling uses the core count before platform initialization")
-
     a, b, n = 32, 64, 8
     row = 7  # duplicated target row
     indices_cpu = torch.full((n, 1), row, dtype=idx_dtype)

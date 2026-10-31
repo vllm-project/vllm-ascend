@@ -2,8 +2,16 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm.config import CUDAGraphMode
+import pytest
+import torch
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
 
@@ -331,3 +339,59 @@ class TestNPUWorkerV2(TestBase):
             self.assertEqual(model_runner_output.execution_time_ms, 125.0)
             self.assertIsNone(model_runner._cpp_execution_time_ms)
             model_runner.sample_tokens.assert_called_once_with(grammar_output)
+
+
+@pytest.mark.parametrize("with_kv_transfer", [False, True])
+@pytest.mark.parametrize("use_compress", [False, True])
+def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_transfer, use_compress):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    compressed_spec = MLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        tokens_per_state=4,
+    )
+    mamba_spec = MambaSpec(
+        block_size=8,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=["compressed_attn"],
+            kv_cache_spec=compressed_spec,
+        ),
+        KVCacheGroupSpec(
+            layer_names=["linear_attn"],
+            kv_cache_spec=mamba_spec,
+        ),
+    ]
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.use_v2_model_runner = True
+    worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC),
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
+        ),
+    )
+    worker.get_kv_cache_spec = MagicMock(
+        return_value={
+            "compressed_attn": compressed_spec,
+            "linear_attn": mamba_spec,
+        }
+    )
+    for use_sparse in (False, True):
+        worker.model_runner = SimpleNamespace(
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=use_sparse,
+            use_compress=use_compress,
+        )
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
+        ):
+            expected = 8230 if use_sparse or use_compress else 12345
+            assert worker._scale_kv_cache_memory_for_multi_group(12345) == expected

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -47,7 +48,27 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate, PromptUpdateDetails
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.models.glm5next.processor import Glm5NextProcessorKwargs
+
+
+def _requires_2d_nz_input(layer: nn.Module) -> bool:
+    return (
+        get_current_hardware_profile().requires_2d_nz_linear_input
+        and get_ascend_config().weight_nz_mode == 2
+        and isinstance(layer.quant_method, UnquantizedLinearMethod)
+        and layer.weight.dtype in (torch.bfloat16, torch.float16)
+    )
+
+
+def _vision_projection(layer: nn.Module, x: torch.Tensor, use_2d: bool) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if not use_2d or x.ndim == 2:
+        return layer(x)
+    # Only GLM vision's NZ projections need the 2D mm/addmm path. Preserve
+    # leading dimensions for the attention/MLP and leave weights untouched.
+    output, bias = layer(x.reshape(-1, x.shape[-1]))
+    return output.view(*x.shape[:-1], output.shape[-1]), bias
 
 
 class Glm5NextVisionPatchEmbed(nn.Module):
@@ -107,13 +128,15 @@ class Glm5NextVisionMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
             disable_tp=use_data_parallel,
         )
+        self._gate_up_2d = _requires_2d_nz_input(self.gate_up_proj)
+        self._down_2d = _requires_2d_nz_input(self.down_proj)
         # GLM-5.3-Flash clamps the vision SwiGLU gate/up unlike GLM-OCR/GLM-4V.
         self.act_fn = SiluAndMulWithClamp(swiglu_limit=swiglu_limit)
 
     def forward(self, x: torch.Tensor):
-        x, _ = self.gate_up_proj(x)
+        x, _ = _vision_projection(self.gate_up_proj, x, True) if self._gate_up_2d else self.gate_up_proj(x)
         x = self.act_fn(x)
-        x, _ = self.down_proj(x)
+        x, _ = _vision_projection(self.down_proj, x, True) if self._down_2d else self.down_proj(x)
         return x
 
 
@@ -157,6 +180,8 @@ class Glm5NextVisionAttention(nn.Module):
             bias=True,
             disable_tp=use_data_parallel,
         )
+
+        self._proj_2d = _requires_2d_nz_input(self.proj)
 
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
@@ -222,7 +247,7 @@ class Glm5NextVisionAttention(nn.Module):
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
-        output, _ = self.proj(context_layer)
+        output, _ = _vision_projection(self.proj, context_layer, True) if self._proj_2d else self.proj(context_layer)
         return output
 
 

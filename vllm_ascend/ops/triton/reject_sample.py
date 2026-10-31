@@ -874,6 +874,9 @@ class SampleRecoveredTokensKernel(AscendTritonJitKernel["SampleRecoveredTokensKe
             vocab_size=compile_key.vocab_size,
             no_draft_probs=compile_key.no_draft_probs,
             sub_block=compile_key.sub_block,
+            # Any positive value compiles the same binary; the grid only
+            # affects launch. Keep the cheapest (1, 1) warmup launch.
+            max_spec_len=1,
         )
 
     @kernel_launcher
@@ -889,10 +892,15 @@ class SampleRecoveredTokensKernel(AscendTritonJitKernel["SampleRecoveredTokensKe
         vocab_size: int,
         no_draft_probs: bool,
         sub_block: int,
+        max_spec_len: int,
     ) -> LaunchSpec:
-        # 2D grid (batch_size, max_spec_len); a (1, 1) grid still compiles the
-        # kernel, and the real grid only affects launch, not the JIT key.
-        return (cu_num_draft_tokens.shape[0], max(1, q.shape[0])), dict(
+        # 2D grid (batch_size, max_spec_len): axis 1 must cover every draft
+        # position. q holds one row per request, so deriving axis 1 from
+        # q.shape[0] under-covers whenever batch_size < max_spec_len and
+        # leaves recovered slots unwritten (garbage token ids then feed
+        # out-of-bounds gathers downstream). A (1, 1) grid still compiles
+        # the kernel; the real grid only affects launch, not the JIT key.
+        return (cu_num_draft_tokens.shape[0], max(1, max_spec_len)), dict(
             output_token_ids_ptr=recovered_token_ids,
             NO_DRAFT_PROBS=no_draft_probs,
             SUB_BLOCK=sub_block,
