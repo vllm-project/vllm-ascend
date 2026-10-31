@@ -596,6 +596,7 @@ class NPUPlatform(Platform):
 
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
+        _validate_speculative_pipeline_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
         _validate_aux_output_config(vllm_config)
@@ -1992,6 +1993,41 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
     max_tp_size = 16 if variant == "V4 Pro" else 8
     if tp_size > max_tp_size:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
+
+
+def _validate_speculative_pipeline_parallel_config(vllm_config: VllmConfig) -> None:
+    """Reject speculative decoding with PP on the V1 model runner.
+
+    Measured on A3 with Qwen3.8-27B-w8a8 (TP2xPP2, MTP with 1 and 3
+    speculative tokens, eager and graph modes, with and without async
+    scheduling): greedy output silently diverges from the non-speculative
+    run within the first few decode steps because the target model keeps
+    attending to the KV of rejected draft tokens. The V2 model runner
+    (VLLM_USE_V2_MODEL_RUNNER=1) runs the same configuration correctly,
+    byte-identical to the non-speculative greedy output.
+    """
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return
+    if vllm_config.parallel_config.pipeline_parallel_size <= 1:
+        return
+    if vllm_config.use_v2_model_runner:
+        return
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is not None and (
+        getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    ):
+        # Prefill-only PD nodes never decode, so speculative verification
+        # never runs there; patch_pp_mtp applies the same exemption.
+        return
+    raise ValueError(
+        "Speculative decoding with pipeline parallelism silently corrupts "
+        "generated tokens on the V1 model runner of vLLM Ascend: the KV of "
+        "rejected draft tokens leaks into later decoding steps. Please set "
+        "VLLM_USE_V2_MODEL_RUNNER=1, on which this combination is verified, "
+        "or remove --pipeline-parallel-size / --speculative-config."
+    )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
