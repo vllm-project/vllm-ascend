@@ -275,6 +275,10 @@ class AscendCompiler(CompilerInterface):
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
+            "fuse_matmul_reduce_scatter": ascend_compilation_config.fuse_matmul_reduce_scatter,
+            "fuse_all_gather_matmul": ascend_compilation_config.fuse_all_gather_matmul,
+            "fuse_matmul_all_reduce": ascend_compilation_config.fuse_matmul_all_reduce,
+            "matmul_comm_fusion_min_tokens": ascend_compilation_config.matmul_comm_fusion_min_tokens,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
