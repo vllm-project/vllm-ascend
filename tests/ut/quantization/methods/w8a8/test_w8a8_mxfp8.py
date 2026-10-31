@@ -233,6 +233,32 @@ class TestAscendW8A8MXFP8DSLinearMethod(TestBase):
                 (input_size // scheme.group_size // 2, output_size, 2),
             )
 
+    def test_process_weights_pads_odd_tp_scale_groups(self):
+        scheme = object.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+        scheme.block_size = 32
+        scheme.group_size = 32
+        layer = nn.Module()
+        layer.weight = nn.Parameter(
+            torch.zeros(64, 288, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.weight_scale = nn.Parameter(
+            torch.ones(2, 9, dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.prefix = "model.layers.0.mlp.shared_experts.down_proj"
+
+        scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (320, 64))
+        self.assertEqual(layer.weight_scale.shape, (5, 64, 2))
+        self.assertEqual(layer.mxfp8_tp_padding, (0, 32))
+        torch.testing.assert_close(layer.weight[288:], torch.zeros(32, 64, dtype=layer.weight.dtype))
+        torch.testing.assert_close(
+            layer.weight_scale[-1],
+            torch.zeros(64, 2, dtype=layer.weight_scale.dtype),
+        )
+
 
 class TestAscendW8A8MXFP8MoEMethod(TestBase):
     num_experts = 8

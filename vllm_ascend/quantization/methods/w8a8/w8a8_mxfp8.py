@@ -683,6 +683,14 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
                 f"group_size={self.group_size}"
             )
         input_repeat = self.block_size // self.group_size
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            # A TP shard can end with an odd number of 32-token scale groups.
+            # The runtime consumes scales in even groups, so append a zero group
+            # and align the weight/input to that padded block.
+            prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+            layer.mxfp8_tp_padding = (prefix_padding, suffix_padding + self.block_size)
+            layer.weight.data = F.pad(layer.weight.data, (0, self.block_size), mode="constant", value=0)
+            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
