@@ -176,4 +176,15 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     cd /workspace && \
     rm -rf /tmp/flash-attention-npu
 
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    ARCH="$(uname -m)" && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.2.0/${ARCH}-linux/devlib/linux/${ARCH}/:/usr/local/lib:$LD_LIBRARY_PATH && \
+    git clone https://github.com/MinghuasLab/flash-attention-npu.git && \
+    cd flash-attention-npu && \
+    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git submodule update --init --recursive && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    python setup.py install
+
 CMD ["/bin/bash"]
