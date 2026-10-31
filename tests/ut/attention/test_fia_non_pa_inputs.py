@@ -271,7 +271,13 @@ def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, 
         if not causal:
             impl.forward_fused_infer_attention(query, query, query, metadata, output)
             eager_fia.assert_called_once()
-            check_fia_contract(**eager_fia.call_args.kwargs)
+            eager_kwargs = eager_fia.call_args.kwargs
+            if sliding_window is None:
+                # Keep the original non-causal FIA call unchanged without a window.
+                assert "atten_mask" not in eager_kwargs
+                assert "pre_tokens" not in eager_kwargs
+                assert "next_tokens" not in eager_kwargs
+            check_fia_contract(**eager_kwargs)
 
     workspace.assert_called_once()
     register.assert_called_once()
