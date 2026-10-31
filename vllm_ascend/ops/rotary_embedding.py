@@ -714,7 +714,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             )  # type: ignore
 
         query, key = torch_npu.npu_mrope(
-            positions.contiguous(),
+            positions.to(dtype=torch.int64).contiguous(),
             query.contiguous(),
             key.contiguous(),
             self.cos_sin_cache.contiguous(),
