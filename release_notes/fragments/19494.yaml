@@ -1,0 +1,4 @@
+pr: 19494
+entries:
+  - category: bugfix
+    text: Preserve the physical shared-pool KV budget for GLM-Next models, preventing unnecessary capacity reductions and GLM-5.3-Flash MRV1 startup failures.

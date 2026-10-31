@@ -184,6 +184,47 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     assert get_glm5_next_max_memory_usage(config, groups) == required_blocks * bytes_per_block
 
 
+@pytest.mark.parametrize("use_sparse", [False, True])
+@pytest.mark.parametrize("packed_main", [False, True])
+def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    config = make_config()
+    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next")
+    config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
+        is_layer_compact=True, is_block_compact=True
+    )
+    specs = make_specs()
+    if packed_main:
+        specs["model.layers.3.attn"] = AscendMLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=528,
+            dtype=torch.int8,
+            cache_sparse_sfa_c8=True,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.vllm_config = config
+    worker.model_config = config.model_config
+    worker.model_runner = SimpleNamespace(
+        supports_standardized_shared_kv_backing=True,
+        use_sparse=use_sparse,
+        use_compress=False,
+    )
+    worker.get_kv_cache_spec = lambda: specs
+    monkeypatch.setattr("vllm_ascend.worker.worker.get_kv_cache_groups", lambda *_args: groups)
+
+    budget = 20 * get_glm5_next_pool_bytes_per_block(groups)
+    planner_budget = worker._scale_kv_cache_memory_for_multi_group(budget)
+    assert planner_budget == budget
+    plan = get_glm5_next_kv_cache_config(config, groups, planner_budget)
+    assert plan.num_blocks == 20
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == budget
+
+
 def test_standalone_mtp_layout_has_no_mamba_groups():
     specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
