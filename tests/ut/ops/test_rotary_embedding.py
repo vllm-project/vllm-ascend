@@ -110,6 +110,59 @@ class TestRopeForwardOOT:
         assert key_out.dtype == torch.float8_e4m3fn
 
 
+class TestAscendMRotaryEmbedding:
+    def _make_emb(self, mrope_section):
+        emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+        emb.head_size = HEAD_SIZE
+        emb.mrope_section = mrope_section
+        emb.mrope_interleaved = False
+        emb.cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.float32)
+        return emb
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu.npu_mrope")
+    def test_npu_mrope_output_is_copied_back_to_input_buffers(self, mock_npu_mrope):
+        """Caller-facing query/key buffers must hold the rotated values."""
+        emb = self._make_emb([16, 24, 24])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        key = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        rotated_q = torch.full_like(query, 3.0)
+        rotated_k = torch.full_like(key, 5.0)
+        mock_npu_mrope.return_value = rotated_q, rotated_k
+
+        query_out, key_out = emb.forward_oot(positions, query, key)
+
+        assert query_out is query
+        assert key_out is key
+        torch.testing.assert_close(query, rotated_q)
+        torch.testing.assert_close(key, rotated_k)
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    def test_super_forward_oot_output_is_copied_back_to_input_buffers(self):
+        """Non-[16,24,24] MRoPE (e.g. Qwen3.8) must still copy back into inputs."""
+        emb = self._make_emb([11, 11, 10])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        key = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        rotated_q = torch.full_like(query, 3.0)
+        rotated_k = torch.full_like(key, 5.0)
+
+        with patch.object(
+            AscendMRotaryEmbedding.__bases__[0],
+            "forward_oot",
+            create=True,
+            return_value=(rotated_q, rotated_k),
+        ) as mock_super_forward_oot:
+            query_out, key_out = emb.forward_oot(positions, query, key)
+
+        mock_super_forward_oot.assert_called_once()
+        assert query_out is query
+        assert key_out is key
+        torch.testing.assert_close(query, rotated_q)
+        torch.testing.assert_close(key, rotated_k)
+
+
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
     """

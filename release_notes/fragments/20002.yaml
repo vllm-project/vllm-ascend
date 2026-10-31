@@ -1,0 +1,8 @@
+pr: 20002
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Ascend MRoPE so rotated query/key are copied back into the caller
+      buffers, restoring Qwen3 DFlash/DSpark speculative decoding acceptance
+      length on Ascend.
+    model: qwen3-dflash
