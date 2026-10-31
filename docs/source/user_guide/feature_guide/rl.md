@@ -355,8 +355,8 @@ Set `stream=true` to receive server-sent events (SSE), ending with
 list of IDs returned by the server (including the `generate-tokens-` prefix),
 rather than the original client-supplied IDs.
 
-For the full protocol and the `text` and `derender` output modes, which
-require a tokenizer, see the upstream
+For the full protocol and the `text` output mode, which requires a tokenizer,
+see the upstream
 [TITO guide](https://docs.vllm.ai/en/latest/serving/online_serving/token_in_token_out/).
 The [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
 provides design background.
