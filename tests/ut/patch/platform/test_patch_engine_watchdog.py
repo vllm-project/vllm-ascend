@@ -16,7 +16,8 @@ from CPU UT):
   in exactly three places -- the def name, the ``logging.DEBUG`` spelling,
   and the ``with get_watch_dog().disable():`` wrap of the blocking
   ``input_queue.get``; the source-diff guard fails loudly on any other
-  upstream drift;
+  upstream drift (the pristine upstream is read via AST from the vllm
+  module file, since the class attr may already be rebound in CI);
 * ``patch_watchdog_for_engine_core`` installs both patches and starts the
   watchdog named ``engine_<dp_rank>`` through the vllm engine-core logger.
 
@@ -24,6 +25,7 @@ The watchdog implementation itself is covered by ``tests/ut/test_watch_dog.py``;
 only the engine-core patch is guarded here.
 """
 
+import ast
 import inspect
 import queue
 import textwrap
@@ -78,9 +80,27 @@ _EXPECTED_INPUT_QUEUE_DELTA = [
 ]
 
 
-def _source_lines(func) -> list[str]:
+def _upstream_method_source(name: str) -> str:
+    """Pristine upstream method source, read from the vllm module file via
+    AST: in CI the platform plugin runs ``patch_watchdog_for_engine_core``
+    at pytest startup (before this test module is imported), so
+    ``EngineCoreProc``'s class attrs may already be rebound to the patched
+    functions and the pristine method must not be read from them."""
+    src = inspect.getsource(_engine_core_mod)
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "EngineCoreProc")
+    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    # ast.get_source_segment strips the leading indent of the first line
+    # only; slice the method's column offset off every line so the method
+    # reads as a uniformly indented top-level function (matching the
+    # patched module-level copy).
+    lines = src.splitlines()
+    return "\n".join(line[fn.col_offset :] for line in lines[fn.lineno - 1 : fn.end_lineno])
+
+
+def _source_lines(src: str) -> list[str]:
     """Normalized source lines: dedented, blank lines dropped."""
-    return [line for line in textwrap.dedent(inspect.getsource(func)).splitlines() if line.strip()]
+    return [line for line in textwrap.dedent(src).splitlines() if line.strip()]
 
 
 def test_patched_process_input_queue_is_upstream_copy_plus_disable():
@@ -91,8 +111,8 @@ def test_patched_process_input_queue_is_upstream_copy_plus_disable():
     delta = [
         line.rstrip()
         for line in unified_diff(
-            _source_lines(EngineCoreProc._process_input_queue),
-            _source_lines(_watchdog_patch._patched_process_input_queue),
+            _source_lines(_upstream_method_source("_process_input_queue")),
+            _source_lines(inspect.getsource(_watchdog_patch._patched_process_input_queue)),
             n=0,
         )
         if line[:1] in "+-" and line[:3] not in ("+++", "---")
