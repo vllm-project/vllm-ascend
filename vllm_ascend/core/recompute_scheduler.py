@@ -101,6 +101,17 @@ class RecomputeScheduler(Scheduler):
     """
 
     prefill_capacity_bound: bool
+    _allow_decode_padding = True
+
+    def _can_admit_local_prefix(self, request: Request, local_hits: int) -> bool:
+        """Hook for decoder-local admission before connector lookup/allocation."""
+        return True
+
+    def _get_admission_replay_tokens(self, request: Request, local_hits: int) -> int:
+        return 0
+
+    def _get_external_prefix_cache_hit(self, request: Request, local_hits: int) -> tuple[int | None, bool]:
+        return self.connector.get_num_new_matched_tokens(request, local_hits)
 
     def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
         allocate = getattr(super(), "_allocate_encoder_inputs", None)
@@ -554,6 +565,10 @@ class RecomputeScheduler(Scheduler):
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
 
+                    if not self._can_admit_local_prefix(request, num_new_local_computed_tokens):
+                        skip_request(request_queue)
+                        continue
+
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
                         # Present a block-aligned local hit to the connector so
@@ -561,9 +576,7 @@ class RecomputeScheduler(Scheduler):
                         # sub-block tail without racing its copy-on-write.
                         partial_tail = num_new_local_computed_tokens % self.block_size
                         block_aligned_local = num_new_local_computed_tokens - partial_tail
-                        ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
-                            request, block_aligned_local
-                        )
+                        ext_tokens, load_kv_async = self._get_external_prefix_cache_hit(request, block_aligned_local)
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -637,6 +650,7 @@ class RecomputeScheduler(Scheduler):
                 duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
+                num_admission_replay_tokens = 0
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -648,6 +662,9 @@ class RecomputeScheduler(Scheduler):
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
+                    if did_prefix_cache_lookup:
+                        num_admission_replay_tokens = self._get_admission_replay_tokens(request, num_computed_tokens)
+                        num_computed_tokens -= num_admission_replay_tokens
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -660,7 +677,8 @@ class RecomputeScheduler(Scheduler):
                     # No scheduled_running_reqs check: disaggregated D nodes never mix long prefills, so padding
                     # always pays off; that check only helps colocated P/D, where prefill_scheduled still guards us.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        self._allow_decode_padding
+                        and (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
@@ -762,7 +780,7 @@ class RecomputeScheduler(Scheduler):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    max(num_new_tokens - num_admission_replay_tokens, 0),
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
