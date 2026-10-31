@@ -101,6 +101,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    embedding_tp_enable,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -290,6 +291,27 @@ class NPUModelRunner(GPUModelRunner):
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
 
+    def _find_embed_tp_module(self):
+        """Return the token embedding that owns the fine-grained exchange group.
+
+        The lookup walks ``named_modules`` once and is cached. A ``None``
+        result (model without a fine-grained embedding, e.g. non-first PP
+        ranks) makes the callers skip the exchange entirely.
+        """
+        if not getattr(self, "_embed_tp_module_resolved", False):
+            from vllm_ascend.ops.vocab_parallel_embedding import (
+                AscendVocabParallelEmbedding,
+            )
+
+            embed_tp_module = None
+            for _, module in self.model.named_modules():
+                if isinstance(module, AscendVocabParallelEmbedding) and module.token_exchange_group is not None:
+                    embed_tp_module = module
+                    break
+            self._embed_tp_module = embed_tp_module
+            self._embed_tp_module_resolved = True
+        return self._embed_tp_module
+
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
@@ -308,6 +330,25 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        if embedding_tp_enable():
+            # Eagerly create the fine-grained embedding exchange group's HCCL
+            # communicator. ProcessGroupHCCL creates communicators lazily on the
+            # first collective; left lazy, the first exchange happens on the
+            # request path, where the concurrent communicator creation can race
+            # across ranks (HCCL EI0019 endpoint collisions) or deadlock inside
+            # the collective. Every rank executes load_model, so one
+            # capacity-sized exchange here builds the communicator
+            # deterministically before any request traffic.
+            warmup_module = self._find_embed_tp_module()
+            if warmup_module is not None:
+                warmup_module(
+                    torch.zeros(
+                        warmup_module.embedding_tp_capacity,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                )
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -680,6 +721,29 @@ class NPUModelRunner(GPUModelRunner):
         )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        if (
+            dummy_run
+            and not is_profile
+            and embedding_tp_enable()
+            # Only inputs-embeds models need the join: their dummy batches feed
+            # inputs_embeds directly and skip the embedding lookup, so the
+            # busy ranks' cross-DP exchange would be left unpaired until HCCL
+            # times out. Text models' dummy batches still carry input_ids and
+            # run the exchange inside the dummy forward — they self-pair and
+            # must not join a second time.
+            and self.uses_inputs_embeds
+        ):
+            # Join at the group-agreed capacity so every rank contributes the
+            # same exchange length per step.
+            join_module = self._find_embed_tp_module()
+            if join_module is not None:
+                join_module(
+                    torch.zeros(
+                        join_module.embedding_tp_capacity,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                )
         with dp_coordination_context:
             try:
                 output = super().execute_model(

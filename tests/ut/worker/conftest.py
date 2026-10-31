@@ -7,16 +7,20 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _stub_ascend_config(monkeypatch):
-    # Bare-runner harnesses reach lmhead TP gates (sample_tokens, the dummy
-    # join) that read the global ascend config; stub it as lmhead-off so the
-    # gates no-op instead of raising on the uninitialized config read.
+    # Bare-runner harnesses reach the fine-grained TP gates (sample_tokens,
+    # the lmhead/embedding dummy joins) that read the global ascend config;
+    # stub it as lmhead/embedding-off so the gates no-op instead of raising
+    # on the uninitialized config read.
     from vllm_ascend import ascend_config as _ascend_config_module
 
     monkeypatch.setattr(
         _ascend_config_module,
         "_ASCEND_CONFIG",
         SimpleNamespace(
-            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            finegrained_tp_config=SimpleNamespace(
+                lmhead_tensor_parallel_size=0,
+                embedding_tensor_parallel_size=0,
+            ),
             ascend_compilation_config=object(),
             eplb_config=object(),
             draft_window_size=None,
