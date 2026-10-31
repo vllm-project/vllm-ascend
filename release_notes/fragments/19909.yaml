@@ -1,0 +1,7 @@
+pr: 19909
+entries:
+  - category: performance
+    text: >-
+      Automatically budget concurrent attention and history-pack cores for
+      FlashMLA DCP speculative decoding, adapting to device resources
+      and retaining full-grid execution for larger packs.

@@ -10,7 +10,7 @@ attention is the independent reference; this is not NPU or ACL graph evidence.
 import ast
 import runpy
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
@@ -163,6 +163,8 @@ def runtime(monkeypatch):
 
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
+    core_budget_factory = Mock(return_value=None)
+    monkeypatch.setitem(api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", core_budget_factory)
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
         return torch.cat((lengths, cu_seqlens_q, seqused_q))
@@ -244,6 +246,8 @@ def runtime(monkeypatch):
 
     return SimpleNamespace(
         builder=builder,
+        core_budget_factory=core_budget_factory,
+        attn_stream=attn_stream,
         api=api,
         metadata_op=metadata_op,
         attention_op=attention_op,
@@ -431,10 +435,18 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
         (False, True, 4, torch.float16, True),
     ],
 )
+@pytest.mark.parametrize("budgeted", [False, True])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, budgeted
 ):
     runtime.context.capturing = capturing
+    if budgeted:
+        budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
+        monkeypatch.setitem(
+            runtime.api.FlashMLAMetadataBuilder.__init__.__globals__,
+            "_create_core_budget",
+            lambda *args: budget,
+        )
     torch.manual_seed(41)
     size, local_heads, tokens = 8, 8, 5
     split = causal and speculative
@@ -492,9 +504,20 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         owned = slice(rank * local_heads, (rank + 1) * local_heads)
 
         def exchange(
-            output, lse, world_size, scatter_dim, group, *, defer_combine, owned=owned, rank=rank, flash=flash
+            output,
+            lse,
+            world_size,
+            scatter_dim,
+            group,
+            *,
+            defer_combine,
+            pack_vector_cores=None,
+            owned=owned,
+            rank=rank,
+            flash=flash,
         ):
             assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
+            assert pack_vector_cores == (28 if budgeted and split else None)
             runtime.events.append(("exchange", runtime.active_stream[0]))
             assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
             expected_output, expected_lse = partials[rank]
@@ -645,3 +668,160 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+def test_budgeted_metadata_refresh_orders_streams_and_preserves_graph_buffers(runtime, monkeypatch):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
+    create = Mock(return_value=budget)
+    monkeypatch.setitem(runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", create)
+    state = runtime.builder()
+    inputs = common([20, 4], [4, 4], tokens=8)
+    flash = state.build(inputs, 2, 8, False, retain_for_graph=True)
+    pointers = (flash.schedule.data_ptr(), flash.current.schedule.data_ptr())
+    seen = []
+    schedule = runtime.metadata_op.side_effect
+
+    def observed(*args, **kwargs):
+        seen.append(runtime.active_stream[0])
+        return schedule(*args, **kwargs)
+
+    runtime.metadata_op.side_effect = observed
+    runtime.events.clear()
+    inputs = common([21, 5], [1, 1], tokens=8)
+    replay = state.build(inputs, 2, 2, False, retain_for_graph=True)
+    assert replay is flash
+    assert pointers == (replay.schedule.data_ptr(), replay.current.schedule.data_ptr())
+    assert seen == ["main", "attn"]
+    assert runtime.events == [
+        ("record", "main"),
+        ("wait", "attn", "main"),
+        ("record", "attn"),
+        ("wait", "main", "attn"),
+    ]
+    assert runtime.active_stream == ["main"]
+    create.assert_called_once()
+
+
+def test_large_pack_uses_original_stream_and_metadata(runtime, monkeypatch):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
+    monkeypatch.setitem(
+        runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", lambda *args: budget
+    )
+    state = runtime.builder(heads=12)
+    large = state.build(common([32], [32], tokens=32), 1, 32, False, retain_for_graph=True)
+    assert large.current.core_budget is None
+    assert state._core_budget_for(8) is budget
+    assert state._core_budget_for(32) is None
+    # The selection uses graph capacity, not changing active lengths.
+    again = state.build(common([32], [1], tokens=32), 1, 1, False, retain_for_graph=True)
+    assert again is large and again.current.core_budget is None
+
+
+@pytest.mark.parametrize("size,speculative,expected_calls", [(8, True, 1), (1, True, 0), (8, False, 0)])
+def test_core_policy_is_automatic_for_dcp_speculation(runtime, size, speculative, expected_calls):
+    runtime.builder(size=size, speculative=speculative)
+    assert runtime.core_budget_factory.call_count == expected_calls
+    if expected_calls:
+        runtime.core_budget_factory.assert_called_once_with(torch.device("cpu"))
+
+
+@pytest.fixture
+def core_runtime(runtime, monkeypatch):
+    parent, dedicated = object(), object()
+    limits = {parent: dict(cube_core_num=18, vector_core_num=36)}
+
+    def set_limit(stream, cube_num, vector_num):
+        limits[stream] = dict(cube_core_num=cube_num, vector_core_num=vector_num)
+
+    runtime = SimpleNamespace(
+        device=lambda _: nullcontext(),
+        current_device=lambda: 0,
+        get_device_properties=Mock(return_value=SimpleNamespace(cube_core_num=28, vector_core_num=56)),
+        get_device_limit=Mock(return_value=dict(cube_core_num=20, vector_core_num=40)),
+        get_stream_limit=Mock(side_effect=lambda stream: limits[stream]),
+        current_stream=lambda: parent,
+        Stream=Mock(return_value=dedicated),
+        set_stream_limit=Mock(side_effect=set_limit),
+        reset_stream_limit=Mock(side_effect=lambda stream: limits.pop(stream, None)),
+    )
+    monkeypatch.setattr(torch, "npu", runtime, raising=False)
+    return runtime, parent, dedicated, limits
+
+
+@pytest.mark.parametrize(
+    "cube,vector,expected",
+    [
+        (28, 56, (14, 28, 28)),
+        (32, 64, (16, 32, 32)),
+        (20, 40, (10, 20, 20)),
+        (17, 35, (8, 16, 19)),
+        (28, 20, (5, 10, 10)),
+        (1, 3, (1, 2, 1)),
+        (1, 2, None),
+        (0, 56, None),
+    ],
+)
+def test_core_allocation(runtime, core_runtime, cube, vector, expected):
+    npu, parent, dedicated, limits = core_runtime
+    npu.get_device_properties.return_value = SimpleNamespace(cube_core_num=cube, vector_core_num=vector)
+    npu.get_device_limit.return_value = limits[parent] = dict(cube_core_num=cube, vector_core_num=vector)
+    budget = runtime.api._create_core_budget(torch.device("cpu"))
+    if expected is None:
+        assert budget is None
+        npu.set_stream_limit.assert_not_called()
+    else:
+        aic, aiv, pack = expected
+        npu.set_stream_limit.assert_called_once_with(dedicated, cube_num=aic, vector_num=aiv)
+        assert budget.pack_vector_cores == pack
+        assert budget.max_pack_rows == 16 * vector
+
+
+@pytest.mark.parametrize("device_name", ["Ascend910B", "Ascend950DT", "unknown"])
+def test_core_budget_uses_capabilities_and_respects_application_limits(runtime, core_runtime, device_name):
+    npu, parent, dedicated, limits = core_runtime
+    npu.get_device_properties.return_value.name = device_name
+    budget = runtime.api._create_core_budget(torch.device("cpu"))
+    assert budget.stream is dedicated
+    assert budget.pack_vector_cores == 18
+    assert budget.max_pack_rows == 16 * 36
+    assert limits[parent] == dict(cube_core_num=18, vector_core_num=36)
+    npu.set_stream_limit.assert_called_once_with(dedicated, cube_num=9, vector_num=18)
+
+
+@pytest.mark.parametrize("failure", ["missing_api", "query", "set", "readback", "invalid_count", "missing_count"])
+def test_core_budget_fallback_preserves_shared_stream(runtime, core_runtime, failure):
+    npu, parent, dedicated, limits = core_runtime
+    if failure == "missing_api":
+        del npu.get_device_limit
+    elif failure == "query":
+        npu.get_device_limit.side_effect = RuntimeError("unsupported runtime")
+    elif failure == "set":
+
+        def partial_set(stream, **kwargs):
+            limits[stream] = dict(cube_core_num=9, vector_core_num=36)
+            raise RuntimeError("unsupported vector limit")
+
+        npu.set_stream_limit.side_effect = partial_set
+    elif failure == "readback":
+        npu.get_stream_limit.side_effect = lambda _: limits[parent]
+    elif failure == "missing_count":
+        npu.get_device_limit.return_value = {}
+    else:
+        npu.get_device_limit.return_value["vector_core_num"] = 0
+    assert runtime.api._create_core_budget(torch.device("cpu")) is None
+    assert limits[parent] == dict(cube_core_num=18, vector_core_num=36)
+    assert dedicated not in limits
+    if failure in ("set", "readback"):
+        npu.reset_stream_limit.assert_called_once_with(dedicated)
+    else:
+        npu.set_stream_limit.assert_not_called()
+
+
+@pytest.mark.parametrize("vector", [56, 64, 40])
+def test_pack_admission_scales_with_available_resources(runtime, vector):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, vector // 2, 16 * vector)
+    runtime.core_budget_factory.return_value = budget
+    builder = runtime.builder(size=8, heads=8)
+    tokens = vector // 4
+    assert builder._core_budget_for(tokens) is budget
+    assert builder._core_budget_for(tokens + 1) is None
