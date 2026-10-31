@@ -1,0 +1,4 @@
+pr: 20433
+entries:
+  - category: performance
+    text: Added a TP row sharding path for the GLM-5.3-Flash KPool indexer prefill, engaged automatically for TP > 1 chunked-prefill batches at or above the per-rank row threshold. Each rank scores only its contiguous cost-balanced row slice against the full visible key history and the group exchanges the final top-k indices with one padded all-gather, removing the per-rank duplicate scoring on long-context prefills; smaller batches keep the replicated path.
