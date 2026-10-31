@@ -2,6 +2,7 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -10,7 +11,9 @@ import msgspec
 import pytest
 import torch
 import zmq
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
@@ -28,15 +31,19 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
 
 from .helpers import (
     make_blocks,
     make_circular_spec,
     make_full_spec,
     make_mamba_spec,
+    make_metadata_groups,
+    make_pp_metadata,
     make_request,
     make_transfer_metadata,
 )
+from .test_pull_worker import make_req_meta, make_thread
 
 
 def make_sending_thread(
@@ -262,13 +269,13 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
 def test_sending_thread_handles_completion_once() -> None:
     thread = make_sending_thread()
 
-    thread.add_delayed_request("normal", time.time())
-    thread._handle_finished_request("normal")
-    thread._handle_finished_request("normal")
+    nonce = thread.add_delayed_request("normal", time.time())
+    thread._handle_finished_request("normal", nonce)
+    thread._handle_finished_request("normal", nonce)
     assert thread.get_and_clear_finished_requests() == {"normal"}
     assert not thread.delayed_free_requests
 
-    thread._handle_finished_request("normal")
+    thread._handle_finished_request("normal", nonce)
     assert thread.get_and_clear_finished_requests() == set()
 
 
@@ -277,18 +284,18 @@ def test_sending_thread_ignores_unknown_completion() -> None:
 
     thread._handle_finished_request("unknown")
     assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("unknown", time.time())
+    nonce = thread.add_delayed_request("unknown", time.time())
     assert thread.get_and_clear_finished_requests() == set()
-    thread._handle_finished_request("unknown")
+    thread._handle_finished_request("unknown", nonce)
     assert thread.get_and_clear_finished_requests() == {"unknown"}
 
 
 def test_sending_thread_acks_duplicate_and_unknown_completion() -> None:
     thread = make_sending_thread()
-    thread.add_delayed_request("normal", time.time())
+    nonce = thread.add_delayed_request("normal", time.time())
     sock = MagicMock()
     sock.recv_multipart.side_effect = [
-        [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id))]
+        [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id, nonce))]
         for request_id in ("normal", "normal", "unknown")
     ] + [KeyboardInterrupt()]
 
@@ -304,10 +311,10 @@ def test_sending_thread_does_not_retain_completed_request_ids() -> None:
 
     for index in range(100):
         request_id = f"request-{index}"
-        thread.add_delayed_request(request_id, time.time())
-        thread._handle_finished_request(request_id)
+        nonce = thread.add_delayed_request(request_id, time.time())
+        thread._handle_finished_request(request_id, nonce)
         assert thread.get_and_clear_finished_requests() == {request_id}
-        thread._handle_finished_request(request_id)
+        thread._handle_finished_request(request_id, nonce)
 
     assert thread.get_and_clear_finished_requests() == set()
     assert not thread.delayed_free_requests
@@ -470,18 +477,19 @@ def test_zero_external_tokens_acknowledges_without_worker_transfer() -> None:
             "remote_host": "10.0.0.1",
             "remote_port": 6000,
             "remote_request_id": "request-p",
+            "remote_lease_nonce": "hold-1",
         }
     )
 
     scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=0)
 
     assert scheduler._reqs_need_recv == {}
-    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p", "hold-1")
 
 
 def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler = make_pull_scheduler()
-    scheduler._sending_thread = MagicMock()
+    scheduler._sending_thread = make_sending_thread()
     request = make_request(
         request_id="request-p",
         status=RequestStatus.FINISHED_LENGTH_CAPPED,
@@ -496,7 +504,18 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_block_ids"] == ([10, 11],)
     assert params["remote_request_id"] == "request-p"
     assert params["last_token_id"] == 123
-    scheduler._sending_thread.add_delayed_request.assert_called_once()
+    nonce = params["remote_lease_nonce"]
+    assert nonce and scheduler._sending_thread._verify_leases((("request-p", nonce),)) == [True]
+    consumer = make_pull_scheduler()
+    consumer._recving_thread = MagicMock()
+    receiving = make_request(request_id="request-d", kv_transfer_params=params)
+    consumer.update_state_after_alloc(receiving, make_blocks(), num_external_tokens=16)
+    metadata = consumer.build_connector_meta(MagicMock())
+    assert metadata.requests["request-d"].remote_lease_nonce == nonce
+    consumer.update_connector_output(KVConnectorOutput(finished_recving={"request-d"}))
+    consumer._recving_thread.add_request.assert_called_once_with(
+        params["remote_host"], params["remote_port"], "request-p", nonce
+    )
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -506,7 +525,7 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack(fail
     scheduler._recving_thread = MagicMock()
     scheduler._sending_thread = MagicMock()
     scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
-    scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
+    scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p", None)
     scheduler._reqs_need_send["request-p"] = time.time()
     output = SimpleNamespace(
         finished_recving={"request-d"},
@@ -516,7 +535,7 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack(fail
 
     scheduler.update_connector_output(output)  # type: ignore[arg-type]
 
-    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p", None)
     assert output.finished_sending == {"request-p"}
     assert scheduler._reqs_need_send == {}
 
@@ -588,7 +607,7 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     socket = MagicMock()
     socket.recv_multipart.side_effect = [
         [b"worker", b"", encoder.encode((b"get_meta_msg",))],
-        [b"worker", b"", encoder.encode((b"done_recving_msg", "request-p"))],
+        [b"worker", b"", encoder.encode((b"done_recving_msg", "request-p", "nonce"))],
         _StopLoop(),
     ]
 
@@ -599,7 +618,7 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
         call((b"worker", b"", thread.encoded_metadata)),
         call((b"worker", b"", ACK_MSG)),
     ]
-    thread._handle_finished_request.assert_called_once_with("request-p")
+    thread._handle_finished_request.assert_called_once_with("request-p", "nonce")
 
 
 def test_recving_run_discards_failed_completion_and_cleans_queue() -> None:
@@ -756,8 +775,8 @@ def test_recving_thread_does_not_requeue_failed_notification() -> None:
     thread.run()
 
     assert thread._send_done_recving.call_args_list == [
-        call("10.0.0.1", 6000, "failed"),
-        call("10.0.0.2", 6000, "healthy"),
+        call("10.0.0.1", 6000, "failed", None),
+        call("10.0.0.2", 6000, "healthy", None),
     ]
     assert thread.request_queue.empty()
     assert thread.request_queue.unfinished_tasks == 0
@@ -850,3 +869,388 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_in_batch
     assert not scheduler._reqs_recv_info
+
+
+def test_expired_lease_is_invalid_before_finished_sending_is_consumed() -> None:
+    thread = make_sending_thread()
+    nonce = thread.add_delayed_request("request", 0.0)
+    assert thread._verify_leases((("request", nonce),)) == [True]
+    with thread.state_lock:
+        thread._retrieve_expired_requests_locked()
+    assert not thread.finished_requests.empty()
+    assert thread._verify_leases((("request", nonce),)) == [False]
+
+
+def test_stale_done_cannot_release_a_reused_request_id() -> None:
+    thread = make_sending_thread()
+    first = thread.add_delayed_request("request", 0.0)
+    assert thread.get_and_clear_finished_requests() == {"request"}
+    second = thread.add_delayed_request("request", time.time())
+    assert first != second
+    thread._handle_finished_request("request", first)
+    thread._handle_finished_request("request")
+    assert thread.get_and_clear_finished_requests() == set()
+    assert thread._verify_leases((("request", first), ("request", second))) == [False, True]
+    thread._handle_finished_request("request", second)
+    thread._handle_finished_request("request", second)
+    assert thread.get_and_clear_finished_requests() == {"request"}
+    assert not thread.lease_nonces
+
+
+@pytest.fixture
+def lease_control_server(request):
+    """Exercise the actual control protocol over loopback, without NPU IO."""
+    producer = make_sending_thread()
+    port_ready = threading.Event()
+    ports = []
+    host = getattr(request, "param", "127.0.0.1")
+
+    def serve():
+        with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:  # type: ignore[attr-defined]
+            socket.setsockopt(zmq.RCVTIMEO, 50)  # type: ignore[attr-defined]
+            if host == "::1":
+                socket.setsockopt(zmq.IPV6, 1)  # type: ignore[attr-defined]
+            ports.append(socket.bind_to_random_port(f"tcp://[{host}]" if host == "::1" else f"tcp://{host}"))
+            port_ready.set()
+            producer._run_busy_loop(socket)
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    assert port_ready.wait(5)
+    try:
+        yield producer, ports[0]
+    finally:
+        producer.stop_event.set()
+        server.join(5)
+        assert not server.is_alive()
+
+
+@pytest.fixture
+def lease_client_sockets(monkeypatch):
+    """Track real per-exchange sockets while sharing one live context."""
+    context = zmq.Context.instance()  # type: ignore[attr-defined]
+    sockets = []
+    create_socket = context.socket
+
+    def socket(*args, **kwargs):
+        result = create_socket(*args, **kwargs)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(context, "socket", socket)
+    yield sockets
+    assert sockets and all(socket.closed for socket in sockets)
+    assert not context.closed
+    assert zmq.Context.instance() is context  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_post_read_verification_protocol_detects_released_hold(lease_control_server, released, lease_client_sockets):
+    producer, port = lease_control_server
+    nonce = producer.add_delayed_request("p", time.time())
+    worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    worker.encoder = msgspec.msgpack.Encoder()
+    meta = SimpleNamespace(remote_request_id="p", remote_lease_nonce=nonce)
+    if released:
+        with producer.state_lock:
+            producer.delayed_free_requests["p"] = 0.0
+            producer._retrieve_expired_requests_locked()
+    assert worker._verify_remote_leases("127.0.0.1", port, {"d": meta}) == ({"d"} if released else set())
+    assert worker._verify_remote_leases(
+        "127.0.0.1", port, {"missing": SimpleNamespace(remote_request_id="p", remote_lease_nonce=None)}
+    ) == {"missing"}
+
+
+def test_late_completion_protocol_preserves_new_attempt(lease_control_server):
+    producer, port = lease_control_server
+    old = producer.add_delayed_request("p", 0.0)
+    assert producer.get_and_clear_finished_requests() == {"p"}
+    new = producer.add_delayed_request("p", time.time())
+    receiver = MooncakeSchedulerRecvingThread(threading.Event())
+    try:
+        receiver._send_done_recving("127.0.0.1", port, "p", old)
+        assert producer._verify_leases((("p", new),)) == [True]
+        receiver._send_done_recving("127.0.0.1", port, "p", new)
+        receiver._send_done_recving("127.0.0.1", port, "p", new)
+        assert producer.get_and_clear_finished_requests() == {"p"}
+    finally:
+        for sockets in receiver.remote_sockets.values():
+            for socket in sockets:
+                socket.close(linger=0)
+        if receiver.zmq_context is not None:
+            receiver.zmq_context.destroy(linger=0)
+
+
+def test_unresponsive_lease_peer_fails_instead_of_waiting_forever():
+    worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    worker.encoder = msgspec.msgpack.Encoder()
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:  # type: ignore[attr-defined]
+        port = socket.bind_to_random_port("tcp://127.0.0.1")
+        start = time.monotonic()
+        with pytest.raises(zmq.Again):  # type: ignore[attr-defined]
+            worker._verify_remote_leases(
+                "127.0.0.1", port, {"d": SimpleNamespace(remote_request_id="p", remote_lease_nonce="lease")}
+            )
+        assert time.monotonic() - start < 5
+
+
+def test_batch_verification_distinguishes_reused_and_live_holds(lease_control_server):
+    producer, port = lease_control_server
+    old = producer.add_delayed_request("reused", 0.0)
+    assert producer.get_and_clear_finished_requests() == {"reused"}
+    new = producer.add_delayed_request("reused", time.time())
+    live = producer.add_delayed_request("live", time.time())
+    worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    worker.encoder = msgspec.msgpack.Encoder()
+    requests = {
+        "stale": SimpleNamespace(remote_request_id="reused", remote_lease_nonce=old),
+        "current": SimpleNamespace(remote_request_id="reused", remote_lease_nonce=new),
+        "other": SimpleNamespace(remote_request_id="live", remote_lease_nonce=live),
+    }
+    assert worker._verify_remote_leases("127.0.0.1", port, requests) == {"stale"}
+    assert producer.get_and_clear_finished_requests() == set()
+    assert producer._verify_leases((("reused", new), ("live", live))) == [True, True]
+
+
+def test_duplicate_registration_preserves_original_hold():
+    producer = make_sending_thread()
+    nonce = producer.add_delayed_request("p", time.time())
+    with pytest.raises(ValueError):
+        producer.add_delayed_request("p", time.time())
+    assert producer._verify_leases((("p", nonce),)) == [True]
+    producer._handle_finished_request("p", nonce)
+    assert producer.get_and_clear_finished_requests() == {"p"}
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("can_report", [False, True])
+def test_read_inflight_expiry_reaches_worker_failure(
+    lease_control_server, expired, can_report, cancelled, monkeypatch, lease_client_sockets
+):
+    producer, port = lease_control_server
+    nonce = producer.add_delayed_request("p", time.time())
+    worker = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
+    worker.encoder = msgspec.msgpack.Encoder()
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    meta = replace(
+        make_req_meta(local=([10], [20])),
+        remote_request_id="p",
+        remote_lease_nonce=nonce,
+        remote_host="127.0.0.1",
+        remote_port=port,
+    )
+    worker._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
+    worker.remote_tp_rank_groups = {"engine-p": {0: {}}}
+    worker.remote_layer_index_pairs = {"engine-p": {0: []}}
+    worker._build_transfer_block_buckets = MagicMock(
+        return_value=({(0, 0): {}, (0, 1): {}}, {(0, 0): {"r"}, (0, 1): {"r"}})
+    )
+    first_started, second_observed, release_first = threading.Event(), threading.Event(), threading.Event()
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._reqs_recv_info["r"] = ("127.0.0.1", port, "p", nonce)
+    scheduler._recving_thread = MagicMock()
+    scheduler._recving_thread.add_request.side_effect = (
+        lambda _host, _port, req_id, hold: producer._handle_finished_request(req_id, hold)
+    )
+    observed_results: list[int] = []
+    verified_results = []
+
+    def transfer(_pp, _pcp, tp, *_args):
+        if tp == 0:
+            first_started.set()
+            assert release_first.wait(5)
+
+    worker._execute_tp_transfer_bucket = transfer
+    verify_remote_leases = worker._verify_remote_leases
+
+    def verify(*args):
+        assert observed_results == [1, 0]
+        result = verify_remote_leases(*args)
+        # Record only a successful real protocol return, never an exception
+        # converted by run() into an indistinguishable batch failure.
+        verified_results.append(result)
+        return result
+
+    worker._verify_remote_leases = MagicMock(side_effect=verify)
+    worker.request_queue = MagicMock()
+    worker.request_queue.get.side_effect = [("engine-p", {"r": meta}), _StopLoop()]
+
+    def run():
+        with pytest.raises(_StopLoop):
+            worker.run()
+
+    with ThreadPoolExecutor(max_workers=2) as transfers, ThreadPoolExecutor(max_workers=1) as runner:
+
+        def submit(func, pp, pcp, tp, *args):
+            future = transfers.submit(func, pp, pcp, tp, *args)
+            original_result = future.result
+
+            def observe_result(*args, **kwargs):
+                result = original_result(*args, **kwargs)
+                observed_results.append(tp)
+                if tp == 1:
+                    second_observed.set()
+                return result
+
+            monkeypatch.setattr(future, "result", observe_result)
+            return future
+
+        worker.executor = SimpleNamespace(submit=submit)
+        task = runner.submit(run)
+        try:
+            assert first_started.wait(5) and second_observed.wait(5)
+            worker._verify_remote_leases.assert_not_called()
+            assert worker.finished_requests.empty()
+            if cancelled:
+                request = make_request(request_id="r", status=RequestStatus.FINISHED_ABORTED)
+                assert scheduler.request_finished(request, ([10], [20])) == (False, None)
+                scheduler._recving_thread.add_request.assert_not_called()
+                assert producer._verify_leases((("p", nonce),)) == [True]
+            if expired:
+                with producer.state_lock:
+                    producer.delayed_free_requests["p"] = 0.0
+                    producer._retrieve_expired_requests_locked()
+        finally:
+            release_first.set()
+        task.result(timeout=5)
+    worker._verify_remote_leases.assert_called_once_with("127.0.0.1", port, {"r": meta})
+    assert observed_results == [1, 0]
+    assert verified_results == [({"r"} if expired else set())]
+    result = worker.get_and_clear_finished_requests()
+    assert result.finished_recving == {"r"}
+    assert result.failed_recving == ({"r"} if expired else set())
+    output = KVConnectorOutput(finished_recving=result.finished_recving, failed_recving=result.failed_recving)
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+    scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", port, "p", nonce)
+    assert producer.get_and_clear_finished_requests() == {"p"}
+    assert not producer.lease_nonces and not scheduler._reqs_recv_info
+    assert worker.invalid_block_ids == ({10, 20} if expired and can_report else set())
+    worker.request_queue.task_done.assert_called_once()
+
+
+@pytest.mark.parametrize("can_report", [False, True])
+def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(
+    lease_control_server, can_report, monkeypatch, lease_client_sockets
+):
+    producer, healthy_port = lease_control_server
+    nonce = producer.add_delayed_request("healthy-p", time.time())
+    worker = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
+    worker.encoder = msgspec.msgpack.Encoder()
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    worker._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
+    worker.remote_tp_rank_groups = {"engine-p": {0: {}}}
+    worker.remote_layer_index_pairs = {"engine-p": {0: []}}
+    worker._build_transfer_block_buckets = MagicMock(
+        side_effect=lambda _meta, _pairs, _groups, _pcp, _dcp, requests, _cache: ({(0, 0): {}}, {(0, 0): set(requests)})
+    )
+    # Only device IO is replaced; both batches use real executor Futures.
+    worker._execute_tp_transfer_bucket = MagicMock(return_value=None)
+    verify_remote_leases = worker._verify_remote_leases
+    verification_outcomes = []
+
+    def verify(host, port, requests):
+        try:
+            result = verify_remote_leases(host, port, requests)
+        except zmq.Again:  # type: ignore[attr-defined]
+            verification_outcomes.append((set(requests), "timeout"))
+            raise
+        verification_outcomes.append((set(requests), result))
+        return result
+
+    worker._verify_remote_leases = MagicMock(side_effect=verify)
+    worker.request_queue = MagicMock()
+    run_finished = threading.Event()
+    run_errors = []
+
+    def run():
+        try:
+            with pytest.raises(_StopLoop):
+                worker.run()
+        except BaseException as exc:
+            run_errors.append(exc)
+        finally:
+            run_finished.set()
+
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as silent_peer:  # type: ignore[attr-defined]
+        silent_port = silent_peer.bind_to_random_port("tcp://127.0.0.1")
+        stalled = replace(
+            make_req_meta(local=([10],)),
+            remote_host="127.0.0.1",
+            remote_port=silent_port,
+            remote_lease_nonce="silent-hold",
+        )
+        healthy = replace(
+            make_req_meta(local=([20],)),
+            remote_request_id="healthy-p",
+            remote_host="127.0.0.1",
+            remote_port=healthy_port,
+            remote_lease_nonce=nonce,
+        )
+        worker.request_queue.get.side_effect = [
+            ("engine-p", {"stalled": stalled}),
+            ("engine-p", {"healthy": healthy}),
+            _StopLoop(),
+        ]
+        with ThreadPoolExecutor(max_workers=1) as transfers:
+            worker.executor = transfers
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert run_finished.wait(5), "worker did not finish the timed-out and healthy batches"
+            runner.join(timeout=1)
+            assert not runner.is_alive()
+        assert not run_errors, run_errors
+        # Prove the silent endpoint received a real VERIFY request, not a
+        # synthetic exception or a failure before the protocol was reached.
+        assert silent_peer.poll(1000, zmq.POLLIN)  # type: ignore[attr-defined]
+        message = msgspec.msgpack.decode(silent_peer.recv_multipart()[-1])
+        assert message == [pull_scheduler.VERIFY_LEASE_MSG, [[stalled.remote_request_id, "silent-hold"]]]
+
+    assert verification_outcomes == [({"stalled"}, "timeout"), ({"healthy"}, set())]
+    assert worker._verify_remote_leases.call_args_list == [
+        call("127.0.0.1", silent_port, {"stalled": stalled}),
+        call("127.0.0.1", healthy_port, {"healthy": healthy}),
+    ]
+    assert worker._execute_tp_transfer_bucket.call_count == 2
+    result = worker.get_and_clear_finished_requests()
+    assert result.finished_recving == {"stalled", "healthy"}
+    assert result.failed_recving == {"stalled"}
+    assert worker.get_and_clear_finished_requests().finished_recving == set()
+    assert worker.invalid_block_ids == ({10} if can_report else set())
+    assert worker.request_queue.task_done.call_count == 2
+    assert worker.request_queue.get.call_count == 3
+
+
+@pytest.mark.parametrize("failure_first", [False, True])
+def test_rank_failure_survives_cross_step_aggregation_before_done(failure_first):
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._recving_thread = MagicMock()
+    scheduler._reqs_recv_info["r"] = ("127.0.0.1", 6000, "p", "hold-1")
+    for step in range(2):
+        failed = failure_first if step == 0 else not failure_first
+        outputs = [SimpleNamespace(kv_connector_output=KVConnectorOutput()) for _ in range(2)]
+        outputs[step].kv_connector_output = KVConnectorOutput(
+            finished_recving={"r"}, failed_recving={"r"} if failed else set()
+        )
+        result = aggregator.aggregate(outputs).kv_connector_output
+        scheduler.update_connector_output(result)
+        if step == 0:
+            assert not result.finished_recving
+            scheduler._recving_thread.add_request.assert_not_called()
+        else:
+            assert result.finished_recving == {"r"} and result.failed_recving == {"r"}
+            scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", 6000, "p", "hold-1")
+
+
+@pytest.mark.parametrize("lease_control_server", ["::1"], indirect=True)
+def test_lease_verification_preserves_ipv6(lease_control_server, lease_client_sockets):
+    producer, port = lease_control_server
+    nonce = producer.add_delayed_request("p", time.time())
+    worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    worker.encoder = msgspec.msgpack.Encoder()
+    meta = SimpleNamespace(remote_request_id="p", remote_lease_nonce=nonce)
+    assert worker._verify_remote_leases("::1", port, {"d": meta}) == set()

@@ -5,6 +5,7 @@
 import queue
 import threading
 import time
+import uuid
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+VERIFY_LEASE_MSG = b"verify_lease_msg"
 ACK_MSG = b"ACK"
 
 
@@ -110,6 +112,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.ready_event = ready_event
         self.stop_event = threading.Event()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.lease_nonces: dict[str, str] = {}
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
 
@@ -310,9 +313,19 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             )
         return merged
 
-    def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
+    def add_delayed_request(self, request_id: str, delay_start_time: float) -> str:
         with self.state_lock:
+            if request_id in self.delayed_free_requests:
+                raise ValueError(f"Mooncake request {request_id} already holds a lease")
+            nonce = uuid.uuid4().hex
             self.delayed_free_requests[request_id] = delay_start_time
+            self.lease_nonces[request_id] = nonce
+            return nonce
+
+    def _verify_leases(self, leases: tuple[tuple[str, str | None], ...]) -> list[bool]:
+        with self.state_lock:
+            # Match the physical hold, not a wall-clock estimate of expiry.
+            return [nonce is not None and self.lease_nonces.get(req_id) == nonce for req_id, nonce in leases]
 
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
@@ -330,6 +343,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             self.join()
         with self.state_lock:
             self.delayed_free_requests.clear()
+            self.lease_nonces.clear()
         while not self.finished_requests.empty():
             self.finished_requests.get_nowait()
 
@@ -364,16 +378,22 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 msg = decoder.decode(payload[0])
                 if msg and msg[0] == GET_META_MSG:
                     sock.send_multipart((identity, b"", self.encoded_metadata))
-                elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
-                    self._handle_finished_request(str(msg[1]))
+                elif msg[0] == VERIFY_LEASE_MSG and len(msg) == 2:
+                    result = self._verify_leases(msg[1])
+                    sock.send_multipart((identity, b"", msgspec.msgpack.encode(result)))
+                elif msg[0] == DONE_RECVING_MSG and len(msg) == 3:
+                    self._handle_finished_request(str(msg[1]), msg[2])
                     sock.send_multipart((identity, b"", ACK_MSG))
                 else:
                     logger.warning("Unexpected Mooncake scheduler control message: %s", msg)
             except Exception:
                 logger.exception("Failed to handle Mooncake scheduler control message")
 
-    def _handle_finished_request(self, request_id: str) -> None:
+    def _handle_finished_request(self, request_id: str, nonce: str | None = None) -> None:
         with self.state_lock:
+            if nonce is None or self.lease_nonces.get(request_id) != nonce:
+                logger.warning("Ignoring Mooncake DONE with stale or missing lease for request %s", request_id)
+                return
             self._mark_finished_locked(request_id)
 
     def _mark_finished_locked(self, request_id: str) -> None:
@@ -386,6 +406,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 request_id,
             )
             return
+        self.lease_nonces.pop(request_id, None)
         del self.delayed_free_requests[request_id]
         self.finished_requests.put(request_id)
 
@@ -412,14 +433,14 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
         super().__init__(daemon=True, name="MooncakeSchedulerRecvingThread")
         self.ready_event = ready_event
         self.stop_event = threading.Event()
-        self.request_queue: queue.Queue[tuple[str, int, str] | None] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, int, str, str | None] | None] = queue.Queue()
         self.encoder = msgspec.msgpack.Encoder()
         self.remote_sockets: dict[str, deque[Any]] = defaultdict(deque)
         self.remote_sockets_lock = threading.Lock()
         self.zmq_context: Any | None = None
 
-    def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
-        self.request_queue.put((remote_host, remote_port, request_id))
+    def add_request(self, remote_host: str, remote_port: int, request_id: str, nonce: str | None = None) -> None:
+        self.request_queue.put((remote_host, remote_port, request_id, nonce))
 
     def shutdown(self) -> None:
         if not self.stop_event.is_set():
@@ -471,13 +492,13 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
                     self.zmq_context = None
             self._clear_pending_requests()
 
-    def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
+    def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str, nonce: str | None = None) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
         sock = self._get_remote_socket(path)
         try:
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((DONE_RECVING_MSG, request_id)),
+                self.encoder.encode((DONE_RECVING_MSG, request_id, nonce)),
                 path,
             )
             response = ensure_zmq_recv(sock, path)
@@ -529,8 +550,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # Producer requests whose blocks must remain allocated until read.
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
-        # D request -> (P scheduler host, port, P request id).
-        self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
+        # D request -> (P scheduler host, port, P request id, lease nonce).
+        self._reqs_recv_info: dict[str, tuple[str, int, str, str | None]] = {}
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
 
@@ -627,6 +648,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                     params["remote_host"],
                     params["remote_port"],
                     params["remote_request_id"],
+                    params.get("remote_lease_nonce"),
                 )
                 if num_external_tokens > 0:
                     self._reqs_need_recv[request.request_id] = (
@@ -695,6 +717,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0
+        lease_nonce = None
         if delay_free_blocks:
             logger.info(
                 "Delaying free of %d blocks for request %s",
@@ -705,7 +728,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._reqs_need_send[request.request_id] = delay_start_time
             if self._sending_thread is None:
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
-            self._sending_thread.add_delayed_request(
+            lease_nonce = self._sending_thread.add_delayed_request(
                 request.request_id,
                 delay_start_time,
             )
@@ -717,6 +740,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_num_prompt_tokens": prompt_len,
             "remote_engine_id": self.engine_id,
             "remote_request_id": request.request_id,
+            "remote_lease_nonce": lease_nonce,
             "remote_host": self.side_channel_host,
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],

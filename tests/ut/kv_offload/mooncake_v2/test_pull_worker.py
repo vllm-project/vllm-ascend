@@ -1056,6 +1056,7 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
         )
     )
 
+    thread._verify_remote_leases = MagicMock(return_value=set())
     completed_future: Future[None] = Future()
     completed_future.set_result(None)
     completed_result = MagicMock(wraps=completed_future.result)
@@ -1992,6 +1993,36 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     )
 
     assert result == expected
+
+
+def test_read_lease_is_checked_after_all_transfer_tasks_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_thread()
+    events = []
+    remote = make_metadata_groups(pp_metadata=make_pp_metadata())
+    thread._get_remote_metadata = MagicMock(return_value=remote)
+    thread.remote_tp_rank_groups = {"engine-p": {0: {}}}
+    thread.remote_layer_index_pairs = {"engine-p": {0: []}}
+    thread._build_transfer_block_buckets = MagicMock(return_value=({(0, 0): {}}, {(0, 0): {"r"}}))
+    future: Future[None] = Future()
+    future.set_result(None)
+    original_result = future.result
+
+    def finish():
+        events.append("read completed")
+        return original_result()
+
+    monkeypatch.setattr(future, "result", finish)
+    thread.executor = MagicMock()
+    thread.executor.submit.return_value = future
+
+    def verify(*args):
+        assert events == ["read completed"]
+        events.append("lease checked")
+        return {"r"}
+
+    thread._verify_remote_leases = verify
+    assert thread._handle_requests("engine-p", "127.0.0.1", 6000, {"r": make_req_meta()}) == {"r"}
+    assert events == ["read completed", "lease checked"]
 
 
 @pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
