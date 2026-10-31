@@ -643,6 +643,18 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertIs(self.queue.pop_request(), r2)
         self.assertEqual(len(self.queue), 0)
 
+    def test_pop_after_removing_peeked_request_returns_next_request(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        r2 = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.queue.add_request(r2)
+
+        self.assertIs(self.queue.peek_request(), r1)
+        self.queue.remove_request(r1)
+
+        self.assertIs(self.queue.pop_request(), r2)
+        self.assertEqual(len(self.queue), 0)
+
     def test_remove_requests_after_peek_leaves_queue_empty(self):
         r1 = self._make_request("r1#job_name[job1]#")
         r2 = self._make_request("r2#job_name[job1]#")
