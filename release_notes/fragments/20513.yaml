@@ -1,4 +1,4 @@
 pr: 20513
 entries:
   - category: bugfix
-    text: Fixed GLM-5.3-Flash PCP query-row mismatches, decode input partitioning, and packed KV cache corruption in mixed prefill/decode batches.
+    text: Fixed GLM-5.3-Flash PCP query-row mismatches, NoPE metadata capacity, decode input partitioning, and packed KV cache corruption in mixed prefill/decode batches.
