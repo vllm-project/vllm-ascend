@@ -184,6 +184,14 @@ class AscendQwen3_5MoeProcessingInfo(_AscendProcessorMixin, Qwen3_5MoeProcessing
 
 
 class AscendQwen3_5VLProcessor(Qwen3VLMultiModalProcessor):
+    def _expands_only_video_token(self, hf_processor) -> bool:
+        # Qwen3.5 keeps the full vision wrapper in the prompt. Replace the
+        # complete placeholder for EVS because get_video_repl emits frame
+        # wrappers. Preserve upstream behavior for the normal video path.
+        if self.info.ctx.get_mm_config().get_video_pruning_spec() is not None:
+            return False
+        return super()._expands_only_video_token(hf_processor)
+
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
         config = dict(super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs))
         if "image_hw" not in hf_inputs:
@@ -204,6 +212,8 @@ class _AscendVLPreprocessMixin:
 
     def __init__(self, *, vllm_config, prefix="model"):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        pruning_spec = self.multimodal_config.get_video_pruning_spec()
+        self.video_pruning_method = pruning_spec[0] if pruning_spec is not None else None
         self.input_norm = build_mm_input_norm(self.model_config)
         # Ascend normalizes before the ViT, including encoder graph selection.
         # Upstream also installs a normalizer inside the ViT as of v0.32;
