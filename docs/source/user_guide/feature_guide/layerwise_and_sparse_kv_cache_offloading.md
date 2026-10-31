@@ -162,6 +162,36 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Direct MLAPO with fused-overlap offload
+
+Direct MLAPO supports disaggregated Decode/MTP with BF16 activations and
+static W8A8 QKV/Q projections. It produces current-token KV and fuses CPU
+writeback on TP0, avoiding a separate copy.
+
+Merge these fields into the existing Decode `--additional-config`:
+
+```json
+{
+    "enable_mlapo": true,
+    "sparse_kv_offload_config": {
+        "enabled": true,
+        "use_fused_overlap": true,
+        "keep_device_kv_cache": false
+    }
+}
+```
+
+- **Path selection**: The default Copy-SFA path, configurations that do not
+  meet Direct's enablement conditions, and steps exceeding 1024 tokens use
+  Native preprocessing. Invalid tensor shapes or layouts still raise errors.
+- **Computation and dimensions**: The constraints are unchanged from the
+  original MLAPO operator. A KV LoRA rank other than 512 or a RoPE dimension
+  other than 64 triggers only a warning and requires numerical validation.
+  Bitwise equality with Native is not guaranteed.
+- **Build and validation**: Rebuild and install the ACLNN operator package
+  and PyTorch extension together. Validate numerical correctness, graph
+  replay, and multi-TP CPU writeback before deployment.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are

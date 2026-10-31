@@ -128,6 +128,10 @@ struct OpParam {
     InputDtype inDtype;
     bool enableInnerOut;
     bool enableRope;
+    bool directOutput{false};
+    uint64_t writebackKBase{0};
+    uint64_t writebackRopeBase{0};
+    uint64_t writebackCapacity{0};
     // MLA dimensions derived from tensor shapes
     uint32_t qLoraRank;
     uint32_t qkNopeHeadDim;
@@ -555,7 +559,8 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
 
 void MlaPreprocessTiling::SetTilingKey()
 {
-    uint64_t tilingKey = (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
+    uint64_t tilingKey = (static_cast<uint64_t>(opParam.directOutput)) << 10;
+    tilingKey |= (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
     tilingKey |= (static_cast<uint64_t>(opParam.inDtype == OpParam::InputDtype::BFLOAT16)) << 8;
 
     tilingKey |= static_cast<uint64_t>(opParam.cacheMode);
@@ -638,6 +643,9 @@ void MlaPreprocessTiling::Init()
     tilingData->kvCacheBlockSize = opParam.kvCacheBlockSize == 0 ? 128ULL : opParam.kvCacheBlockSize;
     tilingData->kvCacheStride0 = opParam.kvCacheStride0;
     tilingData->kvCacheRopeStride0 = opParam.kvCacheRopeStride0;
+    tilingData->writebackKBase = opParam.writebackKBase;
+    tilingData->writebackRopeBase = opParam.writebackRopeBase;
+    tilingData->writebackCapacity = opParam.writebackCapacity;
 
     return;
 }

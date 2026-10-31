@@ -2911,6 +2911,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
+    ops.def(
+        "mla_preprocess_with_kv_offload(Tensor hiddenState, Tensor wdqkv,"
+        "                              Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
+        "                              Tensor gamma2, Tensor? cos, Tensor? sin, Tensor wuk, Tensor? quant_scale0,"
+        "                              Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1,"
+        "                              Tensor? quant_offset1, Tensor? bias1, Tensor? ctkv_scale,"
+        "                              Tensor? q_nope_scale, str? quant_mode,"
+        "                              Tensor(a!) q_out0, Tensor(b!) q_out1, Tensor(c!) inner_out,"
+        "                              Tensor(d!) current_k, Tensor(e!) current_rope,"
+        "                              Tensor? writeback_slots=None, int writeback_k_base=0,"
+        "                              int writeback_rope_base=0, int writeback_capacity=0) -> "
+        "                              (Tensor(a) q_out0, Tensor(b) q_out1, Tensor(c) inner_out,"
+        "                               Tensor(d) current_k, Tensor(e) current_rope)"
+    );
+    ops.impl("mla_preprocess_with_kv_offload", torch::kPrivateUse1,
+             &vllm_ascend::mla_preprocess_with_kv_offload);
+
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif

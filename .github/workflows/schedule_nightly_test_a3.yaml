@@ -415,7 +415,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
-      download_path: ${{ inputs.download_path }}
+      download_path: ${{ inputs.download_path || matrix.test_config.download_path || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
