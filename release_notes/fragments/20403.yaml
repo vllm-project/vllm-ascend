@@ -1,0 +1,7 @@
+pr: 20403
+entries:
+  - category: bugfix
+    text: >-
+      Fixed layerwise MoE weight reloads waiting for the inference-generated
+      expert mapping buffer. Completed modules now release received weights
+      without replacing the existing expert mapping with a meta tensor.
