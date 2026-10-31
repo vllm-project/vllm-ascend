@@ -354,6 +354,42 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+### 9.3 Model Runner V2 Decode Submission
+
+The `--additional-config` boolean `enable_decode_early_queue` defaults to
+`false` (disabled). It lets audited Qwen3.8 Flash Next Model Runner V2 consumers
+use optimistic CPU length bounds while exact execution lengths remain on device.
+The resolved target architecture must be `Qwen4ExpForCausalLM` or
+`Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
+
+Merge this option into the service's existing `--additional-config` JSON:
+
+```bash
+--additional-config '{"enable_decode_early_queue":true}'
+```
+
+The model checks the initialized target and MTP draft attention consumers once
+after KV initialization. A supported model skips both the corrected-count D2H
+copy and its CPU synchronization, using the runner's existing paired exemption.
+Exact positions, accepted counts, KV slots and recurrent state still use device
+state. Existing connector loads, waits, acknowledgements and errors are unchanged.
+
+The same option covers text and ordinary non-realtime multimodal requests.
+Completed prompts use the existing encoder gather fast path; there are no extra
+media certificates or PD observers. The earlier unmerged
+`enable_mm_decode_early_queue` option is removed.
+
+Unknown target/draft consumers, context parallelism, sparse KV offload and
+realtime media retain exact CPU synchronization. The runner's existing PP
+exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off,
+prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement.
+Underlying model/runtime restrictions still apply.
+
+The decision is fixed for the model state's initialized lifetime so production
+and consumption cannot switch independently between batches. Change the option
+when starting the service; changing it in memory does not toggle a running model.
+Initialization drains the old copy stream once before enabling the exemption.
+
 ## 10 FAQ
 
 For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md).
