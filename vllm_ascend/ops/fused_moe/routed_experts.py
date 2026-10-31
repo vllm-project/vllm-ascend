@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
+from vllm import envs as vllm_envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
@@ -42,6 +43,7 @@ from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     FusedExpertsResult,
+    MC2CommImpl,
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
@@ -424,6 +426,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *args,
         tid2eid=None,
         n_shared_experts: int = 0,
+        skip_padding: bool = False,
         **kwargs,
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
@@ -441,6 +444,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
         self.n_shared_experts = n_shared_experts
+        self.skip_padding = skip_padding
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
@@ -725,12 +729,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        skip_padding = self.skip_padding and vllm_envs.VLLM_MOE_SKIP_PADDING
+        if skip_padding and not moe_comm_method.supports_skip_padding:
+            logger.warning_once(
+                "MoE padding exclusion is not supported by the selected MC2 mode; "
+                "retaining its existing dispatch behavior."
+            )
+            skip_padding = False
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
+            skip_padding=skip_padding,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -746,6 +758,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             input_ids=input_ids,
         )
         self.ascend_pertoken_scale = pertoken_scale
+        if skip_padding and isinstance(moe_comm_method, MC2CommImpl) and mc2_mask is not None:
+            # The 1D mask requires a valid prefix; V2 may have padding holes.
+            mc2_mask = mc2_mask[:, None].expand_as(topk_ids).contiguous()
         self.ascend_mc2_mask = mc2_mask
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(

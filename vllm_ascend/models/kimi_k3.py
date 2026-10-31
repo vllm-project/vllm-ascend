@@ -363,6 +363,7 @@ class AscendKimiMoE(nn.Module):
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
             is_sequence_parallel=use_sequence_parallel,
+            skip_padding=True,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=num_redundant_experts,
         )

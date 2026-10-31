@@ -75,3 +75,20 @@ vllm serve <moe-model> \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
 ```
+
+
+## Skipping padding in Kimi K3 MoE
+
+Kimi K3 routed experts exclude padding rows when the upstream
+`VLLM_MOE_SKIP_PADDING` switch is enabled (the default). Set
+`VLLM_MOE_SKIP_PADDING=0` before starting the service to disable this behavior.
+Other models do not opt in automatically.
+
+The valid-token mask follows the same padding, sharding, and gathering as the
+activations. AllGather and AllToAll apply backend-specific skip IDs after expert
+mapping; standard equal-batch, non-hierarchical MC2 uses a route-wise mask so
+padding holes are preserved. Memory-profiling dummy rows still execute experts.
+
+Unequal-batch MC2, hierarchical MC2, fused MC2, and MegaMoE MXFP paths retain
+their existing dispatch behavior and emit a warning when padding exclusion is
+requested. They require separate operator support and validation.
