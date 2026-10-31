@@ -63,6 +63,7 @@ from vllm_ascend.observability.runtime_config._defaults import (
     DUMP_KEYS,
     HOT_RELOAD_INTERVAL_SECONDS,
     MANUAL_TRIGGER_SECTION_KEYS,
+    METRICS_KEYS,
     REPORT_KEYS,
     TOP_LEVEL_KEYS,
 )
@@ -244,12 +245,17 @@ def _normalize_ascend_log_section_into(ascend: dict[str, Any]) -> None:
     ascend["modules"] = normalized_modules
 
 
-def _normalize_config_sections_into(data: dict[str, Any]) -> None:
-    """Normalize ``ascend_log`` shape in place (coerce debug/modules).
+def _normalize_metrics_section_into(metrics: dict[str, Any]) -> None:
+    """Normalize ``metrics.level`` to ``off`` / ``basic`` / ``detail`` / ``debug``."""
+    from vllm_ascend.observability.ms_metrics.level import canonical_metric_level
 
-    Despite the plural name this only touches ``ascend_log`` today; other
-    sections are validated / coerced by :func:`validate_runtime_config`.
-    """
+    if "level" not in metrics:
+        metrics["level"] = "basic"
+    metrics["level"] = canonical_metric_level(metrics.get("level", "basic"))
+
+
+def _normalize_config_sections_into(data: dict[str, Any]) -> None:
+    """Normalize ``ascend_log`` and ``metrics`` in place."""
     if not isinstance(data, dict):
         return
     ascend = data.get("ascend_log")
@@ -257,13 +263,20 @@ def _normalize_config_sections_into(data: dict[str, Any]) -> None:
         ascend = {}
         data["ascend_log"] = ascend
     _normalize_ascend_log_section_into(ascend)
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        data["metrics"] = metrics
+    _normalize_metrics_section_into(metrics)
 
 
 def _normalize_config_sections(data: dict[str, Any]) -> dict[str, Any]:
-    """Shallow-copy top level, deep-copy ``ascend_log``, then normalize in place."""
+    """Shallow-copy top level, copy ``ascend_log`` and ``metrics``, then normalize."""
     out = dict(data)
     ascend = out.get("ascend_log")
     out["ascend_log"] = dict(ascend) if isinstance(ascend, dict) else {}
+    metrics = out.get("metrics")
+    out["metrics"] = dict(metrics) if isinstance(metrics, dict) else {}
     _normalize_config_sections_into(out)
     return out
 
@@ -320,6 +333,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     for section in (
         "dump",
         "ascend_log",
+        "metrics",
         "detector",
         "report",
         "actions",
@@ -370,6 +384,9 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     unknown_ascend = sorted(set(data["ascend_log"]) - ASCEND_LOG_KEYS)
     if unknown_ascend:
         raise ValueError(f"ascend_log has unknown key(s) {unknown_ascend}; allowed={sorted(ASCEND_LOG_KEYS)}")
+    unknown_metrics = sorted(set(data["metrics"]) - METRICS_KEYS)
+    if unknown_metrics:
+        raise ValueError(f"metrics has unknown key(s) {unknown_metrics}; allowed={sorted(METRICS_KEYS)}")
     debug = data["ascend_log"].get("debug", [])
     if not isinstance(debug, list):
         raise ValueError("ascend_log.debug must be a list of module name strings")
@@ -1034,6 +1051,53 @@ class RuntimeConfig:
         """Read ``detector.<section>.<key>``."""
         return self.detector_section(section).get(key, default)
 
+    def metrics_level(self) -> str:
+        """Canonical ``metrics.level`` (``off``, ``basic``, ``detail``, or ``debug``)."""
+        metrics = self._data.get("metrics") or {}
+        level = metrics.get("level", "basic")
+        return str(level)
+
+    def apply_metric_level(self) -> None:
+        """Write ``metrics.level`` into this process's metric level variable."""
+        from vllm_ascend.observability.ms_metrics.level import set_metric_level
+
+        set_metric_level(self.metrics_level())
+
+    def persist_metrics_level(self, level: Any) -> str:
+        """Store ``metrics.level`` in memory and in the JSON file when it exists.
+
+        The API command calls this once so a later file poll applies the same
+        name. Missing files stay missing: startup owns creating the file.
+        """
+        from vllm_ascend.observability.ms_metrics.level import canonical_metric_level
+
+        canonical = canonical_metric_level(level)
+        if not self.config_path.exists():
+            metrics = dict(self._data.get("metrics") or {})
+            metrics["level"] = canonical
+            self._data["metrics"] = metrics
+            return canonical
+
+        with self._lock_config():
+            loaded = self._read_json_object()
+            metrics_on_disk = loaded.get("metrics")
+            if not isinstance(metrics_on_disk, dict):
+                metrics_on_disk = {}
+            else:
+                metrics_on_disk = dict(metrics_on_disk)
+            metrics_on_disk["level"] = canonical
+            loaded["metrics"] = metrics_on_disk
+            self._write_data_unlocked(loaded)
+            raw = self.config_path.read_bytes()
+            mtime = self.config_path.stat().st_mtime
+        metrics = dict(self._data.get("metrics") or {})
+        metrics["level"] = canonical
+        self._data["metrics"] = metrics
+        self._mtime = mtime
+        self._version = mtime
+        self._content_digest = self._digest_bytes(raw)
+        return canonical
+
     def apply_ascend_log_level(self) -> None:
         """Apply live ``ascend_log`` (root default + per-module overrides)."""
         from vllm_ascend.logger import apply_ascend_log_level as _apply
@@ -1101,6 +1165,7 @@ class RuntimeConfig:
                     # Content diffs are logged inside ``_apply_loaded``.
                     if self._maybe_reload_local():
                         self.apply_ascend_log_level()
+                        self.apply_metric_level()
                         if self.manual_trigger():
                             logger.info(
                                 "[runtime_config] dump.manual_dump=true seen on "

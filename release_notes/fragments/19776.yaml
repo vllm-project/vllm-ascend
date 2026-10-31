@@ -1,0 +1,9 @@
+# Release note fragment. See release_notes/README.md.
+pr: 19776
+entries:
+  - category: config
+    text: >
+      Ascend-owned MS Service Metrics follow runtime_config.json metrics.level
+      (off, basic, detail, or debug; default basic). Hot-reload updates the
+      level in each process. The default still records the EPLB hotness
+      metrics shipped today.

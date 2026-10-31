@@ -133,6 +133,23 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
+# ** 5b. File: platform/patch_metrics_level.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.set_metrics_level`
+#   2. `vllm.entrypoints.serve.register_vllm_serve_api_routers`
+#    Why:
+#       The MS metric level is an integer in each process. A file poll on the
+#       last pipeline stage does not update earlier stages, and the API server
+#       has no command that reaches every worker.
+#    How:
+#       Add `POST /set_metrics_level` on the API server. The handler utility-RPCs
+#       `set_metrics_level` to every EngineCore. That method sets the engine
+#       process level and collective-RPCs the same method on every worker.
+#    Related PR (if no, explain why):
+#       No upstream PR. The command is Ascend MS metric control.
+#    Future Plan:
+#       Drop the monkeypatch if upstream grows a generic runtime-config RPC.
+#
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.engram.EngramConfig.verify_model_config`

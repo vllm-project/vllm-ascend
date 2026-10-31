@@ -15,6 +15,7 @@ Startup keys (`runtime_config_path`, `runtime_config_hot_reload`, overlay dict) 
 | `actions` | object | see below | Default incident actions |
 | `dump` | object | see below | Auto dump quota and manual dump controls |
 | `ascend_log` | object | see below | Ascend logger level overrides |
+| `metrics` | object | see below | Ascend-owned MS Service Metric level |
 | `report` | object | see below | Report content and truncation |
 | `detector` | object | see below | Detector sections + shared flags |
 
@@ -61,6 +62,14 @@ GPU `block_ids` are always included in report detail. Decoding token ids to text
 | `level` | str | `"INFO"` | Base Ascend log level |
 | `debug` | list[str] | `[]` | Module path prefixes forced to DEBUG under `vllm_ascend` |
 | `modules` | object | `{}` | Per-logger overrides, e.g. `{"vllm.worker": "WARNING"}` |
+
+## metrics
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `level` | str \| int | `"basic"` | Active level for Ascend-owned MS Service Metric handlers: `off`, `basic`, `detail`, `debug`, or `0`–`3`. `basic` records the metrics shipped today. Applied in this process on startup and on each accepted hot-reload, same moments as `ascend_log`. |
+
+Handlers record a metric when its declared level is less than or equal to this value. Metrics emitted by `ms_service_metric.provider_handlers` are not gated here.
 
 ## detector (shared)
 
