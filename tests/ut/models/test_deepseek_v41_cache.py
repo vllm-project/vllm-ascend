@@ -86,8 +86,7 @@ def _max_memory_usage_bytes_from_groups(runtime, groups):
     """
     if not _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
         return kv_cache_planning._max_memory_usage_bytes_from_groups(runtime, groups)
-    builder = MagicMock()
-    builder._get_pool_bytes_per_block.return_value = get_deepseek_v41_pool_bytes_per_block(groups)
+    builder = kv_cache_planning.DefaultKVCacheConfigBuilder()
     return kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, groups)
 
 
@@ -455,6 +454,21 @@ def test_safe_override_capacity(runtime):
     runtime.cache_config.num_gpu_blocks_override = 3
     config = get_deepseek_v41_kv_cache_config(runtime, groups, 5 * page + 1)
     assert config.num_blocks == 3 and sum(t.size for t in config.kv_cache_tensors) == 3 * page
+
+
+@pytest.mark.skipif(
+    not hasattr(kv_cache_planning, "_pool_bytes_per_block_from_builder"),
+    reason="Requires builder-aware device pool accounting",
+)
+def test_real_builder_accounts_multiple_device_backings(runtime):
+    groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
+    builder = kv_cache_planning.DefaultKVCacheConfigBuilder()
+    planned = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=1)
+    assert len({tensor.size for tensor in planned.kv_cache_tensors}) > 1
+    runtime.cache_config.num_gpu_blocks_override = 7
+    page = kv_cache_planning._pool_bytes_per_block_from_builder(builder, runtime, groups)
+    assert page == sum(tensor.size for tensor in planned.kv_cache_tensors)
+    assert runtime.cache_config.num_gpu_blocks_override == 7
 
 
 def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):

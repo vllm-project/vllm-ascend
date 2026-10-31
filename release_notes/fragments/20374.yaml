@@ -1,0 +1,8 @@
+pr: 20374
+entries:
+  - category: performance
+    text: >-
+      Reduced repeated KV projection and compression during DeepSeek V4.1
+      pure PCP prefill by projecting and compressing local rows before cache aggregation.
+    model: deepseek-v4.1
+    hardware: [A3]

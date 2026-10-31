@@ -348,7 +348,7 @@ class DecoderReplayState:
         num_reqs = batch.num_reqs
         assert self.slots is not None
         positions = self.positions[: self.num_tokens]
-        slot_mappings = self.slots
+        slot_mappings = self.slots[:, : self.num_tokens]
         if self.replay_pcp_context is not None:
             slot_mappings = get_pcp_group().all_gather(self.slots[:, : self.num_tokens].contiguous(), dim=1)
         rope = get_cos_and_sin_dsa(positions, use_cache=False)
