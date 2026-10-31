@@ -81,12 +81,12 @@ class TestNPUWorker(TestBase):
         """Setup test environment"""
         from vllm_ascend.worker import worker as worker_module
 
-        self.enterContext(
-            patch(
-                "vllm_ascend.device_allocator.sleep_runtime.get_ascend_config",
-                side_effect=lambda: worker_module.get_ascend_config(),
-            )
+        runtime_config_patch = patch(
+            "vllm_ascend.device_allocator.sleep_runtime.get_ascend_config",
+            side_effect=lambda: worker_module.get_ascend_config(),
         )
+        runtime_config_patch.start()
+        self.addCleanup(runtime_config_patch.stop)
         # Create configuration mocks
         self.cache_config_mock = MagicMock(spec=CacheConfig)
         self.cache_config_mock.cache_dtype = "auto"
