@@ -144,6 +144,8 @@ def _shutdown(model):
     core = model.llm_engine.engine_core
     processes = list(core.resources.engine_manager.processes)
     core.shutdown(timeout=45)
+    print("SLEEP_GRAPH_SHUTDOWN", json.dumps({"engine_core_exitcodes": [process.exitcode for process in processes]}))
+    assert processes, "Expected real EngineCore processes in this spawned-worker regression"
     assert all(process.exitcode == 0 for process in processes)
 
 
