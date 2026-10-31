@@ -497,6 +497,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return ascend_store_kv_events
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        # A's scheduler also calls this soft API. Keep the call idempotent so
+        # AscendStore does not double-bind when both paths are active.
+        bound = getattr(self, "_bound_gpu_block_pool", None)
+        if bound is gpu_block_pool:
+            return
+        if bound is not None:
+            raise RuntimeError("AscendStoreConnector is already bound to another GPU block pool")
+        self._bound_gpu_block_pool = gpu_block_pool
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 

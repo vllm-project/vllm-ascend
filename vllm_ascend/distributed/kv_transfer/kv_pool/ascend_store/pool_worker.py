@@ -1338,6 +1338,7 @@ class KVPoolWorker:
                 stored_events.append(
                     BlockStored(
                         block_hashes=[block_hash],
+                        session_id=req_meta.session_id,
                         parent_block_hash=parent_hash,
                         token_ids=token_ids,
                         block_size=event_block_size,

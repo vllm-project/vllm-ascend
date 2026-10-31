@@ -945,6 +945,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                         stored_event = BlockStored(
                             block_hashes=[current_hash],
+                            session_id=req_meta.session_id,
                             parent_block_hash=parent_hash,
                             token_ids=token_ids,
                             block_size=block_size,

@@ -89,6 +89,28 @@ def register_connector():
     from vllm_ascend.distributed.weight_transfer import register_engine
 
     register_kv_connector()
+    try:
+        from vllm.v1.kv_offload.transfer_backend import register_kv_transfer_backend
+    except ImportError:
+        # Upstream vLLM does not expose the A-branch transfer seam yet.
+        pass
+    else:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.kv_transfer_backend import (
+            NPUKVTransferBackend,
+        )
+
+        register_kv_transfer_backend("npu", NPUKVTransferBackend())
+    try:
+        from vllm.v1.agent_hint import register_context_edit_backend
+    except ImportError:
+        # Upstream vLLM does not expose the context-edit seam yet.
+        pass
+    else:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.context_edit import (
+            NPUContextEditBackend,
+        )
+
+        register_context_edit_backend(NPUContextEditBackend())
     register_ec_connector()
     register_engine()
 
