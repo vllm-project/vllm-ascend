@@ -692,6 +692,10 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            # Explicit and startup-plan budgets are physical bytes too. Apply
+            # the same private multi-group allocation correction as profiling
+            # before the offload and KVPP budget conversions.
+            kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
             return self._apply_kvpp_memory_budget(
                 self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
             )
