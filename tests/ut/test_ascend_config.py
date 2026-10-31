@@ -119,7 +119,7 @@ class TestQuantizedAllReduceConfig(TestBase):
     def test_defaults(self):
         config = QuantizedAllReduceConfig()
         self.assertFalse(config.enable)
-        self.assertEqual(config.min_numel, 33554432)
+        self.assertEqual(config.min_numel, 16777216)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]

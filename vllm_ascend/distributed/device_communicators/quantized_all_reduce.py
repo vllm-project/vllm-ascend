@@ -32,22 +32,22 @@ Configuration
 -------------
 Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
-    --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 33554432}}'
+    --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 16777216}}'
 
   enable     bool, default false.
   min_numel  Payload threshold in elements: a collective is quantized only when
              its payload reaches min_numel elements, i.e. min_numel * 2 bytes of
-             bf16 data. The default 33554432 is 64 MiB == 16384 tokens at
-             hidden_size 2048, i.e. a full max_num_batched_tokens chunk.
-             Concurrency matters only through batching (16 concurrent 1k-token
-             requests form one 16k-token step and qualify, a single 1k-token
-             request does not); decode steps never qualify.
+             bf16 data. The default 16,777,216 is 32 MiB, i.e. 8192 tokens at
+             hidden_size 2048 or 3277 tokens at hidden_size 5120. Concurrency
+             matters only through batching (32 concurrent 1k-token requests form
+             one 16k-token step and qualify); decode steps never qualify.
 
-  Each collective carries a fixed ~0.75 ms cost, hence a ~36 MiB break-even:
-  4 MiB +359%, 16 MiB +67%, 32 MiB +8%, 64 MiB -23%, 128 MiB -23% (vs bf16).
-  Keep the default and do not go below 16777216 (32 MiB); if
-  max_num_batched_tokens * hidden_size * 2 < 64 MiB the threshold is
-  unreachable, so leave the feature disabled.
+  Each collective carries a fixed ~0.5 ms cost (absmax, tiny fp32 amax
+  all-reduce, quantize, dequantize), so the int8 path only pays off above
+  ~20-24 MiB: 16 MiB +13%, 32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37%
+  (vs a plain bf16 all-reduce on 4x910B3). Do not lower min_numel further; if
+  max_num_batched_tokens * hidden_size * 2 is below the threshold the feature
+  can never trigger, so leave it disabled.
 
   The setting is read when the TP communicator is created (server start-up) and
   is active when every TP worker logs
@@ -94,7 +94,7 @@ class QuantizedAllReduce:
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size if self.supported else 0
         # Payload gate in elements (bf16 payload = 2 bytes per element);
-        # 64 MiB by default, the measured break-even rounded up. See docstring.
+        # 32 MiB by default, the measured break-even rounded up. See docstring.
         self.min_numel = min_numel
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -109,7 +109,12 @@ class QuantizedAllReduce:
             )
             dist.all_reduce(input_, group=self.group)
             return input_
-        if input_.dtype != torch.bfloat16 or input_.numel() < self.min_numel:
+        if (
+            input_.dtype != torch.bfloat16
+            or input_.ndim < 2  # 1-D would degrade per-channel scales to per-element ones
+            or input_.shape[-1] < 64  # degenerate channel dim (e.g. spec-decode topk rows)
+            or input_.numel() < self.min_numel
+        ):
             dist.all_reduce(input_, group=self.group)
             return input_
 
@@ -117,7 +122,9 @@ class QuantizedAllReduce:
         flat = input_.reshape(-1, input_.shape[-1])
 
         # 1. per-channel global amax (tiny fp32 all-reduce, [C] elements).
-        amax = flat.abs().amax(dim=0).float()
+        # vector_norm(ord=inf) is abs+max fused into one kernel: it avoids the
+        # transient abs tensor (80 MiB at an 84 MiB payload) and is ~30% faster.
+        amax = torch.linalg.vector_norm(flat, dim=0, ord=float("inf")).float()
         dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=self.group)
         # Exact-bound scale: rounding a value <= max_q cannot exceed max_q, so
         # the int8 sum over TP ranks stays in range and no clamp is needed.
@@ -127,7 +134,10 @@ class QuantizedAllReduce:
         q = torch_npu.npu_quantize(flat, scale, None, torch.int8, 1, True)
         dist.all_reduce(q, group=self.group)
 
-        # 3. dequantize and write back in place, like the bf16 path.
+        # 3. dequantize back to the original dtype/shape and return out-of-place:
+        # GroupCoordinator.all_reduce treats the device communicator as
+        # out-of-place by contract (vLLM custom ops cannot mutate and return in
+        # the same op), so callers always consume the returned tensor. This
+        # skips an 80 MiB read+write copy per collective.
         out = torch_npu.npu_anti_quant(q, scale, dst_dtype=input_.dtype)
-        input_.copy_(out.reshape(input_.shape))
-        return input_
+        return out.reshape(input_.shape)

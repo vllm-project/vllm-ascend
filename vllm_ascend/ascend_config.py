@@ -400,7 +400,7 @@ class QuantizedAllReduceConfig:
     Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2/A3,
     1 < TP <= 8). A collective takes the int8 path only when its payload reaches
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
-    33,554,432 elements is 64 MiB, the measured break-even rounded up.
+    16,777,216 elements is 32 MiB, the measured break-even rounded up.
 
     The wrapper is built for every parallel group, but only groups with at most
     8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
@@ -409,7 +409,7 @@ class QuantizedAllReduceConfig:
     """
 
     enable: bool = False
-    min_numel: int = 33554432
+    min_numel: int = 16777216
 
     @field_validator("min_numel")
     @classmethod
@@ -532,7 +532,7 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 33554432
+                "min_numel": 16777216
             },
             "xlite_graph_config": {
                 "enabled": false,
