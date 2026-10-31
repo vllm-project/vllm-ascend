@@ -1,0 +1,4 @@
+pr: 20468
+entries:
+  - category: bugfix
+    text: Fixed MiniMax-M3 reasoning-end detection when prompt instructions or earlier turns contain thinking markers, preventing reasoning tags from leaking into streamed content and structured-output constraints from starting too early.
