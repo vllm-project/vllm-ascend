@@ -116,7 +116,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     assert is_pcp_decode_sharding_enabled(config) is expected_sharding
     rank = pcp_size - 1
     manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), shard_decode_requests=True, dcp_world_size=dcp_size)
-    manager.set_vllm_config(config)
+    manager.vllm_config = config
     counts = np.array([1, 1], dtype=np.int32)
     prefilling = np.array([False, False])
 
@@ -169,7 +169,7 @@ def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, upstream_dec
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     manager = AscendPCPManager(2, 1, torch.device("cpu"), shard_decode_requests=upstream_decode_sharding)
-    manager.set_vllm_config(config)
+    manager.vllm_config = config
     assert config.parallel_config.pcp_shard_decode_requests is True
     replace(config.parallel_config)
     query_len = 6 if speculative else 1
@@ -401,7 +401,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
 
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
-    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
     decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
     draft_decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
     prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
