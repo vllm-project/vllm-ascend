@@ -1830,12 +1830,56 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.additional_config = {
             "enable_pcp_o_proj_weight_sharding": "true",
             "draft_window_size": "4096",
+            "yoco_prefill_max_backtrack_tokens": "12",
         }
 
         config = init_ascend_config(vc)
 
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
+        self.assertEqual(config.yoco_prefill_truncation_mode, "off")
+        self.assertEqual(config.yoco_prefill_max_backtrack_tokens, 12)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_yoco_modes_rejected_until_runtime_wired(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config = SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                sliding_window=128,
+                n_prefill_layer=24,
+                num_hidden_layers=40,
+            ),
+            hf_config=SimpleNamespace(),
+            is_moe=False,
+            enforce_eager=True,
+            architectures=[],
+        )
+        vc.additional_config = {"yoco_prefill_truncation_mode": "compact"}
+        with self.assertRaisesRegex(ValueError, "not executable yet"):
+            init_ascend_config(vc)
+
+        vc_bad = VllmConfig()
+        vc_bad.model_config = vc.model_config
+        vc_bad.additional_config = {
+            "yoco_prefill_truncation_mode": "mask",
+            "yoco_prefill_keep_tokens": 100,
+            "yoco_prefill_max_backtrack_tokens": 12,
+        }
+        with self.assertRaisesRegex(ValueError, "yoco_prefill_keep_tokens"):
+            init_ascend_config(vc_bad)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_yoco_compact_rejects_pcp_gt_one(self, mock_fix):
+        vc = VllmConfig()
+        vc.parallel_config.prefill_context_parallel_size = 2
+        vc.additional_config = {
+            "yoco_prefill_truncation_mode": "compact",
+            "yoco_prefill_keep_tokens": 140,
+        }
+        with self.assertRaisesRegex(ValueError, "CP=1"):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

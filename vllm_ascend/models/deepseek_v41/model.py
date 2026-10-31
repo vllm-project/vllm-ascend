@@ -97,6 +97,7 @@ from .engram.embedding import (
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
+from .yoco import compact_yoco_boundary, make_yoco_prefill_runtime
 
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
@@ -1094,6 +1095,27 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+        # YOCO mask/compact prefill truncation (independent of decoder replay).
+        self.yoco_prefill = make_yoco_prefill_runtime(self.config, get_ascend_config())
+
+    def prepare_yoco_prefill(self, metadata) -> None:
+        """Attach per-step YOCO truncation metadata built by the runner (CP=1)."""
+        if self.yoco_prefill is None:
+            return
+        self.yoco_prefill.metadata = metadata
+
+    def _apply_yoco_compact_boundary(self, hidden_states, pre_mix, positions, input_ids):
+        """Gather full-layout states onto keep-tail rows at the first consumer layer."""
+        runtime = self.yoco_prefill
+        assert runtime is not None and runtime.compaction_enabled
+        assert runtime.metadata is not None and runtime.metadata.query_indices is not None
+        qi = runtime.metadata.query_indices
+        hidden_states = compact_yoco_boundary(hidden_states, qi)
+        pre_mix = compact_yoco_boundary(pre_mix, qi)
+        positions = compact_yoco_boundary(positions, qi)
+        if input_ids is not None:
+            input_ids = compact_yoco_boundary(input_ids, qi)
+        return hidden_states, pre_mix, positions, input_ids
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1565,6 +1587,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         pre_mix[:, 0] = 1.0
         last_layer = None
         aux_hidden_states = []
+        yoco_compact_applied = False
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
@@ -1573,6 +1596,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.extend(late_aux)
                 last_layer = self.layers[self.end_layer - 1]
                 break
+            # YOCO compact: gather onto keep-tail rows once, at the first consumer.
+            # Decoder bounded replay (above) remains a separate, prefix-cache path.
+            if (
+                not yoco_compact_applied
+                and self.yoco_prefill is not None
+                and self.yoco_prefill.compaction_enabled
+                and layer.layer_idx == self.yoco_prefill.consumer_start
+            ):
+                hidden_states, pre_mix, positions, input_ids = self._apply_yoco_compact_boundary(
+                    hidden_states, pre_mix, positions, input_ids
+                )
+                yoco_compact_applied = True
             last_layer = layer
             # DSpark consumes the residual stream entering its configured
             # target layers. The runner expresses checkpoint IDs as one-based.
