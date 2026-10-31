@@ -19,7 +19,7 @@
 import atexit
 import gc
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -29,6 +29,8 @@ from vllm.device_allocator import AllocationData, HandleType  # noqa: F401
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.logger import logger
 from vllm.utils.system_utils import find_loaded_library
+
+ACL_GRAPH_TAG = "acl_graph"
 
 camem_available = False
 try:
@@ -122,6 +124,8 @@ class CaMemAllocator(CuMemAllocator):
         if instance is None:
             return
         try:
+            # torch-npu may already have finalized its runtime when this
+            # handler runs. Device work belongs to explicit worker shutdown.
             instance.release_pools()
         except Exception:
             logger.exception("CaMemAllocator singleton shutdown failed")
@@ -136,6 +140,20 @@ class CaMemAllocator(CuMemAllocator):
         super().__init__()
         self.current_tag: str = CaMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self._unmap_failed = False
+
+    def _check_memory_state(self) -> None:
+        if self._unmap_failed:
+            raise RuntimeError("CaMem mapping state is unknown after an unmap failure; restart the worker")
+
+    def _unmap_or_fail(self, handle: HandleType) -> None:
+        try:
+            unmap_and_release(handle)
+        except Exception:
+            # The driver can fail between unmapping and releasing physical
+            # memory. Do not let a later sleep copy from an unmapped address.
+            self._unmap_failed = True
+            raise
 
     def release_pools(self) -> None:
         """Drop Python references to MemPool/pluggable allocators eagerly."""
@@ -156,6 +174,24 @@ class CaMemAllocator(CuMemAllocator):
         # Phase 2: now it is safe to release allocator wrappers.
         allocators.clear()
 
+    def shutdown(self) -> None:
+        """Release physical handles before Python/device finalization.
+
+        Graphs or configuration caches can retain tensors after runner
+        teardown. Their virtual allocations stay valid for late free
+        callbacks, but no physical memory may remain pinned by those owners.
+        The caller must stop inference and drain device work first.
+        """
+        self._check_memory_state()
+        torch.npu.synchronize()
+        for data in list(self.pointer_to_data.values()):
+            if not data.is_asleep:
+                self._unmap_or_fail(data.handle)
+                data.is_asleep = True
+            data.cpu_backup_tensor = None
+        self.release_pools()
+        logger.info("CaMem shutdown: mapped bytes=0; remaining virtual allocations=%d", len(self.pointer_to_data))
+
     def _python_free_callback(self, ptr: int) -> HandleType:
         """Internal method to look up the allocation data
         when memory is freed in the memory pool.
@@ -168,7 +204,8 @@ class CaMemAllocator(CuMemAllocator):
         # regular caching allocator, so without this, in-flight work
         # (e.g. quant helpers' transient tensors during weight loading)
         # races the unmap and surfaces as ACL error.
-        torch.npu.synchronize(data.handle[0])
+        if not data.is_asleep:
+            torch.npu.synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from camem allocator",
             data.handle[1],
@@ -185,6 +222,7 @@ class CaMemAllocator(CuMemAllocator):
         :param offload_tags: The tags of the memory allocation that will be
             offloaded. The rest of the memory allocation will be discarded.
         """
+        self._check_memory_state()
         if offload_tags is None:
             # by default, allocated tensors are offloaded
             # when the allocator sleeps
@@ -221,13 +259,14 @@ class CaMemAllocator(CuMemAllocator):
                 cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
-                dest_max = cpu_ptr + size_in_bytes * 2
-                memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+                result = memcpy(cpu_ptr, size_in_bytes, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+                if result != 0:
+                    raise RuntimeError(f"CaMem device-to-host backup failed: ACL error {result}")
                 data.cpu_backup_tensor = cpu_backup_tensor
-            try:
-                unmap_and_release(handle)
-            finally:
-                data.is_asleep = True
+            # Do not mark a still-mapped allocation asleep after a failed unmap.
+            # Propagate partial native failures instead of allowing graph replay.
+            self._unmap_or_fail(handle)
+            data.is_asleep = True
 
         if has_policy_conflict:
             logger.warning(
@@ -240,6 +279,7 @@ class CaMemAllocator(CuMemAllocator):
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
+        self._check_memory_state()
         if isinstance(tags, str):
             tags = (tags,)
 
@@ -252,8 +292,8 @@ class CaMemAllocator(CuMemAllocator):
                 if data.cpu_backup_tensor is not None:
                     has_policy_conflict = True
                 continue
-            torch.accelerator.synchronize(data.handle[0])
-            unmap_and_release(data.handle)
+            torch.npu.synchronize(data.handle[0])
+            self._unmap_or_fail(data.handle)
             data.is_asleep = True
             discarded_bytes += data.handle[1]
 
@@ -274,8 +314,11 @@ class CaMemAllocator(CuMemAllocator):
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
+        self._check_memory_state()
         gc.collect()
-        torch.accelerator.empty_cache()
+        # torch-npu's allocator does not implement PyTorch's generic
+        # DeviceAllocator interface in every supported wheel.
+        torch.npu.empty_cache()
 
         restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
@@ -290,16 +333,54 @@ class CaMemAllocator(CuMemAllocator):
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
-                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
                         size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         ACL_MEMCPY_HOST_TO_DEVICE = 1
-                        dest_max = ptr + size_in_bytes * 2
-                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        result = memcpy(ptr, size_in_bytes, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        if result != 0:
+                            # Keep the backup and return to a known asleep state.
+                            self._unmap_or_fail(handle)
+                            raise RuntimeError(f"CaMem host-to-device restore failed: ACL error {result}")
                         data.cpu_backup_tensor = None
+                data.is_asleep = False
+
+    @contextmanager
+    def aclgraph_pool(self) -> Iterator[tuple[int, int]]:
+        """Tag graph-capture allocations and yield a persistent NPU pool id.
+
+        capture_begin itself routes allocations into the pool. Entering
+        use_mem_pool here would try to route into the same pool twice.
+        The caller must serialize capture with all other allocator use.
+        """
+        if ACL_GRAPH_TAG not in self.allocator_and_pools:
+            allocator = get_pluggable_allocator(self.python_malloc_callback, self.python_free_callback)
+            pool = torch.npu.memory.MemPool(allocator._allocator)
+            self.allocator_and_pools[ACL_GRAPH_TAG] = (pool, allocator)
+        old_tag = self.current_tag
+        self.current_tag = ACL_GRAPH_TAG
+        try:
+            yield self.allocator_and_pools[ACL_GRAPH_TAG][0].id
+        finally:
+            self.current_tag = old_tag
+
+    def release_aclgraph_pool(self) -> None:
+        """Release the graph pool after all its graphs and output owners die.
+
+        Other pools (weights/KV) remain intact. The native ownership record
+        permits cleanup of a partially restored or entirely asleep pool.
+        """
+        entry = self.allocator_and_pools.pop(ACL_GRAPH_TAG, None)
+        if entry is None:
+            return
+        pool, allocator = entry
+        del entry, pool
+        gc.collect()
+        del allocator
+        if any(data.tag == ACL_GRAPH_TAG for data in self.pointer_to_data.values()):
+            raise RuntimeError("ACL graph allocations still have live owners after graph teardown")
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
