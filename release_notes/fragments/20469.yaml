@@ -1,0 +1,4 @@
+pr: 20469
+entries:
+  - category: feature
+    text: Added support for ModelSlim W4A8 dynamic Linear layers with symmetric per-channel INT4 weights and per-token INT8 activations.
