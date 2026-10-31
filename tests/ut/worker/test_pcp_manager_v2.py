@@ -115,7 +115,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     assert is_pcp_decode_sharding_enabled(config) is expected_sharding
     rank = pcp_size - 1
-    manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), dcp_world_size=dcp_size)
+    manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), shard_decode_requests=True, dcp_world_size=dcp_size)
     manager.vllm_config = config
     counts = np.array([1, 1], dtype=np.int32)
     prefilling = np.array([False, False])
@@ -124,6 +124,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     np.testing.assert_array_equal(
         manager.replicated_requests(counts, prefilling), [not expected_sharding, not expected_sharding]
     )
+    assert manager.shard_decode_requests is expected_sharding
     expected = [(1, 0, 1)] if expected_sharding else [(0, 0, 1), (1, 0, 1)]
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
@@ -162,18 +163,24 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
 
 
 @pytest.mark.parametrize("speculative", [False, True])
-def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool):
+@pytest.mark.parametrize("upstream_decode_sharding", [False, True])
+def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, upstream_decode_sharding: bool):
     config = _make_pcp_config(CUDAGraphMode.NONE)
     config.model_config.hf_text_config.index_kpool = 4
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    manager = AscendPCPManager(2, 1, torch.device("cpu"))
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
+    manager = AscendPCPManager(2, 1, torch.device("cpu"), shard_decode_requests=upstream_decode_sharding)
     manager.vllm_config = config
-    counts = np.array([1, 1], dtype=np.int32)
+    assert config.parallel_config.pcp_shard_decode_requests is True
+    replace(config.parallel_config)
+    query_len = 6 if speculative else 1
+    counts = np.array([query_len, query_len], dtype=np.int32)
     prefilling = np.array([False, False])
 
     assert not is_pcp_decode_sharding_enabled(config)
     np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
-    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, 1), (1, 0, 1)]
+    assert not manager.shard_decode_requests
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, query_len), (1, 0, query_len)]
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
