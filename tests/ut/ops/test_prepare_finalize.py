@@ -63,12 +63,66 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Check padding and split
         self.assertEqual(h_out.shape[0], 4)
         self.assertEqual(r_out.shape[0], 4)
-        self.assertEqual(mask.tolist(), [1, 0, 1])
+        self.assertEqual(mask.tolist(), [1, 0, 1, 0])
         self.assertEqual(padded_hidden_states_shape, torch.Size([4, 8]))
 
         # Finalize
         result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
         self.assertEqual(result.shape[0], 3)
+
+    def test_mc2_empty_rank_prepare_finalize(self):
+        for tp_size in (1, 2, 4):
+            for padded_num_tokens in (0, tp_size * 2):
+                for replace_allreduce in (False, True):
+                    for rank in range(tp_size):
+                        with (
+                            self.subTest(tp_size=tp_size, padded=padded_num_tokens, sp=replace_allreduce, rank=rank),
+                            patch(
+                                "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
+                                return_value=tp_size,
+                            ),
+                            patch(
+                                "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
+                                return_value=rank,
+                            ),
+                            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX") as context,
+                            patch("torch.distributed.all_gather") as all_gather,
+                        ):
+                            # Zero covers an all-empty DP batch; a positive
+                            # padding length represents a nonempty DP peer.
+                            context.padded_num_tokens = padded_num_tokens
+                            context.mc2_mask = torch.zeros(padded_num_tokens, dtype=torch.bool)
+                            layer = PrepareAndFinalizeWithMC2(self.moe_config)
+                            hidden_states = torch.empty(0, 8)
+                            router_logits = torch.empty(0, 2)
+                            prepared = layer.prepare(hidden_states, router_logits, replace_allreduce=replace_allreduce)
+                            local_tokens = max(padded_num_tokens // tp_size, 1)
+                            self.assertEqual(prepared.hidden_states.shape, (local_tokens, 8))
+                            self.assertEqual(prepared.router_logits.shape, (local_tokens, 2))
+                            torch.testing.assert_close(prepared.hidden_states, torch.zeros(local_tokens, 8))
+                            torch.testing.assert_close(prepared.router_logits, torch.zeros(local_tokens, 2))
+                            torch.testing.assert_close(prepared.mc2_mask, torch.zeros(local_tokens, dtype=torch.bool))
+                            prepared_ids = layer.pad_and_split_input_ids(torch.empty(0, dtype=torch.int64))
+                            torch.testing.assert_close(prepared_ids, torch.zeros(local_tokens, dtype=torch.int64))
+
+                            # Simulate output from every TP peer, including
+                            # nonzero dummy values that must be discarded.
+                            def gather(outputs, tensor, group):
+                                for output in outputs:
+                                    output.copy_(tensor)
+
+                            all_gather.side_effect = gather
+                            result = layer.finalize(
+                                torch.ones_like(prepared.hidden_states),
+                                reduce_results=False,
+                                padded_hidden_states_shape=prepared.padded_hidden_states_shape,
+                            )
+                            self.assertEqual(result.shape, hidden_states.shape)
+                            self.assertEqual(layer.num_tokens, 0)
+                            self.assertEqual(all_gather.call_count, int(tp_size > 1 and not replace_allreduce))
+                            # The shared forward context must remain unchanged.
+                            self.assertEqual(context.mc2_mask.numel(), padded_num_tokens)
+                            self.assertEqual(context.padded_num_tokens, padded_num_tokens)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=4)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank")
