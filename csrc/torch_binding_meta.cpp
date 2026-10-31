@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "attention/generic_block_sparse_attention/generic_block_sparse_attention_meta.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -464,6 +465,7 @@ at::Tensor npu_sparse_attention_score_meta(
     return at::empty_symint(query.sym_sizes(),
                             query.options().dtype(out_dtype).device(c10::kMeta));
 }
+
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_vllm_meta(
     const at::Tensor &query,
@@ -1877,10 +1879,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_generic_block_sparse_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
-    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
+    ops.impl("npu_generic_block_sparse_attention_metadata", &vllm_ascend::meta::npu_generic_block_sparse_attention_metadata_meta);
+    ops.impl("npu_generic_block_sparse_attention", &vllm_ascend::meta::npu_generic_block_sparse_attention_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap

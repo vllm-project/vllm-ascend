@@ -62,6 +62,18 @@ from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.utils import AscendDeviceType
 
 
+@pytest.fixture
+def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+    gbsa_metadata_op = MagicMock()
+    gbsa_attention_op = MagicMock()
+    monkeypatch.setattr(msa_m3_npu_module, "enable_custom_op", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        torch.ops._C_ascend, "npu_generic_block_sparse_attention_metadata", gbsa_metadata_op, raising=False
+    )
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_generic_block_sparse_attention", gbsa_attention_op, raising=False)
+    return gbsa_metadata_op, gbsa_attention_op
+
+
 @dataclass
 class BatchSpec:
     seq_lens: list[int]
@@ -378,6 +390,61 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
+
+
+@pytest.mark.parametrize("query_len", [1, 2, 4, 8])
+@pytest.mark.parametrize("batch_size", [0, 1, 10, 128, 512])
+def test_sparse_decode_prefix_matches_cumsum(batch_size: int, query_len: int) -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    prefix = builder._get_decode_cu_seqlens_q(batch_size, query_len)
+    expected = torch.cat(
+        [torch.zeros(1, dtype=torch.int64), torch.full((batch_size,), query_len, dtype=torch.int64).cumsum(0)]
+    )
+    assert prefix.dtype == torch.int64
+    torch.testing.assert_close(prefix, expected, rtol=0, atol=0)
+
+
+def test_sparse_decode_prefix_keeps_captured_buffers_alive() -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    captured = builder._get_decode_cu_seqlens_q(10, 4)
+    expected = captured.clone()
+    # Other graph sizes and query lengths must not overwrite captured storage.
+    for batch_size in (1, 128, builder.context_len_buffer.numel()):
+        assert builder._get_decode_cu_seqlens_q(batch_size, 4).data_ptr() == captured.data_ptr()
+        assert builder._get_decode_cu_seqlens_q(batch_size, 1).data_ptr() != captured.data_ptr()
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("batch_size,query_len", [(-1, 4), (8193, 4), (1, 0)])
+def test_sparse_decode_prefix_rejects_invalid_dimensions(batch_size: int, query_len: int) -> None:
+    builder = _make_sparse_builder(torch.device("cpu"))
+    with pytest.raises(ValueError, match="Invalid uniform decode"):
+        builder._get_decode_cu_seqlens_q(batch_size, query_len)
+
+
+@pytest.mark.parametrize("query_len", [0, 1, 4])
+def test_sparse_metadata_builder_forwards_uniform_decode_prefix(
+    monkeypatch: pytest.MonkeyPatch, query_len: int
+) -> None:
+    device = torch.device("cpu")
+    builder = _make_sparse_builder(device)
+    batch_size = 2
+    common = _create_common_attn_metadata(
+        BatchSpec(seq_lens=[65536] * batch_size, query_lens=[query_len] * batch_size), 128, device
+    )
+    monkeypatch.setattr(
+        msa_m3_module, "split_decodes_and_prefills", lambda *args, **kwargs: (batch_size, 0, batch_size * query_len, 0)
+    )
+    metadata = builder.build(0, common)
+    assert metadata.decode is not None
+    if query_len == 0:
+        assert metadata.num_decodes == 0
+        assert metadata.decode.cu_seqlens_q is None
+        assert not builder.decode_cu_seqlens_q_buffers
+    else:
+        expected = common.query_start_loc.to(torch.int64)
+        torch.testing.assert_close(metadata.decode.cu_seqlens_q, expected, rtol=0, atol=0)
+        assert builder.build(0, common).decode.cu_seqlens_q.data_ptr() == metadata.decode.cu_seqlens_q.data_ptr()
 
 
 @pytest.mark.parametrize(
@@ -1272,6 +1339,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
             block_table=torch.tensor([[0, 1]], dtype=torch.int32),
             max_seq_len=5,
             decode_query_len=1,
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int64),
         ),
         prefill=AscendMiniMaxM3SparsePrefillMetadata(
             cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
@@ -1308,6 +1376,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
+    assert mock_sparse_attn_decode.call_args.kwargs["cu_seqlens_q"] is metadata.decode.cu_seqlens_q
     assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
     assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
@@ -1385,12 +1454,17 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert torch.equal(output, torch.ones_like(output))
 
 
-@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
+@pytest.mark.parametrize("reuse_prefix", [False, True])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 def test_sparse_attn_decode_npu_forwards_runtime_metadata(
-    mock_sparse_attention_score: MagicMock,
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_prefix: bool,
+    device_type: AscendDeviceType,
 ) -> None:
-    q = torch.zeros(4, 2, 4)
-    kv_cache = torch.zeros(2, 6, 128, 2, 4)
+    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
+    kv_cache = torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
         [
             [[0, 1], [0, -1], [2, 3], [-1, -1]],
@@ -1401,7 +1475,18 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
     seq_lens = torch.tensor([129, 385], dtype=torch.int32)
     output = torch.empty_like(q)
-    mock_sparse_attention_score.return_value = torch.ones_like(output)
+    metadata = torch.empty(1024, dtype=torch.int32)
+    gbsa_metadata_op, gbsa_attention_op = mock_gbsa_ops
+    gbsa_metadata_op.return_value = metadata
+    gbsa_attention_op.return_value = (torch.ones_like(output), torch.empty(0))
+
+    prefix = torch.tensor([0, 2, 4], dtype=torch.int64) if reuse_prefix else None
+    if reuse_prefix:
+        monkeypatch.setattr(
+            msa_m3_npu_module,
+            "_build_cu_seqlens_q",
+            MagicMock(side_effect=AssertionError("The per-layer prefix must not be rebuilt")),
+        )
 
     minimax_m3_sparse_attn_decode_npu(
         q,
@@ -1414,19 +1499,272 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
         output=output,
         decode_query_len=2,
         block_size=128,
+        cu_seqlens_q=prefix,
     )
 
-    mock_sparse_attention_score.assert_called_once()
-    kwargs = mock_sparse_attention_score.call_args.kwargs
-    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
-    assert kwargs["actual_seq_lengths_kv"] is seq_lens
+    gbsa_metadata_op.assert_called_once()
+    if reuse_prefix:
+        assert gbsa_metadata_op.call_args.kwargs["cu_seqlens_q"] is prefix
+    metadata_args = gbsa_metadata_op.call_args.args
+    metadata_kwargs = gbsa_metadata_op.call_args.kwargs
+    assert torch.equal(metadata_args[0], topk_idx)
     assert torch.equal(
-        kwargs["select_num_idx"],
+        metadata_args[1],
         torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
     )
-    assert kwargs["block_size"] == 128
-    assert kwargs["top_k"] == 2
+    assert metadata_args[2:6] == (2, 2, 4, [1, 128])
+    assert torch.equal(
+        metadata_kwargs["cu_seqlens_q"],
+        torch.tensor([0, 2, 4], dtype=torch.int64),
+    )
+    assert torch.equal(metadata_kwargs["seqused_kv"], seq_lens)
+    assert metadata_kwargs["max_seqlen_q"] == 2
+    assert metadata_kwargs["layout_q"] == "TND"
+    assert metadata_kwargs["layout_kv"] == "PA_BBND"
+    assert metadata_kwargs["mask_mode"] == 1
+    assert metadata_kwargs["quant_mode"] == 0
+    assert metadata_kwargs["softmax_precision"] == 0
+    assert "is_packed_gqa" not in metadata_kwargs
+
+    gbsa_attention_op.assert_called_once()
+    args = gbsa_attention_op.call_args.args
+    kwargs = gbsa_attention_op.call_args.kwargs
+    assert args[0] is q
+    assert torch.equal(args[3], topk_idx)
+    assert torch.equal(args[4], metadata_args[1])
+    assert args[5] == [1, 128]
+    assert kwargs["metadata"] is metadata
+    assert torch.equal(kwargs["cu_seqlens_q"], metadata_kwargs["cu_seqlens_q"])
+    assert torch.equal(kwargs["seqused_kv"], seq_lens)
+    assert torch.equal(kwargs["block_table"], block_table)
+    assert kwargs["softmax_scale"] == 0.5
+    assert kwargs["mask_mode"] == 1
+    assert kwargs["quant_mode"] == 0
+    assert kwargs["softmax_precision"] == 0
+    assert kwargs["return_softmax_lse"] is False
+    assert "is_packed_gqa" not in kwargs
     assert torch.equal(output, torch.ones_like(output))
+
+
+@pytest.mark.parametrize("shape,dtype", [((2,), torch.int64), ((2, 1), torch.int64), ((3,), torch.int32)])
+def test_sparse_attn_decode_rejects_invalid_reused_prefix(shape: tuple[int, ...], dtype: torch.dtype) -> None:
+    q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="GBSA cu_seqlens_q"):
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16),
+            torch.zeros((2, 4, 2), dtype=torch.int32),
+            torch.zeros((2, 4), dtype=torch.int32),
+            torch.tensor([129, 385], dtype=torch.int32),
+            num_kv_heads=2,
+            sm_scale=0.5,
+            output=torch.empty_like(q),
+            decode_query_len=2,
+            cu_seqlens_q=torch.zeros(shape, dtype=dtype),
+        )
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_sparse_decode_reuses_schedule_but_keeps_layer_inputs(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock], query_len: int
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    schedule = torch.zeros(1024, dtype=torch.int32)
+    metadata_op.return_value = schedule
+    cache: dict = {}
+    counts = torch.ones((2, query_len), dtype=torch.int32)
+    prefix = torch.tensor([0, query_len], dtype=torch.int64)
+    seq_lens = torch.tensor([512], dtype=torch.int32)
+    table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    for layer in range(3):
+        q = torch.full((query_len, 2, 4), layer, dtype=torch.bfloat16)
+        kv = torch.full((2, 4, 128, 2, 4), layer, dtype=torch.bfloat16)
+        indices = torch.full((2, query_len, 1), layer, dtype=torch.int32)
+        attention_op.return_value = (torch.full_like(q, layer + 1), torch.empty(0))
+        output = torch.empty_like(q)
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            kv,
+            indices,
+            table,
+            seq_lens,
+            2,
+            0.5,
+            output,
+            query_len,
+            select_num_idx=counts,
+            cu_seqlens_q=prefix,
+            gbsa_metadata_cache=cache,
+        )
+        args, kwargs = attention_op.call_args
+        assert args[0] is q
+        assert torch.equal(args[1], kv[0])
+        assert torch.equal(args[2], kv[1])
+        assert args[3] is indices
+        assert args[4] is counts
+        assert kwargs["metadata"] is schedule
+        assert torch.equal(output, torch.full_like(q, layer + 1))
+    assert metadata_op.call_count == 1
+    assert attention_op.call_count == 3
+
+
+def test_sparse_decode_new_forward_rebuilds_schedule_for_changed_counts(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    q = torch.zeros((4, 2, 4), dtype=torch.bfloat16)
+    kv = torch.zeros((2, 4, 128, 2, 4), dtype=torch.bfloat16)
+    attention_op.return_value = (q, torch.empty(0))
+    schedules = [torch.full((1024,), i, dtype=torch.int32) for i in range(2)]
+    metadata_op.side_effect = schedules
+    for count in (1, 2):
+        cache: dict = {}
+        for _ in range(2):
+            minimax_m3_sparse_attn_decode_npu(
+                q,
+                kv,
+                torch.zeros((2, 4, 2), dtype=torch.int32),
+                torch.zeros((1, 4), dtype=torch.int32),
+                torch.tensor([128 * count], dtype=torch.int32),
+                2,
+                0.5,
+                torch.empty_like(q),
+                4,
+                select_num_idx=torch.full((2, 4), count, dtype=torch.int32),
+                cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int64),
+                gbsa_metadata_cache=cache,
+            )
+            assert attention_op.call_args.kwargs["metadata"] is schedules[count - 1]
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize("changed", ["heads", "topk", "query_len", "head_dim"])
+def test_sparse_decode_cache_separates_scheduling_configurations(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    changed: str,
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    cache: dict = {}
+    metadata_op.side_effect = [torch.zeros(1024, dtype=torch.int32) for _ in range(2)]
+    for second in (False, True):
+        qlen = 1 if second and changed == "query_len" else 4
+        heads = 4 if second and changed == "heads" else 2
+        width = 2 if second and changed == "topk" else 1
+        dim = 8 if second and changed == "head_dim" else 4
+        q = torch.zeros((qlen, heads, dim), dtype=torch.bfloat16)
+        attention_op.return_value = (q, torch.empty(0))
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros((2, 4, 128, 2, dim), dtype=torch.bfloat16),
+            torch.zeros((2, qlen, width), dtype=torch.int32),
+            torch.zeros((1, 4), dtype=torch.int32),
+            torch.tensor([512], dtype=torch.int32),
+            2,
+            0.5,
+            torch.empty_like(q),
+            qlen,
+            cu_seqlens_q=torch.tensor([0, qlen], dtype=torch.int64),
+            gbsa_metadata_cache=cache,
+        )
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "query_len,block_size,dtype", [(2, 128, torch.bfloat16), (4, 64, torch.bfloat16), (4, 128, torch.float16)]
+)
+def test_sparse_decode_unverified_paths_do_not_reuse_metadata(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    query_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+) -> None:
+    metadata_op, attention_op = mock_gbsa_ops
+    q = torch.zeros((query_len, 2, 4), dtype=dtype)
+    attention_op.return_value = (q, torch.empty(0))
+    cache: dict = {}
+    for _ in range(2):
+        minimax_m3_sparse_attn_decode_npu(
+            q,
+            torch.zeros((2, 4, block_size, 2, 4), dtype=dtype),
+            torch.zeros((2, query_len, 1), dtype=torch.int32),
+            torch.zeros((1, 4), dtype=torch.int32),
+            torch.tensor([128], dtype=torch.int32),
+            2,
+            0.5,
+            torch.empty_like(q),
+            query_len,
+            block_size=block_size,
+            cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int64),
+            gbsa_metadata_cache=cache,
+        )
+    assert not cache
+    assert metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "device_type,enabled", [(AscendDeviceType.A3, True), (AscendDeviceType.A2, False), (AscendDeviceType.A5, False)]
+)
+def test_sparse_builder_metadata_cache_is_forward_local(device_type: AscendDeviceType, enabled: bool) -> None:
+    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=device_type):
+        builder = _make_sparse_builder(torch.device("cpu"))
+        common = _create_common_attn_metadata(BatchSpec([512], [1]), 128, torch.device("cpu"))
+        first = builder.build(0, common).decode
+        second = builder.build(0, common).decode
+    assert first is not None and second is not None
+    if enabled:
+        assert first.gbsa_metadata_cache == {} and second.gbsa_metadata_cache == {}
+        assert first.gbsa_metadata_cache is not second.gbsa_metadata_cache
+    else:
+        assert first.gbsa_metadata_cache is None and second.gbsa_metadata_cache is None
+
+
+def test_sparse_impl_resets_reused_metadata_before_warmup_or_capture() -> None:
+    decode = AscendMiniMaxM3SparseDecodeMetadata(
+        seq_lens=torch.tensor([512], dtype=torch.int32),
+        block_table=torch.zeros((1, 4), dtype=torch.int32),
+        max_seq_len=512,
+        decode_query_len=4,
+        cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int64),
+        gbsa_metadata_cache={},
+    )
+    md = AscendMiniMaxM3SparseMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=512,
+        slot_mapping=torch.arange(4),
+        num_actual_tokens=4,
+        num_decodes=1,
+        num_decode_tokens=4,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    impl = AscendMiniMaxM3SparseImpl(2, 4, 0.5, 2, topk_blocks=16, sparse_block_size=128)
+    cache_sizes = []
+
+    def fake_decode(*args, **kwargs):
+        cache = kwargs["gbsa_metadata_cache"]
+        cache_sizes.append(len(cache))
+        cache[("schedule",)] = torch.zeros(1024, dtype=torch.int32)
+
+    with (
+        patch.object(
+            msa_m3_module,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={"layer3": md, "layer4": md},
+            ),
+        ),
+        patch.object(msa_m3_module, "minimax_m3_sparse_attn_decode", side_effect=fake_decode),
+    ):
+        for name in ["layer3", "layer4", "layer3", "layer4"]:
+            impl.forward(
+                SimpleNamespace(layer_name=name),
+                torch.zeros((4, 8), dtype=torch.bfloat16),
+                torch.empty(0),
+                (torch.zeros((2, 4, 16), dtype=torch.int32), None, None),
+                torch.empty((4, 8), dtype=torch.bfloat16),
+            )
+    assert cache_sizes == [0, 1, 0, 1]
 
 
 def test_m3_impls_provide_update_graph_params_protocol():
@@ -1456,10 +1794,13 @@ def test_m3_impls_provide_update_graph_params_protocol():
         assert params["speculative_config"].default is None
 
 
-@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
-def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
-    mock_sparse_attention_score: MagicMock,
+def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
     q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
     topk_idx = torch.tensor([[[0]]], dtype=torch.int32)
@@ -1468,7 +1809,10 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
     seq_lens = torch.ones(1, dtype=torch.int32)
     dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32)
     output = torch.empty_like(q)
-    mock_sparse_attention_score.return_value = torch.ones_like(output)
+    metadata = torch.empty(1024, dtype=torch.int32)
+    gbsa_metadata_op, gbsa_attention_op = mock_gbsa_ops
+    gbsa_metadata_op.return_value = metadata
+    gbsa_attention_op.return_value = (torch.ones_like(output), torch.empty(0))
 
     minimax_m3_sparse_attn_decode_npu(
         q,
@@ -1484,18 +1828,28 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
         dequant_scale=dequant_scale,
     )
 
-    args = mock_sparse_attention_score.call_args.args
-    kwargs = mock_sparse_attention_score.call_args.kwargs
+    metadata_kwargs = gbsa_metadata_op.call_args.kwargs
+    assert metadata_kwargs["quant_mode"] == 5
+    assert metadata_kwargs["softmax_precision"] == 1
+    assert metadata_kwargs["max_seqlen_q"] == 1
+    assert torch.equal(
+        metadata_kwargs["cu_seqlens_q"],
+        torch.tensor([0, 1], dtype=torch.int64),
+    )
+
+    args = gbsa_attention_op.call_args.args
+    kwargs = gbsa_attention_op.call_args.kwargs
     assert args[0].dtype == torch.float8_e4m3fn
     assert args[1].dtype == torch.float8_e4m3fn
     assert args[2].dtype == torch.float8_e4m3fn
-    assert kwargs["select_num_idx"] is select_num_idx
-    assert kwargs["actual_seq_lengths"].dtype == torch.int32
-    assert torch.equal(kwargs["actual_seq_lengths"], torch.ones_like(seq_lens))
-    assert kwargs["q_dequant_scale"] is dequant_scale
-    assert kwargs["k_dequant_scale"] is dequant_scale
-    assert kwargs["v_dequant_scale"] is dequant_scale
+    assert torch.equal(args[4], select_num_idx)
+    assert kwargs["quant_mode"] == 5
+    assert kwargs["softmax_precision"] == 1
+    assert "q_dequant_scale" not in kwargs
+    assert "k_dequant_scale" not in kwargs
+    assert "v_dequant_scale" not in kwargs
     assert kwargs["attention_out_dtype"] == torch.bfloat16
+    assert torch.equal(output, torch.ones_like(output))
 
 
 @patch.object(torch.ops._C_ascend, "npu_sparse_attention_score_prefill", create=True)
@@ -1539,7 +1893,11 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("cache_layout", ["tensor", "tuple", "list"])
-def test_sparse_attn_prefill_a5_missing_package_uses_q_gather_kv(dtype, cache_layout) -> None:
+def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
+    dtype,
+    cache_layout,
+    mock_gbsa_ops: tuple[MagicMock, MagicMock],
+) -> None:
     q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]] * 5, dtype=torch.bfloat16)
     cache = torch.zeros(2, 3, 128, 1, 4, dtype=dtype)
     kv_cache = cache if cache_layout == "tensor" else (cache[0], cache[1])
@@ -1547,13 +1905,16 @@ def test_sparse_attn_prefill_a5_missing_package_uses_q_gather_kv(dtype, cache_la
         kv_cache = list(kv_cache)
     topk_idx = torch.tensor([[[0, -1]]] * 5, dtype=torch.int32)
     output = torch.empty_like(q)
+    metadata = torch.empty(1024, dtype=torch.int32)
+    gbsa_metadata_op, gbsa_attention_op = mock_gbsa_ops
+    gbsa_metadata_op.return_value = metadata
+    gbsa_attention_op.return_value = (torch.ones_like(q), torch.empty(0))
     with (
         patch.object(
             msa_m3_npu_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
         ),
         patch.object(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", return_value=False),
         patch.object(msa_m3_npu_module, "_npu_k2q_csr") as k2q,
-        patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True, return_value=torch.ones_like(q)) as op,
         patch("torch.ops._C_ascend.npu_sparse_attention_score_prefill", create=True) as split_kv,
     ):
         msa_m3_npu_module.minimax_m3_sparse_attn(
@@ -1573,38 +1934,41 @@ def test_sparse_attn_prefill_a5_missing_package_uses_q_gather_kv(dtype, cache_la
         )
     k2q.assert_not_called()
     split_kv.assert_not_called()
-    op.assert_called_once()
-    args, kwargs = op.call_args
+    gbsa_metadata_op.assert_called_once()
+    metadata_kwargs = gbsa_metadata_op.call_args.kwargs
+    assert metadata_kwargs["max_seqlen_q"] == 3
+    assert metadata_kwargs["softmax_precision"] == (1 if dtype == torch.float8_e4m3fn else 0)
+    assert torch.equal(metadata_kwargs["cu_seqlens_q"], torch.tensor([0, 2, 5], dtype=torch.int64))
+    assert torch.equal(metadata_kwargs["seqused_kv"], torch.tensor([130, 3], dtype=torch.int32))
+
+    gbsa_attention_op.assert_called_once()
+    args, kwargs = gbsa_attention_op.call_args
     assert args[0].dtype == dtype
     assert args[1].dtype == dtype
     assert args[2].dtype == dtype
     assert args[3] is topk_idx
-    torch.testing.assert_close(kwargs["actual_seq_lengths"], torch.tensor([2, 3], dtype=torch.int32))
-    torch.testing.assert_close(kwargs["actual_seq_lengths_kv"], torch.tensor([130, 3], dtype=torch.int32))
-    torch.testing.assert_close(kwargs["select_num_idx"], torch.ones(5, 1, dtype=torch.int32))
-    assert kwargs["inner_precise"] == 4
+    torch.testing.assert_close(args[4], torch.ones(5, 1, dtype=torch.int32))
+    assert kwargs["metadata"] is metadata
+    assert kwargs["softmax_precision"] == metadata_kwargs["softmax_precision"]
     if dtype == torch.float8_e4m3fn:
         torch.testing.assert_close(args[0].float(), q.float().clamp(-448, 448))
         assert kwargs["attention_out_dtype"] == torch.bfloat16
-        scale = kwargs["q_dequant_scale"]
-        assert kwargs["k_dequant_scale"] is scale
-        assert kwargs["v_dequant_scale"] is scale
-        torch.testing.assert_close(scale, torch.ones(1, 1, 1, 1))
+        assert kwargs["quant_mode"] == 5
     else:
         assert args[0] is q
-        assert "q_dequant_scale" not in kwargs
+        assert kwargs["quant_mode"] == 0
         assert "attention_out_dtype" not in kwargs
+    assert not {"q_dequant_scale", "k_dequant_scale", "v_dequant_scale"} & kwargs.keys()
     torch.testing.assert_close(output, torch.ones_like(q))
 
 
-@pytest.mark.parametrize("supports_fp8,value_dtype", [(False, torch.float8_e4m3fn), (True, torch.bfloat16)])
-def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dtype) -> None:
+def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
     q = torch.zeros(1, 1, 4, dtype=torch.bfloat16)
-    kv_cache = (torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn), torch.zeros(1, 128, 1, 4, dtype=value_dtype))
-    with (
-        patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True) as op,
-        pytest.raises(TypeError, match="FP8 sparse attention"),
-    ):
+    kv_cache = (
+        torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn),
+        torch.zeros(1, 128, 1, 4, dtype=torch.bfloat16),
+    )
+    with pytest.raises(TypeError, match="FP8 sparse attention"):
         msa_m3_npu_module._minimax_m3_sparse_attn_a3(
             q,
             kv_cache,
@@ -1616,20 +1980,18 @@ def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dt
             0.5,
             torch.empty_like(q),
             128,
-            supports_fp8=supports_fp8,
         )
-    op.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("device_type", "split_kv_available", "expected_impl"),
     [
         (AscendDeviceType.A5, True, "kv_gather_q"),
-        (AscendDeviceType.A5, False, "legacy"),
+        (AscendDeviceType.A5, False, "gbsa"),
         (AscendDeviceType.A3, True, "kv_gather_q"),
-        (AscendDeviceType.A3, False, "legacy"),
+        (AscendDeviceType.A3, False, "gbsa"),
         (AscendDeviceType.A2, True, "kv_gather_q"),
-        (AscendDeviceType.A2, False, "legacy"),
+        (AscendDeviceType.A2, False, "gbsa"),
     ],
 )
 def test_sparse_attn_prefill_dispatches_by_operator_availability(
@@ -1648,7 +2010,7 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
             "_is_minimax_sparse_attention_split_kv_available",
             return_value=split_kv_available,
         ) as mock_is_available,
-        patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3") as mock_legacy,
+        patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3") as mock_gbsa,
         patch.object(
             msa_m3_npu_module,
             "_minimax_m3_sparse_attn_kv_gather_q",
@@ -1672,16 +2034,16 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
 
     if expected_impl == "kv_gather_q":
         mock_kv_gather_q.assert_called_once()
-        mock_legacy.assert_not_called()
+        mock_gbsa.assert_not_called()
         assert mock_kv_gather_q.call_args.args[-2:] == (5, 3)
         assert mock_kv_gather_q.call_args.kwargs == {
             "supports_fp8": device_type == AscendDeviceType.A5,
         }
     else:
-        mock_legacy.assert_called_once()
+        mock_gbsa.assert_called_once()
         mock_kv_gather_q.assert_not_called()
-        assert mock_legacy.call_args.kwargs == {
-            "supports_fp8": device_type == AscendDeviceType.A5,
+        assert mock_gbsa.call_args.kwargs == {
+            "max_query_len": 0,
         }
 
     mock_is_available.assert_called_once_with()

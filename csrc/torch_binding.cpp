@@ -57,6 +57,9 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/generic_block_sparse_attention/generic_block_sparse_attention_torch_adpt.h"
+#include "attention/store_kv_block/store_kv_block_torch_adpt.h"
+#include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
@@ -3572,6 +3575,30 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+
+    ops.def(
+        "npu_generic_block_sparse_attention_metadata(Tensor sparse_block_idx, Tensor sparse_block_count, "
+        "int num_heads_q, int num_heads_kv, int head_dim, int[] block_shape, *, Tensor? cu_seqlens_q=None, "
+        "Tensor? cu_seqlens_kv=None, Tensor? seqused_q=None, Tensor? seqused_kv=None, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, str layout_q=\"TND\", str layout_kv=\"PA_BBND\", int layout_sparse_pattern=4, "
+        "int mask_mode=1, int quant_mode=0, int softmax_precision=1, int win_left=-1, int win_right=-1, "
+        "int residual_block_mode=0, bool is_consistent_topk=False) -> Tensor"
+    );
+    ops.impl("npu_generic_block_sparse_attention_metadata", torch::kPrivateUse1, &vllm_ascend::npu_generic_block_sparse_attention_metadata);
+
+    ops.def(
+        "npu_generic_block_sparse_attention(Tensor q, Tensor k, Tensor v, Tensor sparse_block_idx, "
+        "Tensor sparse_block_count, int[] block_shape, *, Tensor? metadata=None, Tensor? attn_mask=None, "
+        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, Tensor? v_dequant_scale=None, "
+        "Tensor? p_quant_scale=None, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_kv=None, "
+        "Tensor? seqused_q=None, Tensor? seqused_kv=None, Tensor? block_table=None, str layout_q=\"TND\", "
+        "str layout_kv=\"PA_BBND\", int layout_sparse_pattern=4, float softmax_scale=0., int mask_mode=1, "
+        "int quant_mode=0, float dst_type_max=0., int softmax_precision=1, int win_left=-1, int win_right=-1, "
+        "bool return_softmax_lse=False, int residual_block_mode=0, bool is_consistent_topk=False, "
+        "ScalarType? attention_out_dtype=None) -> (Tensor, Tensor)"
+    );
+    ops.impl("npu_generic_block_sparse_attention", torch::kPrivateUse1, &vllm_ascend::npu_generic_block_sparse_attention);
+
 
     ops.def(
         "npu_fused_lightning_indexer_manage("
