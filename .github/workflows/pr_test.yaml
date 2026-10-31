@@ -227,6 +227,7 @@ jobs:
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
+        timeout-minutes: 10
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always

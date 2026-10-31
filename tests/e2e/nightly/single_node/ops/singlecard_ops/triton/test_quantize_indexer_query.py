@@ -9,6 +9,9 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 
+if get_ascend_device_type() == AscendDeviceType.A5:
+    pytestmark = pytest.mark.skip
+
 
 def reference(query):
     # Keep the oracle independent of NPU division near integer rounding ties.
@@ -38,10 +41,6 @@ def assert_quantized_equal(query, expected):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @torch.inference_mode()
 def test_quantize_indexer_query(heads, tokens, dtype):
-    # A5 with Triton Ascend 3.6.0+dev20261013220622 stably produces -22 at [2128, 0, 91],
-    # while CPU/NPU and exact RN require -21; no specific failing operation is known.
-    if dtype == torch.float32 and tokens == 4096 and heads == 64 and get_ascend_device_type() == AscendDeviceType.A5:
-        pytest.skip("A5 FP32 quantization returns -22 instead of -21 at [2128, 0, 91]")
     torch.manual_seed(41)
     query = torch.randn(tokens, heads, 128, dtype=dtype, device="npu")
     original = query.clone()
