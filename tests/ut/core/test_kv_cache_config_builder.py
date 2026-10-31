@@ -131,7 +131,7 @@ class TestDispatchPrecedenceMatrix(unittest.TestCase):
         builder = _builder()
         with (
             patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=glm_layout),
-            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=111) as glm_call,
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=111),
             patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=qwen_bytes),
             patch.object(builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=222),
         ):
