@@ -303,9 +303,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _propose(
         self,
@@ -491,12 +488,8 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 "sampling_metadata": sampling_metadata,
             }
             run_draft = partial(self._runnable, **model_inputs)
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            draft_token_ids = run_draft()
+
         return draft_token_ids
 
     def _run_merged_draft(
