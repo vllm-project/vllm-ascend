@@ -48,7 +48,7 @@ import torch
 # AttributeError. Setting VLLM_VERSION makes ``vllm_version_is`` use it instead
 # of ``vllm.__version__``. This must happen before the first ``vllm_ascend``
 # import below, and it must not override an explicitly exported value.
-os.environ.setdefault("VLLM_VERSION", "0.31.0")
+os.environ.setdefault("VLLM_VERSION", "0.32.0")
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType

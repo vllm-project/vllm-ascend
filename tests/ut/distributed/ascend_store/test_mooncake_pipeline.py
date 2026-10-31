@@ -20,9 +20,11 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, Slid
 
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore, cpu_cache
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise as protocol
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread, _LayerRevokeTask
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -147,7 +149,9 @@ class TestMooncakePipeline(unittest.TestCase):
             patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
-            scheduler = KVPoolScheduler(worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
+            scheduler = create_kv_pool_scheduler(
+                worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config
+            )
         scheduler.store_scheduler = store
         return scheduler
 
@@ -244,7 +248,7 @@ class TestMooncakePipeline(unittest.TestCase):
             patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
-            scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
+            scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
         scheduler.store_scheduler = store
         for worker in workers:
             self.run_step(
@@ -382,9 +386,15 @@ class TestMooncakePipeline(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
         for dimension in ("decode_context_parallel_size", "prefill_context_parallel_size"):
-            config = SimpleNamespace(pipeline_parallel_size=2, **{dimension: 2})
+            config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2, **{dimension: 2}))
             with self.assertRaisesRegex(ValueError, "context parallelism"):
-                protocol.validate_topology(config)
+                worker.layerwise_backend.bind_layerwise_keys(
+                    vllm_config=config,
+                    kv_cache_config=worker.kv_cache_config,
+                    model_name="test-model",
+                    use_hybrid=False,
+                    grouped_block_size=worker.grouped_block_size,
+                )
 
     def test_empty_last_layer_waits_for_earlier_put(self):
         store = MemoryRangeStore()

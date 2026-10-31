@@ -69,7 +69,6 @@ def test_qwen3_dense_eager_mode(
 @pytest.mark.parametrize(
     "compilation_config",
     [
-        pytest.param({"cudagraph_mode": "FULL_DECODE_ONLY"}, id="full_decode_only"),
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )

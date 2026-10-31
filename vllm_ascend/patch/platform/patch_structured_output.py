@@ -12,8 +12,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
@@ -163,16 +161,16 @@ def _patch_outlines_accept_tokens() -> None:
 
 
 def _patch_xgrammar_disable_any_whitespace() -> None:
-    """Ignore xgrammar's ``separators`` argument added on vLLM main.
+    """Ignore xgrammar's ``separators`` argument on both supported vLLM lanes.
 
-    vLLM #58067 (main only, absent from v0.31.0) passes
+    vLLM #58067 (present in v0.32.0 and verified main) passes
     ``separators=(",", ":")`` to ``GrammarCompiler.compile_json_schema`` when
     ``disable_any_whitespace`` is set. The xgrammar releases shipped with
     Ascend (0.2.7/0.2.8) mishandle it: the resulting grammar lets small models
     loop on ``","`` until ``max_tokens`` and emit truncated, invalid JSON
     (e.g. ``test_guided_decoding.py::test_guided_json_completion_xgrammar``).
-    The v0.31.0 lane never passes the argument, so force the legacy grammar on
-    main until xgrammar >= 0.2.9 is pinned.
+    Force the legacy grammar on both supported lanes until
+    xgrammar >= 0.2.9 is pinned.
     """
     try:
         from xgrammar import GrammarCompiler
@@ -200,6 +198,5 @@ def _patch_xgrammar_disable_any_whitespace() -> None:
 _patch_sampling_params_validation()
 _patch_structured_output_manager()
 _patch_outlines_accept_tokens()
-if not vllm_version_is("0.31.0"):
-    # vLLM #58067 only touches the main lane; keep the v0.31.0 lane as-is.
-    _patch_xgrammar_disable_any_whitespace()
+# vLLM #58067 is present in both v0.32.0 and verified main.
+_patch_xgrammar_disable_any_whitespace()

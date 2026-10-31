@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+
 from __future__ import annotations
 
 import math
@@ -61,11 +62,12 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
+    SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
     AscendConfig = None
@@ -123,6 +125,10 @@ class NPUPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
@@ -249,6 +255,55 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        backend = cls._select_attn_backend_cls(attn_selector_config)
+        # Upstream rejects a dtype the selected backend cannot store from
+        # get_valid_backends, which get_attn_backend_cls calls
+        # (vllm/platforms/rocm.py:594). Ascend selects its backend with a lookup
+        # table instead, so the same questions are asked here, against the backend
+        # the table just returned.
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+
+        try:
+            backend_cls = resolve_obj_by_qualname(backend)
+        except ImportError:
+            # The backend's own module can need a package this install may not have:
+            # the FA3 backend imports ``flash_attn_npu_v3``. A backend that cannot be
+            # imported declares nothing, and selecting it will report the missing
+            # package far more clearly than a dtype check could.
+            return backend
+        # Only a backend that states the set itself is checked. The inherited
+        # upstream default is a CUDA-oriented one that would reject configurations
+        # working today, so a backend that stays silent must not be judged by it.
+        # The DeepSeek sparse subclasses do not state it either, but they pick their
+        # backend in the layer and ask there, so nothing is lost by looking only at
+        # this class. This runs before anything is read off the selector config,
+        # which not every caller fills in.
+        if "supported_kv_cache_dtypes" not in backend_cls.__dict__:
+            return backend
+
+        # Only the kv cache dtype is acted on: the selection table above already
+        # decided every other axis, so the backend's own answer to that one question
+        # is all this needs. ``validate_configuration`` would answer for all 22 axes
+        # and needs the whole selector config through ``_asdict()``, which is not
+        # guaranteed here -- ``use_compress`` is not a field of
+        # ``AttentionSelectorConfig``, so callers that set it build a
+        # ``SimpleNamespace`` instead (tests/ut/attention/test_flash_attn.py).
+        cache_dtype = attn_selector_config.kv_cache_dtype
+        if not backend_cls.supports_kv_cache_dtype(cache_dtype):
+            # List what this backend accepts *here*: the device narrows the declared
+            # set, and naming a dtype that was just refused would contradict it.
+            supported = sorted(
+                dtype for dtype in backend_cls.supported_kv_cache_dtypes if backend_cls.supports_kv_cache_dtype(dtype)
+            )
+            hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+            raise ValueError(
+                f"KV cache dtype {cache_dtype!r} is not supported by the attention backend "
+                f"{backend_cls.__name__}. Reasons: kv_cache_dtype not supported.{hint}"
+            )
+        return backend
+
+    @classmethod
+    def _select_attn_backend_cls(cls, attn_selector_config) -> str:
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
@@ -354,17 +409,6 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        # Upstream derives this threshold only for CUDA/XPU. Without an Ascend
-        # default, an explicit SP/MMRS request is disabled during VllmConfig
-        # validation before the graph fusion pass can observe it.
-        # vLLM #60517 removed PassConfig.enable_sp/fuse_gemm_comms/
-        # sp_min_token_num on main; the pass-based SP this defaulted no longer
-        # exists there.
-        if vllm_version_is("0.31.0"):
-            pass_config = vllm_config.compilation_config.pass_config
-            if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
-                pass_config.sp_min_token_num = 1
-
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
         reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
@@ -414,6 +458,18 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        # DeepSeek V4 keys its page-padding tables on the physical block size, which
+        # check_and_update_config has already settled, and nothing this hook would do
+        # applies to it. The parent's Phase 1 would replace that size with one derived from
+        # get_supported_kernel_block_sizes(), and the compressed cache backends answer that
+        # in logical units -- AscendDSAC128Backend reports 4096 for the same physical page.
+        # Phase 2 is for hybrid models, Phase 3 for mixed KV dtypes, and the mamba handling
+        # below is gated on mamba_cache_mode; none of those is a DeepSeek V4 configuration.
+        if model_config is not None and model_config.hf_config.model_type == "deepseek_v4":
+            return
+
         super().update_block_size_for_backend(vllm_config)
 
         # TODO: NPU still sets block_size in check_and_update_config.
@@ -421,8 +477,6 @@ class NPUPlatform(Platform):
         using_kv_transfer_with_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
-        cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
         if (
             not cache_config.enable_prefix_caching
             and using_kv_transfer_with_hybrid
@@ -521,7 +575,7 @@ class NPUPlatform(Platform):
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
-        if not vllm_version_is("0.31.0"):
+        if not vllm_version_is("0.32.0"):
             from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
             seen: set[int] = set()
@@ -561,7 +615,7 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
-        _validate_deepseek_v4_tp_config(vllm_config, ascend_config)
+        _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -572,7 +626,6 @@ class NPUPlatform(Platform):
             vllm_config,
             compile_backend=cls.get_compile_backend(),
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
-            enable_dsa_cp=ascend_config.enable_dsa_cp,
         )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
@@ -1139,17 +1192,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
 
-    # profiling_chunk (CPP) works with async scheduling only on the v2 model
-    # runner; the v1 PP execution path does not provide the same asynchronous
-    # sampled-token cadence and broadcast guarantees.
-    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
-    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "profiling_chunk_config with async scheduling requires the v2 model runner "
-                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
-            )
-
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
     if dyntra_lb_config.enabled:
         # DyntraLB targets decoder-only inference on the decode side of a
@@ -1323,7 +1365,6 @@ def _setup_compile_backend(
     compile_backend: str,
     *,
     enable_shared_expert_dp: bool = False,
-    enable_dsa_cp: bool = False,
 ) -> None:
     """Recompute cudagraph sizes and setup the compile backend.
 
@@ -1356,7 +1397,7 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
-    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
+    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1364,13 +1405,8 @@ def _setup_compile_backend(
         and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
-        # vLLM #60517 removed `update_sizes_for_sequence_parallelism` on main;
-        # inline its behaviour (keep sizes that are multiples of tp_size).
-        if vllm_version_is("0.31.0"):
-            sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
-        else:
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
-            sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
             raise AssertionError(
                 f"cudagraph_capture_sizes {original_sizes} does not contain"
@@ -1413,6 +1449,7 @@ def _setup_compile_backend(
                 "vllm::mla_forward",
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
+                "vllm::glm5next_kda_forward",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
@@ -1502,9 +1539,6 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     a fork despite being a monkeypatch rather than a ``scheduler_cls``, and that
     its ``super().schedule()`` fallback only applies while balancing is off.
 
-    ``enable_dsa_cp`` is deliberately not here: DSA-CP is not a scheduler fork,
-    and its V4.1 metadata builder keeps the per-request channel the window clamp
-    needs, so that check belongs with the clamp rather than at startup.
     """
     scheduler_config = ascend_config.scheduler_config
     if scheduler_config.recompute_scheduler_enable:
@@ -1626,8 +1660,29 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+    """Match supported target/draft pairs against the live loader tag."""
+    # V2 keeps the target model_config while loading the draft. Match the live
+    # loader tag so the target and other auxiliary models retain their backend.
+    target = spec.target_model_config
+    if spec.method == "dflash":
+        return (
+            bool(spec.enforce_eager)
+            and model_tag == "dflash_head"
+            and target.hf_text_config.model_type == "glm_moe_dsa"
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+        )
+    if spec.method == "dspark":
+        return (
+            model_tag == "dspark_head"
+            and not _MINIMAX_M3_ARCHITECTURES.isdisjoint(target.hf_config.architectures or ())
+            and "Qwen3DSparkModel" in (spec.draft_model_config.architectures or ())
+        )
+    return False
+
+
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
-    """Select CANN FlashAttn for A5 V2 DFlash2 eager drafts with GLM MoE DSA targets."""
+    """Select CANN FlashAttn for A5 GLM DFlash2 and MiniMax-M3 DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.DEVICE_LENGTH_FLASH_ATTN
@@ -1639,22 +1694,12 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not spec.enforce_eager:
-        return False
-    # V2 keeps the target model_config while loading the draft. Read the live
-    # loader tag rather than relying on V1's runner_type="draft" convention.
-    if backends.model_tag != "dflash_head":
-        return False
-    target = spec.target_model_config
-    # Restrict target models to the GLM MoE DSA family, including GLM-5.3.
-    if target.hf_text_config.model_type != "glm_moe_dsa":
+    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     return (
-        spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
-        and selector.dtype in (torch.float16, torch.bfloat16)
+        selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
         # These features require additional metadata or batch-invariance guarantees.
         and not (
@@ -1788,6 +1833,14 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     spec = vllm_config.speculative_config
     if spec is not None and model_config is spec.draft_model_config:
         model_config = spec.target_model_config
+    if model_config is not None and model_config.architecture in (
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+    ):
+        # Qwen4Exp PLE is managed by its model-specific implementation, not
+        # the DeepSeek V4.1 Engram runtime.
+        vllm_config.engram_config = None
+        return
     if engram_config is None:
         if (
             model_config is None
@@ -1930,14 +1983,9 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     return None
 
 
-def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any) -> None:
+def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
     variant = _get_deepseek_v4_variant(vllm_config.model_config)
     if variant is None:
-        return
-
-    # Model Runner V1 with DSA-CP has its own TP topology. Model Runner V2
-    # does not use that exception, even if enable_dsa_cp is present.
-    if not vllm_config.use_v2_model_runner and ascend_config.enable_dsa_cp:
         return
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size

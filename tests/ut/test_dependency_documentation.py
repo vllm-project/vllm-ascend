@@ -93,28 +93,31 @@ class DependencyDocumentationTest(unittest.TestCase):
         section_end = installation.index("### Multi-node deployment", section_start)
         cpu_section = installation[section_start:section_end]
         required_text = (
-            "### CPU-only build verification",
             ".github/vllm-main-verified.commit",
-            "COMPILE_CUSTOM_KERNELS=0",
-            "TORCH_DEVICE_BACKEND_AUTOLOAD=0",
-            "SOC_VERSION=",
-            "--no-build-isolation",
-            "https://download.pytorch.org/whl/cpu/",
+            "python -m venv .venv",
             '"setuptools>=64"',
             '"setuptools-scm>=8"',
-            "attrs",
-            "googleapis-common-protos",
             "wheel",
-            "ninja",
+            'distribution("vllm-ascend")',
+            "CPU-only package build: OK",
+            "skips native extensions and custom kernels",
+            "does not provide CPU inference or an environment for running the unit tests",
+            "Runtime dependencies are intentionally absent",
             "python -m pip check",
+            "../developer_guide/contribution/testing.md#set-up-a-test-environment",
         )
         for text in required_text:
             with self.subTest(text=text):
                 self.assertIn(text, cpu_section)
 
-        for package, variable in MAIN_PACKAGE_VARIABLES.items():
-            with self.subTest(package=package):
-                self.assertIn(f"{package}=={{{{ {variable} }}}}", cpu_section)
+        # Check the flags and target on the actual install command, rather than
+        # accepting mentions elsewhere in the explanatory text.
+        commands = cpu_section.replace("\\\n", " ")
+        self.assertRegex(
+            commands,
+            r"COMPILE_CUSTOM_KERNELS=0\s+SOC_VERSION=\S+\s+"
+            r"python -m pip install\s+--no-build-isolation\s+--no-deps\s+-e\s+\.",
+        )
 
 
 if __name__ == "__main__":

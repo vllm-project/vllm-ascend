@@ -13,11 +13,11 @@ a2:
     test_config:
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
-        os: linux-aarch64-a2b3-4
+        os: linux-aarch64-a2b3-8
         config_file_path: Qwen3-30B-A3B-BF16-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-30b-a3b-w8a8-a2-performance
-        os: linux-aarch64-a2b3-4
+        os: linux-aarch64-a2b3-8
         config_file_path: Qwen3-30B-A3B-W8A8-A2.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: qwen3-vl-32b-instruct-w8a8
@@ -103,12 +103,12 @@ a3:
         config_file_path: GLM-5.3-W8A8C8-A3-200k-PP-PD.yaml
         config_base_path: tests/e2e/cases/features/pp
         size: 4
+      - name: Kimi-K3-MRV2-A3
+        config_file_path: Kimi-K3-MRV2-A3.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
-        size: 4
-      - name: DeepSeek-V4-Pro-w4a8-1M-PD
-        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 4
       - name: QWEN3_235B_PD_3_5K_1_5k
@@ -140,10 +140,6 @@ a3:
         size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
-        size: 2
-      - name: DeepSeek-V4.1-Flash-w8a8-PD-prefix
-        config_file_path: DeepSeek-V4.1-Flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
       - name: DeepSeek-V4.1-Flash-w8a8-PD-MRV2

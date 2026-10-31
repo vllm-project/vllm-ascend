@@ -62,6 +62,50 @@ def test_sp_ep_reduce_scatter_pads_local_chunks(monkeypatch):
     assert result.shape == (3, 4)
 
 
+class _EpGroupUniform:
+    """Uniform SP layout (ceil-div + repeat_interleave): 2 EP ranks, equal sizes."""
+
+    world_size = 2
+    rank_in_group = 0
+
+    def all_gather(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (2, 4)
+        return torch.arange(16, dtype=x.dtype).view(4, 4)
+
+    def reduce_scatter(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (4, 4)
+        return x[:2]
+
+
+def _patch_uniform_sp_context(monkeypatch):
+    context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(get_chunk_sizes_across_dp_rank=lambda: [2, 2]),
+        is_draft_model=False,
+    )
+    monkeypatch.setattr(custom_ops, "_EXTRA_CTX", context)
+    monkeypatch.setattr(custom_ops, "get_forward_context", lambda: context)
+    monkeypatch.setattr(custom_ops, "get_ep_group", _EpGroupUniform)
+
+
+def test_uniform_sp_all_gather_skips_identity_reassembly(monkeypatch):
+    _patch_uniform_sp_context(monkeypatch)
+
+    gathered = custom_ops._maybe_all_gather_and_maybe_unpad_impl(torch.empty(2, 4))
+
+    assert gathered.shape == (4, 4)
+    assert torch.equal(gathered, torch.arange(16, dtype=gathered.dtype).view(4, 4))
+
+
+def test_uniform_sp_reduce_scatter_skips_identity_pad(monkeypatch):
+    _patch_uniform_sp_context(monkeypatch)
+
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(16).view(4, 4))
+
+    assert result.shape == (2, 4)
+
+
 def test_sp_ep_reduce_scatter_draft_model_keeps_ep_layout(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
     custom_ops._EXTRA_CTX.is_draft_model = True
@@ -166,6 +210,94 @@ def test_sp_ep_pcp_token_order_and_round_trip(monkeypatch, dp_size, pcp_size, sp
         reduced = custom_ops._maybe_pad_and_reduce_impl(gathered)
         assert torch.equal(reduced, chunks[rank] * world_size)
         assert custom_ops._maybe_pad_and_reduce_fake(gathered).shape == chunks[rank].shape
+
+
+class _EpGroupDp1:
+    """FlashComm DP=1 + MoE sequence parallelism: 8 EP ranks, SP tail padding."""
+
+    world_size = 8
+    rank_in_group = 4
+
+    def all_gather(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (2, 4)
+        return torch.arange(64, dtype=x.dtype).view(16, 4)
+
+    def reduce_scatter(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (16, 4)
+        return x[:2]
+
+
+class _EpGroupDp2:
+    world_size = 8
+    rank_in_group = 0
+
+    def all_gather(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (16, 4)
+        return torch.arange(128, dtype=x.dtype).view(32, 4)
+
+    def reduce_scatter(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        assert dim == 0
+        assert x.shape == (32, 4)
+        return x[:8]
+
+
+def _patch_dp_context_without_sp_layout(monkeypatch, num_tokens_across_dp, padded_length, ep_group):
+    # dp_metadata exists (SP-MoE) but the chunked_sizes context is never set,
+    # so _get_ep_local_sizes returns None and the fallback branch runs.
+    context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor(num_tokens_across_dp)),
+        is_draft_model=False,
+        padded_length=padded_length,
+    )
+    monkeypatch.setattr(custom_ops, "_EXTRA_CTX", context)
+    monkeypatch.setattr(custom_ops, "get_forward_context", lambda: context)
+    monkeypatch.setattr(custom_ops, "get_dp_group", lambda: SimpleNamespace(world_size=len(num_tokens_across_dp)))
+    monkeypatch.setattr(custom_ops, "get_ep_group", ep_group)
+
+
+def test_dp1_flashcomm_all_gather_trims_sp_tail(monkeypatch):
+    _patch_dp_context_without_sp_layout(monkeypatch, [10], 16, _EpGroupDp1)
+
+    gathered = custom_ops._maybe_all_gather_and_maybe_unpad_impl(torch.empty(2, 4))
+
+    assert gathered.shape == (10, 4)
+    assert torch.equal(gathered, torch.arange(64, dtype=gathered.dtype).view(16, 4)[:10])
+
+
+def test_dp1_flashcomm_reduce_scatter_skips_redundant_pad(monkeypatch):
+    _patch_dp_context_without_sp_layout(monkeypatch, [16], 16, _EpGroupDp1)
+
+    # Already padded_length rows: reduce-scatter must receive the tensor as-is.
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(64).view(16, 4))
+
+    assert result.shape == (2, 4)
+
+
+def test_dp1_flashcomm_reduce_scatter_pads_sp_tail(monkeypatch):
+    _patch_dp_context_without_sp_layout(monkeypatch, [10], 16, _EpGroupDp1)
+
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(40).view(10, 4))
+
+    assert result.shape == (2, 4)
+
+
+def test_dp_gather_and_reduce_scatter_without_sp_layout(monkeypatch):
+    _patch_dp_context_without_sp_layout(monkeypatch, [10, 12], 16, _EpGroupDp2)
+
+    gathered = custom_ops._maybe_all_gather_and_maybe_unpad_impl(torch.empty(16, 4))
+    expected = torch.cat(
+        [
+            torch.arange(128, dtype=gathered.dtype).view(32, 4)[0:10],
+            torch.arange(128, dtype=gathered.dtype).view(32, 4)[16:28],
+        ]
+    )
+    assert torch.equal(gathered, expected)
+
+    reduced = custom_ops._maybe_pad_and_reduce_impl(gathered)
+    assert reduced.shape == (8, 4)
 
 
 def test_sp_ep_returns_none_for_inconsistent_topology(monkeypatch):

@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -30,8 +31,25 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
-from vllm_ascend.weight_switch import WeightSwitchConfig
+from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+@pytest.mark.parametrize("pcp", [False, True])
+def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, pcp):
+    config = {"pcp": pcp}
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
+    expected = (
+        (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl)
+        if pcp
+        else (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
+    )
+    assert dsa_v41_cp.get_v41_cp_classes() == expected
+    assert dsa_v41.DeepseekV41CacheBackend.get_builder_cls() is expected[0]
+    assert dsa_v41.DeepseekV41CacheBackend.supports_pcp()
+    config["pcp"] = False
+    assert dsa_v41_cp.get_v41_cp_classes() == (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
+
 
 LAYER = "model.layers.0.attn"
 PREFIXES = {
@@ -96,18 +114,29 @@ def _projector(
     projector.head_dim = width
     projector.support_fp8_attention = False
     projector.enable_pcp_o_proj_weight_sharding = sharding
-    projector._pcp_decode_sharded = decode_sharded
-    projector._pcp_o_proj_weight_switches = None
     projector.wo_a_pcp_weight_method = projector.wo_a.quant_method
     projector.wo_b_pcp_weight_method = projector.wo_b.quant_method
     group = SimpleNamespace(world_size=world, rank_in_group=rank, device_group=object())
-    projector.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(group)
     projector.vllm_config = SimpleNamespace(
         num_speculative_tokens=speculative_tokens,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=compilation_config,
         model_config=SimpleNamespace(dtype=torch.float32),
     )
+    projector._parallel_o_proj = ParallelOProjection(
+        world * width,
+        projector.wo_b,
+        config=WeightSwitchConfig.from_group(group),
+        tp_group=SimpleNamespace(world_size=1, rank_in_group=0),
+        pool={},
+        pool_key="dsa_pcp_o_proj",
+        project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(projector),
+        decode_sharded=decode_sharded,
+        input_layer=projector.wo_a,
+        input_projection=projector._wo_a_bmm,
+        num_input_groups=world,
+    )
+    projector._parallel_o_proj.enabled = sharding
     monkeypatch.setattr(dsa_cp.AscendDSAPCPImpl, "o_proj_full_pools", {})
 
     def matmul(value, weight, **kwargs):
@@ -132,33 +161,33 @@ def _projector(
 
     def exchange(destination, source, *, group):
         events.append("exchange")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_ag_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_ag_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.all_gather_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.all_gather_output.data_ptr()
         peers = projector.peer_inputs
         torch.testing.assert_close(source, peers[rank])
         destination.copy_(torch.cat(peers))
 
     def scatter(destination, source, *, group):
         events.append("scatter")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_rs_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_rs_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.reduce_scatter_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.reduce_scatter_output.data_ptr()
         destination.copy_(reduce(source).chunk(world)[rank])
 
     group.all_reduce = reduce
 
-    monkeypatch.setattr(dsa_cp.torch_npu, "npu_transpose_batchmatmul", matmul, raising=False)
+    monkeypatch.setattr(dsa_cp.dsa_v1.torch_npu, "npu_transpose_batchmatmul", matmul, raising=False)
     # Match the runtime import even when another UT replaces sys.modules.
     monkeypatch.setattr(importlib.import_module("vllm_ascend.distributed.utils"), "all_gather_async", gather_weight)
     monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
     monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0))
-    monkeypatch.setattr(dsa_cp.dist, "all_gather_into_tensor", exchange)
-    monkeypatch.setattr(dsa_cp.dist, "reduce_scatter_tensor", scatter)
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", exchange)
+    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", scatter)
     monkeypatch.setattr(dsa_cp.dsa_v1, "oproj_tp_enable", lambda: False)
     monkeypatch.setattr(torch.ops.vllm, "unquantized_gemm", torch.nn.functional.linear, raising=False)
     if sharding and decode_sharded:
-        projector._initialize_pcp_o_proj_exchange_buffers()
+        projector._parallel_o_proj._prepare_exchange_buffers(projector.vllm_config)
     return projector
 
 
@@ -186,12 +215,12 @@ def builders(monkeypatch):
     for module in (dsa_v41, dsa_v41_cp):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
-    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, legacy=False, decode_sharded=False):
+    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
         monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
-                tensor_parallel_size=world if legacy else 1,
-                prefill_context_parallel_size=1 if legacy else world,
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=world,
                 decode_context_parallel_size=dcp,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
@@ -204,7 +233,7 @@ def builders(monkeypatch):
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
                     sliding_window=4,
-                    num_attention_heads=8 if legacy else 2,
+                    num_attention_heads=2,
                     head_dim=2,
                     qk_rope_head_dim=2,
                     index_topk=3,
@@ -220,9 +249,7 @@ def builders(monkeypatch):
         }
         monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=rank))
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=world, rank_in_group=rank))
-        builder_class = (
-            dsa_v41_cp.AscendDSAV41CPMetadataBuilder if legacy else dsa_v41_cp.AscendDSAV41PCPMetadataBuilder
-        )
+        builder_class = dsa_v41_cp.AscendDSAV41PCPMetadataBuilder
         result = {
             kind: builder_class(spec, [PREFIXES[kind]], config, torch.device("cpu")) for kind, spec in specs.items()
         }
@@ -389,60 +416,6 @@ def _build_planes(builders, batch):
     # The target adapter must ignore independent draft cache metadata.
     result["draft.attn"] = object()
     return result
-
-
-class TestLegacyMetadata:
-    @pytest.mark.parametrize("world", [2, 4])
-    @pytest.mark.parametrize("last_rank", [False, True])
-    @pytest.mark.parametrize("causal", [False, True])
-    def test_query_intersection_uses_device_lengths_and_global_rope(
-        self, builders, monkeypatch, world, last_rank, causal
-    ):
-        rank = world - 1 if last_rank else 0
-        batch = _batch(world, rank, "prefill")
-        global_batch = batch.context.global_batch
-        # Only pinned staging is device-specific. The legacy metadata builder
-        # and its request-intersection calculation execute unmocked.
-        monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
-        common = AscendCommonAttentionMetadata(
-            query_start_loc=global_batch.query_start_loc,
-            query_start_loc_cpu=global_batch.query_start_loc.clone(),
-            seq_lens=global_batch.seq_lens,
-            seq_lens_cpu=global_batch.seq_lens + 1000,
-            num_reqs=2,
-            num_actual_tokens=16,
-            num_input_tokens=18,
-            max_query_len=8,
-            max_seq_len=16,
-            block_table_tensor=batch.context.global_block_tables[0],
-            slot_mapping=batch.context.global_slot_mappings[0],
-            positions=global_batch.positions,
-            is_prefilling=torch.tensor([True, True]),
-            causal=causal,
-        )
-        local = builders(world, rank, legacy=True)["swa"].build(
-            0, common, common_v41_metadata={}, common_v41_batch_metadata={}
-        )
-        # Independent examples include partial requests and rank-tail padding.
-        expected = {
-            (2, 0): ([0, 8, 9], [12, 9], 0, 9),
-            (2, 1): ([0, 0, 7], [0, 16], 9, 16),
-            (4, 0): ([0, 5, 5], [9, 0], 0, 5),
-            (4, 3): ([0, 0, 1], [0, 16], 15, 16),
-        }
-        offsets, lengths, start, end = expected[world, rank]
-        if not causal:
-            lengths = [
-                length if right > left else 0 for length, left, right in zip([12, 16], offsets[:-1], offsets[1:])
-            ]
-        torch.testing.assert_close(local.query_start_loc, torch.tensor(offsets, dtype=torch.int32))
-        torch.testing.assert_close(local.seq_lens, torch.tensor(lengths, dtype=torch.int32))
-        assert local.num_actual_tokens == end - start
-        assert local.seq_lens.data_ptr() != local.global_metadata.seq_lens.data_ptr()
-        torch.testing.assert_close(local.global_metadata.seq_lens, torch.tensor([12, 16], dtype=torch.int32))
-        torch.testing.assert_close(local.positions, batch.positions[start:end])
-        torch.testing.assert_close(local.cos[LAYER], local.global_metadata.cos[LAYER][start:end])
-        torch.testing.assert_close(local.global_metadata.cos[LAYER][:16, 0, 0, 0], batch.positions.float())
 
 
 class TestPCPMetadata:
@@ -663,9 +636,16 @@ class TestPCPMetadata:
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
             builders(dcp=2)
-        builder = builders()["swa"]
-        with pytest.raises(AssertionError, match="global batch context"):
-            builder.build(0, _batch(2, 0, "prefill").local)
+
+    def test_builds_ordinary_metadata_without_pcp_context(self, builders):
+        # A replicated draft decode builds through PCP builders without a
+        # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        common = _batch(2, 0, "decode").local
+        # Replicated drafts keep rank-local slots, unlike target PCP batches.
+        common = common.replace(slot_mapping=common.slot_mapping[: common.num_input_tokens])
+        for builder in builders().values():
+            metadata = builder.build(0, common)
+            assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 
 @pytest.fixture
@@ -769,7 +749,7 @@ class TestPCPBatchLifecycle:
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
         assert state.events == (["project", "reduce"] if sharding else [])
-        switches = state.projector._pcp_o_proj_weight_switches or ()
+        switches = state.projector._parallel_o_proj._weight_switch_states or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())
             for layer, _, weight in switches
@@ -803,8 +783,9 @@ class TestPCPBatchLifecycle:
     def test_failed_prefill_drains_both_weight_gathers_and_restores_decode(self, runtime, monkeypatch, stage):
         state = runtime()
         projector = state.projector
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states
+        assert switches is not None and len(switches) == 2
         addresses = [layer.weight.data_ptr() for layer, _, _ in switches]
 
         def fail(*args, **kwargs):
@@ -823,7 +804,7 @@ class TestPCPBatchLifecycle:
             elif stage == "attention":
                 failure.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla", fail)
             elif stage == "projection":
-                failure.setattr(dsa_cp.torch_npu, "npu_transpose_batchmatmul", fail)
+                failure.setattr(dsa_cp.dsa_v1.torch_npu, "npu_transpose_batchmatmul", fail)
             elif stage == "weight_gather":
                 failure.setattr(switches[1][1], "all_gather_weight", fail)
             elif stage == "weight_wait":
@@ -917,7 +898,10 @@ class TestPCPBatchLifecycle:
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
         monkeypatch.setattr(
-            dsa_cp.torch_npu, "npu_dynamic_quant", lambda x, **kwargs: (x, torch.ones(x.shape[0])), raising=False
+            dsa_cp.dsa_v1.torch_npu,
+            "npu_dynamic_quant",
+            lambda x, **kwargs: (x, torch.ones(x.shape[0])),
+            raising=False,
         )
         for scenario in ("prefill", "decode", "dummy", "mixed", "empty", "decode"):
             stores.clear()
@@ -940,6 +924,8 @@ class TestPCPProjectionPartition:
         tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank)
         monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: tp_group)
+        monkeypatch.setattr(vllm_distributed, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(vllm_distributed, "get_tp_group", lambda: tp_group)
         impl = dsa_cp.AscendDSAPCPImpl.__new__(dsa_cp.AscendDSAPCPImpl)
         impl.n_local_groups = pcp_size
         impl.wo_a, impl.wo_b = torch.nn.Module(), torch.nn.Module()
@@ -974,7 +960,20 @@ class TestPCPProjectionPartition:
                     parameter.weight_loader = lambda parameter, value: parameter.data.copy_(value)
                     layer.register_parameter(attr, parameter)
                     checkpoints.append((layer, parameter, full, 0))
-        impl._prepare_pcp_o_proj_weight_shards()
+        impl._parallel_o_proj = ParallelOProjection(
+            pcp_size * 4,
+            impl.wo_b,
+            config=WeightSwitchConfig.from_group(group),
+            tp_group=tp_group,
+            pool={},
+            pool_key="dsa_pcp_o_proj",
+            project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(impl),
+            decode_sharded=False,
+            input_layer=impl.wo_a,
+            input_projection=impl._wo_a_bmm,
+            num_input_groups=pcp_size,
+        )
+        impl._parallel_o_proj.prepare_weight_load(SimpleNamespace())
         composed_rank = tp_rank * pcp_size + pcp_rank
         for layer, parameter, full, axis in checkpoints:
             parameter.weight_loader(parameter, full)
@@ -984,10 +983,10 @@ class TestPCPProjectionPartition:
             assert layer.tp_group is tp_group
         assert impl.n_local_groups == pcp_size
         assert impl.wo_a.n_local_groups == 1
-        assert impl.pcp_o_proj_weight_switch_config.group is group
+        assert impl._parallel_o_proj.config.group is group
         impl.wo_a.quant_method.supports_weight_switch = False
         with pytest.raises(RuntimeError, match="weight-switch capable"):
-            impl._get_pcp_weight_switch_method(impl.wo_a)
+            impl._parallel_o_proj._resolve_o_proj_weight_switch_method(impl.wo_a)
 
     @pytest.mark.parametrize("world,rank", [(2, 0), (2, 1), (4, 3)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
@@ -1046,7 +1045,7 @@ class TestPCPProjectionPartition:
             projector.reference_input = peers[rank]
             expected = torch.nn.functional.linear(peers[rank], dense_weight)
             output = torch.full_like(expected, -777)
-            with projector._o_proj_batch(needs_global_metadata=decode_sharded, has_prefill=False):
+            with projector._parallel_o_proj.batch(needs_global_metadata=decode_sharded, has_prefill=False):
                 assert projector._forward_o_proj(peers[rank].view(rows, world, width), output) is output
             torch.testing.assert_close(output, expected)
             assert events.count("exchange") == events.count("scatter") == int(decode_sharded)
@@ -1074,8 +1073,9 @@ class TestPCPProjectionPartition:
             hidden = torch.tensor([values])
             output = torch.empty_like(hidden)
             impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
-            with projector._o_proj_batch(needs_global_metadata=True, has_prefill=True):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+            with projector._parallel_o_proj.batch(needs_global_metadata=True, has_prefill=True):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
                 impl._project_output(attn, hidden.view(1, 2, 2), hidden, None, projected=output)
             outputs.append(output[0, 0].item())
         assert outputs == [3.0, 30.0]
@@ -1091,8 +1091,8 @@ class TestPCPProjectionPartition:
         full_weight = torch.eye(2).repeat(2, 1, 1)
         full_scale = torch.cat((projector.wo_a.weight_scale, projector.wo_a.weight_scale + 1))
         expected_parts = {}
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states or ()
             for layer, _, weight in switches:
                 for name, part in weight.gather_parts.items():
                     full = (
@@ -1110,21 +1110,22 @@ class TestPCPProjectionPartition:
 
         monkeypatch.setattr(importlib.import_module("vllm_ascend.distributed.utils"), "all_gather_async", gather)
         monkeypatch.setattr(
-            dsa_cp.torch_npu,
+            dsa_cp.dsa_v1.torch_npu,
             "npu_dynamic_mx_quant",
             lambda value, **kwargs: (value, torch.ones(value.shape[:-1], dtype=torch.uint8)),
             raising=False,
         )
         monkeypatch.setattr(
-            dsa_cp.torch_npu,
+            dsa_cp.dsa_v1.torch_npu,
             "npu_transpose_quant_batchmatmul",
             lambda value, weight, **kwargs: torch.bmm(value.transpose(0, 1), weight).transpose(0, 1),
             raising=False,
         )
         addresses = [getattr(layer, name).data_ptr() for layer, _, weight in switches for name in weight.gather_parts]
         for has_prefill in (True, False, True):
-            with projector._o_proj_batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+            with projector._parallel_o_proj.batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
                 output = torch.empty_like(projector.reference_input)
                 projector._forward_o_proj(projector.reference_input.view(2, 2, 2), output)
                 torch.testing.assert_close(output, projector.reference_input)
@@ -1240,114 +1241,6 @@ class TestSparseLayerReuse:
             assert addresses == (topk.data_ptr(), candidates.data_ptr())
             impl.role = role
 
-    def test_legacy_cp_compressor_uses_global_rope_and_query_slice(self, monkeypatch):
-        """Prepare local Query before compression can overwrite global RoPE scratch."""
-        impl = dsa_v41_cp.AscendDSAV41CPImpl.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
-        impl.role = SimpleNamespace(
-            is_kv_source=True,
-            has_long_context=True,
-            is_index_source=True,
-            is_candidate_source=False,
-            uses_candidate_filter=False,
-        )
-        impl.topology = SimpleNamespace(candidate_topk_blocks=2, candidate_block_size=8)
-        impl.index_k_source_prefix = PREFIXES["index_k"]
-        hidden = torch.arange(24, dtype=torch.float32).view(6, 4)
-        local = SimpleNamespace(
-            swa=SimpleNamespace(cp_token_range=(2, 4, 2, 0), num_actual_tokens=2),
-            indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)),
-        )
-        cos, sin = torch.ones(4, 2), torch.zeros(4, 2)
-        global_metadata = SimpleNamespace(
-            swa=SimpleNamespace(num_actual_tokens=4, slot_mapping=torch.zeros(4, 2, dtype=torch.int32)),
-            positions=torch.arange(4),
-            indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)),
-            rope=lambda name, count: (cos[:count], sin[:count]),
-        )
-        impl.multistream_dsv4_dsa_overlap = True
-        local.rope = lambda name, count: (cos[2 : 2 + count], sin[2 : 2 + count])
-        calls, writes, selections = [], [], []
-        kv = torch.nn.Linear(4, 2, bias=False)
-        with torch.no_grad():
-            kv.weight.copy_(torch.eye(4)[:2])
-
-        def wrapper(projection):
-            return SimpleNamespace(
-                _quant_method=object(),
-                _has_communication=False,
-                quantize=lambda values: (values, None),
-                matmul=lambda values, scale, **kwargs: projection(values),
-            )
-
-        def select(query, values, positions, cache, metadata, **kwargs):
-            selections.append(values)
-            torch.testing.assert_close(values, hidden[2:4])
-            torch.testing.assert_close(query, hidden[2:4])
-            return kwargs["indices_output"], None
-
-        attn = SimpleNamespace(
-            rotary_emb=SimpleNamespace(layername=LAYER),
-            n_heads=2,
-            head_dim=2,
-            nope_head_dim=0,
-            wq_a=SimpleNamespace(bias=None),
-            wkv=SimpleNamespace(bias=None),
-            wq_b=SimpleNamespace(bias=None),
-            q_norm=torch.nn.Identity(),
-            kv_norm=torch.nn.Identity(),
-            indexer=_query_indexer(select),
-            shared_state=SimpleNamespace(
-                topk_indices=torch.zeros(6, 3),
-                candidates=torch.zeros(6, 1, 2),
-                candidate_lengths=None,
-                topk_lengths=None,
-            ),
-            dsa_attn=SimpleNamespace(
-                swa_cache_layer=SimpleNamespace(kv_cache=[torch.zeros(256, 2)]),
-                dsa_attn=SimpleNamespace(
-                    impl=SimpleNamespace(
-                        cv_wq_a=wrapper(torch.nn.Identity()), cv_wkv=wrapper(kv), cv_wq_b=wrapper(torch.nn.Identity())
-                    )
-                ),
-            ),
-        )
-        monkeypatch.setattr(impl, "_global_layer_metadata", lambda metadata: global_metadata)
-        monkeypatch.setattr(dsa_v41_cp, "get_forward_context", lambda: SimpleNamespace(attn_metadata=object()))
-
-        def compress(*args, **kwargs):
-            calls.append(args)
-            cos.fill_(9999)
-
-        def rotate(value, rope_cos, rope_sin, **kwargs):
-            if value.shape[2] == 2:
-                torch.testing.assert_close(rope_cos, torch.ones(2, 2))
-                assert not calls
-
-        monkeypatch.setattr(impl, "_write_compressed_source", compress)
-        monkeypatch.setattr(
-            torch.ops._C_ascend,
-            "npu_scatter_nd_update_sk",
-            lambda cache, slots, values: writes.append(values),
-            raising=False,
-        )
-        monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", rotate, raising=False)
-        monkeypatch.setattr(
-            dsa_v41,
-            "get_forward_context",
-            lambda: SimpleNamespace(no_compile_layers={PREFIXES["index_k"]: SimpleNamespace(kv_cache=[object()])}),
-        )
-        q, qr, prepared = impl._prepare_inputs_and_caches(attn, hidden, local, {})
-        torch.testing.assert_close(q.flatten(1), hidden[2:4])
-        assert len(writes) == 1
-        torch.testing.assert_close(writes[0], hidden[:4, :2])
-        impl._select_sparse_indices(attn, hidden, qr, torch.arange(2, 4), cos[2:4], sin[2:4], local, prepared)
-        assert len(selections) == 1
-        assert len(calls) == 1
-        torch.testing.assert_close(calls[0][1], hidden[:4])
-        assert calls[0][3].data_ptr() == cos.data_ptr()
-        assert calls[0][4].data_ptr() == sin.data_ptr()
-        assert calls[0][5] is global_metadata
-
 
 class TestProjectionLayout:
     @pytest.mark.parametrize("live,padded", [(4, 4), (3, 8), (0, 8)])
@@ -1366,27 +1259,3 @@ class TestProjectionLayout:
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
-
-
-@pytest.mark.parametrize("legacy,pcp", [(False, False), (True, False), (False, True), (True, True)])
-def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
-    config = {"legacy": legacy, "pcp": pcp}
-    monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
-    if legacy and pcp:
-        with pytest.raises(ValueError, match="cannot be enabled"):
-            dsa_v41_cp.get_v41_cp_classes()
-        return
-    expected = (
-        (dsa_v41_cp.AscendDSAV41CPMetadataBuilder, dsa_v41_cp.AscendDSAV41CPImpl)
-        if legacy
-        else (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl)
-        if pcp
-        else (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
-    )
-    assert dsa_v41_cp.get_v41_cp_classes() == expected
-    assert dsa_v41.DeepseekV41CacheBackend.get_builder_cls() is expected[0]
-    assert dsa_v41.DeepseekV41CacheBackend.supports_pcp()
-    # DSpark constructs its replicated draft under PCP1 in the same process.
-    config.update(legacy=False, pcp=False)
-    assert dsa_v41_cp.get_v41_cp_classes() == (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)

@@ -19,20 +19,19 @@ reload lifecycle, runtime/destructive representations, derived state and the
 graph-captured storage of the first update. The packed lane is currently skipped
 on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
 
-The trainer side keeps this backend's engine handshake: the trainer opens the
-rank-0 HCCL endpoint with ``HCCLWeightTransferEngine.trainer_init`` and the
-server-side init/update RPCs are driven explicitly, so the transaction under
-test is START -> broadcast -> FINISH.
+The trainer factory drives the handshake and both update rounds through
+``HCCLTrainerWeightTransferEngine`` and ``HTTPVLLMWeightSyncClient``, including
+the START -> broadcast -> FINISH transaction and propagation of RPC errors.
 """
 
-import math
 import os
-import threading
 
 import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -43,8 +42,10 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     assert_weight_update_matches_reference,
     generation_signature,
     live_update_serve_args,
+    packed_buffer_size_for,
     pytest_model_cases,
     reference_signature,
+    register_engines_once,
     wait_for_free_device_memory,
 )
 
@@ -57,7 +58,6 @@ INFERENCE_WORLD_SIZE = 1
 # unset, so the pytest process's logical indices equal the physical ones).
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
-INIT_TIMEOUT = 120
 UPDATE_TIMEOUT = 300
 CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.75
@@ -71,82 +71,6 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     response = requests.post(server.url_for(route), json=json, timeout=timeout)
     response.raise_for_status()
     return response
-
-
-class _BackgroundPost(threading.Thread):
-    """Run a blocking server-side HCCL RPC and surface its exception."""
-
-    def __init__(self, server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-        super().__init__(daemon=True)
-        self._server = server
-        self._route = route
-        self._json = json
-        self._timeout = timeout
-        self.error: BaseException | None = None
-
-    def run(self) -> None:
-        try:
-            _post(self._server, self._route, json=self._json, timeout=self._timeout)
-        except BaseException as exc:  # noqa: BLE001 - re-raised by raise_if_failed
-            self.error = exc
-
-    def raise_if_failed(self) -> None:
-        if self.error is not None:
-            raise RuntimeError(f"server-side /{self._route} failed") from self.error
-
-
-def _collect_weight_metadata(source: FixedRandomWeightSource):
-    """Parameter metadata plus a packed buffer that fits the largest tensor."""
-    metadata = source.metadata()
-    max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
-    return (
-        [meta.name for meta in metadata],
-        [str(meta.dtype).split(".")[-1] for meta in metadata],
-        [list(meta.shape) for meta in metadata],
-        max(max_tensor_bytes + 128 * 2**20, 2**30),
-    )
-
-
-def _send_update(server, source, model_update_group, *, packed: bool) -> None:
-    """Run one START -> broadcast -> FINISH transaction over the server's RPCs."""
-    from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-        HCCLTrainerSendWeightsArgs,
-        HCCLWeightTransferEngine,
-    )
-
-    names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(source)
-    _post(server, "pause")
-    _post(server, "start_weight_update")
-
-    # update_weights blocks on the server while it waits for the HCCL broadcasts,
-    # so run it in a thread while the trainer produces the data.
-    update_thread = _BackgroundPost(
-        server,
-        "update_weights",
-        json={
-            "update_info": {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "packed": packed,
-                "packed_buffer_size_bytes": packed_buffer_size_bytes,
-            }
-        },
-        timeout=UPDATE_TIMEOUT,
-    )
-    update_thread.start()
-    HCCLWeightTransferEngine.trainer_send_weights(
-        iterator=iter(source),
-        trainer_args=HCCLTrainerSendWeightsArgs(
-            group=model_update_group,
-            packed=packed,
-            packed_buffer_size_bytes=packed_buffer_size_bytes,
-        ),
-    )
-    update_thread.join()
-    update_thread.raise_if_failed()
-    _post(server, "finish_weight_update")
-    _post(server, "resume")
 
 
 @pytest.mark.skipif(
@@ -203,49 +127,36 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
         client = server.get_client()
         dummy_signature = generation_signature(client, case.model)
 
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
-        master_address = get_ip()
-        master_port = get_open_port()
-        # The trainer is HCCL rank 0; the single inference worker is rank 1, so
-        # the group is the workers plus the sender.
-        world_size = INFERENCE_WORLD_SIZE + 1
-
-        # The server side blocks until the trainer connects, so kick its init RPC
-        # off in a background thread while the trainer opens rank 0.
-        init_thread = _BackgroundPost(
-            server,
-            "init_weight_transfer_engine",
-            json={
-                "init_info": {
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": 1,
-                    "world_size": world_size,
-                }
-            },
-            timeout=INIT_TIMEOUT,
+        register_engines_once()
+        engine = WeightTransferTrainerFactory.trainer_init(
+            HCCLTrainerInitInfo(
+                rank=0,
+                master_address=get_ip(),
+                master_port=get_open_port(),
+                world_size=INFERENCE_WORLD_SIZE + 1,
+                packed=packed,
+                packed_buffer_size_bytes=packed_buffer_size_for(source),
+            ),
+            client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT),
+            source=source,
         )
-        init_thread.start()
-        model_update_group = HCCLWeightTransferEngine.trainer_init(
-            {
-                "master_address": master_address,
-                "master_port": master_port,
-                "world_size": world_size,
-            }
-        )
-        init_thread.join()
-        init_thread.raise_if_failed()
-
         signatures = []
-        for update_round in range(2):
-            _log(
-                f"{case.id}: sending {('packed' if packed else 'unpacked')} "
-                f"fixed-random update round={update_round + 1}"
-            )
-            # START -> broadcast -> FINISH against the inference server.
-            _send_update(server, source, model_update_group, packed=packed)
-            signatures.append(generation_signature(client, case.model))
+        try:
+            for update_round in range(2):
+                _log(
+                    f"{case.id}: sending {('packed' if packed else 'unpacked')} "
+                    f"fixed-random update round={update_round + 1}"
+                )
+                _post(server, "pause")
+                try:
+                    engine.send_weights()
+                finally:
+                    _post(server, "resume")
+                signatures.append(generation_signature(client, case.model))
+        finally:
+            engine.shutdown()
 
     updated_signature, reloaded_signature = signatures
     assert_weight_update_matches_reference(

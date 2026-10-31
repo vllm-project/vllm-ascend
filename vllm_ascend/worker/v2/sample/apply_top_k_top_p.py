@@ -47,7 +47,7 @@ def _apply_top_k_top_p_pytorch(
 # As a result, its workspace is not reserved during warmup, which may lead to an OOM
 # when the op is executed later.
 # TODO: Fix the workspace reservation issue in the future.
-if vllm_version_is("0.31.0"):
+if vllm_version_is("0.32.0"):
 
     def apply_top_k_top_p_npu(logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None) -> torch.Tensor:
         # use pytorch ops

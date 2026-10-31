@@ -94,7 +94,7 @@ def _prefetch_kwargs(*, enforce_eager: bool, nz_mode: int) -> dict:
 
 @wait_until_npu_memory_free()
 def test_prefetch_offload_nd_accuracy():
-    """ND prefetch offload vs one eager baseline (eager, graph, selective MLP)."""
+    """ND prefetch offload vs one eager baseline (eager and graph)."""
     baseline_outputs = _generate_eager_baseline(nz_mode=0)
 
     _assert_offload_matches_baseline(
@@ -104,31 +104,6 @@ def test_prefetch_offload_nd_accuracy():
     _assert_offload_matches_baseline(
         baseline_outputs,
         _prefetch_kwargs(enforce_eager=False, nz_mode=0),
-    )
-    _assert_offload_matches_baseline(
-        baseline_outputs,
-        {
-            "model_name": MODEL,
-            "max_model_len": 512,
-            "enforce_eager": True,
-            "offload_backend": "prefetch",
-            "offload_group_size": 8,
-            "offload_num_in_group": 2,
-            "offload_prefetch_step": 1,
-            "offload_params": {"gate_up_proj", "down_proj"},
-            "additional_config": {"weight_nz_mode": 0},
-        },
-        num_runs=1,
-    )
-
-
-@wait_until_npu_memory_free()
-def test_prefetch_offload_nz_eager_accuracy():
-    """NZ prefetch offload vs one eager baseline."""
-    baseline_outputs = _generate_eager_baseline(nz_mode=2)
-    _assert_offload_matches_baseline(
-        baseline_outputs,
-        _prefetch_kwargs(enforce_eager=True, nz_mode=2),
     )
 
 

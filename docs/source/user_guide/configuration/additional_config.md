@@ -130,10 +130,10 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`. Values `0` and `1` disable O-projection TP; values greater than `1` enable sharding.     |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
+| `oproj_tensor_parallel_size`     | int  | `1` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -161,13 +161,14 @@ The accepted fields depend on the model runner:
 
 - **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
   Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy by default and asynchronous Gloo movement. Select
-  `default` or `stair` only through the upstream `--eplb-config.policy`
-  option. See the
-  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
+  uses the STAIR policy by default and moves expert weights asynchronously
+  over HIXL when it is available on every EPLB rank, falling back to Gloo
+  CPU staging otherwise. Select `default` or `stair` only through the
+  upstream `--eplb-config.policy` option. See the
+  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
   for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase`.
+  `load_collection_phase` and `stair_config`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
 
 Mixing the two schemas fails during startup instead of silently ignoring
@@ -183,7 +184,8 @@ configuration.
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 
@@ -203,7 +205,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
+| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
@@ -259,7 +261,7 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **scheduler_config.short_request_first_config**
 
-ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
+ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It can be combined with profiling-chunk scheduling, but it does not support batch-job-aware or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -377,13 +379,10 @@ An example of additional configuration is as follows:
 
 ### KV pipeline parallelism (KVPP)
 
-Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
-KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
-DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
-TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
+Set `enable_kvpp: true` in `--additional-config` to distribute persistent KV-cache layers across TP and PCP ranks within the same DP replica and PP stage. The group size is TP × PCP: TP4 + PCP2 uses eight ranks, and TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
 
-PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
-non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
-prefill KV before cache writes; layer broadcasts restore prior-forward cache
-contents before attention. The broadcast decision uses the global scheduled
-batch, not PCP-local segment offsets.
+KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` graphs. Full graph modes and DCP are not supported. For `PIECEWISE`, set `--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`; for eager execution, use `--enforce-eager` instead.
+
+KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
+
+PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
