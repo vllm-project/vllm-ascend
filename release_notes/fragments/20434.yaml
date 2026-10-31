@@ -1,0 +1,7 @@
+pr: 20434
+entries:
+  - category: bugfix
+    text: >-
+      Return scores for requested logprob_token_ids in the Ascend MRV2 sampler
+      instead of falling back to default token IDs, including mixed request
+      batches and logits output modes.
