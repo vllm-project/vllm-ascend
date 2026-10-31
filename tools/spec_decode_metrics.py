@@ -49,16 +49,23 @@ def measure_acceptance_rate(
     num_speculative_tokens: int,
     baseline: tuple[int, list[int]],
 ) -> tuple[float, list[float]]:
-    """Fetch final metrics, subtract baseline, return (pos0_rate, all_rates)."""
+    """Subtract comparable counter snapshots and return (pos0_rate, all_rates).
+
+    A decreased counter indicates an invalid measurement interval (for example,
+    a server restart). Capture a new baseline rather than reporting that interval.
+    """
     base_drafts, base_accepted = baseline
+    if len(base_accepted) != num_speculative_tokens:
+        raise ValueError("baseline acceptance position count must match num_speculative_tokens")
 
     metrics_text = fetch_metrics(server)
     num_drafts, num_accepted_tokens_per_pos = analysis_metrics(metrics_text, num_speculative_tokens)
 
     num_drafts -= base_drafts
     for i in range(len(num_accepted_tokens_per_pos)):
-        if i < len(base_accepted):
-            num_accepted_tokens_per_pos[i] -= base_accepted[i]
+        num_accepted_tokens_per_pos[i] -= base_accepted[i]
+    if num_drafts < 0 or any(value < 0 for value in num_accepted_tokens_per_pos):
+        raise ValueError("speculative counters decreased; capture a new baseline before measuring acceptance")
 
     if num_drafts > 0:
         acceptance_per_pos = [v / num_drafts for v in num_accepted_tokens_per_pos]
