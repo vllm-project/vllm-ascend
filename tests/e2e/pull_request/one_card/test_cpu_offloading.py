@@ -197,10 +197,9 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
-        # Tiering must use a shared mmap so the scheduler can move chunks to
-        # secondary tiers. Ascend cannot pin an arbitrary mmap, so only the
-        # CPU-only spec has the pinned-memory performance guarantee measured
-        # by this assertion. Both specs still execute the same load workload.
+        # Tiering registration/SDMA availability depends on the CANN build.
+        # Keep the speed assertion on the established CPU-only baseline;
+        # both specs execute the same load and accuracy workload.
         _latency_test(llm, subscriber, require_cpu_speedup=not enable_tiering)
         _accuracy_test(llm, subscriber)
     finally:
