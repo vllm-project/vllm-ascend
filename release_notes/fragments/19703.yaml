@@ -1,0 +1,7 @@
+pr: 19703
+entries:
+  - category: documentation
+    text: >-
+      Added Kimi-K3 Ascend recipe guidance with A3 W4A8 and A5 MXFP4 variants,
+      mixed serving, and A5 Prefill/Decode separation using MooncakeConnectorV2.
+      KV Offload is restricted to Off on both Ascend profiles.
