@@ -67,6 +67,32 @@ def test_prefill_preserves_request_convolution_history(monkeypatch, builder_cls,
 
 
 @pytest.mark.parametrize(
+    ("configured_dtype", "expected_dtype"),
+    [
+        ("auto", torch.bfloat16),
+        ("bfloat16", torch.bfloat16),
+        ("float32", torch.float32),
+    ],
+)
+def test_ascend_gdn_honors_configured_ssm_cache_dtype(
+    configured_dtype,
+    expected_dtype,
+):
+    layer = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype=configured_dtype,
+        ),
+    )
+
+    conv_dtype, ssm_dtype = AscendGatedDeltaNetAttention.get_state_dtype(layer)
+
+    assert conv_dtype is torch.bfloat16
+    assert ssm_dtype is expected_dtype
+
+
+@pytest.mark.parametrize(
     "values",
     [[], [False], [True], [False] * 8, [True] * 8, [True, False, True, False, False, True]],
 )
