@@ -134,6 +134,53 @@ def test_pcp_decoder_replay_keeps_prompt_logprob_rows(state):
     assert state._pcp_kept_lengths(replay_inputs) is None
 
 
+@pytest.mark.parametrize("world", [1, 2, 16])
+def test_replay_metadata_preserves_pcp_layout_and_active_slot_rows(state, monkeypatch, world):
+    state.num_tokens = state.num_actual_tokens = 2
+    state.config.model_config = SimpleNamespace(max_model_len=32)
+    state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
+    state.slots.fill_(-1)
+    state.slots[0, :2] = torch.tensor([6, 7])
+    monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(
+        replay_mod,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=lambda values, dim: values.repeat(1, world)),
+    )
+    observed = []
+
+    class Builder:
+        def build(self, prefix_len, common, **kwargs):
+            # Exercise the real PCP guard that failed with the gathered replay
+            # slots and a context supplied only through obsolete builder kwargs.
+            assert uses_pcp_sharded_layout(common, use_pcp=True) == (world > 1)
+            observed.append(common)
+            return common
+
+        def take_device_metadata_tasks(self):
+            return []
+
+    state.builders = [(0, ["decoder.swa_cache"], Builder())]
+    batch = SimpleNamespace(
+        num_reqs=1,
+        seq_lens=torch.tensor([8]),
+        seq_lens_np=np.array([8], dtype=np.int32),
+        max_query_len=8,
+        attn_state="prefill",
+        is_prefilling_np=np.array([True]),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        batch, (torch.zeros((1, 16), dtype=torch.int32),), state.slots, [], torch.zeros(1)
+    )
+    replay_mod.DecoderReplayState._build_metadata(state, replay_inputs, np.array([0, 2], dtype=np.int32))
+    common = observed[0]
+    assert common.pcp_context is state.replay_pcp_context
+    assert common.pcp_cache_group_idx == (0 if world > 1 else None)
+    assert common.slot_mapping.tolist() == [6, 7] * world
+    if world == 1:
+        assert common.slot_mapping.data_ptr() == state.slots.data_ptr()
+
+
 def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
     class Backend:
         def get_builder_cls(self):

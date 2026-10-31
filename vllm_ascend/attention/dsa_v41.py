@@ -489,6 +489,14 @@ class AscendDSAV41Impl:
         return projected
 
     def multistream_preprocess(self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs):
+        q, qr, _ = self._multistream_qkv(
+            attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, share_inputs=share_inputs
+        )
+        return q, qr
+
+    def _multistream_qkv(
+        self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs, publish_cache=True
+    ):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
 
         Reuse V1's stream and projection wrappers. V4.1 keeps floating-point
@@ -537,13 +545,13 @@ class AscendDSAV41Impl:
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
             self._apply_rotary(attn, kv, kv_cos, kv_sin)
-            if not write_cache_on_main:
+            if publish_cache and not write_cache_on_main:
                 self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
-        if write_cache_on_main:
+        if publish_cache and write_cache_on_main:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
-        return q, qr
+        return q, qr, kv.squeeze(1)
 
     def _write_compressed_source(
         self,
@@ -558,7 +566,6 @@ class AscendDSAV41Impl:
     ):
         compressor = attn.compressor
         compressor_metadata = metadata.compressor
-        indexer_metadata = metadata.indexer
         ratio = self.role.compress_ratio
         if ratio == 1:
             self._quantize_indexer_query(attn, prepared_indexer, metadata)
@@ -568,8 +575,6 @@ class AscendDSAV41Impl:
             # indexing the global table a second time.
             source_cos = cos
             source_sin = sin
-            index_slots = indexer_metadata.cache.slot_mapping[: positions.shape[0]]
-            long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
         else:
             state_metadata = compressor_metadata.state
             if state_metadata.c2_metadata_group_id is not None:
@@ -589,9 +594,15 @@ class AscendDSAV41Impl:
                 source_sin = fallback_sin[attn.rotary_emb.layername]
             source_cos = source_cos[: positions.shape[0]]
             source_sin = source_sin[: positions.shape[0]]
-            index_slots = indexer_metadata.cache.slot_mapping[: positions.shape[0]]
-            long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
 
+        self._publish_compressed_source(attn, latent, source_cos, source_sin, metadata)
+
+    def _publish_compressed_source(self, attn, latent, source_cos, source_sin, metadata):
+        compressor_metadata = metadata.compressor
+        indexer_metadata = metadata.indexer
+        num_tokens = latent.shape[0]
+        index_slots = indexer_metadata.cache.slot_mapping[: latent.shape[0]]
+        long_slots = compressor_metadata.cache.slot_mapping[: latent.shape[0]]
         attn.indexer.update_keys(
             latent,
             index_slots,
@@ -604,7 +615,7 @@ class AscendDSAV41Impl:
         if backend is not None:
             backend.write_attention_cache(
                 attn.long_kv_cache.kv_cache[0],
-                compressor_metadata.cache.flat_slot_mapping[: positions.shape[0]],
+                compressor_metadata.cache.flat_slot_mapping[:num_tokens],
                 latent.squeeze(1),
                 kind="cmp",
             )

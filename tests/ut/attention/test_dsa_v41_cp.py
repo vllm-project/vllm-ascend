@@ -58,6 +58,68 @@ PREFIXES = {
     "index_k": "model.layers.0.indexer.k_cache",
     "compressor_state": "model.layers.0.compressor.state_cache",
 }
+
+
+@pytest.mark.parametrize("world", [2, 4, 8, 16])
+def test_local_compressor_boundaries_preserve_request_tails_and_predecessors(world):
+    """Exchange only owned rows, keep request isolation, and cover empty local chunks."""
+    lengths = np.array([1, 2, 3, 33, 67], dtype=np.int32)
+    starts = np.concatenate(([0], lengths.cumsum())).astype(np.int32)
+    positions = np.array([0, 1, 5, 30, 63], dtype=np.int32)
+    plans, rank_rows, gathered = [], [], []
+    for rank in range(world):
+        rows, segment_starts = [], []
+        for req, length in enumerate(lengths):
+            chunk = (int(length) + 2 * world - 1) // (2 * world)
+            for part in (rank, 2 * world - 1 - rank):
+                offset = part * chunk
+                if offset < length:
+                    segment_starts.append((req, int(starts[req]) + offset))
+                    rows.extend(range(int(starts[req]) + offset, int(starts[req]) + min(offset + chunk, length)))
+        plan = dsa_v41_cp.build_v41_pcp_prefill_plan(lengths, starts, positions, world, rank, torch.device("cpu"))
+        payload = torch.full_like(plan.send_indices, -1)
+        if rows:
+            payload[plan.send_mask] = torch.tensor(rows)[plan.send_indices[plan.send_mask]]
+        plans.append(plan)
+        rank_rows.append(segment_starts)
+        gathered.append(payload)
+    gathered = torch.cat(gathered)
+    expected_tail = [
+        row for req in range(len(lengths)) for row in range(max(starts[req], starts[req + 1] - 32), starts[req + 1])
+    ]
+    for plan, segments in zip(plans, rank_rows):
+        assert gathered[plan.publish_indices].tolist() == expected_tail
+        expected_requests = [req for req, length in enumerate(lengths) for _ in range(min(int(length), 32))]
+        assert plan.publish_requests.tolist() == expected_requests
+        keys = list(zip(plan.publish_requests.tolist(), plan.publish_slots.tolist()))
+        assert len(keys) == len(set(keys))
+        for index, (req, row) in enumerate(segments):
+            position = int(positions[req]) + row - int(starts[req])
+            predecessor = int(plan.predecessor_indices[index])
+            if position % 2 and row > starts[req]:
+                assert int(gathered[predecessor]) == row - 1
+            else:
+                assert predecessor == -1
+            assert int(plan.predecessor_slots[index]) == (position - 1) % 32
+
+
+def test_local_compressor_boundary_plan_keeps_empty_ranks_in_the_exchange():
+    plans = [
+        dsa_v41_cp.build_v41_pcp_prefill_plan(
+            np.array([1], dtype=np.int32),
+            np.array([0, 1], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            16,
+            rank,
+            torch.device("cpu"),
+        )
+        for rank in range(16)
+    ]
+    assert {plan.send_indices.numel() for plan in plans} == {1}
+    assert plans[0].send_mask.tolist() == [True]
+    assert all(not plan.send_mask.any() and plan.predecessor_indices.numel() == 0 for plan in plans[1:])
+
+
 # Scheduler token IDs owned by each rank, in DualChunkSwap order. Repeated
 # decode rows are added separately; the oracle does not call PCP helpers.
 PREFILL_ROWS = {
@@ -715,7 +777,8 @@ def runtime(builders, monkeypatch):
 
             def gather(value, dim):
                 events.append("hidden")
-                return torch.cat(peers, dim=dim)
+                # Local prefill exchanges projected KV; the fallback exchanges hidden rows.
+                return torch.cat([peer[:, : value.shape[-1]] for peer in peers], dim=dim)
 
             monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather))
             projector.reference_input = torch.zeros_like(peers[rank])
@@ -767,7 +830,10 @@ class TestPCPBatchLifecycle:
             assert state.events.count("exchange") == state.events.count("scatter") == int(exchanges)
             assert state.events.count("cache") == 1
             if sharding and has_prefill:
-                assert state.events.index("hidden") < state.events.index("weights") < state.events.index("cache")
+                if getattr(state.context.attn_metadata[PREFIXES["swa"]], "prefill_plan", None) is not None:
+                    assert state.events.index("weights") < state.events.index("hidden") < state.events.index("cache")
+                else:
+                    assert state.events.index("hidden") < state.events.index("weights") < state.events.index("cache")
             if exchanges:
                 assert state.events.index("cache") < state.events.index("exchange") < state.events.index("scatter")
             assert addresses == [
