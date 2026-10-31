@@ -93,6 +93,45 @@ class TestDpRpcPort(TestBase):
                 )
             )
 
+    def test_check_reports_a_listener_behind_a_wildcard_host(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            # Binding the wildcard address conflicts with the listener above.
+            with self.assertRaises(RuntimeError):
+                check_dp_rpc_port_available(
+                    _parallel_config(
+                        data_parallel_master_ip="0.0.0.0",
+                        data_parallel_rpc_port=port,
+                    )
+                )
+
+    def test_check_reports_a_wildcard_listener(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("0.0.0.0", 0))
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            with self.assertRaises(RuntimeError):
+                check_dp_rpc_port_available(_parallel_config(data_parallel_rpc_port=port))
+
+    def test_check_reports_an_ipv6_listener(self):
+        try:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock.bind(("::1", 0))
+        except OSError:
+            self.skipTest("IPv6 is not available on this host")
+        with sock:
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            with self.assertRaises(RuntimeError):
+                check_dp_rpc_port_available(
+                    _parallel_config(
+                        data_parallel_master_ip="::1",
+                        data_parallel_rpc_port=port,
+                    )
+                )
+
     def test_find_tcp_listener_reports_the_owner(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
