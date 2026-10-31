@@ -20,6 +20,9 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
+For decode block ordering, metadata reuse, and operator validation, see
+[MiniMax-M3 GBSA decode preparation](../../developer_guide/performance_and_debug/minimax_m3_gbsa.md).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

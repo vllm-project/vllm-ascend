@@ -37,6 +37,10 @@ except ImportError:
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+_SORTED_TOPK_ROWS = 4
+_SORTED_TOPK_TILE = 32
+_SORTED_TOPK_BATCHED_WIDTH = 16
+_FP32_INDEX_SENTINEL = 1 << 24
 
 
 def _as_triton_main_kv_cache(
@@ -415,6 +419,57 @@ def _index_topk_postprocess_kernel(
     tl.store(select_num_idx_ptr + pid_h * stride_select_h + pid_b * stride_select_b, valid_count)
 
 
+@triton.jit
+def _index_topk_sorted_postprocess_kernel(
+    ti_in_ptr,
+    ti_out_ptr,
+    select_num_idx_ptr,
+    seq_lens,
+    total_q,
+    decode_query_len,
+    stride_seq,
+    stride_in_h,
+    stride_in_q,
+    stride_in_t,
+    stride_out_h,
+    stride_out_q,
+    stride_out_t,
+    stride_select_h,
+    stride_select_q,
+    BLOCK_SIZE: tl.constexpr,
+    TOPK: tl.constexpr,
+    ROWS: tl.constexpr,
+    TILE: tl.constexpr,
+    SENTINEL: tl.constexpr,
+):
+    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    head = tl.program_id(1)
+    cols = tl.arange(0, TILE)
+    request = rows // decode_query_len
+    offset = rows % decode_query_len
+    seq_len = tl.load(seq_lens + request * stride_seq, rows < total_q, other=0)
+    kv_len = tl.maximum(seq_len - decode_query_len + offset + 1, 0)
+    num_blocks = (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    mask = (rows[:, None] < total_q) & (cols[None, :] < TOPK)
+    raw = tl.load(
+        ti_in_ptr + head * stride_in_h + rows[:, None] * stride_in_q + cols[None, :] * stride_in_t,
+        mask=mask,
+        other=-1,
+    ).to(tl.int32)
+    valid_slot = cols[None, :] < tl.minimum(TOPK, num_blocks[:, None])
+    valid = valid_slot & (raw >= 0) & (raw < num_blocks[:, None])
+    counts = tl.sum(valid.to(tl.int32), axis=1)
+    tl.store(select_num_idx_ptr + head * stride_select_h + rows * stride_select_q, counts, rows < total_q)
+    keys = tl.where(valid, raw.to(tl.float32), SENTINEL)
+    ordered = tl.extra.cann.extension.sort(keys, dim=1, descending=False)
+    selected = tl.where(ordered == SENTINEL, -1, ordered).to(tl.int32)
+    tl.store(
+        ti_out_ptr + head * stride_out_h + rows[:, None] * stride_out_q + cols[None, :] * stride_out_t,
+        selected,
+        mask,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Prefill top-k: prepare scores (pad tail, force init/local), then torch.topk.
 # ---------------------------------------------------------------------------
@@ -728,6 +783,39 @@ def minimax_m3_index_topk(
     return topk_idx
 
 
+def _decode_index_postprocess_sorted(
+    raw: torch.Tensor,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    counts: torch.Tensor,
+    decode_query_len: int,
+) -> None:
+    """Order valid block IDs in one kernel, preserving output-buffer strides."""
+    heads, tokens, topk = raw.shape
+    if not tokens:
+        return
+    raw = raw.contiguous()
+    seq_lens = seq_lens.contiguous()
+    rows = _SORTED_TOPK_ROWS if topk == _SORTED_TOPK_BATCHED_WIDTH else 1
+    _index_topk_sorted_postprocess_kernel[(triton.cdiv(tokens, rows), heads)](
+        raw,
+        indices,
+        counts,
+        seq_lens,
+        tokens,
+        decode_query_len,
+        seq_lens.stride(0),
+        *raw.stride(),
+        *indices.stride(),
+        *counts.stride(),
+        BLOCK_SIZE=SPARSE_BLOCK_SIZE,
+        TOPK=topk,
+        ROWS=rows,
+        TILE=max(_SORTED_TOPK_TILE, triton.next_power_of_2(topk)),
+        SENTINEL=float(_FP32_INDEX_SENTINEL),
+    )
+
+
 @torch.no_grad()
 def minimax_m3_index_decode(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, head_dim]
@@ -743,6 +831,8 @@ def minimax_m3_index_decode(
     max_decode_query_len: int | None = None,
     out: torch.Tensor | None = None,
     sm_scale=None,
+    *,
+    sort_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Decode index block-score + top-k (torch.topk + invalid-index mask).
 
@@ -750,6 +840,8 @@ def minimax_m3_index_decode(
     ``select_num_idx`` contains the number of valid IDs for each head/query.
     When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
     ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
+    ``sort_indices`` fuses ascending FP32 block ordering into postprocessing;
+    output IDs remain int32 and the supplied output strides are preserved.
     """
     index_kv_cache = _as_triton_index_kv_cache(index_kv_cache)
     total_q, num_idx_heads, head_dim = idx_q.shape
@@ -761,6 +853,27 @@ def minimax_m3_index_decode(
     batch = total_q
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
     del sm_scale
+    if sort_indices:
+        if topk <= 0 or max_seq_len < 0:
+            raise ValueError("Invalid TopK or maximum sequence length")
+        if max(max_block, topk) > _FP32_INDEX_SENTINEL:
+            raise ValueError("FP32 block sorting requires exactly representable block IDs")
+        if out is not None and (
+            out.dtype != torch.int32
+            or out.device != idx_q.device
+            or out.ndim != 3
+            or out.shape[0] != num_idx_heads
+            or out.shape[1] < total_q
+            or out.shape[2] != topk
+        ):
+            raise ValueError("Expected an int32 output buffer with shape [heads, >=tokens, topk]")
+        if total_q == 0:
+            indices = (
+                out[:, :0, :]
+                if out is not None
+                else torch.empty((num_idx_heads, 0, topk), dtype=torch.int32, device=idx_q.device)
+            )
+            return indices, torch.empty((num_idx_heads, 0), dtype=torch.int32, device=idx_q.device)
 
     # Pre-fill the tail so torch.topk can run directly on one contiguous tensor
     # without a separate pad kernel. Keep the stride 16-divisible and at least
@@ -824,6 +937,9 @@ def minimax_m3_index_decode(
         dtype=torch.int32,
         device=idx_q.device,
     )
+    if sort_indices:
+        _decode_index_postprocess_sorted(topk_idx_raw, seq_lens, topk_idx, select_num_idx, decode_query_len)
+        return topk_idx, select_num_idx
     _index_topk_postprocess_kernel[(batch, num_idx_heads)](
         topk_idx_raw,
         topk_idx,

@@ -91,3 +91,17 @@ counts instead of requiring a particular ordering of equally ranked block IDs.
 ASCEND_RT_VISIBLE_DEVICES=8 python -m pytest -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py
 ```
+
+## Optional GBSA order
+
+`sort_indices=True` additionally orders valid block IDs ascending inside the
+existing postprocess kernel, with FP32 sort keys. The kernel restores trailing
+`-1` slots before storing contiguous int32 IDs, and preserves the selected set
+and counts. Logical block IDs must fit exactly in FP32 (`logical_block_count <=
+2**24`). The default remains score order. Non-contiguous internal TopK/context
+inputs are normalized before the sorted launch; contiguous decode inputs do not
+need a device copy.
+
+The MiniMax-M3 AscendC decode producer enables this option. Only its matching
+GBSA decode consumer skips normalization. Direct attention callers, prefill,
+and the A5 decode producer retain the existing normalization path.
