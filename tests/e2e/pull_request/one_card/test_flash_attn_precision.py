@@ -3,12 +3,15 @@
 """Compare eager DFlash2 FlashAttn with explicit matmul/softmax."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
-import torch_npu  # noqa: F401
+import torch_npu
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+import vllm_ascend.attention.attention_v1 as attn_module
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState, _get_fia_sparse_params
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl, AscendFlashAttentionMetadataBuilder
 
 
@@ -97,3 +100,105 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
     result = run()
     reference = golden(query, key, value, block_table, [4093, 3067], window, query_len, causal)
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("window", [4, 16])
+def test_noncausal_fia_band_eager_and_graph_match_reference(dtype, window):
+    """Keep future draft keys, but exclude KV outside the trained window."""
+    torch.npu.set_device(0)
+    torch.manual_seed(2026)
+    head_dim, query_len, kv_len, block_size = 128, 9, 65, 128
+    query = torch.randn(query_len, 2, head_dim, device="npu", dtype=dtype)
+    key = torch.randn(1, block_size, 1, head_dim, device="npu", dtype=dtype)
+    value = torch.randn_like(key)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device="npu")
+    mask = AttentionMaskBuilder(torch.device("npu")).get_splitfuse_attn_mask()
+    sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_params(window, False)
+    output = torch.empty_like(query)
+
+    def forward():
+        result, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            block_table=block_table,
+            atten_mask=mask,
+            sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_lengths=[query_len],
+            actual_seq_lengths_kv=[kv_len],
+            num_heads=2,
+            num_key_value_heads=1,
+            scale=head_dim**-0.5,
+        )
+        output.copy_(result)
+
+    forward()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        forward()
+    tolerance = 0.02 if dtype == torch.bfloat16 else 0.003
+    for _ in range(3):
+        query.copy_(torch.randn_like(query))
+        key.copy_(torch.randn_like(key))
+        value.copy_(torch.randn_like(value))
+        expected = golden(query, key, value, block_table, [kv_len], window, query_len, False)
+        for execute in (forward, graph.replay):
+            execute()
+            torch.testing.assert_close(output, expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.parametrize("window", [None, 16])
+def test_fia_graph_shared_band_mask_matches_layer_reference(window):
+    """Exercise the actual graph backend with a merged group's shared mask."""
+    torch.npu.set_device(0)
+    torch.manual_seed(2026)
+    query_len, kv_len, head_dim = 9, 65, 128
+    query = torch.randn(query_len, 2, head_dim, device="npu", dtype=torch.bfloat16)
+    key = torch.randn(1, 128, 1, head_dim, device="npu", dtype=query.dtype)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device="npu")
+    shared_mask = AttentionMaskBuilder(torch.device("npu")).get_splitfuse_attn_mask()
+    metadata = SimpleNamespace(
+        causal=False,
+        attn_mask=shared_mask,
+        actual_seq_lengths_q=[query_len],
+        seq_lens_list=[kv_len],
+        block_tables=block_table,
+        num_actual_tokens=query_len,
+        attn_state=AscendAttentionState.DecodeOnly,
+    )
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.num_heads, impl.num_kv_heads, impl.head_size = 2, 1, head_dim
+    impl.scale = head_dim**-0.5
+    impl.sliding_window = window
+    impl.key_cache, impl.value_cache = key, value
+    impl.use_bnsd_kv_cache = False
+    impl.enable_c8_quant = False
+    impl._use_max_workspace_for_fia_graph = False
+    impl._layer_name = "draft.test"
+
+    def forward():
+        with patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True)):
+            impl.full_graph_fia(query, None, None, metadata, output)
+
+    forward()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        forward()
+    for _ in range(3):
+        query.copy_(torch.randn_like(query))
+        key.copy_(torch.randn_like(key))
+        value.copy_(torch.randn_like(value))
+        expected = golden(query, key, value, block_table, [kv_len], window, query_len, False)
+        for execute in (forward, graph.replay):
+            execute()
+            torch.testing.assert_close(output, expected, rtol=0.02, atol=0.02)
+            assert metadata.attn_mask is shared_mask

@@ -15,14 +15,21 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
 )
+
+try:
+    from vllm.v1.worker.gpu.sample.gumbel import spec_step_seed as _selector_step_seed
+except ImportError:
+    # Older vLLM selectors pass the request seed directly, without step mixing.
+    @triton.jit
+    def _selector_step_seed(seed, step):
+        return seed
 
 
 @triton.jit
@@ -41,15 +48,11 @@ def _selector_walk_kernel_ascend(
     SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
-    """Ascend variant of upstream ``_selector_walk_kernel``.
+    """FP32 Ascend selector walk with upstream random-stream semantics.
 
-    triton-ascend cannot lower ``tldevice.log1p`` (AST parse fails even for
-    the greedy path), so the Gumbel noise uses the algebraically equivalent
-    ``log(1 - u)`` transform. The signature mirrors upstream exactly so the
-    inherited ``DFlash2Speculator._sample_path`` can call it unmodified:
-    ``SAMPLE_PROBABILISTIC`` gates greedy vs. probabilistic, and ``USE_FP64``
-    is rejected via ``tl.static_assert`` (NPU Triton has no fp64
-    philox/rand path), matching the other vllm_ascend gumbel kernels.
+    Reuse upstream's integer hash and stable Gumbel transform, which do not
+    require libdevice log1p or Philox's unsupported int64 multiplies. Keep the
+    explicit FP64 rejection since NPU sampling supports only FP32.
     """
     tl.static_assert(not USE_FP64, "fp64 gumbel is not supported on NPU")
     row = tl.program_id(0)
@@ -82,17 +85,17 @@ def _selector_walk_kernel_ascend(
             best = tl.max(scores, axis=0)
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
-            position = tl.load(sample_pos_ptr + flat) - 1
-            # triton-ascend's philox requires int32 seed/offset operands
-            # (int64 counters lower to 64-bit multiplies whose runtime
-            # helper, __multi3, is unavailable); seeds, token ids and
-            # positions all fit int32.
-            gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
-            uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
-            noise = -tl.log(-tl.log(1.0 - uniform))
-            sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
-            best = tl.max(sampled_scores, axis=0)
-            index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
+            position = tl.load(sample_pos_ptr + flat, mask=valid, other=0) - 1
+            _, index = gumbel_noised_argmax(
+                scores,
+                candidates,
+                mask & valid,
+                _selector_step_seed(seed, step),
+                position,
+                effective_temp,
+                IS_DRAFTING=True,
+                USE_FP64=False,
+            )
 
         tl.store(
             realized_scores_ptr + candidate_base + offsets,
@@ -121,23 +124,3 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
-
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # V2 passes the runner's cudagraph mode to the draft speculator
-        # without consulting the spec-level enforce_eager. Honor it here:
-        # with enforce_eager the draft runs eagerly while the target keeps
-        # its own cudagraph mode (e.g. FULL_DECODE_ONLY). This also works
-        # around a dynamo fullgraph capture failure in the draft's RoPE
-        # (fake-tensor shape mismatch on the NPU meta kernels).
-        if self.speculative_config.enforce_eager:
-            cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            raise NotImplementedError(
-                "dflash2 does not currently support graph mode; "
-                "please enable enforce_eager. This is because the "
-                "_selector_walk_kernel_ascend operator must be reimplemented "
-                "due to NPU hardware constraints and cannot reuse the upstream "
-                "vLLM implementation. Graph mode will be supported in a future "
-                "release."
-            )
-        super().init_cudagraph_manager(cudagraph_mode)

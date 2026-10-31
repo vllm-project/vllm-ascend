@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.v1.worker.gpu.sample import gumbel as gumbel_module
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -33,6 +34,7 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
+    _selector_step_seed,
     _selector_walk_kernel_ascend,
 )
 
@@ -276,10 +278,17 @@ def _spec_config(arch: str) -> SimpleNamespace:
 
 
 def test_init_speculator_routes_dflash2_draft_model():
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
+    cfg = SimpleNamespace(
+        speculative_config=_spec_config("DFlash2DraftModel"),
+        compilation_config=SimpleNamespace(mode=CompilationMode.VLLM_COMPILE),
+    )
     with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
         assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
-        d2.assert_called_once_with(cfg, torch.device("cpu"))
+        draft_config, device = d2.call_args.args
+        assert draft_config.speculative_config is cfg.speculative_config
+        assert draft_config.compilation_config.mode == CompilationMode.NONE
+        assert cfg.compilation_config.mode == CompilationMode.VLLM_COMPILE
+        assert device == torch.device("cpu")
 
     cfg = SimpleNamespace(speculative_config=_spec_config("DFlashDraftModel"))
     with (
@@ -290,9 +299,10 @@ def test_init_speculator_routes_dflash2_draft_model():
         d2.assert_not_called()
 
 
-def test_eager_speculator_keeps_target_compilation_and_graph_config():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_dflash2_keeps_target_compilation_and_graph_config(enforce_eager):
     spec = _spec_config("DFlash2DraftModel")
-    spec.enforce_eager = True
+    spec.enforce_eager = enforce_eager
     config = SimpleNamespace(
         speculative_config=spec,
         compilation_config=SimpleNamespace(
@@ -309,25 +319,41 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
-def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
-    calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
+@pytest.mark.parametrize("mode", list(CUDAGraphMode))
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("supports_full", [True, False])
+def test_dflash2_graph_manager_matches_upstream_policy(monkeypatch, mode, enforce_eager, supports_full):
+    # Keep the real upstream policy and replace only device graph allocation.
+    # This covers every upstream mode and the attention capability fallback.
+    upstream = dflash_module.dflash_speculator
+    support = upstream.AttentionCGSupport
+    manager = SimpleNamespace()
+    create_manager = MagicMock(return_value=manager)
+    monkeypatch.setattr(upstream, "DFlashCudaGraphManager", create_manager)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
-
-    # Eager drafting forces the draft aclgraph manager to NONE.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
-    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
-
-    # Graph mode is rejected until the Ascend walk kernel is capturable, and
-    # must fail before delegating to the parent manager.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.vllm_config = object()
+    speculator.device = torch.device("cpu")
+    speculator.num_query_per_req = 6
+    speculator.attn_cg_support = SimpleNamespace(
+        min_cg_support=support.UNIFORM_BATCH if supports_full else support.NEVER,
+        min_cg_attn_backend="test_backend",
+    )
+    speculator.update_stream = object()
+    speculator.init_cudagraph_manager(mode)
+    expected = (
+        CUDAGraphMode.FULL_DECODE_ONLY
+        if not enforce_eager and supports_full and mode.decode_mode() == CUDAGraphMode.FULL
+        else CUDAGraphMode.NONE
+    )
+    create_manager.assert_called_once_with(
+        speculator.vllm_config,
+        speculator.device,
+        expected,
+        decode_query_len=6,
+    )
+    assert manager.speculator is speculator
+    assert manager.update_stream is speculator.update_stream
 
 
 def test_greedy_walk_contract_reference():
@@ -501,3 +527,15 @@ def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
         dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
 
     kernel.assert_not_called()
+
+
+def test_selector_seed_policy_matches_installed_vllm():
+    if hasattr(gumbel_module, "spec_step_seed"):
+        assert _selector_step_seed is gumbel_module.spec_step_seed
+    else:
+        # UT's mocked jit may return a plain function instead of a JITFunction.
+        seed_fn = getattr(_selector_step_seed, "fn", _selector_step_seed)
+        # Older upstream does not mix steps; preserve even the seed's high bits.
+        for seed in (13, 13 + (1 << 48), -(1 << 55) + 9):
+            for step in (0, 3):
+                assert seed_fn(seed, step) == seed

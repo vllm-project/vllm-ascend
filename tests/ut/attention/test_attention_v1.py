@@ -283,6 +283,36 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.builder.build(1, common_attn_metadata, mock_model)
 
+    def test_build_non_causal_sliding_window_uses_band_template(self):
+        common = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 3]),
+            query_start_loc_cpu=torch.tensor([0, 3]),
+            seq_lens_cpu=torch.tensor([9]),
+            seq_lens=torch.tensor([9]),
+            num_reqs=1,
+            num_actual_tokens=3,
+            max_query_len=3,
+            block_table_tensor=torch.zeros((1, 1)),
+            slot_mapping=torch.arange(3),
+            positions=torch.arange(6, 9),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_seq_len=9,
+            causal=False,
+        )
+        for window in (None, 16):
+            with self.subTest(window=window):
+                self.builder.kv_cache_spec = MagicMock(sliding_window=window)
+                template = torch.ones(1, 1, dtype=torch.int8)
+                with (
+                    patch.object(self.builder.attn_mask_builder, "get_attention_mask", return_value=None),
+                    patch.object(
+                        self.builder.attn_mask_builder, "get_splitfuse_attn_mask", return_value=template
+                    ) as band,
+                ):
+                    metadata = self.builder.build(0, common)
+                self.assertIs(metadata.attn_mask, template if window is not None else None)
+                self.assertEqual(band.call_count, int(window is not None))
+
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)

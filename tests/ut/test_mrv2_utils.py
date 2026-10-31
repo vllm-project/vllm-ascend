@@ -130,13 +130,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
 @pytest.mark.parametrize(
     "config",
     [
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="dflash",
-                enforce_eager=False,
-                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-            )
-        ),
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
@@ -149,7 +142,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
     ids=[
-        "dflash2-graph",
         "pooling-runner",
         "pooling-model",
         "vl-encoder-graph",
@@ -227,13 +219,12 @@ def test_blacklist_logs_fallback(monkeypatch):
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            method="dflash",
-            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+            method="suffix",
         )
     )
     assert use_v2_model_runner(config) is False
     assert len(warning_calls) == 1
-    assert "dflash2 graph" in warning_calls[0][1]
+    assert "suffix speculative decoding" in warning_calls[0][1]
 
 
 def test_validation_is_decoupled_from_upstream():
@@ -263,3 +254,16 @@ def test_apply_config_patch_is_wired(monkeypatch):
     # Restore the upstream class state so later tests are unaffected.
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
     monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False, None])
+def test_dflash2_defaults_to_v2(monkeypatch, enforce_eager):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            enforce_eager=enforce_eager,
+            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+        )
+    )
+    assert use_v2_model_runner(config) is True
