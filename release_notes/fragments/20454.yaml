@@ -1,0 +1,9 @@
+pr: 20454
+entries:
+  - category: performance
+    text: >-
+      Eligible GLM-5.3-Flash PCP prefill automatically overlaps KPool, main KV,
+      and MoE hidden communication, gathers selected MoE routes, and uses KDA
+      output ReduceScatter. End-to-end text equivalence remains under validation.
+    model: glm-5.3-flash
+    hardware: [A5]
