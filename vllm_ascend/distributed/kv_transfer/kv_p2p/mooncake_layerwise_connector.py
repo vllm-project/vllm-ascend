@@ -560,11 +560,16 @@ class KVCacheSendingLayerThread(threading.Thread):
         self, req_meta: ReqMeta, local: LayerMetadata, remote: LayerMetadata, group_idx: int
     ) -> tuple[list[int], list[int], list[int]]:
         """Map logical token/state ownership independently of PCP compute partitioning."""
+        # A four-component D state keeps RecoverSSM verify records locally.
+        # Native P pushes only conv/recurrent state using the existing slices.
+        num_transfer_components = (
+            2 if remote.cache_kind == "mamba" and len(remote.kv_caches_base_addr) == 4 else len(remote.block_len)
+        )
         if (
             local.cache_kind != remote.cache_kind
             or local.compression_ratio != remote.compression_ratio
-            or local.block_dtypes != remote.block_dtypes
-            or len(local.block_len) != len(remote.block_len)
+            or local.block_dtypes != remote.block_dtypes[:num_transfer_components]
+            or len(local.block_len) != num_transfer_components
             or any(
                 len(values) != len(meta.block_len)
                 for meta in (local, remote)
@@ -1793,7 +1798,7 @@ class MooncakeLayerwiseConnectorWorker:
                 elif single_layer_meta.cache_kind == "mamba":
                     layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
                     shapes = layer_kv_cache_spec.shapes
-                    if len(shapes) != 2 or len(shapes[0]) != 2 or len(shapes[1]) != 3:
+                    if len(shapes) not in (2, 4) or len(shapes[0]) != 2 or len(shapes[1]) != 3:
                         raise NotImplementedError(
                             "Component state transfer requires conv and head-major recurrent state"
                         )
