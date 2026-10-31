@@ -81,7 +81,7 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
     int32_t idxSlotmap = 0;
     int32_t idxGroups = 0;
 
-    while (idxSlotmap < slotMappingLen) {
+    while (idxSlotmap < slotMappingLen && idxGroups < outCapacity) {
         // Skip dirty values (negative slots)
         int32_t cacheSlot = slotMappingData[idxSlotmap];
         if (cacheSlot < 0) {
