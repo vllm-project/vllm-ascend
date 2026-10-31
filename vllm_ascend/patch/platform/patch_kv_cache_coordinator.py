@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.prefix_cache_retention import validate_retention_interval as _validate_retention_interval
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -144,10 +145,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             None,
         )
         if self.retention_interval is not None and validate_retention_interval is not None:
-            validate_retention_interval(
+            _validate_retention_interval(
                 self.retention_interval,
                 self.scheduler_block_size,
                 kv_cache_config,
+                validate_retention_interval,
             )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
