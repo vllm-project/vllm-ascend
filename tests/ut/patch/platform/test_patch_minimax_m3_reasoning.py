@@ -145,7 +145,8 @@ def test_streaming_extraction_after_prompt_check(patched_parser, chunks, expecte
     tokenizer = MiniMaxTokenizer()
     parser = parser_cls(tokenizer)
     assert not parser.is_reasoning_end(tokenizer.encode(PROMPT))
-    previous_text, previous_ids = "", []
+    previous_text = ""
+    previous_ids: list[int] = []
     reasoning, content = "", ""
     for chunk in chunks:
         delta_ids = tokenizer.encode(chunk)
