@@ -1,0 +1,113 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Test buildctl Image Build
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - 'test-buildctl*'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test-buildctl-build:
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install buildctl
+        run: |
+          echo "=== Installing buildctl ==="
+          if ! command -v buildctl &> /dev/null; then
+            echo "buildctl not found, installing..."
+            mkdir -p /tmp/buildkit
+            BUILDKIT_VERSION="v0.29.0"
+            ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+            if command -v curl &> /dev/null; then
+              curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
+            else
+              wget -q "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/buildkit.tar.gz
+            fi
+
+            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
+            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
+            chmod +x /usr/local/bin/buildctl
+            rm -rf /tmp/buildkit /tmp/buildkit.tar.gz
+          fi
+
+          echo "✅ buildctl installed:"
+          buildctl --version
+
+      - name: Test buildctl version
+        run: |
+          echo "=== Testing buildctl ==="
+          buildctl --version
+          echo ""
+          echo "✅ buildctl is working!"
+
+      - name: Print build environment
+        run: |
+          echo "=== Build Environment ==="
+          echo "Current directory: $(pwd)"
+          echo "Files:"
+          ls -la | head -20
+          echo ""
+          echo "Git commit: $(git rev-parse HEAD)"
+          echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
+
+      - name: Keep pod running for 60 minutes
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🛌 Pod is sleeping for 60 minutes"
+          echo "=========================================="
+          echo ""
+          echo "You can now inspect the runner and test buildctl:"
+          echo ""
+          echo "1. Find the pod:"
+          echo "   kubectl get pods -n vllm-project -o wide | grep test-buildctl"
+          echo ""
+          echo "2. Enter the pod:"
+          echo "   kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
+          echo ""
+          echo "3. Test buildctl (if buildkitd is available):"
+          echo "   buildctl du  # list build cache"
+          echo "   buildctl --help"
+          echo ""
+          echo "4. Check environment:"
+          echo "   env | grep -i buildkit"
+          echo "   env | grep -i docker"
+          echo ""
+          echo "=========================================="
+          echo "Sleep started: $(date)"
+          sleep 3600
+          echo "Sleep ended: $(date)"
+          echo "=========================================="
+
+      - name: Test complete
+        run: |
+          echo "✅ Test workflow completed!"
