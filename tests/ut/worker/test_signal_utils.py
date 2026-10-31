@@ -29,7 +29,7 @@ def test_restores_engine_handlers_after_backend_import(raises):
 
 
 def test_preserves_default_and_ignored_handlers():
-    handlers = {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_IGN}
+    handlers: dict[signal.Signals, object] = {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_IGN}
     with (
         patch("signal.getsignal", side_effect=handlers.__getitem__),
         patch("signal.signal", side_effect=handlers.__setitem__),
