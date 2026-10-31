@@ -64,7 +64,7 @@ class AscendPCPAttentionContext:
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
-    vllm_config: VllmConfig
+    _vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig | None = None
     _hidden_restore_idx: torch.Tensor | None
     _global_batch_slot_mappings: torch.Tensor | None
@@ -146,9 +146,13 @@ class AscendPCPManager(PCPManager):
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
 
-    def set_vllm_config(self, vllm_config: VllmConfig) -> None:
-        """Align the upstream splitter with Ascend's model-specific PCP policy."""
-        self.vllm_config = vllm_config
+    @property
+    def vllm_config(self) -> VllmConfig:
+        return self._vllm_config
+
+    @vllm_config.setter
+    def vllm_config(self, vllm_config: VllmConfig) -> None:
+        self._vllm_config = vllm_config
         self.shard_decode_requests = self.shard_decode_requests and self.is_decode_sharded
 
     # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
