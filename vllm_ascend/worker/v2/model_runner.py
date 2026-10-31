@@ -622,6 +622,9 @@ class NPUModelRunner(GPUModelRunner):
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         """Capture decoder and multimodal encoder graphs on Ascend."""
+        self._sleep_graph_profile_only = profile_only
+        if not profile_only:
+            self.sleep_capture_model_calls = getattr(self, "sleep_capture_model_calls", 0) + 1
         if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
             encoder_runner = getattr(self.model_state, "encoder_runner", None)
             encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)

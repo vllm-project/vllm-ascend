@@ -26,6 +26,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
+from vllm_ascend.ascend_config import RlConfig
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 
 
@@ -273,6 +274,7 @@ def test_full_replay_refreshes_engram_inside_dp_context(monkeypatch, updatable, 
             raise RuntimeError("lookup")
 
     manager = graph_mod.ModelAclGraphManager.__new__(graph_mod.ModelAclGraphManager)
+    monkeypatch.setattr(graph_mod, "get_ascend_config", lambda: SimpleNamespace(rl_config=RlConfig()))
     manager.update_stream = Mock()
     metadata = Mock()
     manager.model_runner = SimpleNamespace(
