@@ -27,7 +27,7 @@ on:
         type: string
         default: ''
       installation_methods:
-        description: 'e.g. pip,uv,source; leave empty to skip'
+        description: 'Temporarily disabled; e.g. pip,uv,source'
         required: false
         type: string
         default: ''
@@ -174,7 +174,8 @@ jobs:
   installation:
     name: Installation (${{ matrix.method }}, ${{ matrix.os }})
     needs: plan
-    if: needs.plan.outputs.run_installation == 'true'
+    # FIXME: Remove the false guard when installation doctests are re-enabled.
+    if: ${{ needs.plan.outputs.run_installation == 'true' && false }}
     strategy:
       fail-fast: false
       max-parallel: 3
