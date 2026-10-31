@@ -1528,19 +1528,30 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         target_dtype: torch.dtype,
         layer,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather paged INT8 KV blocks and dequantize."""
-        batch_size = block_table.shape[0]
-        max_blocks_per_seq = block_table.shape[1]
+        """Gather paged INT8 KV blocks and dequantize.
 
-        # NZ 5D view: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)
+        The block table is gathered only up to the live block count of the
+        longest sequence instead of the full padded width (#19003).
+        ``seq_lens`` is a host-side list at both call sites, so the trimmed
+        width is computed without device-to-host synchronization, and padded
+        columns only contribute rows that the validity mask discards — the
+        output is preserved bit-for-bit.
+        """
+        batch_size = block_table.shape[0]
         block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
-        max_tokens_padded = max_blocks_per_seq * block_size
+
+        # Trim padded columns: rows beyond ceil(seq_len/block_size) are
+        # always masked out, so gathering them is wasted work.
+        needed_blocks = (max(seq_lens) + block_size - 1) // block_size if seq_lens else 0
+        if 0 < needed_blocks < block_table.shape[1]:
+            block_table = block_table[:, :needed_blocks]
+        max_tokens_padded = block_table.shape[1] * block_size
 
         flat_ids = block_table.reshape(-1)
         key_nz = self._nz_5d_view(key, block_size)
         value_nz = self._nz_5d_view(value, block_size)
 
-        # Gather: (batch*max_blocks, H, D//nz, S, nz)
+        # Gather: (batch*needed_blocks, H, D//nz, S, nz)
         gathered_k = key_nz[flat_ids]
         gathered_v = value_nz[flat_ids]
         # NZ→ND conversion: permute (S, H, D//nz, nz) → reshape (S, H, D)
