@@ -310,11 +310,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     @property
     def _megamoe_shared_expert_fused(self) -> bool:
         """True when this step's routed experts run the shared expert inside MegaMoe."""
-        shared_experts = self.ascend_shared_experts
+        shared_experts = getattr(self, "ascend_shared_experts", None)
         return (
             shared_experts is not None
-            and shared_experts.megamoe_shared_weights_ready
-            and not shared_experts._megamoe_shared_fusion_disabled
+            and getattr(shared_experts, "megamoe_shared_weights_ready", False)
+            and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
             and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
         )
 
