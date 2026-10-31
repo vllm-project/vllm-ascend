@@ -1,0 +1,6 @@
+pr: 20508
+entries:
+  - category: bugfix
+    text: Fixed invalid DeepSeek V4.1 A5 mixed-quant MLA task planning with length-dependent FD enabled by using actual per-layer original and compressed KV lengths.
+    model: deepseek-v4.1
+    hardware: [A5]
