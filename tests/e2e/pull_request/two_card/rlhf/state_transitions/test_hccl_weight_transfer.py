@@ -37,11 +37,11 @@ from vllm.utils.network_utils import get_ip, get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     PACKED_LANE_SKIP_REASON,
-    FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
     generation_signature,
     live_update_serve_args,
+    make_weight_source,
     packed_buffer_size_for,
     pytest_model_cases,
     reference_signature,
@@ -86,7 +86,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
         pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
-    source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
+    source = make_weight_source(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
