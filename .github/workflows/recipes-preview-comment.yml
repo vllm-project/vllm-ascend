@@ -2,11 +2,14 @@ name: Recipes Preview Comment
 
 # Use trusted workflow code and PR metadata only; never check out PR code.
 # Keep comments independent of the App-based preview dispatch so scheduled
-# previews also have a discoverable link. Do not filter paths or base branches:
-# existing comments must be updated when recipe changes or the main base go away.
+# previews also have a discoverable link. Only recipe-labeled PRs are processed.
+# Do not filter paths or base branches: existing comments on labeled PRs must
+# be updated when recipe changes or the main base go away.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, closed, edited]
+    types: [opened, synchronize, reopened, closed, edited, labeled]
+  schedule:
+    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       pr_number:
@@ -16,16 +19,63 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: recipes-preview-comment-${{ github.event.pull_request.number || inputs.pr_number }}
-  # Let an in-flight comment write finish before the next run reads it.
-  cancel-in-progress: false
-
 jobs:
-  comment:
+  select-prs:
     if: >-
       github.repository == 'vllm-project/vllm-ascend' &&
-      (github.event_name == 'pull_request_target' || github.ref == 'refs/heads/main')
+      ((github.event_name == 'pull_request_target' &&
+        contains(github.event.pull_request.labels.*.name, 'recipe') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'recipe')) ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      prs: ${{ steps.select.outputs.prs }}
+    steps:
+      - name: Select recipe-labeled PRs
+        id: select
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const hasRecipeLabel = pr => pr.labels.some(label => label.name === 'recipe');
+            let prs;
+            if (context.eventName === 'schedule') {
+              const openPrs = await github.paginate(github.rest.pulls.list, {
+                ...context.repo, state: 'open', base: 'main', per_page: 100,
+              });
+              prs = openPrs.filter(hasRecipeLabel).map(pr => pr.number);
+            } else {
+              const prNumber = String(context.payload.pull_request?.number ?? context.payload.inputs?.pr_number ?? '');
+              if (!/^[1-9][0-9]*$/.test(prNumber) || !Number.isSafeInteger(Number(prNumber))) {
+                throw new Error('Expected a positive integer PR number without leading zeros.');
+              }
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo, pull_number: Number(prNumber),
+              });
+              prs = hasRecipeLabel(pr) ? [pr.number] : [];
+            }
+            prs = [...new Set(prs)];
+            // GitHub Actions limits a matrix to 256 jobs; never silently drop PRs.
+            const maxMatrixJobs = 256;
+            if (prs.length > maxMatrixJobs) {
+              throw new Error(`Too many recipe PRs for one matrix (${prs.length}); split the scan before retrying.`);
+            }
+            core.setOutput('prs', JSON.stringify(prs));
+
+  comment:
+    needs: select-prs
+    if: needs.select-prs.outputs.prs != '' && needs.select-prs.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.select-prs.outputs.prs) }}
+    concurrency:
+      # All triggers serialize writes to the same PR, including the hourly scan.
+      group: recipes-preview-comment-${{ matrix.pr }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -33,10 +83,12 @@ jobs:
     steps:
       - name: Create or update the recipe preview comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
         with:
           script: |
             const marker = '<!-- recipes-preview:vllm-ascend -->';
-            const prNumber = String(context.payload.pull_request?.number ?? context.payload.inputs?.pr_number ?? '');
+            const prNumber = process.env.PR_NUMBER ?? '';
             if (!/^[1-9][0-9]*$/.test(prNumber) || !Number.isSafeInteger(Number(prNumber))) {
               throw new Error('Expected a positive integer PR number without leading zeros.');
             }
@@ -47,6 +99,8 @@ jobs:
             if (pr.base.repo.full_name !== 'vllm-project/vllm-ascend') {
               throw new Error('Unexpected PR base repository.');
             }
+            // The label may have been removed after selection or while queued.
+            if (!pr.labels.some(label => label.name === 'recipe')) return;
             const comments = await github.paginate(github.rest.issues.listComments, {
               ...repo, issue_number, per_page: 100,
             });
