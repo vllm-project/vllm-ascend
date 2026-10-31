@@ -131,6 +131,28 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
+def test_kv_both_intermediate_prefill_chunk_retains_mamba_boundary_split(monkeypatch):
+    observed = {}
+
+    def _fake_original(self, request, num_new_tokens, nlc=0, nec=0):
+        observed["called"] = True
+        return 42
+
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original)
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True, is_kv_producer=True),
+        _request(
+            num_computed_tokens=1600,
+            num_prompt_tokens=4800,
+            num_tokens=4800,
+        ),
+        num_new_tokens=1600,
+    )
+
+    assert observed == {"called": True}
+    assert result == 42
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
