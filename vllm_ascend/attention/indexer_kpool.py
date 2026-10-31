@@ -220,6 +220,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # MTP decode capture can call the ordinary builder with runtime mode NONE.
         if (
             plan_queries
+            and self.pcp_size == 1
             and not graph_capture
             and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
             and not torch.npu.is_current_stream_capturing()

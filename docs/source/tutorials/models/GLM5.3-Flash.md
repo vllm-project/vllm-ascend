@@ -22,6 +22,8 @@ The deployment scripts on this page use model runner V1 and set `VLLM_USE_V2_MOD
 
 Model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) can skip redundant KPool query selection for full-visible query prefixes. On A3 with TP8 and `--kv-cache-dtype int8`, eligible long prefill prefixes use dense FIA attention, while the remaining queries use SFA. Decode graphs retain the SFA path.
 
+PCP deployments retain normal KPool query selection until separate bypass thresholds are established for their global query layout.
+
 Mooncake P/D peers with different TP/PCP layouts must use the same explicit `--block-size`, large enough for both recurrent-state pages. C8 preserves this shared block size for state handoff.
 
 ## 3 Prerequisites
