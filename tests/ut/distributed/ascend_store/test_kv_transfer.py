@@ -957,6 +957,29 @@ class TestLayerBatchBuilder(unittest.TestCase):
         values.update(overrides)
         return ReqMeta(**values)
 
+    def test_window_save_uses_absolute_arrays_without_silent_shift(self):
+        request = self._make_request(
+            block_ids_by_group=[[7, 8, 9, 10]],
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10])],
+            block_gvas_by_group_np=[np.asarray([101, 102, 103, 104])],
+            save_window_base_state=["WINDOW"],
+            save_window_base_by_group=[32],
+            save_block_ids_by_group_np=[np.asarray([0, 0, 7, 8, 9, 10])],
+            save_block_gvas_by_group_np=[np.asarray([0, 0, 201, 202, 203, 204])],
+        )
+        # This range also fits the legacy arrays: the old path silently selected
+        # physical blocks 9/10 instead of 7/8, without tripping its bounds check.
+        task = LayerTransferTask(layer_id=0, block_ranges=[LayerBlockRange(request, 2, 4)])
+        builder = self._make_builder()
+        result = builder.build_shared(task)
+        np.testing.assert_array_equal(result.block_ids_arr, [7, 8])
+        np.testing.assert_array_equal(result.block_gvas_arr, [201, 202])
+        for aligned in (None, [np.asarray([0, 201])]):
+            request.save_block_gvas_by_group_np = aligned
+            skipped = builder.build_shared(task)
+            self.assertEqual(skipped.req_ids, [])
+            self.assertEqual(skipped.block_ids_arr.size, 0)
+
     def test_builds_layer_addresses(self):
         request = self._make_request()
         task = LayerTransferTask(

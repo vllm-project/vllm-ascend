@@ -18,7 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -784,10 +784,6 @@ class TestLayerMultiBlockReqMeta(unittest.TestCase):
         self.assertIsNone(meta.current_event)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestInferDcpMismatchInfo(unittest.TestCase):
     def test_same_dcp_returns_false(self):
         self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2))
@@ -814,3 +810,63 @@ class TestInferDcpMismatchInfo(unittest.TestCase):
 
     def test_invalid_peer_value_treated_as_local(self):
         self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))
+
+
+class TestSaveWindowMetadata(unittest.TestCase):
+    def make_tracker(self, state="WINDOW", base=32):
+        return RequestTracker(
+            req_id="window",
+            token_len=64,
+            allocated_block_ids_by_group=[[7, 8]],
+            block_sizes=[16],
+            save_window_base_state=[state],
+            save_window_base_by_group=[base],
+        )
+
+    def test_window_policy_and_observation_switch(self):
+        for enabled, state, expected in [
+            (False, "ZERO", True),
+            (False, "WINDOW", False),
+            (True, "WINDOW", True),
+            (True, "UNPROVABLE", False),
+        ]:
+            for observe in (False, True):
+                with (
+                    self.subTest(enabled=enabled, state=state, observe=observe),
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "VLLM_ASCEND_KVPOOL_WINDOW_BASE": str(int(enabled)),
+                            "VLLM_ASCEND_KVPOOL_WINDOW_BASE_OBS": str(int(observe)),
+                        },
+                    ),
+                ):
+                    tracker = self.make_tracker(state, 0 if state == "ZERO" else 32)
+                    meta = ReqMeta.from_request_tracker(tracker, 16, block_hashes=[b"h"] * 4)
+                    self.assertEqual(meta.can_save, expected)
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_KVPOOL_WINDOW_BASE": "1"})
+    def test_window_cursor_does_not_mark_missing_prefix_as_saved(self):
+        tracker = self.make_tracker()
+        first = ReqMeta.from_request_tracker(tracker, 16, block_hashes=[b"h"] * 4)
+        self.assertEqual((first.save_start_token, first.save_end_token), (32, 64))
+        self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertEqual(tracker.save_window_start_token, 0)
+        tracker.token_len = 80
+        tracker.allocated_block_ids_by_group[0].append(9)
+        second = ReqMeta.from_request_tracker(tracker, 16, block_hashes=[b"h"] * 5)
+        self.assertEqual((second.save_start_token, second.save_end_token), (64, 80))
+        self.assertEqual(tracker.num_saved_tokens, 0)
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_KVPOOL_WINDOW_BASE": "1"})
+    def test_partial_offload_refuses_window_save(self):
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.logger") as logger:
+            meta = ReqMeta.from_request_tracker(
+                self.make_tracker(), 16, block_hashes=[b"h"] * 4, save_partial_block=True
+            )
+        self.assertFalse(meta.can_save)
+        logger.error_once.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -481,7 +481,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(load_spec.kvpool_cached_tokens, 48)
         self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
         self.assertTrue(load_spec.can_load)
-        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        scheduler.update_state_after_alloc(request, MagicMock(get_block_ids=MagicMock(return_value=([1, 2, 3, 4],))), 0)
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
@@ -530,6 +530,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = ([1, 2, 3, 4],)
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertIn("r1", scheduler._unfinished_requests)
 
@@ -561,6 +562,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = ([1, 2, 3, 4],)
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
@@ -1277,12 +1279,16 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
 
     def test_zero_external_tokens(self):
         scheduler = self._make_scheduler()
-        scheduler.update_state_after_alloc(MagicMock(request_id="missing"), MagicMock(), 0)
+        scheduler.update_state_after_alloc(
+            MagicMock(request_id="missing"), MagicMock(get_block_ids=MagicMock(return_value=([1, 2],))), 0
+        )
         self.assertNotIn("missing", scheduler.load_specs)
 
         scheduler.use_layerwise = True
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
-        scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
+        scheduler.update_state_after_alloc(
+            MagicMock(request_id="r1"), MagicMock(get_block_ids=MagicMock(return_value=([1, 2],))), 0
+        )
         self.assertTrue(scheduler.load_specs["r1"].can_load)
 
 
@@ -1542,6 +1548,45 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
 
         self.assertEqual(hit, 16)
+
+
+@pytest.mark.parametrize(
+    "ids,full,states,bases",
+    [
+        ([[1, 2], [7, 8]], [[1, 2], [7, 8]], ["ZERO", "ZERO"], [0, 0]),
+        ([[2], [8]], [[1, 2], [7, 8]], ["WINDOW", "WINDOW"], [16, 32]),
+        ([[2, 1]], [[1, 2]], ["UNPROVABLE"], [None]),
+        ([[2, 4]], [[1, 2, 3, 4]], ["UNPROVABLE"], [None]),
+        ([[2]], [[1, 2, 3]], ["UNPROVABLE"], [None]),
+        ([[]], [[]], ["UNPROVABLE"], [None]),
+        ([[1]], [], ["UNPROVABLE"], [None]),
+        ([[1], [2]], [[1]], ["UNPROVABLE", "UNPROVABLE"], [None, None]),
+    ],
+)
+def test_window_base_requires_exact_full_table_or_suffix(ids, full, states, bases):
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler._unfinished_requests = {"r": (None, full)}
+    scheduler.grouped_block_size = [16, 32]
+    assert scheduler._resolve_base_state_by_group("r", ids) == (states, bases)
+
+
+def test_admission_records_authoritative_blocks_without_external_hit():
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler._unfinished_requests = {}
+    scheduler.load_specs = {}
+    scheduler.grouped_block_size = [16]
+    request = SimpleNamespace(request_id="r")
+    blocks = SimpleNamespace(get_block_ids=lambda: ([11, 12],))
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+    assert scheduler._resolve_base_state_by_group("r", [[11, 12]]) == (["ZERO"], [0])
+
+
+@pytest.mark.parametrize("computed,expected", [(0, (["ZERO", "ZERO"], [0, 0])), (47, (["WINDOW", "WINDOW"], [32, 32]))])
+def test_preempted_window_base_uses_each_groups_block_size(computed, expected):
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.num_kv_cache_groups = 2
+    scheduler.grouped_block_size = [16, 32]
+    assert scheduler._resolve_preempted_base_by_group(computed) == expected
 
 
 if __name__ == "__main__":

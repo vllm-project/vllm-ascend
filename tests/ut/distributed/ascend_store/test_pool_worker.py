@@ -1644,6 +1644,38 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64) for block_ids in block_ids_by_group],
         )
 
+    def test_window_save_allocates_absolute_keys_and_clamps_each_group(self):
+        worker = self._make_gva_worker(num_groups=3)
+        worker.layerwise_offload = False
+        worker.cacheable_group_ids = [0, 1]
+        worker.m_store.batch_alloc.side_effect = lambda keys, *args: [201 + i for i in range(len(keys))]
+        request = ReqMeta(
+            req_id="window",
+            save_start_token=0,
+            save_end_token=80,
+            target_token_len=80,
+            block_ids_by_group=[[7, 8], [9], [10]],
+            block_ids_by_group_np=[np.asarray(ids) for ids in [[7, 8], [9], [10]]],
+            block_hashes=[f"h{i}" for i in range(5)],
+            can_save=True,
+            save_window_base_state=["WINDOW"] * 3,
+            save_window_base_by_group=[32, 48, 16],
+        )
+        worker._alloc_gvas_for_save([request])
+        self.assertTrue(request.can_save)
+        self.assertEqual(len(request.save_block_gvas_by_group_np), 3)
+        self.assertEqual(request.save_block_ids_by_group_np[0].tolist(), [0, 0, 7, 8])
+        self.assertEqual(request.save_block_gvas_by_group_np[0].tolist(), [0, 0, 201, 202])
+        self.assertEqual(request.save_block_gvas_by_group_np[2].tolist(), [0, 0])
+        self.assertEqual(
+            worker.m_store.batch_alloc.call_args_list[0].args[0],
+            [worker._make_layerwise_full_key(0, "h2"), worker._make_layerwise_full_key(0, "h3")],
+        )
+        for group in (0, 1):
+            worker._process_save_for_layer_batch([request], 0, group_id=group)
+        ranges = [task.block_ranges[0] for task in worker.layer_save_tasks[0]]
+        self.assertEqual([(item.start_block, item.end_block) for item in ranges], [(2, 4), (3, 4)])
+
     def _make_dspark_gva_worker(self, mixed):
         worker = self._make_gva_worker(num_groups=3)
         target_names = ["model.layers.0.attn", "model.layers.1.attn"]

@@ -721,6 +721,65 @@ class KVPoolScheduler:
 
         return need_to_allocate, self.load_async and not self.use_layerwise
 
+    def _resolve_base_state_by_group(self, req_id, ids_by_group):
+        """Per-group save-window base state: (states, bases).
+
+        state in {"ZERO", "WINDOW", "UNPROVABLE"}; base in absolute tokens.
+        Only exact evidence is accepted: either the table equals the
+        authoritative full table (ZERO), or it equals a contiguous suffix
+        (WINDOW). Length alone is never used to infer a base.
+        """
+        entry = self._unfinished_requests.get(req_id)
+        full = entry[1] if entry else None
+        if not full or ids_by_group is None or len(ids_by_group) != len(full):
+            n = 0 if ids_by_group is None else len(ids_by_group)
+            return ["UNPROVABLE"] * n, [None] * n
+
+        states: list[str] = []
+        bases: list[int | None] = []
+        for g, (ids, full_ids) in enumerate(zip(ids_by_group, full)):
+            if ids and list(ids) == list(full_ids):
+                states.append("ZERO")
+                bases.append(0)
+                continue
+            if not ids:
+                states.append("UNPROVABLE")
+                bases.append(None)
+                continue
+            pos = {blk: i for i, blk in enumerate(full_ids)}
+            i0 = pos.get(ids[0])
+            if i0 is None or list(full_ids[i0:]) != list(ids):
+                states.append("UNPROVABLE")
+                bases.append(None)
+                continue
+            bs = self.grouped_block_size[g] if g < len(self.grouped_block_size) else 0
+            if bs <= 0:
+                states.append("UNPROVABLE")
+                bases.append(None)
+                continue
+            states.append("WINDOW")
+            bases.append(i0 * bs)
+        return states, bases
+
+    def _resolve_preempted_base_by_group(self, num_computed_tokens: int):
+        """Base for the preempted branch, which is known by construction.
+
+        A preempted cached request's table is exactly the blocks allocated in
+        this step, so its window starts at the block boundary that contains
+        num_computed_tokens.
+        """
+        states: list[str] = []
+        bases: list[int | None] = []
+        for g in range(self.num_kv_cache_groups):
+            bs = self.grouped_block_size[g] if g < len(self.grouped_block_size) else 0
+            if num_computed_tokens <= 0 or not bs:
+                states.append("ZERO")
+                bases.append(0)
+                continue
+            states.append("WINDOW")
+            bases.append((num_computed_tokens // bs) * bs)
+        return states, bases
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
@@ -728,9 +787,8 @@ class KVPoolScheduler:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
-        local_block_ids: list[list[int]] = [[] for _ in self.kv_cache_group_ids]
-        if num_external_tokens > 0:
-            local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
+        # Keep the authoritative admission table even on an external-cache miss.
+        local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         if request.request_id not in self.load_specs:
@@ -832,6 +890,11 @@ class KVPoolScheduler:
             )
         request_real = request_tuple[0]
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
+        _w_state, _w_base = (
+            self._resolve_base_state_by_group(request.req_id, block_ids_by_group)
+            if self.use_layerwise
+            else (None, None)
+        )
         previous_tracker = self._request_trackers.get(request.req_id)
         request_tracker = RequestTracker(
             req_id=request.req_id,
@@ -844,6 +907,8 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            save_window_base_by_group=_w_base,
+            save_window_base_state=_w_state,
         )
         self._request_trackers[request.req_id] = request_tracker
         return self._build_req_meta(
@@ -873,6 +938,11 @@ class KVPoolScheduler:
             )
         request_real = request_tuple[0]
         num_tokens_to_compute = request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
+        _w_state, _w_base = (
+            self._resolve_preempted_base_by_group(request_real.num_computed_tokens)
+            if self.use_layerwise
+            else (None, None)
+        )
         previous_tracker = self._request_trackers.get(req_id)
         request_tracker = RequestTracker(
             req_id=req_id,
@@ -885,6 +955,8 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            save_window_base_by_group=_w_base,
+            save_window_base_state=_w_state,
         )
         self._request_trackers[req_id] = request_tracker
         return self._build_req_meta(
@@ -964,6 +1036,9 @@ class KVPoolScheduler:
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
+        _w_state, _w_base = (
+            self._resolve_base_state_by_group(request_id, block_ids) if self.use_layerwise else (None, None)
+        )
         request_tracker = RequestTracker(
             req_id=request_id,
             token_len=num_tokens_to_compute,
@@ -974,6 +1049,8 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            save_window_base_by_group=_w_base,
+            save_window_base_state=_w_state,
         )
         self._request_trackers[request_id] = request_tracker
         return ReqMeta.from_request_tracker(
