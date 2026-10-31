@@ -1548,26 +1548,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # `sample_hidden_states` has been all-gathered to full.
                 # `markov_emb` should also be full to match it.
-                # When the draft model has a reduced vocab (draft_id_to_target_id),
-                # draft logits/probs live in draft-vocab space and cannot be used
-                # directly for target-space rejection sampling. The upstream
-                # compute_draft_token_ids guard falls back to greedy in this case;
-                # mirror that here since this autoregressive loop bypasses it.
-                # implement d2t scatter (like upstream speculator) to enable
-                # probabilistic sampling with vocab remapping.
-                dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
-                use_probabilistic = self._enable_probabilistic_draft_probs and not dspark_has_vocab_mapping
-                if self._enable_probabilistic_draft_probs and dspark_has_vocab_mapping:
-                    logger.warning_once(
-                        "draft_sample_method='probabilistic' is disabled for dspark "
-                        "with vocab remapping (draft_id_to_target_id): draft probs "
-                        "are in draft-vocab space and incompatible with target-space "
-                        "rejection sampling. Falling back to greedy."
-                    )
                 # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
                 # compute logits in draft-vocab space so that the Markov bias
                 # (draft_vocab_size) can be added; sampled draft ids are then
-                # remapped to target ids.
+                # remapped to target ids, and probabilistic draft probs are
+                # scattered into target-vocab space so rejection sampling
+                # compares distributions from the same vocabulary.
+                dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
+                use_probabilistic = self._enable_probabilistic_draft_probs
                 raw_logits = self.model.compute_draft_logits(sample_hidden_states)
                 if lmhead_tp_enable():
                     # Remove B_max - B communication padding.
@@ -1586,6 +1574,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         # logits[:, idx] is [num_blk, V], matching
                         # batch_size for per-request temperature.
                         token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
+                        if dspark_has_vocab_mapping:
+                            # MarkovHead needs target ids at the next step.
+                            # Keep probabilities compact until all steps finish.
+                            token_ids = self.model.map_draft_to_target(token_ids)
                         draft_token_ids[:, idx + 1].copy_(token_ids)
                         if probs is not None:
                             dspark_probs_list.append(probs)
@@ -1595,9 +1587,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             next_token_ids = self.model.map_draft_to_target(next_token_ids)
                         draft_token_ids[:, idx + 1].copy_(next_token_ids)
                 if use_probabilistic and dspark_probs_list:
-                    # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
-                    # [num_blk * K, V] to match early_exit view logic.
-                    draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
+                    # Stack in compact draft space, retaining request-major
+                    # order. Expand through d2t once, avoiding K dense temporary
+                    # probability tensors and their target-sized stack copy.
+                    draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).flatten(0, 1).contiguous()
+                    if dspark_has_vocab_mapping:
+                        draft_probs_step0 = self._scatter_draft_probs_to_target_vocab(draft_probs_step0)
 
                 # Dynamic verify-length path, implemented in DynamicSpecScheduler
                 # Only the dspark method is handled here since it relies on

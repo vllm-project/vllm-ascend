@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -45,6 +46,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
+        # Cached draft-id -> target-id index used to scatter reduced-vocab
+        # draft probabilities into target-vocab space for probabilistic
+        # draft sampling. Built lazily after the draft weights are loaded.
+        self._d2t_scatter_index: torch.Tensor | None = None
         # Replace the target-sized DFlash buffers with the draft model's hidden
         # size. Assignment releases the old tensors without an explicit del.
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
@@ -104,6 +109,53 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+
+    def _get_d2t_scatter_index(self) -> torch.Tensor:
+        """Draft-vocab ids remapped to target ids, cached after first use.
+
+        Derived from the model's own ``map_draft_to_target`` so the prob
+        scatter can never diverge from the token-id remap, regardless of the
+        per-model d2t convention. The mapping must be injective: the reduced
+        draft vocab is a subset of the target vocab.
+        """
+        if self._d2t_scatter_index is None:
+            d2t = self.model.draft_id_to_target_id
+            assert d2t is not None, "d2t scatter requires draft_id_to_target_id"
+            draft_ids = torch.arange(d2t.shape[0], device=d2t.device)
+            scatter_index = self.model.map_draft_to_target(draft_ids)
+            assert scatter_index.unique().numel() == scatter_index.numel(), (
+                "draft_id_to_target_id must map each draft id to a distinct target id"
+            )
+            self._d2t_scatter_index = scatter_index.to(device=self.device, dtype=torch.int64)
+            logger.info(
+                "[spec_decode] probabilistic drafting with reduced vocab: remapping "
+                "draft ids and scattering draft probs from draft-vocab %s to "
+                "target-vocab %s via d2t for lossless rejection sampling.",
+                d2t.shape[0],
+                self.vllm_config.model_config.get_vocab_size(),
+            )
+        return self._d2t_scatter_index
+
+    def _scatter_draft_probs_to_target_vocab(self, draft_probs: torch.Tensor) -> torch.Tensor:
+        """Remap reduced-vocab draft probs into target-vocab space.
+
+        The rejection sampler indexes ``draft_probs`` with target-space draft
+        token ids and strides rows by the target vocab width, so probabilities
+        produced in draft-vocab space must be scattered through the d2t map
+        into a zero-padded target-vocab tensor. Zero entries outside the draft
+        subset are fine: those ids are never proposed by the draft.
+        """
+        scatter_index = self._get_d2t_scatter_index()
+        target_probs = torch.zeros(
+            (draft_probs.shape[0], self.vllm_config.model_config.get_vocab_size()),
+            dtype=draft_probs.dtype,
+            device=draft_probs.device,
+        )
+        return target_probs.scatter_(
+            1,
+            scatter_index.unsqueeze(0).expand(draft_probs.shape[0], -1),
+            draft_probs,
+        )
 
     def _compute_confidence(
         self,

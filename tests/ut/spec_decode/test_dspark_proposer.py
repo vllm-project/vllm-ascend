@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+import vllm.v1.spec_decode.llm_base_proposer as upstream_proposer
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -1185,3 +1186,212 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
         assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
         assert proposer._layer_group_idx == [0] * 5
+
+
+class TestDSparkProbabilisticSampling(_DSparkProposerTestBase):
+    """Exercise Markov sampling and reduced-vocab probability export on CPU."""
+
+    BATCH_SIZE = 3
+    DRAFT_VOCAB_SIZE = 4
+    TARGET_VOCAB_SIZE = 8
+
+    @pytest.fixture
+    def probabilistic_proposer(self, monkeypatch):
+        # Keep the real proposer and probability computation; replace only the
+        # device sampling kernels with their CPU mathematical equivalent.
+        monkeypatch.setattr("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.lmhead_tp_enable", lambda: False)
+        monkeypatch.setattr(
+            upstream_proposer, "empty_exponential_noise_like", lambda probs, fp64: torch.empty_like(probs)
+        )
+        sample = MagicMock(side_effect=lambda probs, noise: (probs / noise).argmax(dim=-1))
+        monkeypatch.setattr(upstream_proposer, "sample_with_exponential_noise", sample)
+
+        def make(num_steps=7, reduced_vocab=True):
+            num_tokens = self.BATCH_SIZE * num_steps
+            proposer = self._make_proposer(
+                max_num_tokens=num_tokens,
+                num_reqs=self.BATCH_SIZE,
+                block_size=num_steps,
+                draft_sample_method="probabilistic",
+            )
+            model = MagicMock()
+            # Absolute target ids are [5, 1, 7, 3]; d2t stores offsets, not ids.
+            model.draft_id_to_target_id = torch.tensor([5, 0, 5, 0]) if reduced_vocab else None
+            model.markov_inputs = []
+            model.logits = torch.arange(num_tokens * self.DRAFT_VOCAB_SIZE, dtype=torch.float32)
+            model.logits = model.logits.sin().reshape(self.BATCH_SIZE, num_steps, self.DRAFT_VOCAB_SIZE)
+            model.return_value = torch.zeros(num_tokens, _HIDDEN_SIZE)
+            model.compute_draft_logits.side_effect = lambda hidden_states: model.logits.flatten(0, 1).clone()
+
+            def markov_embed(token_ids):
+                model.markov_inputs.append(token_ids.clone())
+                return token_ids
+
+            model.markov_embed.side_effect = markov_embed
+            model.markov_bias.side_effect = (
+                lambda token_ids: torch.nn.functional.one_hot(
+                    token_ids % self.DRAFT_VOCAB_SIZE, self.DRAFT_VOCAB_SIZE
+                ).float()
+                * 0.7
+            )
+            model.map_draft_to_target.side_effect = (
+                lambda token_ids: token_ids + model.draft_id_to_target_id[token_ids]
+                if model.draft_id_to_target_id is not None
+                else token_ids
+            )
+            proposer.model = model
+            proposer.method = "dspark"
+            proposer.runner = None
+            proposer._get_positions = lambda count: proposer.positions[:count]
+            proposer.build_model_inputs_first_pass = MagicMock()
+            proposer._share_mtp_indices = False
+            proposer._enable_probabilistic_draft_probs = True
+            proposer.parallel_drafting = True
+            proposer.use_fp64_gumbel = False
+            proposer._dspark_seed_buffer = proposer._dspark_seed_buffer[: self.BATCH_SIZE]
+            proposer._dspark_seed_buffer.copy_(torch.arange(self.BATCH_SIZE))
+            vocab_size = self.TARGET_VOCAB_SIZE if reduced_vocab else self.DRAFT_VOCAB_SIZE
+            proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_vocab_size=lambda: vocab_size))
+            return proposer
+
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            yield make, sample
+
+    @staticmethod
+    def _sampling_metadata(temperatures):
+        return SimpleNamespace(
+            temperature=torch.tensor(temperatures),
+            all_greedy=all(temperature == 0 for temperature in temperatures),
+            all_random=all(temperature > 0 for temperature in temperatures),
+        )
+
+    def _run_sampling(self, proposer, metadata):
+        num_tokens = self.BATCH_SIZE * proposer.num_speculative_tokens
+        return proposer._run_merged_draft(
+            num_input_tokens=num_tokens,
+            batch_size=self.BATCH_SIZE,
+            token_indices_to_sample=torch.arange(num_tokens),
+            target_positions=None,
+            inputs_embeds=None,
+            multi_steps_attn_metadata=None,
+            num_tokens=num_tokens,
+            sampling_metadata=metadata,
+        )
+
+    @pytest.mark.parametrize("num_steps", [1, 7])
+    @pytest.mark.parametrize("reduced_vocab", [True, False], ids=["reduced-vocab", "full-vocab"])
+    @pytest.mark.parametrize("temperatures", [(0.4, 0.7, 1.3), (0.0, 0.7, 1.0)], ids=["random", "mixed"])
+    def test_probabilistic_markov_tokens_and_exported_probs(
+        self, probabilistic_proposer, num_steps, reduced_vocab, temperatures
+    ):
+        make, sample = probabilistic_proposer
+        proposer = make(num_steps, reduced_vocab)
+        original_scatter = proposer._scatter_draft_probs_to_target_vocab
+        proposer._scatter_draft_probs_to_target_vocab = MagicMock(wraps=original_scatter)
+
+        token_ids = self._run_sampling(proposer, self._sampling_metadata(temperatures))
+        probs = proposer.take_last_draft_probs()
+        vocab_size = self.TARGET_VOCAB_SIZE if reduced_vocab else self.DRAFT_VOCAB_SIZE
+        assert token_ids.shape == (self.BATCH_SIZE, num_steps)
+        assert probs.shape == (self.BATCH_SIZE, num_steps, vocab_size)
+        assert probs.dtype == torch.float32
+        assert probs.is_contiguous()
+        assert torch.isfinite(probs).all()
+        torch.testing.assert_close(probs.sum(dim=-1), torch.ones(self.BATCH_SIZE, num_steps))
+        assert sample.call_count == num_steps
+
+        mapping = proposer.model.map_draft_to_target(torch.arange(self.DRAFT_VOCAB_SIZE))
+        effective_temperature = torch.tensor([temperature or 1.0 for temperature in temperatures])
+        for step in range(num_steps):
+            previous_ids = proposer._dspark_seed_buffer if step == 0 else token_ids[:, step - 1]
+            torch.testing.assert_close(proposer.model.markov_inputs[step], previous_ids)
+            logits = proposer.model.logits[:, step] + proposer.model.markov_bias(previous_ids)
+            expected_probs = (logits / effective_temperature[:, None]).softmax(dim=-1)
+            # Each request/step has distinct logits, detecting a transposed stack.
+            torch.testing.assert_close(probs[:, step, mapping], expected_probs)
+            if temperatures[0] == 0:
+                expected_greedy = proposer.model.map_draft_to_target(logits.argmax(dim=-1))
+                assert token_ids[0, step] == expected_greedy[0]
+
+        assert torch.isin(token_ids, mapping).all()
+        assert (probs.gather(-1, token_ids.unsqueeze(-1)) > 0).all()
+        scatter = proposer._scatter_draft_probs_to_target_vocab
+        if reduced_vocab:
+            outside_subset = torch.ones(vocab_size, dtype=torch.bool)
+            outside_subset[mapping] = False
+            assert torch.count_nonzero(probs[..., outside_subset]) == 0
+            # Guard the optimization: expand once after collecting all K steps.
+            scatter.assert_called_once()
+            assert scatter.call_args.args[0].shape == (self.BATCH_SIZE * num_steps, self.DRAFT_VOCAB_SIZE)
+        else:
+            scatter.assert_not_called()
+
+    @pytest.mark.parametrize("fallback", ["all-greedy", "disabled", "missing-metadata"])
+    def test_greedy_fallback_clears_previous_probabilities(self, probabilistic_proposer, fallback):
+        make, sample = probabilistic_proposer
+        proposer = make()
+        self._run_sampling(proposer, self._sampling_metadata((0.4, 0.7, 1.3)))
+        assert proposer.take_last_draft_probs() is not None
+        sample.reset_mock()
+        proposer.model.markov_inputs.clear()
+
+        metadata = self._sampling_metadata((0.4, 0.7, 1.3))
+        if fallback == "all-greedy":
+            metadata = self._sampling_metadata((0.0, 0.0, 0.0))
+        elif fallback == "disabled":
+            proposer._enable_probabilistic_draft_probs = False
+        else:
+            metadata = None
+
+        token_ids = self._run_sampling(proposer, metadata)
+        assert proposer.take_last_draft_probs() is None
+        sample.assert_not_called()
+        for step in range(proposer.num_speculative_tokens):
+            previous_ids = proposer._dspark_seed_buffer if step == 0 else token_ids[:, step - 1]
+            torch.testing.assert_close(proposer.model.markov_inputs[step], previous_ids)
+            logits = proposer.model.logits[:, step] + proposer.model.markov_bias(previous_ids)
+            expected = proposer.model.map_draft_to_target(logits.argmax(dim=-1))
+            torch.testing.assert_close(token_ids[:, step], expected)
+
+    @pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+    def test_scatter_uses_model_mapping_and_caches_index(self, probabilistic_proposer, mapping_dtype):
+        make, _ = probabilistic_proposer
+        proposer = make()
+        assert proposer._d2t_scatter_index is None
+        mapping = proposer.model.map_draft_to_target(torch.arange(self.DRAFT_VOCAB_SIZE))
+        proposer.model.map_draft_to_target.side_effect = lambda token_ids: mapping.to(dtype=mapping_dtype)
+        proposer.model.map_draft_to_target.reset_mock()
+        draft_probs = torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
+        expected = torch.zeros(2, self.TARGET_VOCAB_SIZE)
+        expected[:, mapping] = draft_probs
+
+        cached_index = proposer._get_d2t_scatter_index()
+        assert cached_index.dtype == torch.int64
+        assert cached_index.device == proposer.device
+        for _ in range(2):
+            actual = proposer._scatter_draft_probs_to_target_vocab(draft_probs)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert proposer._get_d2t_scatter_index() is cached_index
+        proposer.model.map_draft_to_target.assert_called_once()
+
+    def test_scatter_index_is_cached_on_proposer_device(self, probabilistic_proposer):
+        make, _ = probabilistic_proposer
+        proposer = make()
+        # Meta verifies device transfer without requiring NPU hardware.
+        assert proposer.model.draft_id_to_target_id.device == torch.device("cpu")
+        proposer.device = torch.device("meta")
+        cached_index = proposer._get_d2t_scatter_index()
+
+        assert cached_index.device == proposer.device
+        assert cached_index.dtype == torch.int64
+        assert proposer._get_d2t_scatter_index() is cached_index
+        proposer.model.map_draft_to_target.assert_called_once()
+
+    def test_scatter_rejects_non_injective_mapping(self, probabilistic_proposer):
+        make, _ = probabilistic_proposer
+        proposer = make()
+        # Draft ids 0 and 1 both map to target id 0.
+        proposer.model.draft_id_to_target_id = torch.tensor([0, -1, 0, 0])
+        with pytest.raises(AssertionError, match="distinct target id"):
+            proposer._scatter_draft_probs_to_target_vocab(torch.full((1, self.DRAFT_VOCAB_SIZE), 0.25))
