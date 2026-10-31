@@ -1,0 +1,4 @@
+pr: 20094
+entries:
+  - category: bugfix
+    text: Fixed decode engine aborts when an MTP speculative step is capped by max_model_len and the graph bucket pads the query, which made the GDN recurrent kernel reject ssm_state_indices against T.
