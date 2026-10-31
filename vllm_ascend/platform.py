@@ -618,6 +618,11 @@ class NPUPlatform(Platform):
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
+        # Preserve deployment membership before dense EngineCore rewrites DP.
+        from vllm_ascend.cpu_binding import prepare_cpu_binding
+
+        prepare_cpu_binding(vllm_config)
+
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
         _update_compilation_modes(vllm_config, ascend_config)
 
