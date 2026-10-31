@@ -250,8 +250,17 @@ class RecomputeScheduler(Scheduler):
         )
 
         # First, schedule the RUNNING requests.
+        transition_needs = self._running_transition_headroom()
+        allow_transition_yield = transition_needs is not None
+        transition_yielded = False
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while token_budget > 0:
+            if req_index >= len(self.running):
+                if allow_transition_yield and transition_yielded and not scheduled_running_reqs:
+                    allow_transition_yield = False
+                    req_index = 0
+                    continue
+                break
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -360,12 +369,16 @@ class RecomputeScheduler(Scheduler):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            skip_transition = False
+            transition_reserve = self._transition_reserve(transition_needs, request)
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        reserved_blocks=transition_reserve,
+                        transition_blocks=(transition_needs or {}).get(request, 0),
                     )
 
                     if new_blocks is not None:
@@ -373,6 +386,11 @@ class RecomputeScheduler(Scheduler):
                         break
 
                     if self.connector is not None and self.connector.has_pending_block_frees():
+                        skip_transition = allow_transition_yield
+                        break
+
+                    if allow_transition_yield:
+                        skip_transition = True
                         break
 
                     # The request cannot be scheduled.
@@ -432,8 +450,13 @@ class RecomputeScheduler(Scheduler):
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
+                if skip_transition:
+                    transition_yielded = True
+                    req_index += 1
+                    continue
                 break
+            if transition_needs is not None and request in transition_needs:
+                transition_needs[request] = self._transition_blocks(request)
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -482,7 +505,12 @@ class RecomputeScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and not self._recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
+        if (
+            not transition_yielded
+            and not preempted_reqs
+            and not self._recomputed_reqs
+            and self._pause_state == PauseState.UNPAUSED
+        ):
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -759,6 +787,8 @@ class RecomputeScheduler(Scheduler):
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+
+                reserved_blocks += self._transition_reserve(transition_needs)
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
