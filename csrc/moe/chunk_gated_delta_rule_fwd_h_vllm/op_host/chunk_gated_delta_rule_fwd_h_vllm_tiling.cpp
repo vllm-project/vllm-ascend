@@ -99,6 +99,9 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    OP_CHECK_IF(ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P && useGk,
+                OP_LOGE(context->GetNodeName(), "Key-wise gating (gk) is not supported on Ascend310P."),
+                return ge::GRAPH_FAILED);
 
     ChunkGatedDeltaRuleFwdHVllmTilingContext tilingCtx{};
     tilingCtx.seqlen = kStorageShape.GetDim(DIM_SEQLEN);
