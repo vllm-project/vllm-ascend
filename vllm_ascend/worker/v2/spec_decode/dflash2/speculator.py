@@ -17,7 +17,7 @@
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, _log1p_neg_stable, tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
@@ -43,10 +43,10 @@ def _selector_walk_kernel_ascend(
 ):
     """Ascend variant of upstream ``_selector_walk_kernel``.
 
-    triton-ascend cannot lower ``tldevice.log1p`` (AST parse fails even for
-    the greedy path), so the Gumbel noise uses the algebraically equivalent
-    ``log(1 - u)`` transform. The signature mirrors upstream exactly so the
-    inherited ``DFlash2Speculator._sample_path`` can call it unmodified:
+    The upstream stable ``log1p(-u)`` helper avoids libdevice log1p and
+    preserves the positive Gumbel tail for small uniform draws.
+    The signature mirrors upstream so the shared ``CandidateSampler`` can
+    call it unmodified:
     ``SAMPLE_PROBABILISTIC`` gates greedy vs. probabilistic, and ``USE_FP64``
     is rejected via ``tl.static_assert`` (NPU Triton has no fp64
     philox/rand path), matching the other vllm_ascend gumbel kernels.
@@ -82,14 +82,16 @@ def _selector_walk_kernel_ascend(
             best = tl.max(scores, axis=0)
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
-            position = tl.load(sample_pos_ptr + flat) - 1
+            # Verification uses a probability-ratio test, so draft and target
+            # draws must use independent noise streams, as in Ascend's sampler.
+            position = tl.load(sample_pos_ptr + flat) - 1 + _DRAFT_NOISE_SALT
             # triton-ascend's philox requires int32 seed/offset operands
             # (int64 counters lower to 64-bit multiplies whose runtime
             # helper, __multi3, is unavailable); seeds, token ids and
             # positions all fit int32.
             gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
             uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
-            noise = -tl.log(-tl.log(1.0 - uniform))
+            noise = -tl.log(-_log1p_neg_stable(uniform))
             sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
             best = tl.max(sampled_scores, axis=0)
             index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
@@ -133,7 +135,7 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
         else:
             raise NotImplementedError(
-                "dflash2 does not currently support graph mode; "
+                f"{self._speculator_name} does not currently support graph mode; "
                 "please enable enforce_eager. This is because the "
                 "_selector_walk_kernel_ascend operator must be reimplemented "
                 "due to NPU hardware constraints and cannot reuse the upstream "

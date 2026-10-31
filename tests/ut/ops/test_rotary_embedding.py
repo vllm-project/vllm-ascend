@@ -22,9 +22,11 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.rotary_embedding import (
     Gemma4RotaryEmbedding,
+    MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
 )
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm_ascend.ops.rotary_embedding import (
     AscendGemma4RotaryEmbedding,
@@ -41,6 +43,35 @@ BASE = 10000.0
 DTYPE = torch.bfloat16
 SEQ_LEN = 4
 NUM_HEADS = 2
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_neox_style", [False, True])
+@pytest.mark.parametrize("sections,rotary_dim", [([44, 44, 40], 256), ([11, 11, 10], 64), ([16, 24, 24], 128)])
+def test_mrope_text_key_only_matches_native(dtype, is_neox_style, sections, rotary_dim):
+    # Use real RoPE math without requiring the CustomOp device dispatcher.
+    rope = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+    torch.nn.Module.__init__(rope)
+    rope.head_size = 256
+    rope.rotary_dim = rotary_dim
+    rope.is_neox_style = is_neox_style
+    rope.mrope_section = sections
+    rope.mrope_interleaved = True
+    rope.apply_rotary_emb = ApplyRotaryEmb.__new__(ApplyRotaryEmb)
+    torch.nn.Module.__init__(rope.apply_rotary_emb)
+    rope.apply_rotary_emb.is_neox_style = is_neox_style
+    rope.apply_rotary_emb.enable_fp32_compute = False
+    positions = torch.tensor([0, 2, 5, 9])
+    frequencies = 10000.0 ** (-torch.arange(0, rotary_dim, 2).float() / rotary_dim)
+    angles = torch.outer(torch.arange(16).float(), frequencies)
+    rope.cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(dtype=dtype)
+    keys = torch.randn(4, 2 * rope.head_size, dtype=dtype)
+
+    actual, unused_key = AscendMRotaryEmbedding.forward_oot(rope, positions, keys.clone(), None)
+    expected, _ = MRotaryEmbedding.forward_native(rope, positions, keys.clone(), keys.clone())
+
+    assert unused_key is None
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):

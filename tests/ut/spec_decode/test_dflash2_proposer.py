@@ -1,3 +1,4 @@
+import io
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
     DFlash2Qwen3DecoderLayer,
     DFlash2Qwen3ForCausalLM,
     DFlash2Qwen3Model,
+    DFlashGroupedConv,
     _grouped_conv,
     _score_edges,
 )
@@ -30,10 +32,10 @@ def _stub_device_properties(monkeypatch):
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
 
 
-@pytest.mark.parametrize("block_size", [5, 8])
-def test_grouped_conv_matches_reference(block_size: int):
+@pytest.mark.parametrize("block_size,taps,batch", [(5, 3, 3), (8, 3, 3), (2, 5, 1), (2, 5, 3)])
+def test_grouped_conv_matches_reference(block_size: int, taps: int, batch: int):
     torch.manual_seed(0)
-    batch, taps, num_groups, group_size = 3, 3, 4, 2
+    num_groups, group_size = 4, 2
     hidden = torch.randn(batch * block_size, num_groups * group_size)
     delta = torch.randn(batch * block_size, taps, num_groups)
     base = torch.randn(taps, num_groups * group_size)
@@ -78,6 +80,193 @@ def test_dflash2_declares_main_factory_classes():
     """vLLM #52816 constructs DFlash subclasses through class factories."""
     assert DFlash2Qwen3Model.decoder_layer_cls is DFlash2Qwen3DecoderLayer
     assert DFlash2Qwen3ForCausalLM.model_cls is DFlash2Qwen3Model
+
+
+def test_lilicorr_convolution_uses_ascend_dflash2_layer():
+    try:
+        import vllm.model_executor.models.lilicorr as upstream_lilicorr
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.model_executor.models.lilicorr":
+            raise
+        pytest.skip("LiLiCorr is not supported by the paired vLLM version")
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    assert upstream_lilicorr.DFlash2Qwen3DecoderLayer is DFlash2Qwen3DecoderLayer
+
+
+def test_lilicorr_cannot_silently_use_plain_dflash_on_v1():
+    from vllm_ascend.worker.v1.spec_decode import get_spec_decode_method
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(architectures=["LiLiCorrDraftModel"]),
+        )
+    )
+    with (
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflashProposer") as plain_dflash,
+        pytest.raises(NotImplementedError, match="VLLM_USE_V2_MODEL_RUNNER=1"),
+    ):
+        get_spec_decode_method("dflash", config, "cpu", None)
+    plain_dflash.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "mask_state",
+    [
+        None,
+        {"mask_token_id": 3, "embedding": torch.ones(8)},
+        {"mask_token_id": 7, "embedding": torch.ones(8)},
+        b"corrupt",
+    ],
+)
+def test_dflash_mask_embedding_errors_are_not_silently_ignored(monkeypatch, mask_state):
+    import vllm.model_executor.models.qwen3_dflash as upstream_dflash
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    data = mask_state
+    if isinstance(mask_state, dict):
+        buffer = io.BytesIO()
+        torch.save(mask_state, buffer)
+        data = buffer.getvalue()
+    monkeypatch.setattr(upstream_dflash, "get_hf_file_bytes", lambda *args: data)
+    model = SimpleNamespace(
+        model=SimpleNamespace(mask_token_id=3),
+        draft_model_config=SimpleNamespace(model="unused", revision="main"),
+    )
+    read_mask = upstream_dflash.DFlashQwen3ForCausalLM._read_mask_embedding
+    if mask_state is None:
+        assert read_mask(model) is None
+    elif isinstance(mask_state, dict) and mask_state["mask_token_id"] != model.model.mask_token_id:
+        with pytest.raises(ValueError, match="mask_token_id does not match"):
+            read_mask(model)
+    elif isinstance(mask_state, dict):
+        torch.testing.assert_close(read_mask(model), mask_state["embedding"])
+    else:
+        # Deserialization failures must propagate instead of changing the draft.
+        monkeypatch.setattr(
+            upstream_dflash.torch, "load", MagicMock(side_effect=RuntimeError("corrupt mask embedding"))
+        )
+        with pytest.raises(RuntimeError, match="corrupt mask embedding"):
+            read_mask(model)
+
+
+@pytest.mark.parametrize("missing_file", ["mask_embedding.pt", "config.json"])
+def test_dflash_mask_embedding_handles_only_missing_modelscope_override(monkeypatch, missing_file):
+    import vllm.model_executor.models.qwen3_dflash as upstream_dflash
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    modelscope_not_exist = type("NotExistError", (Exception,), {"__module__": "modelscope.hub.errors"})
+    error = modelscope_not_exist(f"The file path: {missing_file} not exist in: draft/checkpoint")
+    monkeypatch.setattr(upstream_dflash, "get_hf_file_bytes", MagicMock(side_effect=error))
+    model = SimpleNamespace(
+        model=SimpleNamespace(mask_token_id=3),
+        draft_model_config=SimpleNamespace(model="draft/checkpoint", revision="main"),
+    )
+    read_mask = upstream_dflash.DFlashQwen3ForCausalLM._read_mask_embedding
+    if missing_file == "mask_embedding.pt":
+        assert read_mask(model) is None
+    else:
+        with pytest.raises(modelscope_not_exist):
+            read_mask(model)
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("v_scale", [None, 0.5])
+@pytest.mark.parametrize("mapping_kind", ["shared", "per_layer", "dummy"])
+@pytest.mark.parametrize("inplace_rope", [False, True])
+def test_context_kv_preserves_projection_norm_rope_and_value_scale(quantized, v_scale, mapping_kind, inplace_rope):
+    from vllm_ascend.patch.worker.patch_qwen3_dflash import (
+        _project_context_kv,
+        precompute_and_store_context_kv,
+    )
+
+    torch.manual_seed(7)
+    num_ctx, num_layers, hidden_size, num_kv_heads, head_dim = 3, 2, 8, 2, 2
+    kv_size = num_kv_heads * head_dim
+    hidden_norm = torch.nn.RMSNorm(hidden_size, eps=1e-6)
+    states = torch.randn(num_ctx, hidden_size)
+    positions = torch.arange(num_ctx)
+    weights = [torch.randn(q_size + 2 * kv_size, hidden_size) for q_size in (4, 8)]
+    biases = [torch.randn(weight.shape[0]) for weight in weights]
+    q_sizes = [weight.shape[0] - 2 * kv_size for weight in weights]
+    projections = [
+        MagicMock(side_effect=lambda x, w=w, b=b: (torch.nn.functional.linear(x, w, b), None))
+        for w, b in zip(weights, biases)
+    ]
+
+    def rotate(pos, query, key):
+        # Both in-place Triton and out-of-place torch_npu paths must cache
+        # the returned keys in the same layer-major layout.
+        assert key is None
+        rotated = query + pos[:, None]
+        if inplace_rope:
+            query.copy_(rotated)
+            return query, None
+        return rotated, None
+
+    norms = [torch.nn.RMSNorm(head_dim, eps=1e-6) for _ in range(num_layers)]
+    caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(num_layers)]
+    model = SimpleNamespace(
+        hidden_norm=hidden_norm,
+        layers=[
+            SimpleNamespace(self_attn=SimpleNamespace(k_norm=n, rotary_emb=rotate, v_scale=v_scale)) for n in norms
+        ],
+        _num_attn_layers=num_layers,
+        _kv_size=kv_size,
+        _head_dim=head_dim,
+        _num_kv_heads=num_kv_heads,
+        _context_qkv_projs=projections,
+        _context_q_sizes=q_sizes,
+        _fused_kv_weight=None if quantized else torch.cat([w[q:] for w, q in zip(weights, q_sizes)]),
+        _fused_kv_bias=None if quantized else torch.cat([b[q:] for b, q in zip(biases, q_sizes)]),
+        _attn_layers=caches,
+    )
+    model._project_context_kv = lambda *args: _project_context_kv(model, *args)
+    mapping = torch.tensor([1, 3, 5])
+    slot_mapping = {"shared": mapping, "per_layer": [mapping, None], "dummy": None}[mapping_kind]
+    precompute_and_store_context_kv(model, states, positions, slot_mapping)
+
+    for i, (weight, bias, q_size, norm, cache) in enumerate(zip(weights, biases, q_sizes, norms, caches)):
+        update = cache.impl.do_kv_cache_update
+        if mapping_kind == "dummy" or (mapping_kind == "per_layer" and i == 1):
+            update.assert_not_called()
+            continue
+        expected = torch.nn.functional.linear(hidden_norm(states), weight, bias)[:, q_size:]
+        k, v = expected.chunk(2, dim=-1)
+        expected_k = norm(k.reshape(num_ctx, num_kv_heads, head_dim)) + positions[:, None, None]
+        expected_v = v.reshape(num_ctx, num_kv_heads, head_dim) * (1.0 if v_scale is None else v_scale)
+        update.assert_called_once()
+        args = update.call_args.args
+        assert args[0] is cache and args[3] is cache.kv_cache and args[4] is mapping
+        torch.testing.assert_close(args[1], expected_k)
+        torch.testing.assert_close(args[2], expected_v)
+
+    for proj in projections:
+        assert proj.call_count == int(quantized)
+
+
+def test_grouped_conv_projection_uses_draft_quantization():
+    quant_config = object()
+    with patch(
+        "vllm_ascend.models.qwen3_dflash2.ReplicatedLinear",
+        return_value=torch.nn.Identity(),
+    ) as linear:
+        DFlashGroupedConv(
+            hidden_size=8,
+            taps=2,
+            group_size=2,
+            block_size=4,
+            params_dtype=torch.bfloat16,
+            prefix="conv",
+            quant_config=quant_config,
+        )
+
+    assert linear.call_args.kwargs["quant_config"] is quant_config
+    assert linear.call_args.kwargs["prefix"] == "conv.kernel_projection"
 
 
 def _reference_walk(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
