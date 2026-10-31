@@ -128,7 +128,7 @@ def test_ec_get_batch_uses_offsets_and_copies_out() -> None:
     base_addr = connector._recv_buffer.data_ptr()
 
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["key0", "key1"])
+        embeddings = connector._ec_get_batch(["key0", "key1"], [2, 3])
 
     # After two embeddings successfully returned from memcache, assert whether they are equal.
     assert embeddings is not None
@@ -170,7 +170,7 @@ def test_ec_get_batch_splits_requests_by_buffer_capacity() -> None:
 
     base_addr = connector._recv_buffer.data_ptr()
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["key0", "key1", "key2"])
+        embeddings = connector._ec_get_batch(["key0", "key1", "key2"], [2, 3, 1])
 
     assert embeddings is not None
     assert all(embedding is not None for embedding in embeddings)
@@ -211,7 +211,7 @@ def test_ec_get_batch_reuses_one_temporary_buffer_for_oversized_values() -> None
     npu.Event.side_effect = [first_copy_done, second_copy_done]
 
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["key0", "key1", "key2"])
+        embeddings = connector._ec_get_batch(["key0", "key1", "key2"], [5, 5, 10])
 
     assert embeddings is not None
     assert [embedding.shape[0] for embedding in embeddings if embedding is not None] == [
@@ -260,7 +260,7 @@ def test_ec_get_batch_preserves_all_mixed_request_outputs() -> None:
     npu.Event.side_effect = [regular_copy_done, oversized_copy_done]
 
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["regular0", "oversized", "regular1"])
+        embeddings = connector._ec_get_batch(["regular0", "oversized", "regular1"], [2, 5, 2])
 
     assert embeddings is not None
     assert all(embedding is not None for embedding in embeddings)
@@ -281,8 +281,9 @@ def test_ec_get_batch_preserves_all_mixed_request_outputs() -> None:
 def test_ec_get_batch_preserves_indices_when_key_metadata_is_skipped() -> None:
     """Keep outputs aligned with the original keys after metadata filtering.
 
-    The first key has an empty value and the second has an unaligned value, so
-    neither is submitted to Memcache. The third key is valid: it uses offset
+    The first key has an empty value and the second does not divide into the
+    request's embedding rows, so neither is submitted to Memcache. The third
+    key is valid: it uses offset
     zero in the compact receive batch, but its output must still be written to
     original index 2 via ``src_idx`` rather than being assigned to index 0.
     """
@@ -300,7 +301,7 @@ def test_ec_get_batch_preserves_indices_when_key_metadata_is_skipped() -> None:
     base_addr = connector._recv_buffer.data_ptr()
 
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["empty", "unaligned", "valid"])
+        embeddings = connector._ec_get_batch(["empty", "unaligned", "valid"], [1, 1, 2])
 
     assert embeddings is not None
     assert embeddings[0] is None
@@ -337,7 +338,7 @@ def test_ec_get_batch_keeps_failed_or_missing_results_as_none() -> None:
     npu.Event.return_value = copy_done
 
     with _mock_npu_allocations(npu):
-        embeddings = connector._ec_get_batch(["success", "failed", "missing"])
+        embeddings = connector._ec_get_batch(["success", "failed", "missing"], [1, 1, 1])
 
     assert embeddings is not None
     assert embeddings[0] is not None
@@ -351,7 +352,7 @@ def test_ec_get_batch_rejects_mismatched_key_info_count() -> None:
     connector = _make_connector()
     connector._backend.batch_get_key_info.return_value = [_key_info(16)]
 
-    assert connector._ec_get_batch(["key0", "key1"]) is None
+    assert connector._ec_get_batch(["key0", "key1"], [1, 1]) is None
     connector._backend.batch_get_into_buffers.assert_not_called()
 
 
@@ -371,3 +372,85 @@ def test_shutdown_waits_unregisters_and_releases_receive_buffer() -> None:
 
     connector.shutdown()
     connector._backend.unregister_buffer.assert_called_once_with([recv_buffer_ptr], [recv_buffer_nbytes])
+
+
+def test_ec_get_batch_reshapes_each_value_by_its_own_width() -> None:
+    """Values of different modalities share the buffer at their own widths.
+
+    vLLM #57904: Qwen3-Omni image outputs are 4x wider than audio outputs, so
+    a single model-level width would misread one of them. Offsets advance by
+    bytes and each output is reshaped from the request's row count.
+    """
+    connector = _make_connector(capacity_tokens=8, hidden_dim=4)
+    elem = connector._elem_size
+    image_bytes = 2 * 8 * elem
+    audio_bytes = 3 * 2 * elem
+    connector._backend.batch_get_key_info.return_value = [_key_info(image_bytes), _key_info(audio_bytes)]
+    connector._backend.batch_get_into_buffers.return_value = [0, 0]
+    npu = MagicMock()
+    flat = connector._recv_buffer.view(-1)
+    expected_image = flat[:16].clone().view(2, 8)
+    expected_audio = flat[16:22].clone().view(3, 2)
+    base_addr = connector._recv_buffer.data_ptr()
+
+    with _mock_npu_allocations(npu):
+        embeddings = connector._ec_get_batch(["image", "audio"], [2, 3])
+
+    assert embeddings is not None
+    assert torch.equal(embeddings[0], expected_image)
+    assert torch.equal(embeddings[1], expected_audio)
+    connector._backend.batch_get_into_buffers.assert_called_once_with(
+        ["image", "audio"],
+        [base_addr, base_addr + image_bytes],
+        [image_bytes, audio_bytes],
+        connector_module.MmcDirect.COPY_G2L.value,
+    )
+
+
+def test_ec_get_batch_skips_value_not_matching_request_rows() -> None:
+    connector = _make_connector()
+    # 5 float32 elements cannot form 2 equal rows.
+    connector._backend.batch_get_key_info.return_value = [_key_info(5 * connector._elem_size)]
+    npu = MagicMock()
+
+    with _mock_npu_allocations(npu):
+        embeddings = connector._ec_get_batch(["key0"], [2])
+
+    assert embeddings == [None]
+    connector._backend.batch_get_into_buffers.assert_not_called()
+
+
+def test_scheduler_records_encoder_embed_rows_for_loads() -> None:
+    connector = ECMemcacheConnector.__new__(ECMemcacheConnector)
+    connector._mm_hash_hits = {"hit"}
+    connector._mm_hash_hit_count = 1
+    connector._miss_count = 0
+    connector._mm_hashes_need_loads = {}
+    connector._mm_hashes_need_saves = set()
+    request = MagicMock()
+    request.mm_features = [MagicMock(identifier="hit"), MagicMock(identifier="miss")]
+    request.get_num_encoder_embeds.side_effect = lambda index: [7, 9][index]
+
+    connector.update_state_after_alloc(request, 0)
+    connector.update_state_after_alloc(request, 1)
+    meta = connector.build_connector_meta(MagicMock())
+
+    assert meta.mm_hashes_need_loads == {"hit": 7}
+    assert meta.mm_hashes_need_saves == {"miss"}
+    assert connector._mm_hashes_need_loads == {}
+
+
+def test_start_load_caches_passes_scheduler_row_counts() -> None:
+    connector = _make_connector()
+    meta = connector_module.ECMemcacheConnectorMetadata(mm_hashes_need_loads={"cached": 1, "new": 3})
+    loaded = torch.zeros(3, 2)
+    encoder_cache = {"cached": torch.ones(1, 4)}
+
+    with (
+        patch.object(connector, "_get_connector_metadata", return_value=meta),
+        patch.object(connector, "_ec_get_batch", return_value=[loaded]) as get_batch,
+    ):
+        connector.start_load_caches(encoder_cache)
+
+    get_batch.assert_called_once_with(["new"], [3])
+    assert encoder_cache["new"] is loaded
