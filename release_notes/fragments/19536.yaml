@@ -1,0 +1,6 @@
+pr: 19536
+entries:
+  - category: feature
+    text: >-
+      Added intfloat/e5-mistral-7b-instruct embedding support on Ascend NPUs,
+      with last-token pooling, L2-normalized outputs, and a new model tutorial.
