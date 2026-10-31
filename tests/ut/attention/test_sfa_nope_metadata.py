@@ -268,6 +268,22 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
     dispatch.assert_called_once_with(impl, q, rope, composed, indices, metadata, query_lens, seq_lens, block_table=None)
 
 
+def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
+    """NoPE c8 returns the operator output unmodified: the fork kernel defines its
+    own padding rows (TND tail zero-init), so no Python masked_fill remains."""
+    impl = object.__new__(sfa.AscendSFAImpl)
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    cache = torch.empty(8, 2, 1, 12, dtype=torch.int8)
+    metadata = SimpleNamespace(block_size=2)
+    with patch.object(sfa.DeviceOperator, "execute_sparse_flash_attention_process") as dispatch:
+        result = impl._execute_sparse_flash_attention_process(
+            torch.empty(4, 2, 8), None, (cache,), None, metadata, None, None
+        )
+    assert result is dispatch.return_value
+
+
 @pytest.mark.parametrize("a5", [False, True])
 def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypatch, a5):
     query = torch.ones(3, 2, 128)
