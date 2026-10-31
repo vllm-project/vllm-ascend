@@ -15,6 +15,7 @@
  */
 
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -25,6 +26,15 @@ extern "C" {
 
 #include <sys/types.h>
 #include "acl/acl.h"
+
+// The fourth Python handle field remains an opaque integer pointer. Track
+// physical ownership separately from the retained virtual reservation so free
+// is valid both before and after sleep, including partial driver failures.
+struct CaMemAllocation {
+  aclrtDrvMemHandle physical = nullptr;
+  bool mapped = false;
+  std::mutex mutex;
+};
 
 // Global references to Python callables
 // NOTE: this is borrowed reference, so we don't need to DECREF them.
@@ -37,7 +47,7 @@ static PyObject* g_python_free_callback = nullptr;
 // Helper functions:
 
 void ensure_context(unsigned long long device) {
-  aclrtContext pctx;
+  aclrtContext pctx = nullptr;
   aclrtGetCurrentContext(&pctx);
   if (!pctx) {
     // Ensure device context.
@@ -47,7 +57,11 @@ void ensure_context(unsigned long long device) {
 }
 
 void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
-                    aclrtDrvMemHandle* p_memHandle) {
+                    CaMemAllocation* allocation) {
+  std::lock_guard<std::mutex> lock(allocation->mutex);
+  if (allocation->mapped) {
+    return;
+  }
   ensure_context(device);
   // Define memory allocation properties
   aclrtPhysicalMemProp prop = {};
@@ -59,7 +73,10 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   prop.reserve = 0;
 
   // Allocate memory using aclrtMallocPhysical
-  aclError error_code = aclrtMallocPhysical(p_memHandle, size, &prop, 0);
+  aclError error_code = ACL_SUCCESS;
+  if (allocation->physical == nullptr) {
+    error_code = aclrtMallocPhysical(&allocation->physical, size, &prop, 0);
+  }
   if (error_code != 0) {
     if (error_code == ACL_ERROR_RT_MEMORY_ALLOCATION) {
       throw std::runtime_error("aclrtMallocPhysical failed with acl error code: " + 
@@ -72,29 +89,43 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   }
 
   // Map memory
-  error_code = aclrtMapMem(d_mem, size, 0, *p_memHandle, 0);
+  error_code = aclrtMapMem(d_mem, size, 0, allocation->physical, 0);
   if (error_code != 0) {
+    // Keep ownership if FreePhysical also fails, so a later cleanup can retry.
+    if (aclrtFreePhysical(allocation->physical) == ACL_SUCCESS) {
+      allocation->physical = nullptr;
+    }
     throw std::runtime_error("aclrtMapMem failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
+  allocation->mapped = true;
 }
 
 void unmap_and_release(unsigned long long device, ssize_t size,
                        void* d_mem,
-                       aclrtDrvMemHandle* p_memHandle) {
+                       CaMemAllocation* allocation) {
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
-  aclError error_code = aclrtUnmapMem(d_mem);
+  std::lock_guard<std::mutex> lock(allocation->mutex);
+  aclError error_code = ACL_SUCCESS;
+  if (allocation->mapped) {
+    error_code = aclrtUnmapMem(d_mem);
+  }
   if (error_code != 0) {
     throw std::runtime_error("aclrtUnmapMem failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
-  error_code = aclrtFreePhysical(*p_memHandle);
+  allocation->mapped = false;
+  if (allocation->physical == nullptr) {
+    return;
+  }
+  error_code = aclrtFreePhysical(allocation->physical);
   if (error_code != 0) {
     throw std::runtime_error("aclrtFreePhysical failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
+  allocation->physical = nullptr;
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,
@@ -125,10 +156,13 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 // Our exported C functions that call Python:
 
 __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device, aclrtStream stream) {
+  if (!g_python_malloc_callback) {
+    throw std::runtime_error("my_malloc ERROR: g_python_malloc_callback not set." +
+                            std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
+  }
   ensure_context(device);
 
-  // first allocation, align the size, and reserve an address, and also allocate
-  // a aclrtDrvMemHandle
+  // Align the first allocation and reserve its virtual address.
 
   // Define memory allocation properties
   aclrtPhysicalMemProp prop = {};
@@ -161,13 +195,22 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
                               std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
     }
   }
-  // allocate the aclrtDrvMemHandle
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)malloc(sizeof(aclrtDrvMemHandle));
+  // Allocate the opaque mapping/physical-ownership record.
+  CaMemAllocation* p_memHandle = new CaMemAllocation();
 
-  if (!g_python_malloc_callback) {
-    throw std::runtime_error("my_malloc ERROR: g_python_malloc_callback not set." +
-                            std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
+  // Finish physical allocation before publishing the handle to Python. A
+  // failed initial map must not leave a stale entry in pointer_to_data.
+  try {
+    create_and_map(device, alignedSize, d_mem, p_memHandle);
+  } catch (...) {
+    // create_and_map normally releases a failed map's physical allocation.
+    // If the driver also fails cleanup, retain the reservation rather than
+    // releasing an address whose ownership is unknown.
+    if (p_memHandle->physical == nullptr) {
+      aclrtReleaseMemAddress(d_mem);
+      delete p_memHandle;
+    }
+    throw;
   }
 
   // Acquire GIL (not in stable ABI officially, but often works)
@@ -185,13 +228,14 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
   if (!py_result) {
     PyErr_Print();
     PyGILState_Release(gstate);
+    unmap_and_release(device, alignedSize, d_mem, p_memHandle);
+    aclrtReleaseMemAddress(d_mem);
+    delete p_memHandle;
     return nullptr;
   }
 
+  Py_DECREF(py_result);
   PyGILState_Release(gstate);
-
-  // do the final mapping
-  create_and_map(device, alignedSize, d_mem, p_memHandle);
 
   return (void*)d_mem;
 }
@@ -211,9 +255,15 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
 
   PyObject* py_result =
       PyObject_CallFunctionObjArgs(g_python_free_callback, py_ptr, NULL);
+  Py_DECREF(py_ptr);
 
   if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
-    PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    if (!PyErr_Occurred()) {
+      PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    }
+    Py_XDECREF(py_result);
+    PyErr_Print();
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -222,22 +272,19 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
   // Unpack the tuple into four C integers
   if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
                         &recv_d_mem, &recv_p_memHandle)) {
-    // PyArg_ParseTuple sets an error if it fails
+    Py_DECREF(py_result);
+    PyErr_Print();
+    PyGILState_Release(gstate);
     return;
   }
 
+  Py_DECREF(py_result);
   PyGILState_Release(gstate);
 
-  // recv_size == size
-  // recv_device == device
-
-  // Free memory
-
+  // The callback holds the actual device and aligned reservation size.
   void *d_mem = (void*)recv_d_mem;
-    // allocate the aclrtDrvMemHandle
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
-  unmap_and_release(device, size, d_mem, p_memHandle);
+  CaMemAllocation* p_memHandle = (CaMemAllocation*)recv_p_memHandle;
+  unmap_and_release(recv_device, recv_size, d_mem, p_memHandle);
 
   // free address and the handle
   aclError error_code = aclrtReleaseMemAddress(d_mem);
@@ -245,7 +292,7 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
     throw std::runtime_error("aclrtReleaseMemAddress failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
-  free(p_memHandle);
+  delete p_memHandle;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,10 +337,14 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   }
 
   void *d_mem_ptr = (void*)recv_d_mem;
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
+  CaMemAllocation* p_memHandle = (CaMemAllocation*)recv_p_memHandle;
 
-  unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
+  try {
+    unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
+  } catch (const std::exception& error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    return nullptr;
+  }
 
   Py_RETURN_NONE;
 }
@@ -314,10 +365,14 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   }
 
   void *d_mem_ptr = (void*)recv_d_mem;
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
+  CaMemAllocation* p_memHandle = (CaMemAllocation*)recv_p_memHandle;
 
-  create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
+  try {
+    create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
+  } catch (const std::exception& error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    return nullptr;
+  }
 
   Py_RETURN_NONE;
 }
