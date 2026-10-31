@@ -14,11 +14,20 @@
 
 """Ascend V2 model-runner state for Qwen4Exp."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+if TYPE_CHECKING:
+    import torch
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
@@ -30,6 +39,18 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     attention metadata and stores it on the state for FULL aclgraph replay
     (``update_full_graph_params`` reads ``model_state.attn_metadata``).
     """
+
+    def _prepare_ngram_context(self, input_batch: InputBatch, req_states: RequestState) -> torch.Tensor:
+        from vllm_ascend.ops.triton.qwen4_exp.ngram_context import gather_ngram_context
+
+        return gather_ngram_context(
+            self.ngram_context[: input_batch.num_reqs_after_padding],
+            input_batch.idx_mapping,
+            req_states.num_computed_tokens.gpu,
+            req_states.all_token_ids.gpu,
+            input_batch.num_reqs,
+            self.ngram_eos_token_id,
+        )
 
 
 __all__ = ["AscendQwen4ExpModelState"]
