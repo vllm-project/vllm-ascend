@@ -82,8 +82,7 @@ test_cases:
       - "--enable-prefix-caching"
       - "--gpu-memory-utilization"
       - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--enforce-eager"
     benchmarks:
       <<: *benchmarks_gpqa
 #  - name: "longSeq_pcpdcp_performance_0004"
