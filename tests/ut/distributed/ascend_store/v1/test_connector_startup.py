@@ -96,6 +96,7 @@ def test_hybrid_startup_aligns_mamba_before_v1_admission(configuration_case, mon
     config.cache_config.mamba_cache_mode = "none"
     config.cache_config.mamba_block_size = None
     config.model_config.architecture = "HybridStartupFixture"
+    config.model_config.hf_config = SimpleNamespace(model_type="hybrid_startup_fixture")
     config.scheduler_config.enable_chunked_prefill = True
     HybridAttentionMambaModelConfig.verify_and_update_config(config)
     monkeypatch.setattr(Platform, "update_block_size_for_backend", classmethod(lambda cls, config: None))

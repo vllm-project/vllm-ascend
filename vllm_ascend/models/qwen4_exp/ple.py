@@ -26,6 +26,8 @@ import torch_npu
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+
 
 def _get_allow_internal_format() -> bool:
     raw_value = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
@@ -211,6 +213,8 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
 
     @wraps(original)
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # PLE runs before attention in the same decoder layer.
+        wait_for_kv_layer_from_connector(self.prefix)
         previous = _get_allow_internal_format()
         _set_allow_internal_format(False)
         try:

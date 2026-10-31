@@ -38,6 +38,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4StateBackend,
     AscendDSAC128Backend,
     AscendDSAC128StateBackend,
+    AscendDSAIndexerBackend,
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
@@ -1936,7 +1937,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     swa_cache = cast(deepseek_v4_model.AscendDeepseekV4SWACache, SimpleNamespace())
     c4_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c4_cache)
     c128_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c128_cache)
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAC4Backend
+    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAIndexerBackend
     assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c128_indexer) is AscendDSAC128Backend
     assert deepseek_v4_model.AscendDeepseekV4SWACache.get_attn_backend(swa_cache) is AscendDSASWABackend
     assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c4_state) is AscendDSAC4StateBackend

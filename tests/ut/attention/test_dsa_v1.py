@@ -370,6 +370,7 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
             num_actual_reqs=None,
             cos=torch.ones(6),
             sin=torch.zeros(6),
+            formatted_slot_mapping=builder.slot_mapping[:6],
         )
         tasks = builder.take_device_metadata_tasks()
         assert len(tasks) == 1
@@ -619,7 +620,8 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         attn_state=MagicMock(),
     )
     req_metadata = MagicMock()
-    builder.build_req_metadata = MagicMock(return_value=req_metadata)
+    builder._build_sas_metadata = MagicMock()
+    common_attn_metadata.causal = True
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
     rope_buffer = torch.ones(14)
@@ -695,7 +697,8 @@ def test_build_matches_rope_positions_to_graph_mode(full_graph_mode: bool, expec
         block_table_tensor=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
         attn_state=MagicMock(),
     )
-    builder.build_req_metadata = MagicMock(return_value=MagicMock())
+    builder._build_sas_metadata = MagicMock()
+    common_attn_metadata.causal = True
     captured: dict[str, int] = {}
 
     def get_rope(positions, use_cache=False, **kwargs):
@@ -770,6 +773,7 @@ def test_build_req_metadata_uses_execution_window_for_sas(deferred: bool, causal
             num_actual_reqs=None,
             cos=torch.ones(5),
             sin=torch.zeros(5),
+            formatted_slot_mapping=builder.slot_mapping[:5],
         )
         if deferred:
             metadata_op.assert_not_called()
@@ -831,6 +835,9 @@ def test_build_reuses_batched_slot_values_in_persistent_buffer():
         num_input_tokens=count,
         seq_lens=lengths,
         block_table_tensor=torch.tensor([[4, 8]], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, count], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, count], dtype=torch.int32),
+        causal=True,
         attn_state=MagicMock(),
     )
     shared = dict(
@@ -843,7 +850,7 @@ def test_build_reuses_batched_slot_values_in_persistent_buffer():
         cos=torch.ones(count),
         sin=torch.zeros(count),
     )
-    builder.build_req_metadata = MagicMock()
+    builder._build_sas_metadata = MagicMock()
     with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan") as plan:
         builder.build(0, common, common_ratio_to_sas_metadata=shared, formatted_slot_mapping=expected)
     plan.assert_not_called()
@@ -877,6 +884,7 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
         num_actual_reqs=None,
         cos=torch.empty(0),
         sin=torch.empty(0),
+        formatted_slot_mapping=builder.slot_mapping[:0],
     )
 
     sas_kwargs = builder._build_sas_metadata.call_args.kwargs
@@ -914,6 +922,7 @@ def test_build_req_metadata_clears_graph_padding_rows():
         num_actual_reqs=1,
         cos=torch.ones(2),
         sin=torch.zeros(2),
+        formatted_slot_mapping=builder.slot_mapping[:2],
     )
 
     assert metadata.num_actual_reqs == 1
@@ -1794,9 +1803,11 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     global_block_tables = (torch.empty(0), global_block_table)
     global_slot_mappings = torch.arange(14, dtype=torch.int64).view(2, 7)
     global_slot_mapping = global_slot_mappings[1, : global_batch.num_tokens]
+    local_query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
     local_common = SimpleNamespace(
         attn_state="local",
-        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+        query_start_loc=local_query_start_loc,
+        query_start_loc_cpu=local_query_start_loc.clone(),
         num_actual_tokens=2,
         num_input_tokens=3,
         num_reqs=2,
@@ -2012,7 +2023,8 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     assert torch.equal(built_local_common.seq_lens, seq_lens)
     assert torch.equal(built_local_common.slot_mapping, expected_local_slots)
     assert local_call.kwargs["num_actual_reqs"] == num_actual_reqs
-    assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata
+    assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata["pcp_local"]
+    assert builder.common_ratio_to_sas_metadata is shared_local_metadata
 
 
 def test_pcp_metadata_provider_discards_unused_global_tasks():
@@ -2762,6 +2774,7 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
             num_actual_reqs=None,
             cos=torch.ones(5),
             sin=torch.zeros(5),
+            formatted_slot_mapping=builder.slot_mapping[:5],
         )
         if deferred:
             for task in builder.take_device_metadata_tasks():
