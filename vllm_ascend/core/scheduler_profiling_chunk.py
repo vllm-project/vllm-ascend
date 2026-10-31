@@ -581,7 +581,7 @@ class ProfilingChunkScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -604,8 +604,13 @@ class ProfilingChunkScheduler(Scheduler):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                request_queue = self.kv_holding_waiting or self.waiting
-                assert request_queue is not None
+                # vllm-project/vllm#60572: upstream counts KV holders under PAUSED_NEW
+                # in get_num_unfinished_requests(); drain them, leaving ordinary waiting queued.
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
+                if not request_queue:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
