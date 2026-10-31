@@ -37,7 +37,6 @@ def sampler_310v2():
         spec = MagicMock()
         spec.num_speculative_tokens = 1
         spec.method = "mtp"
-        spec.draft_sample_method = "greedy"
 
         return RejectionSampler310V2(mock_sampler, spec, device=torch.device("cpu"))
 

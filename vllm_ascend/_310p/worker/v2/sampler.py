@@ -17,20 +17,17 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
+from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from vllm_ascend._310p.worker.v2.sample import (
-    apply_min_p,
-    apply_temperature,
     apply_top_k_top_p_npu,
     gather_logprobs,
 )
-from vllm_ascend._310p.worker.v2.sample.allowed_token_ids import (
-    apply_allowed_token_ids,
-    materialize_allowed_mask,
-)
 from vllm_ascend._310p.worker.v2.sample.bad_words import apply_bad_words
-from vllm_ascend._310p.worker.v2.sample.logit_bias import apply_logit_bias
+from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
+from vllm_ascend._310p.worker.v2.sample.logit_bias import LogitBiasState310
 from vllm_ascend._310p.worker.v2.sample.penalties import (
     apply_penalties,
     build_penalty_token_tensors,
@@ -54,9 +51,6 @@ class Ascend310PSampler:
     SamplingStates.
     """
 
-    # TODO: Refactor this sampler to register 310P implementations through
-    # Triton Dispatcher after vLLM RFC #45133 lands.
-
     def __init__(
         self,
         max_num_reqs: int = 1,
@@ -64,6 +58,7 @@ class Ascend310PSampler:
         vocab_size: int | None = None,
         req_states: Any | None = None,
     ) -> None:
+        register_sampling_kernel_overrides()
         # Keep attribute for upstream post_update compatibility (no persistent bins).
         self.penalties_state = SimpleNamespace(output_bin_counts=None)
         self.req_states = req_states
@@ -123,7 +118,7 @@ class Ascend310PSampler:
         self._use_penalty = np.zeros(max_num_reqs, dtype=bool)
         self._use_allowed = np.zeros(max_num_reqs, dtype=bool)
         self._allowed_token_ids: dict[int, list[int]] = {}
-        self._allowed_mask: torch.Tensor | None = None
+        self.logit_bias_state = LogitBiasState310(max_num_reqs, device)
         self._use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
         self._logit_bias: dict[int, dict[int, float]] = {}
         self._use_bad_words = np.zeros(max_num_reqs, dtype=bool)
@@ -182,14 +177,11 @@ class Ascend310PSampler:
         if allowed_token_ids:
             self._allowed_token_ids[req_idx] = list(allowed_token_ids)
             self._use_allowed[req_idx] = True
-            if self.vocab_size > 0:
-                self._materialize_allowed_mask(req_idx)
         else:
             self._allowed_token_ids.pop(req_idx, None)
             self._use_allowed[req_idx] = False
-            if self._allowed_mask is not None:
-                self._allowed_mask[req_idx].fill_(False)
 
+        self.logit_bias_state.invalidate()
         logit_bias = getattr(sampling_params, "logit_bias", None)
         if logit_bias:
             self._logit_bias[req_idx] = {int(k): float(v) for k, v in logit_bias.items()}
@@ -256,26 +248,6 @@ class Ascend310PSampler:
         self._top_k_np[unset] = self.vocab_size
         self.top_k_cpu[unset] = self.vocab_size
         self.sampling_states.top_k.gpu[unset] = self.vocab_size
-        for req_idx in list(self._allowed_token_ids):
-            self._materialize_allowed_mask(req_idx)
-
-    def _ensure_allowed_mask(self) -> torch.Tensor:
-        if self._allowed_mask is None:
-            if self.vocab_size <= 0:
-                raise RuntimeError("allowed_token_ids requires vocab_size before apply.")
-            self._allowed_mask = torch.zeros(
-                self.max_num_reqs,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-        return self._allowed_mask
-
-    def _materialize_allowed_mask(self, req_idx: int) -> None:
-        allowed = self._allowed_token_ids.get(req_idx)
-        if not allowed:
-            return
-        materialize_allowed_mask(self._ensure_allowed_mask(), req_idx, allowed, self.vocab_size)
 
     def _batch_needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
         temp = self._temperature_np[idx_mapping_np]
@@ -331,36 +303,6 @@ class Ascend310PSampler:
             self.sampling_states.repetition_penalty.gpu[expanded_idx_mapping],
         )
 
-    def _apply_allowed_token_ids(
-        self,
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
-    ) -> None:
-        if not np.any(self._use_allowed[idx_mapping_np]):
-            return
-        for req_idx in np.unique(idx_mapping_np):
-            req_idx = int(req_idx)
-            if req_idx >= 0 and self._use_allowed[req_idx] and req_idx in self._allowed_token_ids:
-                self._materialize_allowed_mask(req_idx)
-        assert self._allowed_mask is not None
-        apply_allowed_token_ids(logits, self._allowed_mask, expanded_idx_mapping)
-
-    def _apply_logit_bias(
-        self,
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
-    ) -> None:
-        if not np.any(self._use_logit_bias[idx_mapping_np]):
-            return
-        apply_logit_bias(
-            logits,
-            expanded_idx_mapping,
-            logit_bias=self._logit_bias,
-            use_logit_bias=self._use_logit_bias,
-        )
-
     def _apply_bad_words(
         self,
         logits: torch.Tensor,
@@ -392,8 +334,8 @@ class Ascend310PSampler:
         expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Allowed → logit_bias → bad_words → penalties → temp → min_p → top-k/p."""
-        self._apply_allowed_token_ids(logits, expanded_idx_mapping, idx_mapping_np)
-        self._apply_logit_bias(logits, expanded_idx_mapping, idx_mapping_np)
+        if np.any(self._use_allowed[idx_mapping_np] | self._use_logit_bias[idx_mapping_np]):
+            self.logit_bias_state.apply(logits, expanded_idx_mapping, self._allowed_token_ids, self._logit_bias)
         self._apply_bad_words(
             logits,
             expanded_idx_mapping,
@@ -464,8 +406,6 @@ class Ascend310PSampler:
         idx_mapping_np = input_batch.idx_mapping_np
         num_reqs = input_batch.num_reqs
         input_ids = getattr(input_batch, "input_ids", None)
-        if input_ids is not None:
-            input_ids = input_ids[input_batch.logits_indices]
         expanded_local_pos = getattr(input_batch, "expanded_local_pos", None)
         max_num_logprobs = self._batch_max_num_logprobs(idx_mapping_np)
         # Gather logprobs from raw logits before any post-process masking.

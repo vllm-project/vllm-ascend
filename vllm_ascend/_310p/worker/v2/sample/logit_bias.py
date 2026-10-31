@@ -1,28 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Triton-free logit_bias."""
+"""Stage 310P whitelist/bias state for the upstream sampling helper."""
 
-from __future__ import annotations
-
-import numpy as np
 import torch
+from vllm.v1.worker.gpu.sample.logit_bias import apply_logit_bias
 
 
-def apply_logit_bias(
-    logits: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    *,
-    logit_bias: dict[int, dict[int, float]],
-    use_logit_bias: np.ndarray,
-) -> None:
-    expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
-    for row_idx, req_idx in enumerate(expanded_np.tolist()):
-        req_idx = int(req_idx)
-        if req_idx < 0 or not bool(use_logit_bias[req_idx]):
-            continue
-        bias_map = logit_bias.get(req_idx)
-        if not bias_map:
-            continue
-        for token_id, bias in bias_map.items():
-            if 0 <= token_id < logits.shape[-1]:
-                logits[row_idx, token_id] += bias
+class LogitBiasState310:
+    def __init__(self, max_num_reqs: int, device: torch.device):
+        self.max_num_reqs = max_num_reqs
+        self.device = device
+        self._staged: tuple[torch.Tensor, ...] | None = None
+        self._zeros = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+
+    def invalidate(self) -> None:
+        self._staged = None
+
+    def apply(self, logits, expanded_idx_mapping, allowed_token_ids, logit_bias) -> None:
+        if self._staged is None:
+            allowed_width = max((len(ids) for ids in allowed_token_ids.values()), default=1)
+            bias_width = max((len(bias) for bias in logit_bias.values()), default=1)
+            allowed = torch.zeros((self.max_num_reqs, allowed_width), dtype=torch.int32)
+            bias_ids = torch.zeros((self.max_num_reqs, bias_width), dtype=torch.int32)
+            biases = torch.zeros((self.max_num_reqs, bias_width), dtype=torch.float32)
+            num_allowed = torch.zeros(self.max_num_reqs, dtype=torch.int32)
+            num_bias = torch.zeros_like(num_allowed)
+            for req_idx, ids in allowed_token_ids.items():
+                num_allowed[req_idx] = len(ids)
+                allowed[req_idx, : len(ids)] = torch.tensor(ids, dtype=torch.int32)
+            for req_idx, bias in logit_bias.items():
+                num_bias[req_idx] = len(bias)
+                bias_ids[req_idx, : len(bias)] = torch.tensor(list(bias), dtype=torch.int32)
+                biases[req_idx, : len(bias)] = torch.tensor(list(bias.values()), dtype=torch.float32)
+            self._staged = tuple(t.to(self.device) for t in (num_allowed, allowed, num_bias, bias_ids, biases))
+        num_allowed, allowed, num_bias, bias_ids, biases = self._staged
+        # min_tokens is outside this PR's scope. Supply neutral state to the
+        # shared upstream helper rather than changing its kernel contract.
+        zeros = self._zeros
+        # Positions are unused when all stop-token counts are zero.
+        positions = expanded_idx_mapping
+        stop_ids = zeros.unsqueeze(-1)
+        apply_logit_bias(
+            logits,
+            expanded_idx_mapping,
+            positions,
+            num_allowed,
+            allowed,
+            num_bias,
+            bias_ids,
+            biases,
+            zeros,
+            zeros,
+            zeros,
+            stop_ids,
+        )
