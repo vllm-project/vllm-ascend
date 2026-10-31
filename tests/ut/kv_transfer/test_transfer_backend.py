@@ -24,11 +24,14 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 
 
-def _config(**extra):
+def _config(*, model_config=None, **extra):
     def get_from_extra_config(name, default):
         return extra.get(name, default)
 
-    return SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=get_from_extra_config))
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(get_from_extra_config=get_from_extra_config),
+        model_config=model_config or SimpleNamespace(enable_sleep_mode=False),
+    )
 
 
 class _FakeTransferEngine:
@@ -91,6 +94,31 @@ def test_unknown_backend_is_rejected():
         tb.resolve_transfer_backend(_config(transfer_backend="hccl"))
 
 
+def test_explicit_null_override_falls_back_to_default():
+    assert tb.resolve_transfer_backend(_config(transfer_backend=None)) == tb.BACKEND_MOONCAKE
+    assert tb.resolve_mooncake_protocol(_config(transfer_protocol=None)) == DEFAULT_TRANSFER_PROTOCOL
+
+
+def test_missing_kv_transfer_config_uses_defaults():
+    config = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(enable_sleep_mode=False))
+    assert tb.resolve_transfer_backend(config) == tb.BACKEND_MOONCAKE
+    assert tb.resolve_mooncake_protocol(config) == DEFAULT_TRANSFER_PROTOCOL
+
+
+def test_memfabric_rejects_sleep_mode(monkeypatch):
+    """Sleep/wake only unregisters buffers through GlobalTE, so a MemFabric
+    selection must fail loudly instead of keeping stale registered addresses."""
+    monkeypatch.setattr(tb, "global_memfabric_te", _BoomTE())
+
+    with pytest.raises(ValueError, match="sleep mode"):
+        tb.build_transfer_engine(
+            _config(transfer_backend="memfabric", model_config=SimpleNamespace(enable_sleep_mode=True)),
+            "10.0.0.1",
+            device_name=None,
+            kv_role="kv_producer",
+        )
+
+
 # --- regressions the factory is meant to prevent ------------------------------
 
 
@@ -127,10 +155,9 @@ def test_connector_uses_the_backend_factory():
     from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_connector
 
     assert mooncake_connector.build_transfer_engine is tb.build_transfer_engine
-    # The connector still exposes the shared registry so existing tests and any
-    # future call site patch one object, but it is passed explicitly instead of
-    # being reached through a module global inside the factory.
-    assert mooncake_connector.global_te is tb.global_te
+    # The shared registry belongs to the factory module now; the connector no
+    # longer imports it, so a future call site cannot reach the engine directly.
+    assert not hasattr(mooncake_connector, "global_te")
 
 
 def test_mooncake_only_connectors_reject_memfabric():
@@ -267,3 +294,10 @@ def test_conflicting_protocol_is_rejected(fake_mooncake):
 
     with pytest.raises(RuntimeError, match="already initialized with protocol 'ascend'"):
         registry_holder.get_transfer_engine("10.0.0.1", device_name=None, protocol="ascend_direct")
+
+
+def test_blank_protocol_resolves_to_the_default_instead_of_conflicting(fake_mooncake):
+    registry_holder = GlobalTE()
+    first = registry_holder.get_transfer_engine("10.0.0.1", device_name=None, protocol="ascend")
+
+    assert registry_holder.get_transfer_engine("10.0.0.1", device_name=None, protocol="") is first

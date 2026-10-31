@@ -59,7 +59,6 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.transfer_backend import build_transfer_engine
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -2230,7 +2229,6 @@ class MooncakeConnectorWorker:
             self.side_channel_host,
             device_name=device_name,
             kv_role=self.kv_role,
-            mooncake_registry=global_te,
         )
         self.te_rpc_port = self.engine.get_rpc_port()
 

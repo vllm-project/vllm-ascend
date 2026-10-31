@@ -5,9 +5,11 @@
 The dense connector used to talk to the Mooncake transfer engine only, and that
 engine was always initialized with one hardcoded transport. MemFabric exposes
 the same surface the connector needs (``batch_transfer_sync_read``,
-``register_memory``, ``get_rpc_port``) but moves device memory through SDMA
-instead of the Mooncake Ascend transport's ``aclrtMemcpy`` staging, which on a
-same-host prefill/decode pair is several times faster.
+``register_memory``, ``get_rpc_port``) but moves registered device memory through
+SDMA instead of the Mooncake Ascend transport's ``aclrtMemcpy`` staging. The
+measured effect is a shorter prefill-side post-prefill wait, not a higher bulk
+transfer rate: the connector is pull-only and the TP ranks share one
+interconnect.
 
 Which engine a machine can actually use depends on the interconnect (RoCE or
 fabric memory availability), not on the model, so the choice is a launch
@@ -45,14 +47,12 @@ VALID_TRANSFER_BACKENDS = (BACKEND_MOONCAKE, BACKEND_MEMFABRIC)
 
 
 def _extra_config(vllm_config: VllmConfig, key: str, default: Any) -> Any:
-    """Read one extra-config key, tolerating the stubs unit tests build.
-
-    Real deployments always go through ``KVTransferConfig``; test doubles often
-    only carry the fields a case needs. An explicit ``None`` also means "not
-    set", otherwise ``str(None)`` would reach the native engine as a value.
-    """
-    getter = getattr(vllm_config.kv_transfer_config, "get_from_extra_config", None)
-    value = default if getter is None else getter(key, default)
+    """Read one extra-config key. An explicit ``None`` means "not set"."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    getter = getattr(kv_transfer_config, "get_from_extra_config", None)
+    if getter is None:
+        return default
+    value = getter(key, default)
     return default if value is None else value
 
 
@@ -103,12 +103,20 @@ def ensure_mooncake_backend(vllm_config: VllmConfig, connector: str) -> None:
         )
 
 
+def _sleep_mode_enabled(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    return bool(getattr(model_config, "enable_sleep_mode", False))
+
+
+def _log_backend(backend: str, role: str, protocol: Any) -> None:
+    logger.info("KV transfer backend: backend=%s role=%s protocol=%s", backend, role, protocol)
+
+
 def build_transfer_engine(
     vllm_config: VllmConfig,
     hostname: str,
     device_name: str | None,
     kv_role: str,
-    mooncake_registry: Any | None = None,
 ) -> tuple[Any, Any]:
     """Initialize the configured backend.
 
@@ -119,14 +127,18 @@ def build_transfer_engine(
     """
     backend = resolve_transfer_backend(vllm_config)
     if backend == BACKEND_MEMFABRIC:
+        # The worker's sleep/wake path only unregisters and re-registers buffers
+        # through GlobalTE. MemFabric has no such pair yet, so a level-2 wake
+        # would leave the engine pointing at released KV memory.
+        if _sleep_mode_enabled(vllm_config):
+            raise ValueError(
+                "transfer_backend='memfabric' does not support sleep mode yet: "
+                "GlobalMemfabricTE has no unregister/re-register path, so KV buffers "
+                "would stay registered across a sleep/wake cycle."
+            )
         role = _memfabric_role(kv_role)
         protocol = _extra_config(vllm_config, "memfabric_transfer_protocol", None)
-        logger.info(
-            "KV transfer backend: backend=%s role=%s protocol=%s",
-            backend,
-            role,
-            protocol or "sdma (MemFabric default)",
-        )
+        _log_backend(backend, role, protocol or "sdma (MemFabric default)")
         # MemFabric binds its process-wide engine to one role/device/protocol, so
         # it has to be configured before the first get_transfer_engine() call.
         global_memfabric_te.configure(
@@ -137,15 +149,8 @@ def build_transfer_engine(
         return global_memfabric_te, global_memfabric_te.get_transfer_engine(hostname)
 
     protocol = resolve_mooncake_protocol(vllm_config)
-    logger.info(
-        "KV transfer backend: backend=%s role=%s protocol=%s",
-        backend,
-        kv_role,
-        protocol,
-    )
-    # Bind late: callers (and tests) may replace the module-level singleton.
-    registry = global_te if mooncake_registry is None else mooncake_registry
-    return registry, registry.get_transfer_engine(
+    _log_backend(backend, kv_role, protocol)
+    return global_te, global_te.get_transfer_engine(
         hostname,
         device_name=device_name,
         protocol=protocol,
