@@ -43,6 +43,8 @@ class RejectionSampler310V2(RejectionSampler):
         spec_config: SpeculativeConfig,
         device: torch.device,
     ) -> None:
+        if getattr(spec_config, "draft_sample_method", "greedy") != "greedy":
+            raise NotImplementedError("310P MRV2 MTP requires greedy drafts; probabilistic drafts are not supported.")
         super().__init__(sampler, spec_config, device)
         max_num_reqs = sampler.max_num_reqs
         self.device = device
@@ -86,9 +88,11 @@ class RejectionSampler310V2(RejectionSampler):
         sampled_cpu = sampled.detach().to("cpu")
         row_indices: list[int] = []
         token_ids: list[int] = []
+        cu_num_generated_tokens = [0]
         for req_idx in range(num_reqs):
             n = int(num_sampled_np[req_idx])
             if n <= 0:
+                cu_num_generated_tokens.append(len(token_ids))
                 continue
             start = int(cu_num_logits_np[req_idx])
             for pos in range(n):
@@ -97,12 +101,13 @@ class RejectionSampler310V2(RejectionSampler):
                     break
                 row_indices.append(start + pos)
                 token_ids.append(tok)
+            cu_num_generated_tokens.append(len(token_ids))
         if not token_ids:
             return None
         rows = torch.tensor(row_indices, device=logits.device, dtype=torch.int64)
         tokens = torch.tensor(token_ids, device=logits.device, dtype=torch.int32)
         raw = torch.log_softmax(logits.index_select(0, rows), dim=-1, dtype=torch.float32)
-        return gather_logprobs(raw, max_num_logprobs, tokens)
+        return gather_logprobs(raw, max_num_logprobs, tokens, cu_num_generated_tokens)
 
     def __call__(
         self,
@@ -113,12 +118,16 @@ class RejectionSampler310V2(RejectionSampler):
         del draft_logits
         num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
+        if np.any(self.sampler._min_p_np[idx_mapping_np] != 0.0) or np.any(
+            self.sampler._use_logit_bias[idx_mapping_np]
+        ):
+            raise NotImplementedError("310P MRV2 MTP does not support min_p or logit_bias.")
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         processed = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
-            input_ids=getattr(input_batch, "input_ids", None),
+            input_ids=input_batch.input_ids[input_batch.logits_indices],
             expanded_local_pos=getattr(input_batch, "expanded_local_pos", None),
         )
 

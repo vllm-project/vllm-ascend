@@ -41,10 +41,6 @@ from vllm_ascend._310p.worker.v2.sample_utils import (
     _random_sample_310p,
 )
 
-# UT / callers may still import these historical names.
-_apply_temperature_pytorch = apply_temperature
-_apply_min_p_pytorch = apply_min_p
-
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
 _SAMPLING_EPS = 1e-5
@@ -166,10 +162,6 @@ class Ascend310PSampler:
         temperature = float(sampling_params.temperature)
         top_p = float(sampling_params.top_p)
         top_k = int(sampling_params.top_k)
-        min_p = float(sampling_params.min_p)
-        repetition_penalty = float(sampling_params.repetition_penalty)
-        frequency_penalty = float(sampling_params.frequency_penalty)
-        presence_penalty = float(sampling_params.presence_penalty)
         if self.vocab_size <= 0:
             # Late-bind from logits on first sample if caller omitted vocab_size.
             vocab_size = max(top_k, 1)
@@ -181,18 +173,10 @@ class Ascend310PSampler:
         self._temperature_np[req_idx] = temperature
         self._top_p_np[req_idx] = top_p
         self._top_k_np[req_idx] = top_k
-        self._min_p_np[req_idx] = min_p
-        self._repetition_penalty_np[req_idx] = repetition_penalty
-        self._frequency_penalty_np[req_idx] = frequency_penalty
-        self._presence_penalty_np[req_idx] = presence_penalty
-        self._use_penalty[req_idx] = use_penalty(sampling_params)
         self.temperature_cpu[req_idx] = temperature
         self.top_p_cpu[req_idx] = top_p
         self.top_k_cpu[req_idx] = top_k
-        self.min_p_cpu[req_idx] = min_p
-        self.repetition_penalty_cpu[req_idx] = repetition_penalty
-        self.frequency_penalty_cpu[req_idx] = frequency_penalty
-        self.presence_penalty_cpu[req_idx] = presence_penalty
+        self._stage_postprocess_params(req_idx, sampling_params)
 
         allowed_token_ids = getattr(sampling_params, "allowed_token_ids", None)
         if allowed_token_ids:
@@ -238,6 +222,18 @@ class Ascend310PSampler:
         else:
             self._source_generators.pop(req_idx, None)
 
+    def _stage_postprocess_params(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        """Keep CPU and NumPy post-processing state consistent on slot reuse."""
+        for name in ("min_p", "repetition_penalty", "frequency_penalty", "presence_penalty"):
+            value = float(getattr(sampling_params, name))
+            getattr(self, f"_{name}_np")[req_idx] = value
+            getattr(self, f"{name}_cpu")[req_idx] = value
+        self._use_penalty[req_idx] = use_penalty(sampling_params)
+
+    def _copy_postprocess_params_to_device(self) -> None:
+        for name in ("min_p", "repetition_penalty", "frequency_penalty", "presence_penalty"):
+            getattr(self.sampling_states, name).gpu.copy_(getattr(self, f"{name}_cpu"), non_blocking=True)
+
     def apply_staged_writes(self) -> None:
         if not self._sampling_state_dirty:
             return
@@ -247,10 +243,7 @@ class Ascend310PSampler:
         self.sampling_states.seeds.gpu.copy_(self.seeds_cpu, non_blocking=True)
         self.sampling_states.top_k.gpu.copy_(self.top_k_cpu, non_blocking=True)
         self.sampling_states.top_p.gpu.copy_(self.top_p_cpu, non_blocking=True)
-        self.sampling_states.min_p.gpu.copy_(self.min_p_cpu, non_blocking=True)
-        self.sampling_states.repetition_penalty.gpu.copy_(self.repetition_penalty_cpu, non_blocking=True)
-        self.sampling_states.frequency_penalty.gpu.copy_(self.frequency_penalty_cpu, non_blocking=True)
-        self.sampling_states.presence_penalty.gpu.copy_(self.presence_penalty_cpu, non_blocking=True)
+        self._copy_postprocess_params_to_device()
         self._sampling_state_dirty = False
 
     def _maybe_bind_vocab_size(self, vocab_size: int) -> None:
@@ -471,6 +464,8 @@ class Ascend310PSampler:
         idx_mapping_np = input_batch.idx_mapping_np
         num_reqs = input_batch.num_reqs
         input_ids = getattr(input_batch, "input_ids", None)
+        if input_ids is not None:
+            input_ids = input_ids[input_batch.logits_indices]
         expanded_local_pos = getattr(input_batch, "expanded_local_pos", None)
         max_num_logprobs = self._batch_max_num_logprobs(idx_mapping_np)
         # Gather logprobs from raw logits before any post-process masking.

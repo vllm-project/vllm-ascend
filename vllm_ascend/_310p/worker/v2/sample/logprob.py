@@ -13,6 +13,7 @@ def gather_logprobs(
     logprobs: torch.Tensor,
     num_logprobs: int,
     token_ids: torch.Tensor,
+    cu_num_generated_tokens: list[int] | None = None,
 ) -> LogprobsTensors:
     token_ids_i64 = token_ids.to(torch.int64).view(-1, 1)
     token_logprobs = logprobs.gather(-1, token_ids_i64)
@@ -24,4 +25,4 @@ def gather_logprobs(
     else:
         indices = token_ids_i64.to(torch.int32)
         values = token_logprobs
-    return LogprobsTensors(indices, values, token_ranks)
+    return LogprobsTensors(indices, values, token_ranks, cu_num_generated_tokens=cu_num_generated_tokens)
