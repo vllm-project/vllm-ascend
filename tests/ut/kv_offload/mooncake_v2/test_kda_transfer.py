@@ -77,7 +77,7 @@ def state_bytes(meta, rank):
 @pytest.mark.parametrize("mode", ["none", "align"])
 @pytest.mark.parametrize(
     ("p_tp", "p_pcp", "d_tp"),
-    [(1, 1, 8), (1, 8, 1), (1, 8, 2), (1, 8, 8), (2, 4, 1), (2, 4, 8), (4, 2, 1), (8, 1, 2), (2, 1, 2)],
+    [(1, 1, 8), (1, 8, 1), (1, 8, 2), (1, 8, 8), (2, 2, 1), (2, 4, 1), (2, 4, 8), (4, 2, 1), (8, 1, 2), (2, 1, 2)],
 )
 def test_native_pcp_to_recoverssm_reconstructs_exact_state(layout, mode, p_tp, p_pcp, d_tp):
     local, remote = (
