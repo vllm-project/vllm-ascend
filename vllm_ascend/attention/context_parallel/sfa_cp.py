@@ -32,7 +32,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    SFAForwardContext,
     _view_cache_as_operator_pages,
     needs_pcp_kv_gather,
 )
@@ -124,19 +123,8 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         with self._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        context = super()._get_parallel_forward_context(
-            attn_metadata,
-            num_input_tokens,
-            hidden_states,
-        )
+    def _prepare_o_proj_weights(self) -> None:
         self._parallel_o_proj.all_gather_weights()
-        return context
 
     def _finalize_o_proj(self, attn_output: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         return self._parallel_o_proj.forward(attn_output, output)
@@ -1025,7 +1013,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             tp_group = get_tp_group()
             tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
             return torch.ops.vllm.dcp_a2a_fused(
-                sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
+                sfa_output, softmax_lse, tp_size, tp_group.unique_name, pcp_group.unique_name
             )
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
@@ -1033,7 +1021,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sfa_output,
             softmax_lse,
             self.dcp_size,
-            1,
             self.dcp_group.unique_name,
         )
 

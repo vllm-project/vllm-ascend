@@ -917,7 +917,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
-            scatter_dim=1,
             local_output=current_output,
             local_lse=current_lse,
         )

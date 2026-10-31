@@ -64,7 +64,7 @@ def test_output_exchange_uses_sfa_tp_and_pcp_groups(tp_size, pcp_size, defer):
         assert impl._merge_dcp_attention_output(out, lse, defer_combine=defer) is result
     args = exchange.call_args.args
     assert args[0] is out and args[1] is lse
-    assert args[2:] == (tp_size, 1, "tp", "pcp")
+    assert args[2:] == (tp_size, "tp", "pcp")
     assert exchange.call_args.kwargs == {"defer_combine": defer}
 
 

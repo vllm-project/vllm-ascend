@@ -56,8 +56,8 @@ class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
 
     Carries everything the indexer kernels need from the engine: the paged
-    cache view (block table, slot mapping), the rope tables, the parallel
-    sequence lengths, and the LI C8 reshape-optim fields. All fields are
+    cache view (block table, slot mapping), the rope tables, and sequence
+    lengths. All fields are
     derived from common attention metadata by the indexer's own builder.
     """
 
@@ -72,10 +72,6 @@ class AscendSFAIndexerMetadata:
     sin: torch.Tensor
     cos: torch.Tensor
     block_size: int = 0
-    # Parallel-layout sequence lengths consumed by the top-k kernel. Base/PCP
-    # modes use the unsharded values.
-    actual_seq_lengths_query: torch.Tensor | None = None
-    actual_seq_lengths_key: torch.Tensor | None = None
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
@@ -102,8 +98,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     The SFA indexer cache is represented as its own AttentionLayerBase so the
     KV-cache planner can assign an independent physical tensor while sharing
     block ids with the main MLA cache group. Its builder constructs the
-    metadata the indexer forward consumes (paged cache view, rope tables,
-    LI C8 reshape-optim fields, RoPE, and parallel-layout values). SFA only
+    metadata the indexer forward consumes (paged cache view, RoPE tables,
+    and parallel-layout values). SFA only
     consumes the completed indexer metadata during its forward.
 
     Do not reuse AscendSFAMetadataBuilder here. It inherits vLLM's
@@ -443,8 +439,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
-        assert indexer_metadata.actual_seq_lengths_query is not None
-        assert indexer_metadata.actual_seq_lengths_key is not None
 
         if hidden_states is k_hidden_states:
             # The k path already ran wk_weights_proj on these hidden states
@@ -514,8 +508,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,
-            indexer_metadata.actual_seq_lengths_query,
-            indexer_metadata.actual_seq_lengths_key,
+            indexer_metadata.cum_query_lens,
+            indexer_metadata.seq_lens,
             self.enable_sparse_li_c8,
             self.enable_sparse_li_c4,
             self.use_torch_npu_lightning_indexer,
@@ -553,10 +547,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self._group_metadata_buffers: dict[
-            object,
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        ] = {}
         self._rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
@@ -931,8 +921,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        actual_seq_lengths_query = cum_query_lens
-        actual_seq_lengths_key = seq_lens
         if copy_rope:
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
@@ -960,8 +948,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             sin=sin,
             cos=cos,
             block_size=block_size,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
         )

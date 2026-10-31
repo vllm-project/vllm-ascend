@@ -709,8 +709,8 @@ class TestAscendSFAKPathFusion(TestBase):
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
-            actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
-            actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
+            cum_query_lens=torch.tensor([num_tokens], dtype=torch.int32),
+            seq_lens=torch.tensor([num_tokens], dtype=torch.int32),
         )
 
         k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
@@ -1126,12 +1126,8 @@ class TestAscendSFAImpl(TestBase):
             num_actual_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
-        )
-        context = SimpleNamespace(
-            actual_seq_lengths_query=[1, 2],
-            actual_seq_lengths_key=[1, 2],
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=2,
+            cum_query_lens=[1, 2],
+            seq_lens=[1, 2],
         )
         cases = (
             (PreprocessType.NATIVE, True, False),
@@ -1160,7 +1156,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
-                self.impl._get_parallel_forward_context = lambda *_args: context
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(

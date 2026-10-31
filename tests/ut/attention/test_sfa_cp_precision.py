@@ -57,10 +57,9 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
         actual = impl._merge_dcp_outputs(output, lse)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
+    fused_a2a.assert_called_once_with(output, lse, 2, "dcp:0")
 
 
-@pytest.mark.parametrize("scatter_dim", [0, 1])
 @pytest.mark.parametrize(
     "dtype,return_lse",
     [
@@ -70,14 +69,14 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
         (torch.bfloat16, False),
     ],
 )
-def test_sfa_custom_op_optional_lse_fake_shape(scatter_dim, dtype, return_lse):
+def test_sfa_custom_op_optional_lse_fake_shape(dtype, return_lse):
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     with FakeTensorMode():
         output = torch.empty(48, 96, 512, dtype=dtype)
         lse = torch.empty(48, 96, 1, dtype=torch.float32)
-        merged = torch.ops.vllm.dcp_a2a_fused(output, lse, 16, scatter_dim, "fake-dcp", return_lse=return_lse)
-        expected = (3, 96, 512 + int(return_lse)) if scatter_dim == 0 else (48, 6, 512 + int(return_lse))
+        merged = torch.ops.vllm.dcp_a2a_fused(output, lse, 16, "fake-dcp", return_lse=return_lse)
+        expected = (48, 6, 512 + int(return_lse))
         assert merged.shape == expected
         assert merged.dtype == dtype
         assert merged.device == output.device
@@ -90,10 +89,10 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
     lse = torch.randn(2, 3, 1)
     expected = torch.randn(2, 3, 5)
     with patch.object(kernels, "dcp_a2a_fused_combine", return_value=expected) as combine:
-        actual = kernels.dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
+        actual = kernels.dcp_a2a_fused(output, lse, 1, "", return_lse=True)
     assert actual is expected
     combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False
+        output, lse, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False
     )
 
 
@@ -138,7 +137,7 @@ def test_replicated_pcp_query_heads_and_output_merge(impl_type, dcp_size, total_
         expected = torch.empty_like(q)
         merge.return_value = expected
         assert impl._merge_dcp_outputs(output, lse) is expected
-        merge.assert_called_once_with(output, lse, 4 if dcp_size == 16 else 1, 1, "tp:0", "pcp:0")
+        merge.assert_called_once_with(output, lse, 4 if dcp_size == 16 else 1, "tp:0", "pcp:0")
 
 
 def test_dcp_query_gather_preserves_distinct_head_shards():

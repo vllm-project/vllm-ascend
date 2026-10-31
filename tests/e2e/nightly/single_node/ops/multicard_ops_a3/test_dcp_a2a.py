@@ -48,9 +48,8 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             use_device_communicator=False,
         )
 
-        for scatter_dim in (0, 1):
-            torch.manual_seed(2026 + scatter_dim)
-            num_tokens, num_heads, head_dim = (4, 4, 96) if scatter_dim == 0 else (3, 8, 128)
+        for case_idx, (num_tokens, num_heads, head_dim) in enumerate(((4, 4, 96), (3, 8, 128))):
+            torch.manual_seed(2026 + case_idx)
             sender_outputs = torch.randn(
                 world_size,
                 num_tokens,
@@ -73,24 +72,15 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
                 sender_outputs[rank].contiguous(),
                 sender_lses[rank].contiguous(),
                 world_size,
-                scatter_dim,
                 dcp_group.unique_name,
             )
 
-            if scatter_dim == 0:
-                local_tokens = num_tokens // world_size
-                token_slice = slice(rank * local_tokens, (rank + 1) * local_tokens)
-                expected = _reference_merge(
-                    sender_outputs[:, token_slice],
-                    sender_lses[:, token_slice, :, 0],
-                )
-            else:
-                local_heads = num_heads // world_size
-                head_slice = slice(rank * local_heads, (rank + 1) * local_heads)
-                expected = _reference_merge(
-                    sender_outputs[:, :, head_slice],
-                    sender_lses[:, :, head_slice, 0],
-                )
+            local_heads = num_heads // world_size
+            head_slice = slice(rank * local_heads, (rank + 1) * local_heads)
+            expected = _reference_merge(
+                sender_outputs[:, :, head_slice],
+                sender_lses[:, :, head_slice, 0],
+            )
 
             torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
             # Deferred communication returns all history shards; current KV
@@ -99,7 +89,6 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
                 sender_outputs[rank].float(),
                 sender_lses[rank].contiguous(),
                 world_size,
-                scatter_dim,
                 dcp_group.unique_name,
                 defer_combine=True,
             )
@@ -108,12 +97,11 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             combined = dcp_a2a.fused_dcp_lse_combine(
                 recv,
                 head_dim,
-                scatter_dim,
                 local_output=local,
                 local_lse=local_lse,
             )
-            history = sender_outputs[:, token_slice] if scatter_dim == 0 else sender_outputs[:, :, head_slice]
-            history_lse = sender_lses[:, token_slice] if scatter_dim == 0 else sender_lses[:, :, head_slice]
+            history = sender_outputs[:, :, head_slice]
+            history_lse = sender_lses[:, :, head_slice]
             expected_combined = _reference_merge(
                 torch.cat((history.float(), local.unsqueeze(0))),
                 torch.cat((history_lse, local_lse.unsqueeze(0)))[..., 0],

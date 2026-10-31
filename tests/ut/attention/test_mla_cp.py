@@ -760,10 +760,10 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         assert kwargs["sparse_mode"] == 3
         return current_output, current_lse
 
-    def communicate(out, lse, size, scatter_dim, group_name, pcp_group_name=None, defer_combine=False):
+    def communicate(out, lse, size, group_name, pcp_group_name=None, defer_combine=False):
         assert active[0] == "main"
         assert out is history_output and lse is history_lse
-        assert size == tp_size and scatter_dim == 1 and defer_combine
+        assert size == tp_size and defer_combine
         if pcp_size > 1:
             assert group_name == "tp-test" and pcp_group_name == "pcp-test"
         else:
@@ -772,11 +772,11 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         events.append("history_collective")
         return transferred
 
-    def merge(partials, head_dim, scatter_dim, local_output, local_lse):
+    def merge(partials, head_dim, local_output, local_lse):
         assert active[0] == "main"
         assert events[-1] == ("main_wait", "done")
         assert partials is transferred
-        assert head_dim == 4 and scatter_dim == 1
+        assert head_dim == 4
         assert local_output is current_output and local_lse is current_lse
         events.append("merge")
         # Independent reference counts every history rank and current KV once.

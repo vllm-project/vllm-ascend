@@ -287,7 +287,7 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
     ):
         result = impl._forward_decode_dcp(query, make_metadata(), query, query)
     assert result is query
-    a2a.assert_called_once_with(*history, dcp_size, 1, "group" if dcp_size > 1 else "", defer_combine=True)
+    a2a.assert_called_once_with(*history, dcp_size, "group" if dcp_size > 1 else "", defer_combine=True)
     assert combine.call_args.kwargs["local_output"] is current[0]
     assert combine.call_args.kwargs["local_lse"] is current[1]
     calls = impl._run_dcp_attention.call_args_list
