@@ -18,11 +18,11 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import fill_logprob_token_ids_npu
 
 
 @triton.jit
@@ -131,18 +131,44 @@ def compute_topk_logprobs(
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
 
-    if max_per_req_token_ids != 0:
-        logger.warning_once("Custom logprob_token_ids is not supported yet. Falling back to default logprob_token_ids.")
-
-    logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-    if num_logprobs > 0:
-        topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-        logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
+    if max_per_req_token_ids == 0:
+        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+        if num_logprobs > 0:
+            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+            logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
+        valid_mask = None
+    else:
+        assert logprob_token_ids_state is not None
+        assert expanded_idx_mapping is not None
+        if num_logprobs > 0:
+            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices.to(torch.int32)
+        else:
+            # The fill kernel does not read this pointer when NUM_TOPK is zero.
+            topk_indices = logprob_token_ids_state.token_ids.gpu
+        num_cols = max(num_logprobs, max_per_req_token_ids)
+        logprob_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
+        valid_mask = torch.zeros_like(logprob_token_ids, dtype=torch.bool)
+        fill_logprob_token_ids_npu(
+            logprob_token_ids,
+            logprob_token_ids.stride(0),
+            valid_mask,
+            valid_mask.stride(0),
+            sampled_token_ids,
+            topk_indices,
+            topk_indices.stride(0),
+            expanded_idx_mapping,
+            logprob_token_ids_state.num_token_ids.gpu,
+            logprob_token_ids_state.token_ids.gpu,
+            logprob_token_ids_state.token_ids.gpu.stride(0),
+            NUM_TOPK=num_logprobs,
+            PADDED_COLS=triton.next_power_of_2(num_cols),
+        )
     if logits_mode:
-        # Mirror upstream compute_topk_scores: raw-logit scores, no softmax.
         logprobs = logits.gather(-1, logprob_token_ids).to(torch.float32)
     else:
         logprobs = compute_token_logprobs(logits, logprob_token_ids)
+    if valid_mask is not None:
+        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(
         batch_size,
