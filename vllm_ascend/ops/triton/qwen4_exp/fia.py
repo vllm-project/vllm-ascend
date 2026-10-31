@@ -36,8 +36,7 @@ class QSAFIAMaskWorkspace:
             or update_width > self.max_update_width
         ):
             raise ValueError(
-                f"QSA FIA mask workspace cannot cover rows={rows}, words={mask_words}, "
-                f"updates={update_width}"
+                f"QSA FIA mask workspace cannot cover rows={rows}, words={mask_words}, updates={update_width}"
             )
         storage = self.storage[:storage_size].view(rows, word_stride)
         words = self.words[:mask_size].view(rows, mask_words)
@@ -169,9 +168,7 @@ def build_qsa_fia_mask(
     storage, words, indices, updates, selected = workspace.views(rows, mask_words, update_width)
     word_stride = mask_words + update_width
     word_block = min(QSA_FIA_MASK_WORD_TILE, triton.next_power_of_2(mask_words))
-    _initialize_qsa_mask_words_kernel[(rows,)](
-        storage, mask_words, word_stride, WORD_BLOCK=word_block
-    )
+    _initialize_qsa_mask_words_kernel[(rows,)](storage, mask_words, word_stride, WORD_BLOCK=word_block)
     _prepare_qsa_mask_words_kernel[(rows,)](
         compact_indices,
         visible_lens,
