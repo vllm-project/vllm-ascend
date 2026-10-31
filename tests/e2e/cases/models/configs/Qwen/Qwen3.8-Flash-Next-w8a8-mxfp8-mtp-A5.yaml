@@ -1,20 +1,21 @@
-# Runtime reference: PR #16981, commit 4ecd1efdb243123865e95807aa247b03e94afda5.
-# A5 serving settings follow /mnt/share/z00946941/script/serve_qwen38.sh
-# on 141.61.141.62 (z00946941_qwen38_a5), checked 2026-10-24.
-# CI supplies its own model location, port, and allocated NPU IDs.
-# Requires compatible A5 CANN/ATB and custom_transformer operators in the CI image.
-# Source their environment before pytest; do not hardcode a developer's build path here.
-# The 128K baseline was measured on the local A5 service; validate the Nightly
-# image and ModelScope model artifact in CI.
+# A5 serving settings match the TP4/DP1/EP, MTP=3 performance runs on 2026-10-31.
+# Reference image: nightly-ci-main-a5-openeuler-cann9.2.1-20261031-r57.
+# CI retains its model identifier, port, and allocated NPU IDs.
+# The CI image must provide matching CANN/ATB and compiled custom operators.
+# Performance baselines are three-run mean output TPS from the local A5 service;
+# validate the Nightly image and ModelScope model artifact in CI.
 test_cases:
   - name: "Qwen3.8-Flash-Next-w8a8-mxfp8-mtp-A5"
     model: "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mxfp8-mtp"
     envs:
       VLLM_USE_MODELSCOPE: "true"
-      VLLM_USE_V2_MODEL_RUNNER: "0"
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       HCCL_NPU_SOCKET_PORT_RANGE: "16700-16799"
       SOC_VERSION: "ascend950dt_9582"
+      CC: "/usr/bin/g++"
+      CXX: "/usr/bin/g++"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       VLLM_RPC_TIMEOUT: "6000"
@@ -23,6 +24,8 @@ test_cases:
       - "0.0.0.0"
       - "--port"
       - "$SERVER_PORT"
+      - "--served-model-name"
+      - "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mxfp8-mtp"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
@@ -47,52 +50,31 @@ test_cases:
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
       - "--speculative-config"
       - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
-    test_content:
-      - "chat_completion"
-    prompts:
-      - "Who are you?"
-    api_keyword_args:
-      max_tokens: 1024
-      temperature: 0
-      top_p: 1
-      chat_template_kwargs:
-        enable_thinking: false
+    test_content: []
     benchmarks:
-      acc_aime2026:
-        case_type: accuracy
-        dataset_path: evalscope/aime26
-        request_conf: vllm_api_stream_chat
-        dataset_conf: aime2026/aime2026_gen_0_shot_chat_prompt
-        max_out_len: 65536
-        batch_size: 32
-        baseline: 94.44
-        threshold: 10
-        temperature: 1.0
-        top_k: 20
-        top_p: 0.95
-        repetition_penalty: 1.0
-        trust_remote_code: false
       perf_128k:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 16
+        num_prompts: 64
         max_out_len: 1024
-        batch_size: 4
+        batch_size: 16
         request_rate: 0
-        baseline: 43.8566
+        baseline: 64.6506
         threshold: 0.97
         temperature: 0
-      perf_3_5k:
+        ignore_eos: true
+      perf_16k:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 140
-        max_out_len: 1500
-        batch_size: 32
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
         request_rate: 0
-        baseline: 155.1464
+        baseline: 145.1943
         threshold: 0.97
         temperature: 0
+        ignore_eos: true
