@@ -26,9 +26,10 @@ from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, 
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
-from vllm_ascend.utils import create_hccl_pg_options
+from vllm_ascend.utils import create_hccl_pg_options, get_hccl_qos_config
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
+_DEFAULT_WORLD_GROUP_NAME = "default_world"
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +96,53 @@ def _patch_destroy_distributed_environment():
     destroy_fn = _wrap_destroy_distributed_environment(vllm.distributed.parallel_state.destroy_distributed_environment)
     vllm.distributed.parallel_state.destroy_distributed_environment = destroy_fn
     vllm.distributed.destroy_distributed_environment = destroy_fn
+
+
+def _is_hccl_backend(backend: object) -> bool:
+    if backend is None:
+        return False
+    return str(backend).rsplit(".", maxsplit=1)[-1].lower() == "hccl"
+
+
+def _merge_default_world_qos(pg_options: Any) -> Any:
+    """Attach QoS to the default HCCL process group without changing its buffer."""
+    qos_config = get_hccl_qos_config(_DEFAULT_WORLD_GROUP_NAME)
+    if not qos_config:
+        return pg_options
+
+    if pg_options is None:
+        import torch_npu
+
+        pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+
+    hccl_config = dict(getattr(pg_options, "hccl_config", None) or {})
+    hccl_config.setdefault("group_name", _DEFAULT_WORLD_GROUP_NAME)
+    hccl_config.update(qos_config)
+    pg_options.hccl_config = hccl_config
+    return pg_options
+
+
+def _wrap_init_process_group(init_process_group):
+    if getattr(init_process_group, "_default_world_qos_wrapped", False) is True:
+        return init_process_group
+
+    @wraps(init_process_group)
+    def wrapped(*args, **kwargs):
+        backend = kwargs.get("backend", args[0] if args else None)
+        if not _is_hccl_backend(backend):
+            return init_process_group(*args, **kwargs)
+
+        pg_options = _merge_default_world_qos(kwargs.get("pg_options"))
+        if pg_options is not None:
+            kwargs["pg_options"] = pg_options
+        return init_process_group(*args, **kwargs)
+
+    cast(Any, wrapped)._default_world_qos_wrapped = True
+    return wrapped
+
+
+def _patch_init_process_group():
+    torch.distributed.init_process_group = _wrap_init_process_group(torch.distributed.init_process_group)
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
@@ -252,3 +300,4 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
+_patch_init_process_group()
