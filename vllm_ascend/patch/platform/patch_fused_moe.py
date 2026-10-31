@@ -78,7 +78,7 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         return topk_ids
     self._validate_eplb_state()
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
-    if use_allgather_eplb(True):
+    if use_allgather_eplb():
         expert_replica_routing_table = eplb_state.allgather_expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
