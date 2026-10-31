@@ -1,6 +1,7 @@
 # A5 serving settings match the TP4/DP1/EP, MTP=3 performance runs on 2026-10-31.
 # Reference image: nightly-ci-main-a5-openeuler-cann9.2.1-20261031-r57.
-# CI retains its model identifier, port, and allocated NPU IDs.
+# CI supplies the model identifier and port; device visibility is inherited
+# from the runner/container environment without a per-case override.
 # The CI image must provide matching CANN/ATB and compiled custom operators.
 # Performance baselines are three-run mean output TPS from the local A5 service;
 # validate the Nightly image and ModelScope model artifact in CI.
@@ -11,7 +12,6 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       HCCL_NPU_SOCKET_PORT_RANGE: "16700-16799"
       SOC_VERSION: "ascend950dt_9582"
       CC: "/usr/bin/g++"

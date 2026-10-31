@@ -1,5 +1,6 @@
 # A3 serving settings match the TP8/DP1/EP, MTP=3 performance runs on 2026-10-31.
-# CI retains its model identifier, port, and NPU IDs.
+# CI supplies the model identifier and port; device visibility is inherited
+# from the runner/container environment without a per-case override.
 # The CI image must provide the CANN/ATB environment used by that command.
 # Performance baselines are three-run mean output TPS from the local A3 service;
 # validate the Nightly image and ModelScope model artifact in CI.
@@ -10,7 +11,6 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       VLLM_RPC_TIMEOUT: "6000"
