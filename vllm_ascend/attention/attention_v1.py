@@ -42,6 +42,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -65,12 +66,17 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.ops.triton.small_decode_attention import small_decode_attention
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+_SMALL_DECODE_MAX_MODEL_LEN = 1024
+_SMALL_DECODE_QUERY_SHAPE = (1, 16, 128)
+_SMALL_DECODE_CACHE_INNER_SHAPE = (128, 8, 128)
+_SMALL_DECODE_CACHE_INNER_STRIDE = (1024, 128, 1)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -910,6 +916,50 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _can_use_small_decode_attention(self, query, attn_metadata, output) -> bool:
+        # Keep capture-time dispatch independent of the current KV length.
+        # Lengths grow on replay, so gate on the configured context bound.
+        # Larger batches/contexts retain FIA: vector-only attention does not
+        # outperform its cube implementation throughout that regime.
+        return (
+            type(self) is AscendAttentionBackendImpl
+            and query.shape == _SMALL_DECODE_QUERY_SHAPE
+            and get_ascend_config().enable_small_decode_attention
+            and query.dtype == torch.bfloat16
+            and query.is_contiguous()
+            and output.is_contiguous()
+            and output.dtype == query.dtype
+            and attn_metadata.max_query_len == 1
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.causal
+            and attn_metadata.seq_lens_gpu is not None
+            and attn_metadata.block_tables is not None
+            and attn_metadata.seq_lens_gpu.device == query.device
+            and attn_metadata.block_tables.device == query.device
+            and attn_metadata.block_tables.stride(-1) == 1
+            and self.num_kv_heads == _SMALL_DECODE_CACHE_INNER_SHAPE[1]
+            and self.sinks is None
+            and self.alibi_slopes is None
+            and self.sliding_window is None
+            and self.attn_type == AttentionType.DECODER
+            and not self.use_bnsd_kv_cache
+            and not self.enable_c8_quant
+            and not envs_vllm.VLLM_BATCH_INVARIANT
+            and self.vllm_config.model_config.max_model_len <= _SMALL_DECODE_MAX_MODEL_LEN
+            and self.vllm_config.speculative_config is None
+            and self.vllm_config.kv_transfer_config is None
+            and self.kv_sharing_target_layer_name is None
+            and not attn_metadata.uses_pcp_sharded_layout
+            and self.key_cache is not None
+            and self.value_cache is not None
+            and self.key_cache.dtype == query.dtype
+            and self.value_cache.dtype == query.dtype
+            and self.key_cache.shape[1:] == _SMALL_DECODE_CACHE_INNER_SHAPE
+            and self.value_cache.shape[1:] == _SMALL_DECODE_CACHE_INNER_SHAPE
+            and self.key_cache.stride()[1:] == _SMALL_DECODE_CACHE_INNER_STRIDE
+            and self.value_cache.stride()[1:] == _SMALL_DECODE_CACHE_INNER_STRIDE
+        )
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -919,6 +969,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        if self._can_use_small_decode_attention(query, attn_metadata, output):
+            # The kernel consumes persistent device metadata, so graph replay
+            # needs no per-layer host FIA parameter update for this shape.
+            small_decode_attention(
+                query,
+                self.key_cache,
+                self.value_cache,
+                attn_metadata.block_tables,
+                attn_metadata.seq_lens_gpu,
+                self.scale,
+                output,
+            )
+            return output
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
