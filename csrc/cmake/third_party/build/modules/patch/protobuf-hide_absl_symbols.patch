@@ -33,6 +33,25 @@ index f308e1b..09617e0 100644
  
  // ABSL_OPTION_HARDENED
  //
+diff --git a/absl/container/internal/container_memory.h b/absl/container/internal/container_memory.h
+--- a/absl/container/internal/container_memory.h
++++ b/absl/container/internal/container_memory.h
+@@ -18,5 +18,6 @@
+ #include <cassert>
+ #include <cstddef>
++#include <cstdint>
+ #include <cstring>
+ #include <memory>
+ #include <new>
+@@ -63,7 +64,7 @@ void* Allocate(Alloc* alloc, size_t n) {
+   // with the "foo(bar)" syntax.
+   A my_mem_alloc(*alloc);
+   void* p = AT::allocate(my_mem_alloc, (n + sizeof(M) - 1) / sizeof(M));
+-  assert(reinterpret_cast<uintptr_t>(p) % Alignment == 0 &&
++  assert(reinterpret_cast<std::uintptr_t>(p) % Alignment == 0 &&
+          "allocator does not respect alignment");
+   return p;
+ }
 diff --git a/absl/hash/internal/hash.cc b/absl/hash/internal/hash.cc
 index 11451e5..75886d3 100644
 --- a/absl/hash/internal/hash.cc
