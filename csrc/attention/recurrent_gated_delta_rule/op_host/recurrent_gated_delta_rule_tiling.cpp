@@ -42,6 +42,7 @@ const size_t BETA_DIM_NUM = 2;
 const size_t STATE_DIM_NUM = 4;
 const size_t CUSEQLENS_DIM_NUM = 1;
 const size_t SSM_STATE_INDICES_DIM_NUM = 1;
+const size_t SSM_STATE_INDICES_TABLE_DIM_NUM = 2;
 const size_t G_DIM_NUM = 2;
 
 const size_t DIM_0 = 0;
@@ -267,9 +268,20 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckShapeDimAndRelation(const ge
     if (!CheckDim(queryShape, QKV_DIM_NUM, "query") || !CheckDim(keyShape, QKV_DIM_NUM, "key") ||
         !CheckDim(valueShape, QKV_DIM_NUM, "value") || !CheckDim(betaShape, BETA_DIM_NUM, "beta") ||
         !CheckDim(stateShape, STATE_DIM_NUM, "state") ||
-        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths") ||
-        !CheckDim(ssmStateShape, SSM_STATE_INDICES_DIM_NUM, "ssm_state_indices")) {
+        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths")) {
         return ge::GRAPH_FAILED;
+    }
+
+    const size_t stateIndexRank = ssmStateShape.GetDimNum();
+    OP_CHECK_IF(stateIndexRank != SSM_STATE_INDICES_DIM_NUM &&
+                stateIndexRank != SSM_STATE_INDICES_TABLE_DIM_NUM,
+                OP_LOGE(context_->GetNodeName(), "ssm_state_indices must be [T] or [B, W]"),
+                return ge::GRAPH_FAILED);
+    if (stateIndexRank == SSM_STATE_INDICES_TABLE_DIM_NUM) {
+        OP_CHECK_IF(ssmStateShape.GetDim(DIM_0) != cuSeqlensShape.GetDim(DIM_0) - 1 ||
+                    ssmStateShape.GetDim(DIM_1) <= 0 || ssmStateShape.GetDim(DIM_1) > MAX_MTP,
+                    OP_LOGE(context_->GetNodeName(), "Invalid state table batch or width"),
+                    return ge::GRAPH_FAILED);
     }
 
     if (!CheckDimEqual(queryShape, DIM_0, keyShape, DIM_0, "query", "key", "T dimension") ||
@@ -351,6 +363,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::RuleFillTilingShapeData()
     const auto &stateShape = context_->GetInputShape(STATE_INDEX)->GetOriginShape();
     const auto &cuSeqlensShape = context_->GetInputShape(CUSEQLENS_INDEX)->GetOriginShape();
     FillTilingShapeData(queryShape, valueShape, stateShape, cuSeqlensShape);
+    const auto &ssmStateShape = context_->GetInputShape(SSM_STATE_INDICES_INDEX)->GetOriginShape();
+    tilingData_.stateIndicesStride = ssmStateShape.GetDimNum() == SSM_STATE_INDICES_TABLE_DIM_NUM
+        ? ssmStateShape.GetDim(DIM_1) : 0;
     return ge::GRAPH_SUCCESS;
 }
 
