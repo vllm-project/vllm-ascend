@@ -48,6 +48,158 @@ def make_speculator():
     return spec
 
 
+class FakeUvaBufferPool:
+    def __init__(self):
+        self.value = None
+
+    def copy_to_uva(self, value):
+        self.value = np.asarray(value).copy()
+        return torch.from_numpy(self.value)
+
+
+def select_context_suffix_reference(query_start_loc, cu_context_lens, num_context_tokens, keep):
+    indices = torch.zeros(num_context_tokens, dtype=torch.int64)
+    valid = torch.zeros(num_context_tokens, dtype=torch.bool)
+    for req in range(query_start_loc.numel() - 1):
+        begin = int(query_start_loc[req])
+        end = int(query_start_loc[req + 1])
+        dest_begin = int(cu_context_lens[req])
+        rows = torch.arange(max(begin, end - keep), end)
+        indices[dest_begin : dest_begin + rows.numel()] = rows
+        valid[dest_begin : dest_begin + rows.numel()] = True
+    return indices, valid
+
+
+def test_dspark_context_suffix_selection_uses_mrv2_batch(monkeypatch):
+    spec = make_speculator()
+    spec.model = SimpleNamespace(get_draft_context_window=lambda: 128)
+    spec.num_speculative_steps = 5
+    spec.dcp_size = 1
+    spec.pcp_manager = None
+    spec._context_cu_lens = FakeUvaBufferPool()
+    monkeypatch.setattr(shared, "select_context_window_indices", select_context_suffix_reference)
+    context_lens = np.array([6, 348, 1, 29], dtype=np.int32)
+    query_start_loc = torch.from_numpy(np.concatenate(([0], np.cumsum(context_lens))).astype(np.int32))
+    batch = SimpleNamespace(
+        num_tokens=int(context_lens.sum()),
+        num_scheduled_tokens=context_lens,
+        query_start_loc=query_start_loc,
+    )
+
+    selection = spec._select_context_suffix(batch, num_reqs=4, dummy_run=False)
+
+    assert selection is not None
+    indices, valid = selection
+    expected = torch.cat(
+        (
+            torch.arange(0, 6),
+            torch.arange(221, 354),
+            torch.arange(354, 355),
+            torch.arange(355, 384),
+        )
+    )
+    torch.testing.assert_close(indices, expected, atol=0, rtol=0)
+    assert valid.all()
+    np.testing.assert_array_equal(spec._context_cu_lens.value, [0, 6, 139, 140, 169])
+
+
+def test_dspark_context_suffix_selection_skips_packing_for_long_requests(monkeypatch):
+    spec = make_speculator()
+    spec.model = SimpleNamespace(get_draft_context_window=lambda: 128)
+    spec.num_speculative_steps = 5
+    spec.dcp_size = 1
+    spec.pcp_manager = None
+    spec._context_cu_lens = FakeUvaBufferPool()
+    packed_selector = MagicMock()
+    uniform_selector = MagicMock(return_value=(torch.tensor([1]), torch.tensor([True])))
+    monkeypatch.setattr(shared, "select_context_window_indices", packed_selector)
+    monkeypatch.setattr(shared, "select_uniform_context_window_indices", uniform_selector)
+    context_lens = np.array([65536, 65536], dtype=np.int32)
+    batch = SimpleNamespace(
+        num_tokens=int(context_lens.sum()),
+        num_scheduled_tokens=context_lens,
+        query_start_loc=torch.tensor([0, 65536, 131072], dtype=torch.int32),
+    )
+
+    selection = spec._select_context_suffix(batch, num_reqs=2, dummy_run=False)
+
+    assert selection is uniform_selector.return_value
+    uniform_selector.assert_called_once_with(batch.query_start_loc, 2, 133)
+    packed_selector.assert_not_called()
+    assert spec._context_cu_lens.value is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"replicated_pcp": True},
+        {"use_dcp": True},
+        {"dcp_size": 2},
+        {"pcp_manager": object()},
+    ],
+)
+def test_dspark_context_suffix_selection_falls_back_for_parallel_context(monkeypatch, override):
+    spec = make_speculator()
+    spec.model = SimpleNamespace(get_draft_context_window=lambda: 128)
+    spec.num_speculative_steps = 5
+    spec.dcp_size = 1
+    spec.pcp_manager = None
+    spec._context_cu_lens = FakeUvaBufferPool()
+    for name, value in override.items():
+        setattr(spec, name, value)
+    selector = MagicMock()
+    monkeypatch.setattr(shared, "select_context_window_indices", selector)
+    batch = SimpleNamespace(
+        num_tokens=384,
+        num_scheduled_tokens=np.array([384], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 384], dtype=torch.int32),
+    )
+
+    assert spec._select_context_suffix(batch, num_reqs=1, dummy_run=False) is None
+    selector.assert_not_called()
+
+
+def test_dspark_context_suffix_projects_and_stores_only_selected_rows():
+    spec = make_speculator()
+    combine = MagicMock(side_effect=lambda hidden_states: hidden_states + 100)
+    precompute = MagicMock()
+    spec.model = SimpleNamespace(
+        combine_hidden_states=combine,
+        precompute_and_store_context_kv=precompute,
+    )
+    indices = torch.tensor([2, 0, 0], dtype=torch.int64)
+    valid = torch.tensor([True, False, False])
+    spec._context_selection = (indices, valid)
+    spec._compact_context_states = None
+    spec._aux_staging = None
+    aux_hidden_states = [
+        torch.arange(12, dtype=torch.float32).view(6, 2),
+        torch.arange(6, dtype=torch.float32).view(6, 1),
+    ]
+
+    spec._store_hidden_states(6, torch.zeros(6, 3), aux_hidden_states)
+
+    selected = torch.cat([hidden_states.index_select(0, indices) for hidden_states in aux_hidden_states], dim=-1)
+    torch.testing.assert_close(combine.call_args.args[0], selected)
+    torch.testing.assert_close(spec._compact_context_states, selected + 100)
+
+    spec.context_positions = torch.arange(6, dtype=torch.int64) + 10
+    spec._context_slot_mappings = torch.stack(
+        (
+            torch.arange(6, dtype=torch.int32) + 100,
+            torch.arange(6, dtype=torch.int32) + 200,
+        )
+    )
+    spec._layer_group_idx = [1, 0]
+    spec._precompute_context_kv(start=1, end=6)
+
+    states, positions, slots = precompute.call_args.args
+    torch.testing.assert_close(states, selected + 100)
+    torch.testing.assert_close(positions, torch.tensor([12, 10, 10]))
+    torch.testing.assert_close(slots[0], torch.tensor([202, -1, -1], dtype=torch.int32))
+    torch.testing.assert_close(slots[1], torch.tensor([102, -1, -1], dtype=torch.int32))
+
+
 @pytest.mark.parametrize("replicated_pcp", [False, True])
 def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
     spec = make_speculator()
@@ -118,7 +270,13 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
 
 def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
-    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
+
+    def init_base_speculator(self, config, device):
+        self.vllm_config = config
+        self.max_num_reqs = 4
+
+    monkeypatch.setattr(DSparkSpeculator, "__init__", init_base_speculator)
+    monkeypatch.setattr(shared, "UvaBufferPool", lambda *args: FakeUvaBufferPool())
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
     config = SimpleNamespace(
         attention_config=AttentionConfig(),

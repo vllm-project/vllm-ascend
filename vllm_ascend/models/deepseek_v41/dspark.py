@@ -309,6 +309,10 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.dsa_attn.swa_cache_layer.prefix for layer in self.layers.values()]
 
+    def get_draft_context_window(self) -> int:
+        """Target features are consumed only by the draft's sliding-window KV."""
+        return max(layer.self_attn.window_size for layer in self.layers.values())
+
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.main_norm(self.main_proj(aux_hidden_states))
 
@@ -490,6 +494,9 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()
+
+    def get_draft_context_window(self) -> int:
+        return self.model.get_draft_context_window()
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(aux_hidden_states)

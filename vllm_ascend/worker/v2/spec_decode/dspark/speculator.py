@@ -25,6 +25,8 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
@@ -38,6 +40,10 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
+)
+from vllm_ascend.ops.triton.v2.spec_decode.select_context_window import (
+    select_context_window_indices,
+    select_uniform_context_window_indices,
 )
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -71,6 +77,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
         self._init_dcp()
+        self._context_selection: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._compact_context_states: torch.Tensor | None = None
+        self._context_cu_lens = UvaBufferPool(self.max_num_reqs + 1, torch.int64)
 
     def _init_dcp(self) -> None:
         self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -144,6 +153,129 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+
+    def capture(self) -> None:
+        self._context_selection = None
+        self._compact_context_states = None
+        super().capture()
+
+    def _select_context_suffix(
+        self,
+        input_batch: InputBatch,
+        num_reqs: int,
+        dummy_run: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        num_target_tokens = input_batch.num_tokens
+        if (
+            dummy_run
+            or num_reqs == 0
+            or self.replicated_pcp
+            or self.use_dcp
+            or getattr(self, "dcp_size", 1) != 1
+            or getattr(self, "pcp_manager", None) is not None
+            or num_target_tokens <= 2 * num_reqs * (self.num_speculative_steps + 1)
+        ):
+            return None
+
+        model = getattr(self, "model", None)
+        context_window = getattr(model, "get_draft_context_window", None)
+        if context_window is None:
+            return None
+
+        keep = int(context_window()) + self.num_speculative_steps
+        kept_lens = input_batch.num_scheduled_tokens[:num_reqs].clip(max=keep)
+        num_context_tokens = int(kept_lens.sum())
+        if num_target_tokens <= 2 * num_context_tokens:
+            return None
+        if num_context_tokens == num_reqs * keep:
+            return select_uniform_context_window_indices(
+                input_batch.query_start_loc,
+                num_reqs,
+                keep,
+            )
+
+        cu_context_lens = np.empty(num_reqs + 1, dtype=np.int64)
+        cu_context_lens[0] = 0
+        np.cumsum(kept_lens, out=cu_context_lens[1:])
+        return select_context_window_indices(
+            input_batch.query_start_loc,
+            self._context_cu_lens.copy_to_uva(cu_context_lens),
+            num_context_tokens,
+            keep,
+        )
+
+    def _store_hidden_states(
+        self,
+        num_tokens: int,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_graph_tokens: int = 0,
+    ) -> None:
+        if self._context_selection is None:
+            super()._store_hidden_states(
+                num_tokens,
+                last_hidden_states,
+                aux_hidden_states,
+                num_graph_tokens,
+            )
+            return
+
+        start = 0
+        if num_graph_tokens and self._aux_staging is not None:
+            assert aux_hidden_states
+            start = min(num_tokens, num_graph_tokens)
+            torch.cat(
+                [hidden_states[:start] for hidden_states in aux_hidden_states],
+                dim=-1,
+                out=self._aux_staging[:start],
+            )
+        if start == num_tokens:
+            return
+        indices, _ = self._context_selection
+        if aux_hidden_states:
+            self._compact_context_states = self.model.combine_hidden_states(
+                torch.cat(
+                    [hidden_states.index_select(0, indices) for hidden_states in aux_hidden_states],
+                    dim=-1,
+                )
+            )
+        else:
+            self._compact_context_states = last_hidden_states.index_select(0, indices)
+
+    def _precompute_context_kv(
+        self,
+        start: int,
+        end: int,
+        dummy_run: bool = False,
+    ) -> None:
+        if self._compact_context_states is not None:
+            assert self._context_selection is not None and not dummy_run
+            indices, valid = self._context_selection
+            valid = valid & (indices >= start) & (indices < end)
+            context_slot_mappings = cast(
+                torch.Tensor,
+                self._context_slot_mappings,  # type: ignore[has-type]
+            )
+            slots = [
+                torch.where(
+                    valid,
+                    mapping.index_select(0, indices),
+                    PAD_SLOT_ID,
+                )
+                for mapping in context_slot_mappings
+            ]
+            compact_slots = (
+                [slots[group_idx] for group_idx in self._layer_group_idx]
+                if self._layer_group_idx is not None
+                else slots[0]
+            )
+            self.model.precompute_and_store_context_kv(
+                self._compact_context_states,
+                self.context_positions.index_select(0, indices),
+                compact_slots,
+            )
+            return
+        super()._precompute_context_kv(start, end, dummy_run)
 
     @torch.inference_mode()
     def get_draft_context_group_layout(self) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:
@@ -440,6 +572,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        num_reqs = input_batch.num_reqs
+        if dummy_run and sync_state is not None:
+            num_reqs = min(num_reqs, sync_state.num_reqs)
+        self._context_selection = self._select_context_suffix(
+            input_batch,
+            num_reqs,
+            dummy_run,
+        )
+        self._compact_context_states = None
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
