@@ -40,7 +40,7 @@ from .helpers import (
     make_sliding_spec,
     make_transfer_metadata,
 )
-from .test_kda_transfer import geometry, metadata
+from .test_kda_transfer import geometry, metadata, state_bytes
 
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
@@ -1068,6 +1068,96 @@ def test_kda_native_pcp_handoff_submits_only_base_state_with_independent_strides
         40000 + 2 * rst[1]
     ]
     assert lengths == [half_projection_bytes] * 3 + [ll[1] // 2]
+
+
+@pytest.mark.parametrize("dp_rank", range(8))
+def test_kda_pure_dp_decode_reconstructs_full_state_on_every_replica(dp_rank: int) -> None:
+    name = "model.layers.0.linear_attn"
+    local_meta, remote_meta = metadata(recover=True), metadata(4, 2)
+    ls, ll, lst = geometry(local_meta)
+    rs, rl, rst = geometry(remote_meta)
+    local_addrs = [100_000 + dp_rank * 1_000_000 + cache * 10_000 for cache in range(4)]
+    memory = {addr: bytearray([0xA5] * (3 * stride)) for addr, stride in zip(local_addrs, lst)}
+    peer_addrs = {}
+    for pcp in range(2):
+        peer_addrs[pcp] = {}
+        for tp in range(4):
+            bases = [10_000_000 + (tp * 2 + pcp) * 1_000_000 + cache * 10_000 for cache in range(2)]
+            peer_addrs[pcp][tp] = [bases]
+            for addr, stride, state in zip(bases, rst, state_bytes(remote_meta, tp)):
+                memory[addr] = bytearray([0xCC] * (3 * stride))
+                memory[addr][2 * stride : 2 * stride + len(state)] = state
+
+    def locate(addr: int, length: int) -> tuple[bytearray, int]:
+        for base, buffer in memory.items():
+            if base <= addr and addr + length <= base + len(buffer):
+                return buffer, addr - base
+        raise AssertionError(f"Transfer address outside registered memory: {addr}, {length}")
+
+    def read(_session: str, destinations: list[int], sources: list[int], lengths: list[int]) -> int:
+        for dst, src, length in zip(destinations, sources, lengths):
+            destination, offset = locate(dst, length)
+            source, source_offset = locate(src, length)
+            # No duplicate writes or writes outside the persistent state slot.
+            assert destination[offset : offset + length] == bytes([0xA5]) * length
+            destination[offset : offset + length] = source[source_offset : source_offset + length]
+        return 0
+
+    remote = replace(
+        make_pp_metadata(
+            layer_names=[name],
+            block_shapes=[rs],
+            block_lens=[rl],
+            block_strides=[rst],
+            pcp_tp_base_addrs=peer_addrs,
+        ),
+        kda_state_metadata={name: remote_meta},
+    )
+    thread = make_thread(
+        dp_rank=dp_rank,
+        dp_size=8,
+        engine=MagicMock(),
+        layer_names=[name],
+        local_metadata=replace(make_transfer_metadata(layer_names=[name]), kda_state_metadata={name: local_meta}),
+        kv_caches_base_addr=[local_addrs],
+        block_shapes=[ls],
+        block_lens=[ll],
+        block_strides=[lst],
+        kv_cache_specs=[
+            replace(
+                make_mamba_spec(),
+                shapes=tuple(ls),
+                dtypes=(torch.bfloat16, torch.float32, torch.float32, torch.bfloat16),
+            )
+        ],
+    )
+    thread.engine.batch_transfer_sync_read.side_effect = read
+    groups, pairs = thread._build_remote_transfer_layout(
+        make_metadata_groups(tp_size=4, pcp_size=2, pp_metadata=remote)
+    )
+    assert groups == {0: {(0, 0): [[0, 1], [2, 3], [4, 5], [6, 7]]}}
+    assert pairs == {0: [(0, 0)]}
+    for candidates in groups[0][(0, 0)]:
+        # Exercise both PCP replicas. DP rank must never become a head rank.
+        worker = candidates[dp_rank % 2]
+        thread._execute_tp_transfer_bucket(
+            0,
+            worker % 2,
+            worker // 2,
+            2,
+            4,
+            1,
+            remote,
+            {0: {(0, 0): [("request", [1], [2])]}},
+        )
+    assert thread.engine.batch_transfer_sync_read.call_count == 4
+    expected = state_bytes(local_meta, 0)
+    for cache, (addr, stride, length) in enumerate(zip(local_addrs, lst, ll)):
+        untouched = bytearray([0xA5] * (3 * stride))
+        if cache < 2:
+            untouched[stride : stride + length] = expected[cache]
+        # Also verify the other slots, page padding, and RecoverSSM records.
+        assert memory[addr] == untouched
 
 
 def test_kda_handshake_requires_explicit_contract_from_both_sides() -> None:
