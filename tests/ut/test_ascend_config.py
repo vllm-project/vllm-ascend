@@ -1918,6 +1918,39 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sparse_li_c8_empty_selection_warning(self, mock_fix, mock_sparse):
+        cases = (
+            ("int8", "W8A8_DYNAMIC", True),
+            ("int8", "W8A8", True),
+            ("fp8", "FLOAT", True),
+            ("int8", "INT8_DYNAMIC", False),
+            ("fp8", "W8A8_MXFP8", False),
+            ("auto", "W8A8_DYNAMIC", False),
+            ("int8", None, False),
+        )
+        for indexer_dtype, quant_type, should_warn in cases:
+            with self.subTest(indexer_dtype=indexer_dtype, quant_type=quant_type):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.attention_config.indexer_kv_dtype = indexer_dtype
+                vc.quant_config = SimpleNamespace(
+                    quant_description=(
+                        {"model.layers.3.self_attn.indexer.wq_b.weight": quant_type} if quant_type is not None else {}
+                    )
+                )
+                with patch("vllm_ascend.ascend_config.logger.warning") as warning:
+                    config = init_ascend_config(vc)
+                selection_warnings = [
+                    call for call in warning.call_args_list if "no eligible Indexer layers" in str(call.args[0])
+                ]
+                self.assertEqual(len(selection_warnings), int(should_warn))
+                if should_warn:
+                    self.assertTrue(config.enable_sparse_li_c8)
+                    self.assertFalse(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
         # enable_sparse_sfa_c8 is derived from cache_dtype (see

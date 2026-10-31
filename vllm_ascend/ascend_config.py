@@ -891,6 +891,12 @@ class AscendConfig:
             self._sparse_li_c4_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
+        if self.enable_sparse_li_c8 and self._sparse_li_layer_filter_enabled and not self._sparse_li_c8_layer_names:
+            logger.warning(
+                "Lightning Indexer C8 is enabled, but quantization metadata selects no eligible Indexer layers. "
+                "LI C8 will not be used. Check the checkpoint's indexer quantization metadata; "
+                "the supported per-layer quantization types are INT8_DYNAMIC and W8A8_MXFP8."
+            )
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
         # (and `PassConfig.enable_sp`) in both v0.32.0 and verified main.
 
