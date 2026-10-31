@@ -1,0 +1,10 @@
+pr: 20059
+entries:
+  - category: bugfix
+    text: >-
+      DeepSeek V4 and V4.1 tool calls now stream long DSML parameter values as
+      they are generated. Previously the value was buffered until its closing
+      tag arrived, so a client received no bytes for the whole generation and
+      could time out on multi-KB file writes or shell heredocs.
+    model: DeepSeek-V4
+    hardware: [A3]

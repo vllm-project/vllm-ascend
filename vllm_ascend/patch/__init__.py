@@ -66,6 +66,25 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 1a. File: platform/patch_deepseek_dsml_arg_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.engine.parser_engine.ParserEngine._compute_arg_delta`
+#    Why:
+#       DeepSeek V4/V4.1 stream tool arguments as DSML parameters and configure
+#       `arg_structural_chars = {'>'}`. Deltas that contain no '>' are dropped,
+#       so a long `string="true"` value (file body, heredoc, ...) is buffered
+#       until its closing tag arrives. The client receives no bytes for the
+#       whole generation and times out, while the engine keeps decoding.
+#    How:
+#       For the `deepseek_v4` / `deepseek_v41` parser engines only, let
+#       value-body deltas through while holding back a trailing partial tag.
+#       Conversion and prefix bookkeeping are still done by upstream code.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/64196
+#    Future Plan:
+#       Remove this patch once the supported vLLM revision streams long DSML
+#       parameter values (upstream PR #64196).
+#
 # ** 2. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
