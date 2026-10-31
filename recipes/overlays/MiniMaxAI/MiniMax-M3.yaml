@@ -1,0 +1,188 @@
+# Source: https://github.com/vllm-project/vllm-ascend/blob/86add7adfd1194c225fd8880699d5be7a248c3ce/docs/source/tutorials/models/MiniMax-M3.md
+# Extracted with vllm-project/recipes@9ffe8f5da08b1f2ae862464805ebc487529c34d4.
+variants:
+  ascend_bf16:
+    label: BF16 (Ascend A3)
+    precision: bf16
+    vram_minimum_gb: 1025
+    description: Native MiniMaxAI/MiniMax-M3 BF16 on one Atlas 800 A3 node (16x Ascend 910C). Tutorial runs TP8+DP2+EP single-node, TP8 x DP4 over two nodes.
+    supported_hardware:
+      - ascend_910c
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '16'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        install:
+          pip: false
+  ascend_w8a8:
+    model_id: Eco-Tech/MiniMax-M3-w8a8-0626
+    label: W8A8 (Ascend A3)
+    precision: int8
+    vram_minimum_gb: 513
+    description: ModelSlim INT8 W8A8 for one Atlas 800 A3 node (16x Ascend 910C). Tutorial runs TP4+DP4+EP with Eagle3. Requires --quantization ascend; weights come from ModelScope.
+    supported_hardware:
+      - ascend_910c
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--quantization'
+      - ascend
+      - '--api-server-count'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '32768'
+      - '--long-prefill-token-threshold'
+      - '4096'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        install:
+          pip: false
+  ascend_mxfp8:
+    model_id: MiniMaxAI/MiniMax-M3-MXFP8
+    label: MXFP8 (Ascend A5)
+    precision: mxfp8
+    vram_minimum_gb: 513
+    description: NPU MXFP8 (W8A8C8, where C8 is dynamic KV-cache quantization) for one Atlas A5 node (8x Ascend 950DT). Tutorial runs TP4+DP2+EP with Eagle3; requires --quantization mxfp8 and --kv-cache-dtype fp8.
+    supported_hardware:
+      - ascend_950dt_8x
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--dtype'
+      - bfloat16
+      - '--quantization'
+      - mxfp8
+      - '--kv-cache-dtype'
+      - fp8
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--max-num-seqs'
+      - '500'
+      - '--async-scheduling'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+    extra_env:
+      HCCL_BUFFSIZE: '512'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
+        install:
+          pip: false
+meta:
+  hardware:
+    ascend_910c: verified
+    ascend_950dt_8x: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+    extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+hardware_notes:
+  ascend_910c:
+    title: Ascend-specific switches
+    body: Pick ascend_w8a8 or ascend_mxfp8 for quantized serving; ascend_bf16 must not get a --quantization value - its checkpoint is unquantized and forcing a quant method on it fails the load. Shared-expert DP is on for W8A8 and off for BF16; both it and multistream_overlap_shared_expert ride in the variant's single --additional-config. enable_mlapo is not set - the tutorial never passes it and the feature matrix marks MLAPO unavailable on A3. KV pooling is not offered on the KV Offload row for Ascend NPU; the tutorial covers the Mooncake and Memcache backends.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+  ascend_950dt_8x:
+    title: Ascend-specific switches
+    body: This profile is the tutorial's "950DT products" (Atlas A5). Same switches as A3, and enable_mlapo is left unset for the same reason. The tutorial covers the Mooncake and Memcache KV pool backends.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+strategy_hardware:
+  # Single-node TP/TEP/DEP keep the inherited default; only the multi-node forms are opted out.
+  multi_node_tp_dp:
+    npu: supported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+strategy_overrides:
+  multi_node_tp_dp:
+    hardware_overrides:
+      npu:
+        extra_env:
+          HCCL_IF_IP: $LOCAL_IP
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+  multi_node_tp_pp:
+    hardware_overrides:
+      npu:
+        extra_env:
+          HCCL_IF_IP: $LOCAL_IP
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+features:
+  spec_decoding:
+    modes:
+      eagle3:
+        hardware:
+          npu: unsupported
+      eagle3_gqa:
+        hardware:
+          npu: supported
+        hardware_overrides:
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3}'
+          ascend_950dt_8x:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}'
+  encoder_parallel:
+    hardware_overrides:
+      npu:
+        args:
+          - '--mm-encoder-tp-mode'
+          - data
