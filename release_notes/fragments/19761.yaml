@@ -1,0 +1,4 @@
+pr: 19761
+entries:
+  - category: bugfix
+    text: Preserve the previous tensor-parallel patch state when a speculative decoding context exits, including nested and exceptional exits.
