@@ -10,11 +10,6 @@ from vllm.logger import logger
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_graph_params,
-    weak_ref_workspaces,
-)
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
@@ -201,19 +196,15 @@ def torch_npu_graph_wrapper(*args, **kwargs):
     # without adding another upstream monkey patch.
     enable_super_kernel = get_ascend_config().ascend_compilation_config.enable_super_kernel
     graph = args[0] if args else (kwargs.get("cuda_graph") or kwargs.get("graph"))
-    try:
-        with torch.npu.graph(*args, **kwargs), super_kernel_scope("full_model", enable_super_kernel):
-            yield
-        if enable_super_kernel and graph is not None:
-            graph.super_kernel_optimize(
-                optimize_options={
-                    "dcci_after_kernel_end": [".*"],
-                },
-            )
-            logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
-    finally:
-        weak_ref_workspaces(get_graph_params())
-        weak_ref_workspaces(get_draft_graph_params())
+    with torch.npu.graph(*args, **kwargs), super_kernel_scope("full_model", enable_super_kernel):
+        yield
+    if enable_super_kernel and graph is not None:
+        graph.super_kernel_optimize(
+            optimize_options={
+                "dcci_after_kernel_end": [".*"],
+            },
+        )
+        logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
 
 def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:

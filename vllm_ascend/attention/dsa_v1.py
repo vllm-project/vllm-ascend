@@ -2408,18 +2408,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             indexer=indexer_metadata,
         )
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        # dsa does not need to update graph params
-        pass
-
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading
         # dispatcher (only LinearMethodBase subclasses are). The owning model

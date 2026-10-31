@@ -220,28 +220,6 @@ class PagedAttentionGraphParam:
         return iter(self.params)
 
 
-def cache_graph_workspace(
-    graph_params,
-    num_tokens: int,
-    candidate_workspace: torch.Tensor,
-    *,
-    use_max_workspace: bool,
-) -> torch.Tensor:
-    # Most models keep the original first-workspace cache behavior. Models with
-    # mixed attention layer shapes may need the largest workspace for a graph
-    # size because layers can require different FIA workspace sizes.
-    current_workspace = graph_params.workspaces.get(num_tokens)
-    if use_max_workspace:
-        if current_workspace is None or (
-            candidate_workspace.numel() * candidate_workspace.element_size()
-            > current_workspace.numel() * current_workspace.element_size()
-        ):
-            graph_params.workspaces[num_tokens] = candidate_workspace
-    elif current_workspace is None:
-        graph_params.workspaces[num_tokens] = candidate_workspace
-    return graph_params.workspaces[num_tokens]
-
-
 @lru_cache(maxsize=1)
 def needs_layer_aware_fia_graph_replay() -> bool:
     vllm_config = get_current_vllm_config()
