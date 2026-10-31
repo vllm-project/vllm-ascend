@@ -25,15 +25,15 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
         # main renamed the QSA side-cache module and its builder/backend; the
         # release tree still ships qsa_cache.py.
         if vllm_version_is("0.32.0"):
-            from vllm.models.qwen4_exp.common.qsa_cache import (
-                QSAMetadataBuilder as QSAIndexerMetadataBuilder,
-                QSAStateBackend as QSAIndexerBackend,
-            )
+            import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
+
+            QSAIndexerMetadataBuilder = qsa_cache.QSAMetadataBuilder
+            QSAIndexerBackend = qsa_cache.QSAStateBackend
         else:
-            from vllm.models.qwen4_exp.common.qsa_indexer import (
-                QSAIndexerBackend,
-                QSAIndexerMetadataBuilder,
-            )
+            import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+
+            QSAIndexerMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
+            QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
         from vllm.v1.attention.backends.short_conv_attn import (
             PleShortConvAttentionBackend,
             PleShortConvAttentionMetadataBuilder,

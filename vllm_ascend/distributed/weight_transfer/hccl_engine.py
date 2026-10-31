@@ -334,6 +334,16 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             the worker RPC in `_send_update`.
             """
             with torch.npu.device(self.device):
+                if not self.is_sender:
+                    # Non-sender trainer ranks hold no HCCL communicator. They
+                    # still have to replay the source so the trainer-side
+                    # gather (an FSDP `full_tensor()`, say) keeps every rank in
+                    # the collective; only the rank-0 sender ships weights.
+                    source = self.source
+                    if source is not None:
+                        for _ in source.iter_full():
+                            pass
+                    return
                 if self.model_update_group is None:
                     raise RuntimeError("HCCL trainer communicator is not initialized")
                 if src != 0:

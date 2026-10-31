@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -50,9 +51,11 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
-    def supports_batch_sharded_draft_logits(self) -> bool:
-        # NPU draft-logits kernels index the cache by request state.
-        return False
+    if not vllm_version_is("0.32.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

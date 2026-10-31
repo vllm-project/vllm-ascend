@@ -171,7 +171,7 @@ class UvaBufferWrapper:
         self._dirty_prefix_end = 0
         requested_real_uva = is_uva_available()
         if requested_real_uva:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found,import-untyped]  # noqa: F401
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
         view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu) if requested_real_uva else None
         self._use_real_uva = view is not None
@@ -251,7 +251,7 @@ class UvaBufferWrapper:
         ``__setitem__``, so mark the written rows explicitly.
         """
         np.concatenate(chunks, out=self._np[:n], casting="unsafe")
-        self._modified_indices.update(range(n))
+        self._mark_prefix_modified(n)
         return self.uva(n)
 
 
