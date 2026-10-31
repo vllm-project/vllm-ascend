@@ -286,9 +286,6 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
-        if ascend_compilation_config.enable_static_kernel:
-            # Serialized FX artifacts embed the static compilation shape filter.
-            factors["static_kernel_batch_sizes"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
