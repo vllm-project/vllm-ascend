@@ -778,6 +778,39 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
         router._compute_routing(hidden_states, router_logits, torch.int32)
 
 
+def test_hash_router_reuses_global_ids_across_layers(monkeypatch):
+    input_ids = torch.tensor([11, 22, 0, 0], dtype=torch.int64)
+    gather = MagicMock(side_effect=AssertionError("global routing IDs must not be gathered again"))
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            moe_comm_type=MoECommType.ALLGATHER,
+            moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(all_gather_input_ids=gather)),
+        ),
+    )
+    weights = torch.ones(4, 2, dtype=torch.float32)
+    experts = torch.zeros(4, 2, dtype=torch.int32)
+    hash_op = MagicMock(return_value=(weights, experts, None))
+    monkeypatch.setattr(fused_topk_router_module.torch.ops._C_ascend, "moe_gating_top_k_hash", hash_op, raising=False)
+    for _ in range(40):
+        router = AscendFusedTopKRouter(
+            top_k=2,
+            global_num_experts=4,
+            scoring_func="sqrtsoftplus",
+            tid2eid=torch.ones(32, 2, dtype=torch.int32),
+        )
+        router.input_ids_are_global = True
+        actual_weights, actual_experts = router._compute_routing(
+            torch.ones(4, 4, dtype=torch.bfloat16), torch.ones(4, 4), torch.int32, input_ids=input_ids
+        )
+        assert hash_op.call_args.kwargs["input_ids"] is input_ids
+        assert actual_weights is weights
+        assert actual_experts is experts
+    gather.assert_not_called()
+    assert hash_op.call_count == 40
+
+
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
 def test_vision_router_preserves_reference_routing_without_native_vision(monkeypatch, image_sentinel_lo, renormalize):

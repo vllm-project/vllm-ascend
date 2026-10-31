@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -63,6 +64,7 @@ from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
+    prepare_sp_routing_input_ids,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
@@ -102,6 +104,20 @@ from .indexer import DeepseekV41Indexer
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def _can_reuse_routing_input_ids(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    return (
+        parallel.use_sequence_parallel_moe
+        and parallel.data_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and not parallel.use_ubatching
+        and not enable_dsa_cp()
+        # Zero admits the low-token MC2 path in the communication selectors.
+        # If it still selects ALLGATHER, increasing the batch cannot enable MC2.
+        and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
+    )
 
 
 class DeepseekV41MLP(nn.Module):
@@ -997,6 +1013,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.reuse_routing_input_ids = _can_reuse_routing_input_ids(vllm_config)
+        if self.reuse_routing_input_ids:
+            # With no DP/PCP redistribution, every TP rank already has the
+            # complete input IDs. Match the gathered SP row layout once rather
+            # than gathering and normalizing the IDs again in every layer.
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                layer.mlp.experts.router.input_ids_are_global = True
         topology = build_layer_plan(self.config)
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
@@ -1558,7 +1581,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)
+            if self.reuse_routing_input_ids:
+                input_ids = prepare_sp_routing_input_ids(input_ids)
+            else:
+                input_ids = sp_shard(input_ids)
             token_mask = sp_shard(token_mask)
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
