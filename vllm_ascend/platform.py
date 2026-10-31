@@ -1449,7 +1449,7 @@ def _setup_compile_backend(
                 "vllm::mla_forward",
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
-                "vllm::glm5next_kda_forward",
+                "vllm::glm5next_kda_forward_with_output",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
