@@ -5,7 +5,7 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
+import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # type: ignore[import-untyped]  # noqa: F401
 from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as upstream
 
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import _selector_walk_kernel_ascend
