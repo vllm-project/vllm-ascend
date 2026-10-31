@@ -809,6 +809,78 @@ class TestAscendConfig(TestBase):
                 self.assertEqual(ascend_config.enable_shared_expert_dp, enable_shared_expert_dp)
                 self.assertEqual(shared_expert_dp_enabled(), enable_shared_expert_dp)
 
+    def test_pcp_padding_token_budget(self):
+        # Each request is padded up to a multiple of 2 * pcp_size, i.e. at most
+        # 2 * pcp_size - 1 extra tokens, and a step schedules at most max_num_seqs
+        # requests.
+        self.assertEqual(AscendConfig._pcp_padding_token_budget(2, 64), 192)
+        self.assertEqual(AscendConfig._pcp_padding_token_budget(4, 16), 112)
+        self.assertEqual(AscendConfig._pcp_padding_token_budget(1, 256), 256)
+
+    @staticmethod
+    def _pcp_padded_total(scheduled_tokens, pcp_size):
+        num_chunks = 2 * pcp_size
+        return sum(math.ceil(num_tokens / num_chunks) * num_chunks for num_tokens in scheduled_tokens)
+
+    def test_pcp_padding_overflow_before_reservation(self):
+        # vllm-ascend#18518: packing 8192 tokens into [6661, 1531] leaves no room
+        # for the padder, so the padded batch grows past max_num_batched_tokens.
+        self.assertEqual(self._pcp_padded_total([6661, 1531], 2), 8196)
+        self.assertGreater(self._pcp_padded_total([6661, 1531], 2), 8192)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_pcp_reserves_scheduling_budget_for_padding(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        test_vllm_config.scheduler_config.max_num_batched_tokens = 8192
+        test_vllm_config.scheduler_config.max_num_seqs = 64
+
+        init_ascend_config(test_vllm_config)
+
+        # 8192 - (2 * 2 - 1) * 64 = 8000
+        self.assertEqual(test_vllm_config.scheduler_config.max_num_scheduled_tokens, 8000)
+        # The worst-case padding now fits back inside max_num_batched_tokens.
+        budget = test_vllm_config.scheduler_config.max_num_scheduled_tokens
+        padding_budget = AscendConfig._pcp_padding_token_budget(2, 64)
+        self.assertLessEqual(budget + padding_budget, test_vllm_config.scheduler_config.max_num_batched_tokens)
+        self.assertLessEqual(self._pcp_padded_total([6661, 1339], 2), 8192)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_pcp_reservation_keeps_a_lower_user_budget(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        test_vllm_config.scheduler_config.max_num_batched_tokens = 8192
+        test_vllm_config.scheduler_config.max_num_seqs = 64
+        test_vllm_config.scheduler_config.max_num_scheduled_tokens = 4096
+
+        init_ascend_config(test_vllm_config)
+
+        self.assertEqual(test_vllm_config.scheduler_config.max_num_scheduled_tokens, 4096)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_pcp_reservation_raises_when_budget_too_small(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        test_vllm_config.scheduler_config.max_num_batched_tokens = 256
+        test_vllm_config.scheduler_config.max_num_seqs = 128
+
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_no_pcp_reservation_without_pcp(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.scheduler_config.max_num_batched_tokens = 8192
+        test_vllm_config.scheduler_config.max_num_seqs = 64
+
+        init_ascend_config(test_vllm_config)
+
+        self.assertIsNone(test_vllm_config.scheduler_config.max_num_scheduled_tokens)
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):

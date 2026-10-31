@@ -778,6 +778,43 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
+        # PCP padding headroom for the scheduling budget.
+        #
+        # Under prefill context parallelism each request's scheduled tokens are
+        # padded up to a multiple of ``2 * pcp_size`` before being split into
+        # per-rank chunks, and the padded batch has to survive the all-gather
+        # back to ``padded_total`` tokens. If the scheduler packs a step up to
+        # ``max_num_batched_tokens`` and every request then grows by the worst
+        # case padding, the enlarged activation exceeds
+        # ``max_num_batched_tokens`` and the Ascend index kernels report an out
+        # of range index (see vllm-ascend#18518). Reserve that worst-case
+        # padding from the scheduler budget so the padding can never push the
+        # batch over the limit.
+        pcp_size = vc.parallel_config.prefill_context_parallel_size
+        if pcp_size > 1:
+            max_num_batched_tokens = vc.scheduler_config.max_num_batched_tokens
+            padding_budget = self._pcp_padding_token_budget(pcp_size, vc.scheduler_config.max_num_seqs)
+            reserved_budget = max_num_batched_tokens - padding_budget
+            if reserved_budget <= 0:
+                raise ValueError(
+                    "max_num_batched_tokens is too small to reserve the worst-case prefill "
+                    f"context parallel padding: {max_num_batched_tokens} - {padding_budget} <= 0. "
+                    "Increase max_num_batched_tokens, decrease max_num_seqs, or lower "
+                    "--prefill-context-parallel-size."
+                )
+            current_budget = vc.scheduler_config.max_num_scheduled_tokens
+            if current_budget is None or current_budget > reserved_budget:
+                vc.scheduler_config.max_num_scheduled_tokens = reserved_budget
+                logger.warning_once(
+                    "prefill context parallelism (pcp_size=%s) reserves %s tokens of the "
+                    "scheduling budget for worst-case batch padding; capping "
+                    "max_num_scheduled_tokens at %s (max_num_batched_tokens=%s).",
+                    str(pcp_size),
+                    str(padding_budget),
+                    str(reserved_budget),
+                    str(max_num_batched_tokens),
+                )
+
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
@@ -929,6 +966,18 @@ class AscendConfig:
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    @staticmethod
+    def _pcp_padding_token_budget(pcp_size: int, max_num_seqs: int) -> int:
+        """Worst-case extra tokens the PCP batch layout adds per scheduling step.
+
+        Each scheduled request has its tokens padded up to a multiple of
+        ``2 * pcp_size`` (the DualChunkSwap split) before the per-rank chunks
+        are formed, so a single request can gain up to ``2 * pcp_size - 1``
+        tokens. A step can schedule at most ``max_num_seqs`` requests, hence the
+        padding is bounded by ``(2 * pcp_size - 1) * max_num_seqs``.
+        """
+        return (2 * pcp_size - 1) * max_num_seqs
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
