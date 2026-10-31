@@ -203,6 +203,7 @@ def _create_mock_backend_app():
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
+    @app.post("/v1/responses")
     async def handle(req: Request):
         item = queue.pop()
         if item.kind == "json":
@@ -550,3 +551,57 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_responses_review_fixes_over_http(proxy_server, streaming):
+    """Rejected requests must not consume backend scripts; the next valid request does."""
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {
+                "kind": "json",
+                "body": {
+                    "kv_transfer_params": {"do_remote_decode": True},
+                    "usage": {"input_tokens_details": {"cached_tokens": 20}},
+                },
+            }
+        ],
+    )
+    result = {
+        "id": "resp_http",
+        "usage": {
+            "input_tokens": 160,
+            "output_tokens": 17,
+            "total_tokens": 177,
+            "input_tokens_details": {"cached_tokens": 114, "cached_tokens_per_turn": [100, 11, 3]},
+        },
+    }
+    raw = json.dumps({"type": "response.completed", "response": result} if streaming else result).encode()
+    if streaming:
+        raw = b"event: response.completed\ndata: " + raw + b"\n\n"
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": [raw[:19], raw[19:]]}])
+    with httpx.Client(timeout=15) as client:
+        for option, value in (("background", True), ("previous_response_id", "resp_other_instance")):
+            rejected = client.post(
+                f"{proxy_server}/v1/responses",
+                json={"model": MODEL, "input": "hi", "stream": streaming, option: value},
+            )
+            assert rejected.status_code == 400
+            assert rejected.json()["error"]["param"] == option
+        accepted = client.post(
+            f"{proxy_server}/v1/responses",
+            json={"model": MODEL, "input": "hi", "stream": streaming, "background": False},
+        )
+    assert accepted.status_code == 200
+    if streaming:
+        assert accepted.content.startswith(b"event: response.completed\n")
+        actual = json.loads(accepted.content.split(b"data: ", 1)[1])["response"]
+    else:
+        actual = accepted.json()
+    assert actual["id"] == "resp_http"
+    assert actual["usage"]["input_tokens_details"] == {
+        "cached_tokens": 34,
+        "cached_tokens_per_turn": [20, 11, 3],
+    }
+    assert actual["usage"]["total_tokens"] == 177
