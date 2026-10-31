@@ -18,6 +18,8 @@ def worker(monkeypatch):
     worker.model_runner.model.register_buffer("scale", torch.tensor([2.0]))
     worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+    worker.use_v2_model_runner = False
     worker.sleep_wakeup_manager = MagicMock()
     worker.allocator = MagicMock()
     monkeypatch.setattr(worker, "synchronize_device", MagicMock())
@@ -46,6 +48,7 @@ def device_parameters(model, monkeypatch):
         mock = MagicMock()
         mock.is_cpu = False
         mock.detach.return_value.to.side_effect = lambda _, parameter=parameter: parameter.detach().clone()
+        mock.copy_.side_effect = parameter.copy_
         mocks.append((name, mock))
     monkeypatch.setattr(model, "named_parameters", lambda: iter(mocks))
     return dict(mocks)
@@ -116,6 +119,7 @@ def test_level_two_retains_parameters_before_allocator_discards_them(worker, mon
 def test_level_one_keeps_allocator_offload_and_clears_old_backups(worker, monkeypatch):
     worker._sleep_saved_parameters = {"weight": torch.ones(2, 2)}
     worker._sleep_saved_buffers = {"scale": torch.ones(1)}
+    worker._sleep_saved_draft_buffers = {"metadata": torch.ones(1)}
     save = MagicMock()
     monkeypatch.setattr(worker, "_save_sleep_parameters", save)
 
@@ -125,6 +129,7 @@ def test_level_one_keeps_allocator_offload_and_clears_old_backups(worker, monkey
     worker.allocator.sleep.assert_called_once_with(offload_tags=("weights",))
     assert worker._sleep_saved_parameters == {}
     assert worker._sleep_saved_buffers == {}
+    assert worker._sleep_saved_draft_buffers == {}
 
 
 @pytest.mark.parametrize("tags", [None, ["weights"], ["weights", "kv_cache"]])
@@ -177,3 +182,93 @@ def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
 
         assert torch.equal(model.weight, torch.full_like(model.weight, value))
         assert worker._sleep_saved_parameters == {}
+
+
+@pytest.fixture
+def draft(worker):
+    model = torch.nn.Linear(2, 2)
+    model.register_buffer("metadata", torch.tensor([3.0]), persistent=False)
+    model.register_buffer("fused_kv", torch.arange(6.0).reshape(2, 3), persistent=False)
+    model.fused_kv_view = model.fused_kv.view(-1)
+    worker.use_v2_model_runner = True
+    worker.model_runner.get_draft_model = lambda: model
+    return model
+
+
+@pytest.mark.parametrize("tags", [None, ["weights"], ["weights", "kv_cache"]])
+def test_level_two_restores_draft_buffers_after_mapping(worker, draft, tags):
+    worker.model_config.sleep_preserve_parameter_names = []
+    pointer = draft.metadata.data_ptr()
+    fused_pointer = draft.fused_kv.data_ptr()
+
+    def discard(offload_tags):
+        assert torch.equal(worker._sleep_saved_draft_buffers["metadata"], torch.tensor([3.0]))
+        draft.metadata.zero_()
+        draft.fused_kv.zero_()
+
+    worker.allocator.sleep.side_effect = discard
+    worker.sleep(level=2)
+    worker.wake_up(tags=tags)
+    assert draft.metadata.data_ptr() == pointer
+    torch.testing.assert_close(draft.metadata, torch.tensor([3.0]))
+    assert draft.fused_kv.data_ptr() == fused_pointer
+    torch.testing.assert_close(draft.fused_kv_view, torch.arange(6.0))
+    assert worker._sleep_saved_draft_buffers == {}
+
+
+def test_kv_only_wake_keeps_draft_backup_for_the_weights_phase(worker, draft):
+    worker._sleep_saved_draft_buffers = {"metadata": torch.tensor([8.0])}
+    worker.wake_up(tags=["kv_cache"])
+    torch.testing.assert_close(draft.metadata, torch.tensor([3.0]))
+    assert "metadata" in worker._sleep_saved_draft_buffers
+    worker.wake_up(tags=["weights"])
+    torch.testing.assert_close(draft.metadata, torch.tensor([8.0]))
+    assert worker._sleep_saved_draft_buffers == {}
+
+
+def test_level_two_retains_selected_draft_parameters(worker, draft, monkeypatch):
+    expected = draft.weight.detach().clone()
+    worker.model_config.sleep_preserve_parameter_names = ["draft.weight"]
+    device_parameters(draft, monkeypatch)
+
+    def discard(offload_tags):
+        assert set(worker._sleep_saved_parameters) == {"draft.weight"}
+        draft.weight.data.zero_()
+
+    worker.allocator.sleep.side_effect = discard
+    worker.sleep(level=2)
+    worker.wake_up(tags=["weights"])
+    torch.testing.assert_close(draft.weight, expected)
+    assert worker._sleep_saved_parameters == {}
+
+
+def test_sleep_parameter_names_deduplicate_shared_target_and_draft_parameters(worker, draft):
+    draft.weight = worker.model_runner.model.weight
+    parameters = worker._get_sleep_parameters(worker.model_runner.model)
+    assert "weight" in parameters
+    assert "draft.weight" not in parameters
+    assert parameters["draft.bias"] is draft.bias
+
+
+def test_optional_draft_wildcard_allows_a_target_only_worker(worker):
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
+    worker._save_sleep_parameters(worker.model_runner.model)
+    assert worker._sleep_saved_parameters == {}
+
+
+def test_missing_draft_on_wake_preserves_backup_and_reports_error(worker):
+    worker._sleep_saved_draft_buffers = {"metadata": torch.tensor([8.0])}
+    with pytest.raises(RuntimeError, match="Cannot restore saved draft buffers"):
+        worker.wake_up(tags=["weights"])
+    assert "metadata" in worker._sleep_saved_draft_buffers
+
+
+def test_repeated_level_two_sleep_uses_latest_draft_buffers(worker, draft, monkeypatch):
+    worker.model_config.sleep_preserve_parameter_names = []
+    monkeypatch.setattr("vllm_ascend.worker.worker.torch.npu.mem_get_info", lambda: (100, 200))
+    worker.allocator.sleep.side_effect = lambda offload_tags: draft.metadata.zero_()
+    for value in (4.0, 9.0):
+        draft.metadata.fill_(value)
+        worker.sleep(level=2)
+        worker.wake_up(tags=["weights"])
+        torch.testing.assert_close(draft.metadata, torch.tensor([value]))

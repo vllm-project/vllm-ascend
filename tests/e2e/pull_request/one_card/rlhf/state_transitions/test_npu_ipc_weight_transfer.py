@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Model-aware end-to-end tests for NPU IPC live weight updates.
+"""End-to-end NPU IPC weight updates for target and draft models.
+
+The target-model matrix below checks reload correctness against startup loading.
+The V2 draft test separately checks repeated draft sessions, a subsequent target
+update, parameter values and storage identity, and speculative generation in both
+packed and unpacked modes, with and without level-2 sleep. It uses a small local
+Qwen3 configuration in eager mode.
 
 Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
@@ -22,10 +28,11 @@ signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. The packed lane is currently skipped
-on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
+graph-captured storage of the first update. The target-model matrix's packed lane
+is currently skipped — see ``PACKED_LANE_SKIP_REASON`` — so only its unpacked
+lane runs.
 
-The lane is the same-chip deployment this backend exists for: the trainer
+The target-model lane is the same-chip deployment this backend exists for: the trainer
 payload shares the card with the rollout engine, so every round releases the
 engine's HBM with a level-2 sleep and wakes it again afterwards. Level 2
 discards the weights, so the weights allocation is mapped back *before* the
@@ -33,12 +40,16 @@ transaction — the layerwise reload copies the payload into those very buffers 
 while the KV cache is re-allocated last, once the new weights are in place.
 """
 
+import gc
 import os
 
 import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from transformers import Qwen3Config
+from vllm import LLM, SamplingParams
+from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -55,11 +66,18 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     register_engines_once,
     wait_for_free_device_memory,
 )
+from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+    NPUIPCTrainerInitInfo,
+    NPUIPCTrainerWeightTransferEngine,
+)
 
 CONTROL_TIMEOUT = 60
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
 GPU_MEMORY_UTILIZATION = 0.45
+WEIGHT_NAME = "model.norm.weight"
+HIDDEN_SIZE = 256
+SLEEP_BUFFER_NAME = "_ipc_draft_sleep_probe"
 # Card the inference server (and the co-located trainer) runs on, as an absolute
 # device index inside the container: the harness hands the server
 # `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
@@ -135,8 +153,6 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
-        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
-
         register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             NPUIPCTrainerInitInfo(
@@ -177,3 +193,148 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         reloaded_signature,
         case,
     )
+
+
+class _NormWeightSource(WeightSource):
+    def __init__(self):
+        self.value = 2.0
+
+    def metadata(self):
+        return [ParamMeta(WEIGHT_NAME, torch.bfloat16, (HIDDEN_SIZE,))]
+
+    def __iter__(self):
+        yield WEIGHT_NAME, torch.full((HIDDEN_SIZE,), self.value, dtype=torch.bfloat16, device="npu:0")
+
+
+class _LocalClient:
+    def __init__(self, llm):
+        self.llm = llm
+        self.is_draft = True
+
+    def init_weight_transfer_engine(self, init_info):
+        self.llm.init_weight_transfer_engine({"init_info": init_info})
+
+    def start_weight_update(self):
+        if self.is_draft:
+            self.llm.start_draft_weight_update()
+        else:
+            self.llm.start_weight_update()
+
+    def update_weights(self, update_info):
+        self.llm.update_weights({"update_info": update_info})
+
+    def finish_weight_update(self, weight_version=None):
+        self.llm.finish_weight_update(weight_version)
+
+
+def _snapshot(worker):
+    result = []
+    for model in (worker.get_model(), worker.get_draft_model()):
+        weight = model.get_parameter(WEIGHT_NAME)
+        result.append((weight.detach().cpu(), weight.data_ptr()))
+    return result
+
+
+def _prepare_draft_sleep_probe(worker):
+    draft = worker.get_draft_model()
+    # Alias an existing weights-pool allocation so level 2 really discards it.
+    # Do not retain this draft parameter: only the draft-buffer restore can
+    # recover its first element before the next IPC update replaces the tensor.
+    draft.register_buffer(SLEEP_BUFFER_NAME, draft.get_parameter(WEIGHT_NAME).detach()[:1], persistent=False)
+    worker.model_config.sleep_preserve_parameter_names = [
+        name for name in worker._get_sleep_parameters(worker.get_model()) if name != f"draft.{WEIGHT_NAME}"
+    ]
+
+
+def _snapshot_draft_sleep_probe(worker):
+    buffer = worker.get_draft_model().get_buffer(SLEEP_BUFFER_NAME)
+    return buffer.detach().cpu(), buffer.data_ptr()
+
+
+@pytest.mark.skipif(torch.npu.device_count() < 1, reason="Requires one NPU for colocated IPC transfer.")
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize("sleep_level", [None, 2], ids=["awake", "sleep-level-2"])
+def test_npu_ipc_draft_then_target_update(tmp_path, monkeypatch, packed, sleep_level):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    # The trusted local RPCs carry a callable snapshot and IPC rebuild arguments.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    torch.npu.set_device(0)
+    model_path = tmp_path / "tiny-qwen3"
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        vocab_size=128,
+        bos_token_id=1,
+        eos_token_id=127,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=128,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+    ).save_pretrained(model_path)
+    llm = LLM(
+        model=str(model_path),
+        skip_tokenizer_init=True,
+        load_format="dummy",
+        dtype="bfloat16",
+        enable_sleep_mode=sleep_level is not None,
+        enforce_eager=True,
+        max_model_len=64,
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        gpu_memory_utilization=0.2,
+        speculative_config={"method": "standalone_ar", "model": str(model_path), "num_speculative_tokens": 2},
+        weight_transfer_config={"backend": "npu_ipc"},
+        additional_config={"rl_config": {"enabled": True}},
+    )
+    trainer = None
+    try:
+        if sleep_level is not None:
+            llm.collective_rpc(_prepare_draft_sleep_probe)
+        before = llm.collective_rpc(_snapshot)[0]
+        client = _LocalClient(llm)
+        source = _NormWeightSource()
+        trainer = NPUIPCTrainerWeightTransferEngine.trainer_init(
+            NPUIPCTrainerInitInfo(rank=0, packed=packed, packed_buffer_size_bytes=4096),
+            client=client,
+            source=source,
+        )
+        # Repeated draft sessions must leave the target model unchanged.
+        for value in (2.0, 3.0):
+            if sleep_level is not None:
+                saved_buffer, pointer = llm.collective_rpc(_snapshot_draft_sleep_probe)[0]
+                llm.sleep(level=sleep_level)
+                llm.wake_up(tags=["weights"])
+                restored_buffer, restored_pointer = llm.collective_rpc(_snapshot_draft_sleep_probe)[0]
+                torch.testing.assert_close(restored_buffer, saved_buffer, rtol=0, atol=0)
+                assert restored_pointer == pointer
+            source.value = value
+            trainer.send_weights()
+            target, draft = llm.collective_rpc(_snapshot)[0]
+            torch.testing.assert_close(target[0], before[0][0], rtol=0, atol=0)
+            torch.testing.assert_close(draft[0], torch.full_like(draft[0], value), rtol=0, atol=0)
+            assert (target[1], draft[1]) == (before[0][1], before[1][1])
+            if sleep_level is not None:
+                llm.wake_up(tags=["kv_cache"])
+
+        client.is_draft = False
+        source.value = 5.0
+        trainer.send_weights()
+        target, draft = llm.collective_rpc(_snapshot)[0]
+        torch.testing.assert_close(target[0], torch.full_like(target[0], 5.0), rtol=0, atol=0)
+        torch.testing.assert_close(draft[0], torch.full_like(draft[0], 3.0), rtol=0, atol=0)
+        assert (target[1], draft[1]) == (before[0][1], before[1][1])
+        output = llm.generate(
+            [{"prompt_token_ids": [1, 2, 3]}], SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+        )
+        assert len(output[0].outputs[0].token_ids) == 4
+    finally:
+        if trainer is not None:
+            trainer.shutdown()
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        gc.collect()
+        torch.npu.empty_cache()
