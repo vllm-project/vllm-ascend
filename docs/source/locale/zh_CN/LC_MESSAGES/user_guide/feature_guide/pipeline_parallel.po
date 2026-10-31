@@ -747,21 +747,8 @@ msgstr ""
 "模型的层不包含在其层数总和中，其权重命名和层布局取决于具体的投机解码实现。在两个模型运行器上，drafter 都加载在最后一个 PP 阶段，而不是跨 "
 "PP 阶段进行分区。因此，最后一个阶段可以包含："
 
-msgid ""
-"The following matrix lists the features that can be stacked with PP on\n"
-"Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,\n"
-"\"supported\" means the combination is enabled in code and exercised by CI."
-msgstr ""
-"以下矩阵列出了在 Model Runner V2（`VLLM_USE_V2_MODEL_RUNNER=1`）上可以与 PP "
-"叠加的功能。除非另有说明，“支持”意味着该组合已在代码中启用并由 CI 进行测试。"
-
 msgid "| Feature stacked with PP | Support |"
 msgstr "| 与 PP 叠加的功能 | 支持情况 |"
-
-msgid ""
-"| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY`; validated with"
-" MTP stacks. |"
-msgstr "| 图模式（ACL graph） | 在 `FULL_DECODE_ONLY` 下支持；已通过 MTP 叠加验证。 |"
 
 msgid "| MTP | Supported. |"
 msgstr "| MTP | 支持。 |"
@@ -787,11 +774,6 @@ msgid ""
 "KV transfer. |"
 msgstr ""
 "| DCP（Decode Context Parallel） | 支持；使用 `MooncakeConnectorV2` 进行 KV 传输。 |"
-
-msgid ""
-"| LayerSplit (KVPP) | Supported. An intermittent output-mismatch issue in "
-"the e2e test is under investigation. |"
-msgstr "| LayerSplit（KVPP） | 支持。e2e 测试中偶发的输出不匹配问题正在调查中。 |"
 
 msgid ""
 "| KV offloading (Sparse KV Cache Offload) | Supported with the layerwise "
@@ -847,3 +829,54 @@ msgstr ""
 "- `MooncakeConnectorV1` 目前要求 Decode 侧的 PP size 为 `1`。\n"
 "- 对于基于 RoCE 的跨节点 MoE 部署，PP 和 DP 目前无法同时启用，因为 `MoeDistributeDispatch` 通信路径不支持这种组合拓扑。\n"
 "- 特性组合仍因模型而异。在生产部署前，请查阅相关特性指南。"
+
+msgid ""
+"The following matrix lists the features that can be stacked with PP on\n"
+"Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual\n"
+"feature combination with PP and remains subject to the model and hardware\n"
+"requirements in the relevant feature guide."
+msgstr ""
+"以下矩阵列出了在 Model Runner V2（`VLLM_USE_V2_MODEL_RUNNER=1`）上可与 PP "
+"叠加使用的特性。支持情况描述了各特性与 PP 的单独组合，且仍需满足相关特性指南中的模型与硬件要求。"
+
+msgid ""
+"| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and "
+"`PIECEWISE`; `FULL_DECODE_ONLY` is validated with MTP stacks. |"
+msgstr ""
+"| 图模式（ACL graph） | 支持 `FULL_DECODE_ONLY` 和 `PIECEWISE`；`FULL_DECODE_ONLY` "
+"已通过 MTP 叠加验证。 |"
+
+msgid ""
+"| LayerSplit (KVPP) | Supported with eager or `PIECEWISE` execution; full "
+"graph modes cannot be combined with KVPP. An intermittent output-mismatch "
+"issue in the e2e test is under investigation. See the [KVPP guide](kvpp.md)."
+" |"
+msgstr ""
+"| LayerSplit (KVPP) | 支持 eager 或 `PIECEWISE` 执行；完整图模式无法与 KVPP 组合使用。e2e "
+"测试中偶发的输出不一致问题正在排查中。参见 [KVPP 指南](kvpp.md)。 |"
+
+msgid "| KV Cache Pool | Supported. |"
+msgstr "| KV Cache Pool | 支持。 |"
+
+msgid "| Lmhead TP | Supported. |"
+msgstr "| Lmhead TP | 支持。 |"
+
+msgid "| MLAPO | Supported. |"
+msgstr "| MLAPO | 支持。 |"
+
+msgid "| Multimodal inputs (mm) | Supported. |"
+msgstr "| 多模态输入（mm） | 支持。 |"
+
+msgid "| Multistream MoE | Supported. |"
+msgstr "| 多流 MoE | 支持。 |"
+
+msgid "| Shared Expert DP | Supported. |"
+msgstr "| 共享专家 DP | 支持。 |"
+
+msgid ""
+"| Quantization | Supported for all quantization methods available for the "
+"model and hardware, including W4A4, W4A8, and W8A8. |"
+msgstr "| 量化 | 支持模型和硬件可用的所有量化方法，包括 W4A4、W4A8 和 W8A8。 |"
+
+msgid "| Weight NZ | Supported. |"
+msgstr "| Weight NZ | 支持。 |"
