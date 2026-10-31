@@ -1016,12 +1016,13 @@ class AscendConfig:
         platforms. Where the operators currently differ, the stricter bound is
         applied and the per-platform actuals are documented inline.
         """
-        # Guard against early-init phases where model_config is still None, and
-        # against dense models: both would otherwise crash or slip through the
-        # size checks below. derive_and_validate may run before model_config is
-        # fully populated (other validators in it check for None as well).
+        # Guard against early-init phases where model_config is still None
+        # (derive_and_validate may run before it is populated; other validators
+        # in it check for None as well). Dense models need no extra guard here:
+        # a non-MiniMax config without moe_intermediate_size is rejected below,
+        # and the MiniMax family has no dense variants.
         model_config = vllm_config.model_config
-        if model_config is None or not model_config.is_moe:
+        if model_config is None:
             return False
         model_architectures = getattr(model_config, "architectures", None) or []
         # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
