@@ -6,7 +6,7 @@ Kimi K2.6 is an open-source, native multimodal agentic model built through conti
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.20.0rc1**. The current model (Kimi-K2.6) is first supported in this version.
+This document is validated and written based on **vLLM-Ascend v0.23.0**. Kimi-K2.6 was first supported in vLLM-Ascend v0.20.0rc1.
 
 ## 2 Supported Features
 
@@ -129,7 +129,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+For vLLM-Ascend v0.20.0 and earlier versions, transformers must be version 4.57.6 or lower to use the tool_calls feature.
 
 ## 5 Online Service Deployment
 
@@ -164,7 +164,10 @@ export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
-    --served-model-name kimi_k26 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
     --allowed-local-media-path / \
     --trust-remote-code \
     --tensor-parallel-size 4 \
@@ -199,7 +202,7 @@ Service Verification:
 curl http://<node_ip>:8088/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "kimi_k26",
+        "model": "Eco-Tech/Kimi-K2.6-w4a8",
         "messages": [{
             "role": "user",
             "content": [
@@ -348,7 +351,10 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --served-model-name kimi_k26 \
+       --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 4 \
        --max-model-len 32768 \
@@ -427,7 +433,10 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --served-model-name kimi_k26 \
+       --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 4 \
        --max-model-len 32768 \
@@ -506,7 +515,10 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --served-model-name kimi_k26 \
+       --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 8 \
        --max-model-len 32768 \
@@ -585,7 +597,10 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --served-model-name kimi_k26 \
+       --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 8 \
        --max-model-len 32768 \
@@ -705,7 +720,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 {
     "id": "chatcmpl-xxxxxxxxxxxxx",
     "object": "chat.completion",
-    "model": "kimi_k26",
+    "model": "Eco-Tech/Kimi-K2.6-w4a8",
     "choices": [
         {
             "index": 0,
@@ -734,7 +749,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "kimi_k26",
+        "model": "Eco-Tech/Kimi-K2.6-w4a8",
         "messages": [{
             "role": "user",
             "content": [
@@ -758,7 +773,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
     "id": "chatcmpl-9df13fd5e539af93",
     "object": "chat.completion",
     "created": 1780971952,
-    "model": "kimi_k26",
+    "model": "Eco-Tech/Kimi-K2.6-w4a8",
     "choices": [
         {
             "index": 0,
@@ -815,7 +830,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --trust-remote-code --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -871,4 +886,4 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What transformer version is required for tool_calls feature?**
 
-  A: To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+  A: For vLLM-Ascend v0.20.0 and earlier versions, transformers must be version 4.57.6 or lower to use the tool_calls feature.
