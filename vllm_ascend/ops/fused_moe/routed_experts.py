@@ -697,7 +697,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         comm_type = _EXTRA_CTX.moe_comm_type
         if (
-            _EXTRA_CTX.use_mega_moe
+            getattr(_EXTRA_CTX, "use_mega_moe", False)
             and self._vllm_config.model_config.runner_type == "draft"
             and self.quant_type == QuantType.NONE
             and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
