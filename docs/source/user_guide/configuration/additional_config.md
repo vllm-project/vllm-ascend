@@ -230,6 +230,8 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **rejection_sampler_config**
 
+For Model Runner V2, enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.rejection_sample_method="standard"`. Entropy Verify and upstream `"block"` verification are mutually exclusive. See [Block Verify and Entropy Verify](../feature_guide/speculative_decoding.md#block-verify-and-entropy-verify) for usage and sampling semantics.
+
 > **Note**: Both block verify and entropy verify improve speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
 
 | Name | Type | Default | Description |

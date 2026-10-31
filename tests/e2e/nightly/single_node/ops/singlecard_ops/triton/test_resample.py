@@ -794,6 +794,7 @@ def test_rejection_sample_residual_is_independent_of_acceptance_draw(
         torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 4001,
         num_spec_steps,
         use_block_verification=use_block_verification,
+        use_entropy_verify=False,
     )
     torch.npu.synchronize()
 
@@ -859,6 +860,7 @@ def test_rejection_sample_greedy_end_to_end():
         temperature,
         seed,
         num_spec_steps,
+        use_entropy_verify=False,
     )
     torch.npu.synchronize()
 
@@ -1021,3 +1023,34 @@ def test_draft_vocab_dimension_must_be_contiguous():
             _position_tensor(2),
             has_draft_logits=True,
         )
+
+
+@torch.inference_mode()
+def test_entropy_verify_uses_unscaled_recovery():
+    # Position 0 has ratio 0.4 / 0.8 = 0.5. Condition on accepting it;
+    # the zero-target probability proposal at position 1 forces rejection.
+    # Ordinary residual [0, .2, .3, 0] normalizes to [0, .4, .6, 0]. A wrong
+    # prefix-scaled residual would put all mass on token 2 instead.
+    num_reqs, steps = STAT_TRIALS, 3
+    p = torch.tensor([0.0, 0.4, 0.5, 0.1], device=DEVICE)
+    q = torch.tensor([0.5, 0.2, 0.2, 0.1], device=DEVICE)
+    q_first = torch.tensor([0.1, 0.8, 0.05, 0.05], device=DEVICE)
+    mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    sampled, counts = rejection_sample(
+        target_logits=p.log().repeat(num_reqs * (steps + 1), 1),
+        draft_logits=torch.stack([q_first, q, q]).log()[None].expand(num_reqs, -1, -1).contiguous(),
+        draft_sampled=torch.tensor([0, 1, 0, 0], dtype=torch.int64, device=DEVICE).repeat(num_reqs),
+        cu_num_logits=torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (steps + 1),
+        pos=_position_tensor(num_reqs * (steps + 1)),
+        idx_mapping=mapping,
+        expanded_idx_mapping=mapping.repeat_interleave(steps + 1),
+        expanded_local_pos=torch.arange(steps + 1, dtype=torch.int32, device=DEVICE).repeat(num_reqs),
+        temperature=torch.ones(num_reqs, device=DEVICE),
+        seed=torch.arange(num_reqs, dtype=torch.int64, device=DEVICE) * 104729 + 17,
+        num_speculative_steps=steps,
+        use_entropy_verify=True,
+    )
+    selected = counts == 2
+    assert selected.sum() > num_reqs // 4
+    assert (sampled[selected, 0] == 1).all()
+    _assert_distribution(sampled[selected, 1], torch.tensor([0.0, 0.4, 0.6, 0.0]))
