@@ -1,0 +1,217 @@
+# Four-node adaptation of the Kimi-K3 A5 PD template: 2P + 2D.
+# Reference: docs/source/tutorials/models/Kimi-K3.md at 2982425cc7cc00249feda1eaaab3b9bf40432c11.
+# Each side is an independent TP8/DP2/EP16 world, not one DP4 world.
+# Start with both sides eager; enable Decode graphs only after PD validation.
+# Prefill requires HCCL_OP_EXPANSION_MODE unset in the runner/container.
+# Two-node-per-side model capacity and KV transfer still require A5 validation.
+test_name: "test Kimi-K3-W4A8-MXFP-QuaRot A5 four-node 2P2D deployment"
+model: "Eco-Tech/Kimi-K3-w4a8-mxfp-quarot"
+num_nodes: 4
+npu_per_node: 8
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+
+config:
+  - node_index: 0
+    port_start: 8080
+    dp_rpc_port: 13389
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 8080
+    dp_rpc_port: 13389
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 2
+    port_start: 8080
+    dp_rpc_port: 13390
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 8080
+    dp_rpc_port: 13390
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 8
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  SERVER_PORT: "${PORT}"
+  HCCL_BUFFSIZE: 800
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: 1
+  TASK_QUEUE_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 7200
+  PYTHONHASHSEED: 0
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
+
+templates:
+  - &prefill_template
+    node_index: 0
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "$SERVER_PORT"
+      - --quantization
+      - "ascend"
+      - --dtype
+      - "bfloat16"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --tokenizer-mode
+      - "kimi_k3"
+      - --tensor-parallel-size
+      - "${TP_SIZE}"
+      - --data-parallel-size
+      - "${DP_SIZE}"
+      - --data-parallel-rank
+      - "${DP_RANK}"
+      - --data-parallel-address
+      - "${DP_ADDRESS}"
+      - --data-parallel-rpc-port
+      - "${DP_RPC_PORT}"
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --mamba-cache-mode
+      - "align"
+      - --seed
+      - "1024"
+      - --max-num-seqs
+      - "16"
+      # Keep room for the existing GPQA 65536-token output plus its input.
+      - --max-model-len
+      - "131072"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --enforce-eager
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":2}'
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "kimi_k3"
+      - --tool-call-parser
+      - "kimi_k3"
+      - --additional-config
+      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_flashcomm1":true}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"20001","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
+
+  - <<: *prefill_template
+    node_index: 1
+
+  - &decode_template
+    node_index: 2
+    envs:
+      <<: *env_common
+      HCCL_OP_EXPANSION_MODE: "AIV"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "$SERVER_PORT"
+      - --quantization
+      - "ascend"
+      - --dtype
+      - "bfloat16"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --tokenizer-mode
+      - "kimi_k3"
+      - --tensor-parallel-size
+      - "${TP_SIZE}"
+      - --data-parallel-size
+      - "${DP_SIZE}"
+      - --data-parallel-rank
+      - "${DP_RANK}"
+      - --data-parallel-address
+      - "${DP_ADDRESS}"
+      - --data-parallel-rpc-port
+      - "${DP_RPC_PORT}"
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --mamba-cache-mode
+      - "align"
+      - --seed
+      - "1024"
+      - --max-num-seqs
+      - "16"
+      # Keep room for the existing GPQA 65536-token output plus its input.
+      - --max-model-len
+      - "131072"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --enforce-eager
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --limit-mm-per-prompt
+      - '{"vision_chunk":2}'
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "kimi_k3"
+      - --tool-call-parser
+      - "kimi_k3"
+      - --additional-config
+      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"20002","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
+
+  - <<: *decode_template
+    node_index: 3
+
+benchmarks:
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    temperature: 1.0
+    top_p: 1.0
+    thinking: true
+
+  perf_16k_prefix0:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
