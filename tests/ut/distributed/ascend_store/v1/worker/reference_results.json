@@ -3428,7 +3428,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -3576,7 +3578,9 @@
       "failed_request_ids": [
         "load"
       ],
-      "failed_block_ids": [],
+      "failed_block_ids": [
+        2
+      ],
       "failed_locations": [
         {
           "group_id": 3,
@@ -3801,7 +3805,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4124,7 +4130,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4251,7 +4259,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4426,7 +4436,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4573,7 +4585,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4666,7 +4680,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -4800,7 +4816,9 @@
       "failed_request_ids": [
         "load"
       ],
-      "failed_block_ids": [],
+      "failed_block_ids": [
+        2
+      ],
       "failed_locations": [
         {
           "group_id": 3,
@@ -4992,7 +5010,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5258,7 +5278,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5377,7 +5399,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5531,7 +5555,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5664,7 +5690,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5757,7 +5785,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -5912,7 +5942,9 @@
       "failed_request_ids": [
         "load"
       ],
-      "failed_block_ids": [],
+      "failed_block_ids": [
+        2
+      ],
       "failed_locations": [
         {
           "group_id": 3,
@@ -6146,7 +6178,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -6445,7 +6479,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -6564,7 +6600,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -6748,7 +6786,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -6902,7 +6942,9 @@
       "completed_request_ids": [
         "load"
       ],
-      "failed_request_ids": [],
+      "failed_request_ids": [
+        "load"
+      ],
       "failed_block_ids": [
         2
       ],
@@ -7001,7 +7043,10 @@
         "first",
         "second"
       ],
-      "failed_block_ids": [],
+      "failed_block_ids": [
+        3,
+        5
+      ],
       "failed_locations": [
         {
           "group_id": 1,
@@ -7138,7 +7183,10 @@
         "first",
         "second"
       ],
-      "failed_block_ids": [],
+      "failed_block_ids": [
+        3,
+        5
+      ],
       "failed_locations": [
         {
           "group_id": 1,

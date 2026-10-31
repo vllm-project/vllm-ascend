@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import accumulate
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict
 
@@ -62,10 +62,15 @@ class BlockHashMapping:
 
     block_size: int
     hash_block_size: int
+    _hashes_per_block: int = field(init=False, repr=False)
+    _terminal_hash_offset: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.block_size <= 0 or self.hash_block_size <= 0 or self.block_size % self.hash_block_size:
             raise ValueError("Block size must be a positive multiple of the hash block size")
+        hashes_per_block = self.block_size // self.hash_block_size
+        object.__setattr__(self, "_hashes_per_block", hashes_per_block)
+        object.__setattr__(self, "_terminal_hash_offset", hashes_per_block - 1)
 
     def pair_block_ids(
         self,
@@ -78,7 +83,7 @@ class BlockHashMapping:
     ) -> Iterator[BlockPair]:
         if not hashes or end_token <= 0:
             return
-        hashes_per_block = self.block_size // self.hash_block_size
+        hashes_per_block, terminal_hash_offset = self._hashes_per_block, self._terminal_hash_offset
         hash_count = len(hashes) // hashes_per_block
         block_count = -(-end_token // self.block_size)
         if tail_boundary is not None:
@@ -91,7 +96,7 @@ class BlockHashMapping:
             if tail_boundary is not None and logical_index == block_count - 1:
                 value = self.hash_at_boundary(tail_boundary, hashes)
             elif logical_index < hash_count:
-                value = hashes[(logical_index + 1) * hashes_per_block - 1]
+                value = hashes[logical_index * hashes_per_block + terminal_hash_offset]
             else:
                 continue
             yield logical_index, value, block_ids[logical_index - block_offset]
@@ -115,12 +120,14 @@ class BlockHashMapping:
                 start = (-(-boundary // self.block_size) - 1) * self.block_size
                 yield TokenChunk(start, boundary - start, hashes[index])
         else:
-            hashes_per_block = self.block_size // self.hash_block_size
+            hashes_per_block, terminal_hash_offset = self._hashes_per_block, self._terminal_hash_offset
             count = min(len(hashes) // hashes_per_block, -(-end_token // self.block_size))
             for index in range(max(start_token // self.block_size, 0), count):
                 start = index * self.block_size
                 yield TokenChunk(
-                    start, min(self.block_size, end_token - start), hashes[(index + 1) * hashes_per_block - 1]
+                    start,
+                    min(self.block_size, end_token - start),
+                    hashes[index * hashes_per_block + terminal_hash_offset],
                 )
 
     def hash_at_boundary(self, boundary: int, hashes: Sequence[bytes | str]) -> bytes | str:

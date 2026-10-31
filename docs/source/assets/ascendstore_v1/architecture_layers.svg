@@ -28,7 +28,7 @@
 <g data-node="protocol">
 <rect x="48" y="288" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="64" y="315" class="name">Protocol · 共享业务契约</text>
-<text x="64" y="339" class="muted">Load / Store 命令与结果 · Lookup 编解码、校验与未命中回退 · 来源释放回执</text>
+<text x="64" y="339" class="muted">命令与完成 / 失败结果 · 查询与缓存控制 · 来源释放与观测</text>
 </g>
 <rect x="48" y="368" width="1184" height="216" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
 <text x="64" y="397" class="name">Infrastructure · 可组合能力</text>

@@ -20,7 +20,7 @@
 <g data-node="worker">
 <rect x="48" y="112" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="64" y="139" class="name">Worker</text>
-<text x="64" y="163" class="muted">KV 绑定 · 将模型钩子交给 Service / Transfer · 开始、结束、中止与关闭</text>
+<text x="64" y="163" class="muted">KV 绑定 · 模型钩子适配 · 同步回退时本轮保存失效的交接 · 开始、结束、中止与关闭</text>
 </g>
 <g data-node="lookup">
 <rect x="48" y="224" width="348" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
@@ -32,7 +32,7 @@
 <rect x="420" y="224" width="372" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="436" y="251" class="name">LoadService</text>
 <text x="436" y="275" class="muted">选块、Key 与全部目标归属</text>
-<text x="436" y="298" class="muted">登记 LoadBatch · 收集加载结果</text>
+<text x="436" y="298" class="muted">登记 LoadBatch · 解释失败与完成</text>
 </g>
 <g data-node="store">
 <rect x="816" y="224" width="416" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
@@ -75,12 +75,12 @@
 <rect x="420" y="690" width="372" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="436" y="717" class="name">LoadBatch · LoadService 持有</text>
 <text x="436" y="741" class="muted">对象与全部本地目标 · 结果槽位</text>
-<text x="436" y="764" class="muted">写入安全与完成；可跨步保留</text>
+<text x="436" y="764" class="muted">失败位置、写入安全与完成；可跨步保留</text>
 </g>
 <g data-node="storebatch">
 <rect x="816" y="690" width="416" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="832" y="717" class="name">StoreBatch · StoreService 持有</text>
-<text x="832" y="741" class="muted">命令与选中来源 · 完成和发布证据</text>
+<text x="832" y="741" class="muted">命令与选中来源 · 来源有效性与发布证据</text>
 <text x="832" y="764" class="muted">读源安全与释放；可跨步保留</text>
 </g>
 <text x="48" y="828" class="muted">Backend Session 保护远端对象；LayerwiseExecutor 控制层推进，两者不共用生命周期。</text>

@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from functools import partial
+from queue import Empty, SimpleQueue
 
+from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from ...infrastructure.collective import CollectiveGroup, GroupCompletion
 from ...infrastructure.coordinator import Coordinator, checkpoint_companion_indices
@@ -40,6 +43,7 @@ class StoreService:
         self._latest: dict[str, StoreBatch] = {}
         self._released: set[int] = set()
         self._fatal_error: Exception | None = None
+        self._events: SimpleQueue[BlockStored] = SimpleQueue()
         topology = context.topology
         self._writers: dict[int, slice] = {}
         self._completion_group: GroupCompletion[str, object] | None = None
@@ -130,6 +134,12 @@ class StoreService:
     def stop_accepting(self) -> None:
         self._accepting = False
 
+    def invalidate_requests(self, request_ids: frozenset[str]) -> None:
+        """Invalidate only the current sources selected for requests whose Load failed."""
+        for request_id in request_ids:
+            if batch := self._latest.get(request_id):
+                batch.invalidate_sources((request_id,))
+
     def drain(self) -> DrainResult:
         """Observe every sealed job; retain jobs without confirmed safe source release."""
         self.stop_accepting()
@@ -159,6 +169,14 @@ class StoreService:
         released, self._released = self._released, set()
         return released
 
+    def take_events(self) -> list[BlockStored]:
+        events = []
+        while True:
+            try:
+                events.append(self._events.get_nowait())
+            except Empty:
+                return events
+
     def check_available(self) -> None:
         if self._fatal_error is not None:
             raise RuntimeError("Worker cannot continue after a fatal Store failure") from self._fatal_error
@@ -178,6 +196,8 @@ class StoreService:
                 batch.codes = [None] * len(selection.keys)
             if len(batch.codes) != len(selection.keys):
                 raise ValueError("Backend Store result count does not match its parameters")
+            for index in tuple(batch.invalid_objects):
+                batch.codes[index] = None
         commit = [
             index for index in batch.opened_indices if batch.codes[index] == 0 and index not in batch.unsafe_objects
         ]
@@ -200,6 +220,17 @@ class StoreService:
                 StoreResult(command.request_id, command.store_job_id, succeeded=False, error=batch.error)
                 for command in batch.commands
             )
+        if selection.events:
+            successful = {
+                key
+                for index, key in enumerate(selection.keys)
+                if batch.codes[index] == 0 and index not in batch.unsafe_objects
+            }
+            for event, keys, owner in selection.events:
+                if (not keys or batch.commands[owner].request_id not in batch.invalid_requests) and all(
+                    key in successful for key in keys
+                ):
+                    self._events.put(event)
         return self._results(batch)
 
     def _confirm_publication(self, batch: StoreBatch, commit: list[int]) -> list[int]:
@@ -250,6 +281,12 @@ class StoreService:
             if not hit:
                 missing.keys.append(key)
                 missing.sources.append(source)
+        if selection.events:
+            present_keys = {key for key, hit in zip(selection.keys, present, strict=True) if hit}
+            missing.events = [
+                (event, tuple(key for key in keys if key not in present_keys), owner)
+                for event, keys, owner in selection.events
+            ]
         return missing
 
     def _candidates(self, commands: tuple[StoreCommand, ...]) -> StoreSelection:
@@ -281,7 +318,7 @@ class StoreService:
                     start_token=command.start_token,
                     end_token=command.end_token,
                 )
-                self._add_candidates(request_index, group_id, blocks, selection, seen_keys, mask, mask_start)
+                self._add_candidates(request_index, group_id, blocks, selection, seen_keys, command, mask, mask_start)
         # Preserve public per-partition result order while keeping each selected source unchanged.
         if len(context.partition_order) > 1 and selection.keys:
             ordered = sorted(
@@ -299,6 +336,7 @@ class StoreService:
         blocks: Iterable[BlockPair],
         selection: StoreSelection,
         seen_keys: set[str],
+        command: StoreCommand,
         mask: tuple[bool, ...] | None = None,
         mask_start: int = 0,
     ) -> None:
@@ -318,12 +356,29 @@ class StoreService:
                 continue
             skip = stride - 1
             value = block_hash.hex() if isinstance(block_hash, bytes) else block_hash
+            first = len(selection.keys)
             for partition, (prefix, suffix) in partitions:
                 key = prefix + value + suffix
                 if key not in seen_keys:
                     seen_keys.add(key)
                     selection.keys.append(key)
                     selection.sources.append((partition, block_id, request_index))
+            if command.event_tokens is not None and len(selection.keys) != first:
+                token_start, token_ids = command.event_tokens
+                mapping = self.context.block_hash_mappings[group_id]
+                start = logical_index * mapping.block_size
+                end = min(start + mapping.block_size, token_start + len(token_ids))
+                parent = mapping.hash_at_boundary(start, command.block_hashes) if start else None
+                event = BlockStored(
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=maybe_convert_block_hash(parent) if parent is not None else None,
+                    token_ids=list(token_ids[start - token_start : end - token_start]),
+                    block_size=mapping.block_size,
+                    lora_id=None,
+                    medium="cpu",
+                    lora_name=None,
+                )
+                selection.events.append((event, tuple(selection.keys[first:]), request_index))
 
     def _checkpoint_candidates(
         self, command: CheckpointStoreCommand, request_index: int, selection: StoreSelection, seen_keys: set[str]
@@ -343,7 +398,7 @@ class StoreService:
                 continue
             block_mapping = context.block_hash_mappings[source.group_id]
             block = (-(-boundary // block_mapping.block_size) - 1, value, source.block_id)
-            self._add_candidates(request_index, source.group_id, (block,), selection, seen_keys)
+            self._add_candidates(request_index, source.group_id, (block,), selection, seen_keys, command)
             partial |= bool(boundary % block_mapping.block_size)
         if partial:
             for group_id, block_mapping in context.block_hash_mappings.items():
@@ -365,7 +420,7 @@ class StoreService:
                     )
                     if block_ids[index] >= 0
                 )
-                self._add_candidates(request_index, group_id, blocks, selection, seen_keys)
+                self._add_candidates(request_index, group_id, blocks, selection, seen_keys, command)
 
     def _results(self, batch: StoreBatch) -> tuple[StoreResult, ...]:
         assert batch.selection is not None
@@ -391,7 +446,13 @@ class StoreService:
                 tuple(codes_by_request[index]),
                 succeeded=succeeded[index],
                 source_release_confirmed=index not in unsafe_requests,
-                error=batch.error if not succeeded[index] else None,
+                error=(
+                    RuntimeError("Store source depends on a failed Load")
+                    if command.request_id in batch.invalid_requests and not succeeded[index]
+                    else batch.error
+                    if not succeeded[index]
+                    else None
+                ),
             )
             for index, command in enumerate(batch.commands)
         )

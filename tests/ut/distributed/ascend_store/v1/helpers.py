@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import BlockHashMapping
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import Resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.topology import (
     ContextRank,
@@ -307,6 +308,13 @@ def make_topology(
         context_global_ranks=tuple(sorted(rank.global_rank for rank in context_ranks)),
         context_replica_groups=context_replica_groups(context_ranks, tp_rank, put_step),
     )
+
+
+def make_block_hash_mappings(topology: KVPoolTopology) -> dict[int, BlockHashMapping]:
+    return {
+        group.group_id: BlockHashMapping(group.block_size, topology.config.hash_block_size)
+        for group in topology.transfer_groups
+    }
 
 
 class FakeEvent:

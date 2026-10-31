@@ -28,7 +28,7 @@ class StoreSourceLeases:
         self._expected_worker_count = config.expected_worker_count
         self._block_pool: BlockPool | None = None
         self._next_job_id = 0
-        self._leases: dict[int, tuple[tuple[int, ...], int]] = {}
+        self._leases: dict[int, tuple[tuple[int, ...], int, str]] = {}
         store_group_specs = (
             tuple((group_id, config.group_specs[group_id]) for group_id in config.transfer_group_ids)
             if config.store_enabled and not config.use_layerwise
@@ -81,7 +81,7 @@ class StoreSourceLeases:
         store_job_id = self._next_job_id
         self._next_job_id += 1
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in block_ids])
-        self._leases[store_job_id] = (block_ids, self._expected_worker_count)
+        self._leases[store_job_id] = (block_ids, self._expected_worker_count, command.request_id)
         return cast(StoreCommandT, replace(command, store_job_id=store_job_id))
 
     def release(self, released_store_jobs: dict[int, int]) -> None:
@@ -89,12 +89,12 @@ class StoreSourceLeases:
             lease = self._leases.get(store_job_id)
             if lease is None:
                 continue
-            block_ids, remaining = lease
+            block_ids, remaining, request_id = lease
             remaining -= count
             if remaining < 0:
                 raise RuntimeError(f"Store job {store_job_id} reported source release by too many Workers")
             if remaining:
-                self._leases[store_job_id] = (block_ids, remaining)
+                self._leases[store_job_id] = (block_ids, remaining, request_id)
                 continue
             if self._block_pool is None:
                 raise RuntimeError("GPU block pool is unavailable while Store source leases are active")
@@ -110,11 +110,17 @@ class StoreSourceLeases:
         if self._block_pool is None or not self._leases:
             return False
         # Each job touches a block once, independently of how many Workers still owe its acknowledgement.
-        source_refs = Counter(block_id for block_ids, _ in self._leases.values() for block_id in block_ids)
+        source_refs = Counter(block_id for block_ids, _, _ in self._leases.values() for block_id in block_ids)
         return any(self._block_pool.blocks[block_id].ref_cnt == count for block_id, count in source_refs.items())
 
     def pending_job_ids(self) -> tuple[int, ...]:
         return tuple(self._leases)
+
+    def pending_counts(self) -> tuple[int, int]:
+        return (
+            len({request_id for _, _, request_id in self._leases.values()}),
+            len({block for blocks, _, _ in self._leases.values() for block in blocks}),
+        )
 
     def _source_block_ids(self, command: StoreCommand) -> tuple[int, ...]:
         source_ids: list[int] = []

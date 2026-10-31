@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
+from vllm.distributed.kv_events import BlockStored
+
 from ...infrastructure.mapping import PartitionId
 
 CachePartition: TypeAlias = tuple[int, PartitionId]  # Cache group and its physical partition.
@@ -64,3 +66,5 @@ class StoreSelection:
 
     keys: list[str] = field(default_factory=list)
     sources: list[StoreSource] = field(default_factory=list)
+    # Event, keys still requiring successful publication, and owning command.
+    events: list[tuple[BlockStored, tuple[str, ...], int]] = field(default_factory=list)

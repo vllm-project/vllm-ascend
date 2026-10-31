@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend
+from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, make_block_hash_mappings
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import (
     expected_group_bytes,
     expected_head_bytes,
@@ -34,7 +34,13 @@ def transfer_arguments(case, group_id, hashes, ids, mask=None):
     case.topology.config.align_state_group_ids = frozenset(
         group.group_id for group in case.topology.transfer_groups if group.uses_align_state
     )
-    context = bind_context(case.topology, case.caches, case.layout, layerwise_access=LayerwiseAccessKind.KEY_RANGE)
+    context = bind_context(
+        case.topology,
+        case.caches,
+        case.layout,
+        layerwise_access=LayerwiseAccessKind.KEY_RANGE,
+        block_hash_mappings=make_block_hash_mappings(case.topology),
+    )
     selection = LoadSelection(context.partition_order)
     index = KeyIndex(keys=selection.keys)
     keys = {partition: parts for (_, partition), parts in context.key_parts[group_id].items()}

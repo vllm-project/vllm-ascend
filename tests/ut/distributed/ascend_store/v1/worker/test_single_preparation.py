@@ -5,7 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.gva_fixtures import FakeGVABackend
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, make_coordinator, make_topology
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeBackend,
+    make_block_hash_mappings,
+    make_coordinator,
+    make_topology,
+)
 from tests.ut.distributed.ascend_store.v1.worker.fixtures import make_worker as make_bulk
 from tests.ut.distributed.ascend_store.v1.worker.test_layerwise import layer_names
 from tests.ut.distributed.ascend_store.v1.worker.test_layerwise import make_worker as make_layerwise
@@ -35,7 +40,9 @@ def test_shared_hash_reuses_each_object_and_keeps_its_first_source(operation):
     if operation == "lookup":
         topology = make_topology(pp_size=2)
         backend = FakeBackend()
-        lookup = LookupService(topology, backend, make_coordinator(topology))
+        lookup = LookupService(
+            topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+        )
         result = lookup(
             LookupRequest(end_token=8, transfer_group_ids=(0,), block_hashes=(value, value), local_available_tokens=0)
         )
@@ -69,7 +76,7 @@ def test_shared_hash_reuses_each_object_and_keeps_its_first_source(operation):
 def test_fully_local_lookup_preserves_available_prefix_without_backend_io():
     topology = make_topology()
     backend, coordinator = FakeBackend(), make_coordinator(topology)
-    result = LookupService(topology, backend, coordinator)(
+    result = LookupService(topology, backend, coordinator, block_hash_mappings=make_block_hash_mappings(topology))(
         LookupRequest(end_token=8, transfer_group_ids=(0,), block_hashes=(b"a", b"b"), local_available_tokens=8)
     )
     assert result.available_end_token == 8 and not backend.calls

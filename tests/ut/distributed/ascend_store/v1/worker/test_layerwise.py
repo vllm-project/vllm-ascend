@@ -14,6 +14,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeLoadStartGate,
     FakeResources,
     make_backend_spec,
+    make_block_hash_mappings,
     make_coordinator,
     make_topology,
 )
@@ -68,7 +69,9 @@ def test_lookup_keeps_sparse_recovery_points_and_plans_only_the_missing_load_ran
         block_hashes=(b"\x01", b"\x02", b"\x03", b"\x04"),
         local_available_tokens=16,
     )
-    result = LookupService(topology, backend, make_coordinator(topology))(query)
+    result = LookupService(
+        topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+    )(query)
     assert result.available_end_token == 24
     assert result.tail_key_boundaries == (TailKeyBoundary(0, 24), TailKeyBoundary(1, 24))
     command = plan_load(
@@ -95,7 +98,9 @@ def test_lookup_does_not_require_remote_keys_for_a_valid_local_prefix():
     query = LookupRequest(
         end_token=16, transfer_group_ids=(0,), block_hashes=(b"a", b"b", b"c", b"d"), local_available_tokens=8
     )
-    result = LookupService(topology, backend, make_coordinator(topology))(query)
+    result = LookupService(
+        topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+    )(query)
     assert result.available_end_token == 16
     assert [key.rsplit("@", 1)[-1] for key in backend.calls[0][1]] == ["63", "64"]
     command = plan_load(

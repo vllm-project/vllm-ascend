@@ -48,14 +48,27 @@ class LookupClient:
         self._closed = True
         self._rpc.close()
 
+    def reset(self) -> bool:
+        if self._closed:
+            raise RuntimeError("Lookup client is closed")
+        try:
+            return self._rpc.request([b"reset"], deadline=deadline_after(self._timeout_ms)) == b"1"
+        except Exception:
+            self._rpc.reset_connection()
+            logger.exception("External cache reset failed at %s", self._address)
+            return False
+
 
 class LookupServer:
     """Translate Lookup failures into miss replies while retaining the Worker callback until close."""
 
-    def __init__(self, lookup: Callable[[LookupRequest], LookupResult], address: str) -> None:
+    def __init__(
+        self, lookup: Callable[[LookupRequest], LookupResult], address: str, *, reset: Callable[[], bool] | None = None
+    ) -> None:
         self._codec = LookupCodec()
         self._address = address
         self._lookup = lookup
+        self._reset = reset
         self._rpc = RpcServer(self._handle_request, address)
 
     def close(self, *, timeout: float = RPC_CLOSE_TIMEOUT_S) -> None:
@@ -63,6 +76,12 @@ class LookupServer:
         self._rpc.close(timeout=timeout)
 
     def _handle_request(self, frames: Sequence[WireFrame]) -> bytes:
+        if len(frames) == 1 and bytes(frames[0]) == b"reset":
+            try:
+                return b"1" if self._reset is not None and self._reset() else b"0"
+            except Exception:
+                logger.exception("External cache reset failed at %s", self._address)
+                return b"0"
         try:
             request = self._codec.decode_request(frames)
             return self._codec.encode_result(self._lookup(request))

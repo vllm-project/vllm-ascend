@@ -8,7 +8,7 @@ AscendStore 将模型计算产生的 KV 缓存保存到外部存储，让后续�
 
 ![AscendStore v1 总体职责：Connector 直接装配 Scheduler 与 Worker，业务层组合基础设施并调用 Backend](../../assets/ascendstore_v1/architecture_layers.svg)
 
-Connector 在 Scheduler 和 Worker 进程中分别实例化。Lookup 通过独立 RPC 查询；Load / Store 命令与完成信息通过 vLLM Connector 元数据交接，KV 字节经 Backend 传输。
+Connector 在 Scheduler 和 Worker 进程中分别实例化。查询与缓存控制通过独立 RPC 交接；Load / Store 命令、完成与失败结果通过 vLLM Connector 元数据交接，KV 字节经 Backend 传输。
 
 资源所有权与调用关系分开：Service / Transfer 使用 Backend，Resources 保留客户端、注册句柄及对象会话，直到业务排空并确认内存安全后才释放。
 
@@ -20,9 +20,10 @@ Connector 在 Scheduler 和 Worker 进程中分别实例化。Lookup 通过独�
 v1/
 ├── connector.py                 vLLM 钩子适配、配置准入与两侧实例装配
 ├── protocol/
-│   ├── messages.py              命令、Lookup 消息与来源释放回执
+│   ├── messages.py              命令、查询消息、事件元数据与来源释放回执
 │   ├── results.py               Load / Store 完成与安全排空结果
-│   └── lookup.py                Lookup 编解码、校验与未命中回退
+│   ├── observations.py          跨 Worker 的缓存事件汇总
+│   └── lookup.py                查询与缓存控制的编解码、校验和应答语义
 ├── scheduler/
 │   ├── scheduler.py             命中采用、分配确认、每步命令规划
 │   ├── lookup.py                请求侧恢复候选与实际加载范围
@@ -69,50 +70,76 @@ v1/
 
 ### 3.2 Lookup：只准备查询和恢复证据
 
-![Lookup 数据流：选查询范围、建立唯一 Key、查询存在性、还原可用性并求恢复终点](../../assets/ascendstore_v1/lookup_flow.svg)
+![Lookup 数据流：vLLM 发起查询，Worker 形成恢复证据，Scheduler 采用候选并确认分配后生成 Load](../../assets/ascendstore_v1/lookup_flow.svg)
 
-- 连续 Full Attention 的观察结果只需起点、块大小和命中序列；稀疏或多组路径还保留每个候选的起点、覆盖长度与 hash，以表达不同恢复条件。
-- 一个逻辑块可能对应多个远端分区，各分区的对象都存在才算可用；本地已确认前缀直接作为恢复证据参与计算。
-- Store 的保留策略只决定本次保存哪些块，不能描述外部存储中所有可能存在的恢复点。因此 Lookup 使用自己的候选规则。
+Lookup 的候选规则覆盖可能支持恢复的逻辑位置。Store 的保留策略只描述本次保存哪些块，无法描述外部存储中所有可能存在的恢复点，因此两者分别选块。
+
+查询观察按恢复条件保留数据：
+
+| 缓存形态 | 观察结果保留什么 |
+| --- | --- |
+| 连续 Full Attention | 起点、块大小和命中序列 |
+| 稀疏或多缓存组 | 每个候选的起点、覆盖长度、hash 与命中证据，用于协调不同组的恢复条件 |
 
 ### 3.3 Load：对象唯一，目标不能丢
 
-![Load 数据流：按已确定的终点选块、绑定全部目标、登记批次、准备参数并传输和收集](../../assets/ascendstore_v1/load_flow.svg)
+![Load 数据流：公共准备与传输之后，区分请求级异步 Bulk、同步单组可回退，以及同步多组失败或致命异常的消费路径](../../assets/ascendstore_v1/load_flow.svg)
 
-- 同一请求不能同时登记两次在途 Load。登记后即使启动失败，Service 仍持有目标归属，关闭时能够继续检查写入是否停止。
-- 单组失败只有在目标写入已结束且框架支持失效重算时才可回退。当前多缓存组的部分加载失败缺少同等回退契约，因此上抛；参数或结果数量错误、写入安全未知也不能当作普通未命中处理。
+同步回退时，本次 forward 的计算范围已由调度结果确定，Worker 不会因 Load 返回失败码而就地重新排程。即使 Load 与 Store 的 token 范围不重叠，后缀 Attention 对前缀 KV 的使用仍可能把错误传播到后续层的新 KV。后续重算不会自动撤销已发布的远端对象，因此要排除本轮依赖失败前缀产生的保存。
+
+- 单组 / 多组按模型的完整缓存组布局判断，所选传输组只是其中的子集，不能据此放宽失败策略。
+- 同一请求只保留一个在途 Load。启动失败或目标写入安全未确认时，批次继续持有目标归属。
+- 可回退的失败码以目标写入已停止为前提；参数或结果数量违反契约、写入安全未知的异常均上抛。
 
 ### 3.4 Store：先选合格来源，再查询和展开地址
 
-![Store 数据流：登记来源、选择 writer 和候选、Key 去重与存在性过滤、读源传输、发布和来源释放](../../assets/ascendstore_v1/store_flow.svg)
+![Store 数据流：Scheduler 规划保存范围，Worker 准备对象与来源，按计算就绪时序读源；同步回退路径排除本轮失效来源，完成后交回释放回执](../../assets/ascendstore_v1/store_flow.svg)
 
 - 范围命令从本次保存起点选块；checkpoint 命令使用指定状态块，并补齐恢复该 checkpoint 必需的 companion 块。
-- 多分区需要稳定结果顺序时，排序移动的是已经绑定的 Key 与来源。来源中的命令索引用于将结果交回原请求和 Store job，不需要另建反向索引。
-- 共享汇总要求参与者进入相同轮次。没有数据或准备失败的成员也发送报告，是为了让其他成员能结束本轮，并判断必要 writer 的证据是否齐全。
+- 多分区需要稳定结果顺序时，排序移动的是已经绑定的 Key 与来源，结果沿命令索引交回原请求和 Store job。
+- 已存在对象的成功证据来自 Backend，无需读取本次本地来源。来源失效只影响仍需读取的待写对象，记录随当前批次结束，不延续到后续重算批次。
 
 ### 3.5 三条业务与两种传输方式
 
-三条业务需要的数据不同，不能为了统一流程而全部展开成一套对象行。Lookup 需要逻辑可用性；Load 需要唯一对象及所有目的地；Store 需要唯一 Key 及选中的来源。Bulk / Layerwise 与这个划分正交：两者复用同一 Service 的选块与归属，区别在传输粒度、对象访问方式和时序。
+三条业务保留的身份与归属不同：
+
+| 业务 | 沿数据流保留什么 |
+| --- | --- |
+| Lookup | 逻辑可用性、唯一查询 Key 与必要路由 |
+| Load | 唯一对象、全部本地目标、请求归属与结果槽位 |
+| Store | 唯一 Key、一个合格来源及其命令索引 |
+
+Bulk / Layerwise 与这个划分正交：两者复用同一 Service 的选块与归属，区别在传输粒度、对象访问方式和时序。
 
 Layerwise 跨层复用 Selection、成功对象计划和可共享的层参数模板；不在每层重新生成 Key、执行存在性查询或重建请求归属。层地址和范围在对应层需要时求值。GVA 的远端基址来自本次 Backend Session，不能当成永久 Mapping 数据。
 
-“数据只准备一次”约束的是重复推导，不是禁止扫描。必须保留的扫描包括 Lookup 合并可用性、Store 根据 exists 结果过滤候选、Layerwise 根据 open 结果投影成功对象，以及完成后的失败与发布汇总。这些阶段有新的输入证据，沿既有身份推进；没有新信息时不应再次拆分、合并或重建归属。
+“数据只准备一次”约束的是重复推导，不是禁止扫描。Lookup 合并可用性、Store 按 exists 和来源有效性过滤候选、Layerwise 按 open 结果投影成功对象，以及完成后的失败与发布汇总，都有新的输入证据。这些阶段沿既有身份推进，不重新选块或重建归属。
 
 ### 3.6 Scheduler 与 Connector 交接
 
-Scheduler 将外部命中视为候选，只有 vLLM 确认采用并分配目标块后才生成 Load 命令。Store 规划区分已就绪来源和本步仍在计算的来源，并为需要额外保护的来源持有引用。原始 group ID 始终表示缓存组身份，紧凑下标仅用于批次内部定位。
+请求的原始 prompt 边界用于查询，本次预填充终点用于区分重放与 Decode，保存进度记录已处理区间。抢占后的 V1 RESUMED 与 V2 NEW 入口都按确认后的新块表和本次预填充范围规划，避免将重放的 Decode 历史误当成新生成数据。
 
-Connector 直接装配 Scheduler 和 Worker。异步请求级 Load 当前用于 Bulk；Layerwise 使用同步 Scheduler，通过逐层钩子与计算交叠。Worker 将 begin、加载、层等待、保存和 end 钩子适配到 Service / Transfer，不直接推进底层队列或逐层 Future。
+Store 的阶段许可在 Scheduler 生成命令前确定。Consumer 开启 `save_decode_cache` 后可以保存 Decode 区间，重放预填充仍按预填充策略处理。规划结果区分已就绪来源和本步仍在计算的来源，并为需要额外保护的来源持有引用。原始 group ID 始终表示缓存组身份，紧凑下标仅用于批次内部定位。
 
-没有 forward 的空步骤也要收集先前提交的异步完成和来源释放回执，再清除元数据。普通步骤结束只解除当前步骤控制关系，不能丢弃跨步 Load / Store 批次。Forward 或钩子异常时中止本步，保留原异常以及已提交任务的安全状态，关闭时继续排空。
+Connector 将同一份 Load 结果适配到框架字段：
 
-Protocol 的 Lookup 适配将查询失败或无效应答转为未命中；RPC 不解释命中语义。Store 来源释放回执表示 Worker 已停止读源，用来归还 Scheduler 的引用，不代表存储成功；异步 Load 完成和失败信息也必须只交付一次。
+| 框架字段 | 适用范围 | 交付内容 |
+| --- | --- | --- |
+| `finished_recving` | 请求级异步 Bulk | 已结束加载的请求 ID，成功与失败分别判断 |
+| `failed_recving` | 请求级异步 Bulk，模型具有多个缓存组 | 加载失败的请求 ID |
+| `invalid_block_ids` | 单缓存组的失败码上报 | 需要失效处理的本地 Block ID |
+
+同步 Bulk 的 Mamba 状态准备由 ModelRunner 在加载返回后、forward 消费前完成。
+
+启用缓存事件时，Store 命令携带本次 token 区间快照，选块时绑定事件归属；exists 与最终发布结果共同确认关联对象均可用后产生事件，再通过 Protocol 汇总各 Worker 的共同事件。
+
+Load 耗时在批次完成后领取，Scheduler 则按当前未归还的来源引用统计等待释放的请求与块数，两者经 Connector 统计接口交给框架。结果、事件与耗时快照领取后即移出待交付队列，来源释放回执独立用于归还 Scheduler 的引用。
 
 ## 4. 基础设施
 
 ### 4.1 Configuration
 
-Configuration 负责整体静态解析，将执行选项、缓存规格、传输粒度和并行分区整理为 Scheduler 与 Worker 共用的配置。缓存规格与粒度复用 vLLM 的解析结果，Backend 的对象格式要求转化为相应的分区约束。
+Configuration 负责整体静态解析，将执行选项、缓存规格、传输粒度和并行分区整理为 Scheduler 与 Worker 共用的配置。角色与保存选项分别确定 Load / Store 能力和预填充 / Decode 的保存许可。缓存规格与粒度复用 vLLM 的解析结果，Backend 的对象格式要求转化为相应的分区约束。
 
 Connector 先调用 Configuration 完成解析和支持检查，再装配 Scheduler 或 Worker。配置描述两侧共用的规则，不依赖某个 Worker 的进程坐标；不支持的组合在申请 Backend 资源前被拒绝。
 
@@ -124,7 +151,7 @@ Worker 侧先完成 Topology 绑定，再申请 Backend 资源并构造 Worker�
 
 ### 4.3 RPC
 
-RPC 提供同步字节帧请求应答，使用 ZMQ REQ / REP。客户端由单一调用线程使用，同一连接一次只进行一个交换；服务端在持有 socket 的线程上串行执行处理回调。Lookup 的业务适配由 Protocol 完成。
+RPC 提供同步字节帧请求应答，使用 ZMQ REQ / REP。客户端由单一调用线程使用，同一连接一次只进行一个交换；服务端在持有 socket 的线程上串行执行处理回调。Protocol 适配查询与缓存重置的消息语义：查询失败或无效应答回退为未命中，重置则返回明确的成功或失败结果。
 
 客户端延迟建连，发送和接收共用同一个截止时间。交换失败后丢弃连接并向调用方抛出异常，不自动重试；下次请求重新建连，避免迟到应答进入后续交换。Protocol 检测到无效响应时也会要求重置连接。客户端超时只结束本次等待，不能取消已经进入原生客户端的查询。
 
@@ -140,7 +167,7 @@ Coordinator 在 Token 轴上统一理解本地与外部 KV 的逻辑可用性，
 | --- | --- | --- |
 | Lookup | 查询上限与本地已确认前缀；查询后的外部命中 | 先选择可能支持候选终点的查询块，再根据可用性证据求各组共同支持的恢复终点 |
 | Load | Scheduler 已确定的加载终点 | 选择恢复到该终点所需的逻辑块，不再求解共同终点或重复裁剪 |
-| Store | 本次保存区间、prompt 边界与保留策略 | 选择应保存的逻辑块，mask 从本次起始块计数 |
+| Store | 本次保存区间、预填充边界与保留策略 | 选择应保存的逻辑块，mask 从本次起始块计数 |
 
 Lookup 的查询候选、外部实际命中和 Load 所需块是不同结果；Store 的稀疏保留规则也不能替代 Lookup 选择，否则会漏掉仍可恢复的终点。恢复终点与尾部对象边界不一致时，`ReachablePrefix` 保留读取所需的尾部 key 边界。
 
@@ -148,7 +175,7 @@ Coordinator 输出逻辑终点与选择掩码，不查询 Backend、不读写 KV
 
 ### 4.5 Mapping
 
-`BlockHashMapping` 表达逻辑位置、内容 hash 与调用方 Block ID 的关系，供 Load / Store 共用。它处理 hash 粒度、范围切片和尾部边界，不分配块、不查询后端，也不保存请求状态。Lookup 只使用其 hash 范围能力。
+`BlockHashMapping` 表达逻辑位置、内容 hash 与调用方 Block ID 的关系。Worker 装配时按组绑定粒度比例和完整块末尾 hash 的相对偏移，LookupService 与 TransferContext 共享这些不可变实例。运行时结合本次 hash、块表、范围和尾部边界求值，不分配块、不查询后端，也不保存请求状态。Lookup 只使用其 hash 范围能力。
 
 Mapping 将对象身份、本地字节与远端位置分别绑定为 Key、Local、Remote 三份数据，Layer 记录物理层到 segment 区间的关系。一个 segment 是可连续复制的本地字节段；各份数据通过一致的分区坐标与段顺序对应。
 
@@ -182,7 +209,7 @@ Mapping 将对象身份、本地字节与远端位置分别绑定为 Key、Local
 
 Mooncake 的普通 TransferEngine 路径由 v1 Backend 持有进程级引擎和注册表，与旧 Connector 的全局引擎隔离。多个 v1 客户端注册同一地址和大小时共享引用，最后一个注册句柄释放时才注销内存；失败的回滚或注销保留句柄供重试。引擎初始化复用上游 `GlobalTE` 的失败策略，原生初始化失败后需要重启进程。使用 Store 独立引擎或 fabric memory 的路径仍按各自原生契约处理。
 
-Backend 实现原生客户端调用、内存注册、对象保护和结果规范化。Layerwise Transfer 累计各层复制证据，StoreService 判断对象完整性并决定 commit 或 revoke，再由 Transfer 调用 Backend Session。commit 发布完整对象；revoke 撤销未完成写入。适配器落实这些操作的原生语义。
+Backend 实现原生客户端调用、内存注册、对象保护和结果规范化。Layerwise Transfer 累计各层复制证据，StoreService 根据来源有效性和对象完整性决定 commit 或 revoke，再由 Transfer 调用 Backend Session。commit 发布完整对象；revoke 撤销未完成写入，其完成确认取决于原生接口提供的所有权保证。
 
 同步 Store 正常返回时，接口保证本地来源读取已经结束，返回的失败码仍可以表示某些对象写入失败。异常缺少这一完成保证，调用者需要保留未知状态。远端发布和本地读源结束分别记录，避免用其中一个状态代替另一个。
 
@@ -271,7 +298,7 @@ Mapping 只求值位置与身份。Service 负责对象选择与结果归属，T
 
 ### 6.1 来源安全与目标安全
 
-Store 的模型写入完成、Backend 停止读源、来源允许回收是不同条件。源就绪事件只允许开始读取；复制结束证据用于确认停止读源；Scheduler 的引用和 Worker 的 fence 再约束后续回收或覆盖。
+Store 读取本地 KV 需要内容有效且设备写入已完成。来源有效性来自业务结果，源就绪事件来自模型钩子，事件完成本身不证明加载成功。读取开始后，Backend 的完成证据确认停止读源，Scheduler 的引用和 Worker 的 fence 再约束后续回收或覆盖。
 
 普通 Full Attention 请求存活期间，manager 保留相关缓存块。请求结束或抢占后，Worker 在模型可能复用这些块之前等待相关 Store。对于请求存活期间就可能回收页面的 manager，以及需要保护的 checkpoint 来源，Scheduler 额外持有引用，并等待预期 Worker 的来源释放回执。
 
@@ -281,15 +308,17 @@ Store 的模型写入完成、Backend 停止读源、来源允许回收是不同
 
 Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实际 `ContextRank` 成员关系识别副本，每组副本选择最小 global rank 作为 writer。存在多个对象分片时，使用覆盖相关成员的 CollectiveGroup 汇总；成员集合来自实际拓扑，不凭 rank 算术推定。
 
-发布前，必要 writer 必须完成各自的必要层，并确认使用相同的远端分配身份（地址与大小）。GroupCompletion 返回一致完成的 Key，StoreService 据此选择 commit。缺少 writer、任一必要层失败或分配身份不一致，都不能发布。非 writer、空结果和打开失败的成员同样参与本轮汇总；预留空间中的空闲槽位不虚构 writer。
+发布条件是必要 writer 的来源有效、各必要层复制完成，且远端分配身份（地址与大小）一致。GroupCompletion 返回一致完成的 Key，StoreService 据此选择 commit。来源失效后，Layerwise 停止该对象后续层的读取，未完成对象进入撤销收尾。非 writer、空结果和失败的成员同样参与本轮汇总；预留空间中的空闲槽位不虚构 writer。
 
-对象打开失败、复制失败、发布失败和撤销失败分别保留其证据。撤销失败时保留未确认的 Session 所有权供后续清理。远端对象是否发布和本地来源是否停止被读不能互相替代。
+对象打开、复制、发布和撤销分别保留完成证据。原生接口无法确认安全撤销或撤销失败时，Session 继续持有未确认的对象，供后续清理。远端对象是否发布和本地来源是否停止被读分别决定对象会话与本地内存的释放。
 
-### 6.3 绑定、结束与关闭
+### 6.3 绑定、步骤结束、重置与关闭
 
 绑定 KV 时，Resources 先保留 Tensor；Worker 建立 TransferContext、Transfer 和 Service，再注册有效跨度并启动执行队列。失败时按已取得的资源逆向清理，不能先丢 Tensor 引用再排空可能访问它的任务。
 
-结束一步只结束本步控制关系。异步 Load 与跨步 Store 仍由 Service 的 pending 批次持有；空步骤也可以交回它们的完成。Layerwise 必须先停止新增层操作、安排完成回调，再允许批次被最终领取。钩子异常和 forward 异常均触发中止，不能在框架的 finally 收尾路径继续发起正常保存并覆盖原异常。
+结束一步只结束本步控制关系，异步 Load 与跨步 Store 仍由 Service 的 pending 批次持有。没有 forward 的空步骤也收集先前提交的异步完成和来源释放回执，再清除元数据。Layerwise 先停止新增层操作、安排完成回调，再允许批次被最终领取。钩子异常和 forward 异常均触发中止，保留原异常及已提交任务的安全状态，关闭时继续排空；框架的 finally 收尾路径不再发起正常保存。
+
+缓存重置在暂停调度、没有活动步骤、在途 Load 或未归还来源引用时执行。Scheduler 在发出重置请求前清除旧恢复候选；Worker 等待 Store 停止读源，清空待交付缓存事件，再调用 Backend 清理缓存。执行队列、注册和业务准入继续保留，后续请求可以重新查询和传输。应答失败时无法确认远端是否已执行，旧候选保持失效，调用方得到失败结果。当前 Mooncake Bulk 支持该操作，Mooncake Layerwise 返回拒绝，其他 Backend 返回不适用。
 
 关闭按以下依赖推进：
 
@@ -311,10 +340,12 @@ Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实
 | 逻辑 hash 与 Block ID | `worker/test_block_hash_mapping.py` | 不同粒度、加载起点、尾部边界与调用方块表 |
 | Key / Local / Remote / Layer | `infrastructure/mapping/test_mapping.py`、`test_partition_bindings.py`（同目录） | 分区、非连续 view、段序、对象偏移与预留 |
 | 三条业务的数据流 | `worker/test_data_flow.py`、`test_store_candidates.py`、`test_single_preparation.py`（同目录） | Lookup 新 Key、重复目标、writer 筛选、exists 过滤与归属保留 |
+| Scheduler / Worker 接口契约 | `test_dataflow_contracts.py` | 候选有效期、V1 / V2 恢复入口、阶段许可、分组失败交付、加载失败到 Store 来源失效及重算恢复 |
 | 实际参数与字节一致性 | `worker/test_equivalence.py`、`test_layerwise_bytes.py`（同目录） | 对照基准、整对象 / 逐层重组、KeyRange / GVA 字节 |
 | 串行队列与逐层时序 | `infrastructure/test_execution.py`、`test_layerwise_executor.py`、`test_attention_gate.py`（同目录） | 提交 / 领取分离、Gate 取消、封口、重复钩子与收尾 |
 | Lookup 契约与 RPC | `protocol/test_lookup.py`、`infrastructure/test_rpc.py` | 消息校验、失败回退、连接重建与线程退出 |
 | 集成与空步骤 | `test_connector_integration.py`、`test_connector_lifecycle.py` | 异步完成只交付一次、无 forward、异常收尾与关闭顺序 |
+| 消费、观测与缓存控制 | `test_dataflow_contracts.py` | 同步加载后的模型状态准备、按对象可用证据产生事件、统计领取、RPC 重置与后续请求准入 |
 | 注册与关闭所有权 | `infrastructure/test_resources.py`、`worker/test_worker.py` | 绑定与注册顺序、失败保留、内存安全未知时禁止释放 |
 | 共享对象发布 | `worker/test_gva_writers.py`、`infrastructure/test_collective.py` | writer 完备性、空报告、失败及分配身份分歧 |
 

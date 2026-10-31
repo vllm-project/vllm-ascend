@@ -31,7 +31,7 @@ class TransferContext:
 
     topology: KVPoolTopology
     groups: dict[int, KVPoolGroupTopology]
-    block_hash_mappings: dict[int, BlockHashMapping]
+    block_hash_mappings: Mapping[int, BlockHashMapping]
     key_parts: dict[int, dict[CachePartition, tuple[str, str]]]
     partition_order: dict[CachePartition, int]
     local: dict[int, LocalTable]
@@ -49,6 +49,7 @@ def bind_context(
     kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]],
     kv_cache_layout: str,
     *,
+    block_hash_mappings: Mapping[int, BlockHashMapping],
     layerwise_access: LayerwiseAccessKind | None = None,
     key_builder: WireKeyBuilder | None = None,
 ) -> TransferContext:
@@ -102,10 +103,7 @@ def bind_context(
     return TransferContext(
         topology=topology,
         groups=groups,
-        block_hash_mappings={
-            group_id: BlockHashMapping(group.block_size, topology.config.hash_block_size)
-            for group_id, group in groups.items()
-        },
+        block_hash_mappings=block_hash_mappings,
         key_parts=key_parts,
         partition_order={
             coordinate: index

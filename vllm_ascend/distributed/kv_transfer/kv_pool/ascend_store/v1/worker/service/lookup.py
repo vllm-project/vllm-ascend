@@ -1,5 +1,7 @@
 """Bind remote query identities independently of local KV buffers and resources."""
 
+from collections.abc import Mapping
+
 from vllm.logger import logger
 
 from ...backend.interfaces import KVStoreBackend
@@ -18,14 +20,12 @@ class LookupService:
         backend: KVStoreBackend,
         coordinator: Coordinator,
         *,
+        block_hash_mappings: Mapping[int, BlockHashMapping],
         key_builder: WireKeyBuilder | None = None,
     ) -> None:
         self._backend, self._coordinator = backend, coordinator
         self._group_ids = topology.config.transfer_group_ids
-        self._block_hash_mappings = {
-            group.group_id: BlockHashMapping(group.block_size, topology.config.hash_block_size)
-            for group in topology.transfer_groups
-        }
+        self._block_hash_mappings = block_hash_mappings
         self._keys = {}
         for group in topology.transfer_groups:
             head_count = (
@@ -49,7 +49,7 @@ class LookupService:
         if not 0 <= request.local_available_tokens <= request.end_token:
             raise ValueError("Local availability must lie within the Lookup range")
         fully_local = request.local_available_tokens == request.end_token and all(
-            request.end_token % mapping.block_size == 0 for mapping in self._block_hash_mappings.values()
+            request.end_token % self._block_hash_mappings[group_id].block_size == 0 for group_id in self._group_ids
         )
         observations: list[LookupObservation | ContiguousObservation]
         if fully_local:
@@ -60,7 +60,8 @@ class LookupService:
             observations = []
             key_index: KeyIndex | None = None
             observed: list[bool] = []
-            for (group_id, mapping), mask in zip(self._block_hash_mappings.items(), masks, strict=True):
+            for group_id, mask in zip(self._group_ids, masks, strict=True):
+                mapping = self._block_hash_mappings[group_id]
                 compact = self._coordinator.contiguous_lookup and mask is None
                 if compact:
                     first = request.local_available_tokens // mapping.block_size

@@ -30,6 +30,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
 )
 
 
+@pytest.mark.parametrize("native_result,expected", ((0, True), (7, True), (-7, False)))
+def test_external_reset_preserves_native_removed_object_count_contract(native_result, expected):
+    store = MagicMock()
+    store.remove_all.return_value = native_result
+    backend = _make_mooncake_registration_backend(store)
+    assert backend.reset_cache() is expected
+    store.remove_all.assert_called_once_with(force=True)
+
+
 def test_named_mooncake_worker_unregisters_store_regions_before_client_close() -> None:
     store = MagicMock()
     backend = _make_mooncake_registration_backend(store)

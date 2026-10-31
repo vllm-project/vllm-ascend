@@ -547,7 +547,7 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     assert resources.closed
 
 
-@pytest.mark.parametrize("invalid", ("boolean", "partial", "unsupported_route"))
+@pytest.mark.parametrize("invalid", ("boolean", "partial", "unsupported_route", "decode_only_layerwise"))
 def test_connector_roles_reject_configuration_before_ranks_and_resource_creation(
     configuration_case, monkeypatch, invalid
 ):
@@ -558,6 +558,10 @@ def test_connector_roles_reject_configuration_before_ranks_and_resource_creation
     elif invalid == "partial":
         config.kv_transfer_config.kv_connector_extra_config["discard_partial_chunks"] = False
         message = "discard_partial_chunks=False"
+    elif invalid == "decode_only_layerwise":
+        config.kv_transfer_config.kv_role = "kv_consumer"
+        config.kv_transfer_config.kv_connector_extra_config.update(use_layerwise=True, save_decode_cache=True)
+        message = "Decode-only Store requires Bulk"
     else:
         config.kv_transfer_config.kv_connector_extra_config.update(use_layerwise=True, prefill_tp_size=2)
         config.kv_transfer_config.kv_role = "kv_consumer"

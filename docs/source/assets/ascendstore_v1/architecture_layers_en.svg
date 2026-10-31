@@ -28,7 +28,7 @@
 <g data-node="protocol">
 <rect x="48" y="288" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
 <text x="64" y="315" class="name">Protocol · shared business contracts</text>
-<text x="64" y="339" class="muted">Load / Store commands and results · Lookup codec, validation and miss fallback · source-release reports</text>
+<text x="64" y="339" class="muted">Commands and completion / failure results · queries and cache control · source release and observations</text>
 </g>
 <rect x="48" y="368" width="1184" height="216" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
 <text x="64" y="397" class="name">Infrastructure · composable capabilities</text>

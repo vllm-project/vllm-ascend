@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from dataclasses import field, make_dataclass
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, Mock
@@ -13,6 +14,17 @@ from tests.ut.distributed.ascend_store._mock_deps import (
     _FakeMambaSpec,
     _FakeSlidingWindowSpec,
 )
+
+# Older local CPU checkouts lack the request-failure snapshot used by current CI.
+connector_base = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
+if not hasattr(connector_base, "KVConnectorTransferResults"):
+    connector_base.KVConnectorTransferResults = make_dataclass(  # type: ignore[attr-defined]
+        "KVConnectorTransferResults",
+        [
+            (name, set[str], field(default_factory=set))
+            for name in ("finished_sending", "finished_recving", "failed_recving")
+        ],
+    )
 
 
 class _FakeCircularBufferSpec(_FakeKVCacheSpec):

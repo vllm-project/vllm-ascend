@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import partial
+from time import perf_counter
 from typing import Any, cast
 
 import numpy as np
@@ -84,7 +85,7 @@ class LayerwiseTransfer:
         self,
         batch: LoadBatch,
         finish: Callable[[LoadBatch], LoadResult],
-        check_ready: Callable[[LoadBatch], None],
+        check_ready: Callable[[LoadBatch, set[int] | None], None],
     ) -> None:
         if self._write_batch is not None:
             raise RuntimeError("Layerwise write already started for this step")
@@ -99,11 +100,13 @@ class LayerwiseTransfer:
             partial(self._finish_write, batch, finish),
         )
 
-    def _open_write(self, batch: LoadBatch, check_ready: Callable[[LoadBatch], None]) -> tuple[int, ...]:
+    def _open_write(
+        self, batch: LoadBatch, check_ready: Callable[[LoadBatch, set[int] | None], None]
+    ) -> tuple[int, ...]:
         batch.plan, codes, _ = self.open(batch.selection, to_remote=False)
         batch.codes = codes
         if any(batch.codes):
-            check_ready(batch)
+            check_ready(batch, None)
         return tuple(sorted(batch.plan.layers))
 
     def wait_for_layer(self, layer_id: int, record_source_ready: Callable[[], Any]) -> None:
@@ -111,26 +114,37 @@ class LayerwiseTransfer:
             layer_id, record_source_ready, read_at_compute_start=self.context.read_at_compute_start
         )
 
-    def _write_layer(self, layer_id: int, batch: LoadBatch, check_ready: Callable[[LoadBatch], None]) -> None:
+    def _write_layer(
+        self, layer_id: int, batch: LoadBatch, check_ready: Callable[[LoadBatch, set[int] | None], None]
+    ) -> None:
         assert batch.plan is not None
         if batch.error is not None:
             raise batch.error
+        started = None
+
+        def mark_started() -> None:
+            nonlocal started
+            batch.destination_writes_stopped = False
+            started = perf_counter()
+
         try:
             codes = self.copy(
                 batch.plan,
                 layer_id,
                 to_remote=False,
-                on_start=lambda: setattr(batch, "destination_writes_stopped", False),
+                on_start=mark_started,
             )
+            if started is not None:
+                batch.transfer_seconds += perf_counter() - started
             batch.destination_writes_stopped = True
-            failed = False
+            failed = set()
             for index, code in batch.plan.failures(layer_id, codes):
-                failed = True
                 if batch.codes[index] == 0:
                     batch.codes[index] = code
+                    failed.add(index)
             batch.copied_layers.add(layer_id)
             if failed:
-                check_ready(batch)
+                check_ready(batch, failed)
         except BaseException as error:
             batch.error = error
             raise
@@ -175,6 +189,8 @@ class LayerwiseTransfer:
 
     def _open_read(self, batch: StoreBatch, prepare: Callable[[], StoreSelection]) -> None:
         batch.selection = prepare()
+        if batch.invalid_requests:
+            batch.invalidate_sources(tuple(batch.invalid_requests))
         batch.plan, codes, batch.opened_indices = self.open(
             batch.selection, to_remote=True, keep_regions=batch.needs_shared_confirmation
         )
@@ -191,6 +207,12 @@ class LayerwiseTransfer:
     def _read_layer(self, source_ready: Any, layer_id: int, batch: StoreBatch) -> None:
         if batch.plan is None or batch.remaining_objects == 0 or layer_id not in batch.plan.layers:
             return
+        for index in tuple(batch.invalid_objects):
+            if batch.codes[index] == 0:
+                batch.codes[index] = None
+                batch.remaining_objects -= 1
+        if batch.remaining_objects == 0:
+            return
         started = False
 
         def mark_started() -> None:
@@ -204,6 +226,7 @@ class LayerwiseTransfer:
                 to_remote=True,
                 source_ready=source_ready,
                 on_start=mark_started,
+                skip_indices=batch.invalid_objects,
             )
         except Exception as error:
             batch.error = batch.error or error
@@ -441,6 +464,7 @@ class LayerwiseTransfer:
         to_remote: bool,
         source_ready: Any = None,
         on_start: Callable[[], None] | None = None,
+        skip_indices: set[int] | None = None,
     ) -> tuple[int, ...]:
         keys = plan.range_keys[layer_id]
         merges = plan.key_merges[layer_id]
@@ -467,10 +491,32 @@ class LayerwiseTransfer:
                     position += 1
         if source_ready is not None:
             source_ready.synchronize()
+        active = None
+        if skip_indices:
+            skipped = {
+                position if merges is None else merges[position]
+                for position, index in enumerate(plan.range_indices[layer_id])
+                if index in skip_indices
+            }
+            if skipped:
+                active = [index for index in range(len(keys)) if index not in skipped]
+                if not active:
+                    return (0,) * len(keys)
+                addresses = [addresses[index] for index in active]
+                sizes = [sizes[index] for index in active]
+                offsets = [offsets[index] for index in active]
         if on_start is not None:
             on_start()
         copy = self._store_ranges if to_remote else self._load_ranges
-        return copy(keys, addresses, sizes, offsets)
+        if active is None:
+            return copy(keys, addresses, sizes, offsets)
+        codes = copy([keys[index] for index in active], addresses, sizes, offsets)
+        if len(codes) != len(active):
+            raise ValueError("Backend result count does not match layer parameters")
+        results = [0] * len(keys)
+        for index, code in zip(active, codes, strict=True):
+            results[index] = code
+        return tuple(results)
 
     def _copy_gva(
         self,
@@ -480,6 +526,7 @@ class LayerwiseTransfer:
         to_remote: bool,
         source_ready: Any = None,
         on_start: Callable[[], None] | None = None,
+        skip_indices: set[int] | None = None,
     ) -> int:
         remote: list[int] = []
         local: list[int] = []
@@ -487,13 +534,25 @@ class LayerwiseTransfer:
         for coordinate in plan.layers[layer_id]:
             group_id, partition = coordinate
             block_ids = plan.block_ids[coordinate]
+            bases = plan.object_bases[coordinate]
+            if skip_indices and not skip_indices.isdisjoint(plan.result_slots[coordinate]):
+                positions = [
+                    position
+                    for position, index in enumerate(plan.result_slots[coordinate])
+                    if index not in skip_indices
+                ]
+                block_ids, bases = block_ids[positions], bases[positions]
+                if not len(block_ids):
+                    continue
             span, lengths, offsets = self._geometry[layer_id][coordinate]
             addresses = local_addresses(self.context.local[group_id][partition], block_ids, span)
-            remote.extend((plan.object_bases[coordinate][:, None] + offsets).ravel().tolist())
+            remote.extend((bases[:, None] + offsets).ravel().tolist())
             local.extend(addresses.ravel().tolist())
             sizes.extend(np.broadcast_to(lengths, addresses.shape).ravel().tolist())
         if source_ready is not None:
             source_ready.synchronize()
+        if not local:
+            return 0
         if on_start is not None:
             on_start()
         copy = self._store_gva if to_remote else self._load_gva

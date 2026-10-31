@@ -73,6 +73,8 @@ class KVPoolConfig:
 
     # Lookup RPC.
     lookup_rpc_timeout_ms: int
+    store_prefill_enabled: bool = True
+    enable_kv_events: bool = False
 
     @property
     def has_private_state(self) -> bool:
@@ -96,7 +98,8 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
     prefetch_layers = _resolve_layerwise_prefetch_layers(extra_config, use_layerwise)
     discard_partial_chunks = _boolean_option(extra_config, "discard_partial_chunks", default=True)
     load_enabled = transfer_config.kv_role != "kv_consumer" or consumer_load
-    store_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or consumer_store
+    store_prefill_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or consumer_store
+    store_enabled = store_prefill_enabled or save_decode_cache
     lookup_rpc_timeout_ms = extra_config.get("lookup_rpc_timeout_ms", -1)
 
     model_config = vllm_config.model_config
@@ -153,6 +156,10 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
         hash_block_size=hash_block_size,
         retention_interval=kv_cache_config.prefix_cache_retention_interval,
         lookup_rpc_timeout_ms=lookup_rpc_timeout_ms,
+        store_prefill_enabled=store_prefill_enabled,
+        enable_kv_events=bool(
+            getattr(vllm_config, "kv_events_config", None) and vllm_config.kv_events_config.enable_kv_cache_events
+        ),
     )
 
 
@@ -304,6 +311,8 @@ def validate_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheCon
         raise ValueError("AscendStore v1 does not support active KVPP until KVPP ownership is represented")
 
     transfer_config = vllm_config.kv_transfer_config
+    if config.use_layerwise and config.store_enabled and not config.store_prefill_enabled:
+        raise ValueError("Decode-only Store requires Bulk transfer; enable consumer_is_to_put for Layerwise Store")
     dcp_size = config.cp_partition.dcp_size
     pcp_size = config.cp_partition.pcp_size
     if (

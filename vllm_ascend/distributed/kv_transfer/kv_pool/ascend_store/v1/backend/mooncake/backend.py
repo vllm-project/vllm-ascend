@@ -71,6 +71,12 @@ class MooncakeBackend:
         self._require_open()
         torch.npu.set_device(self.device_id)
 
+    def reset_cache(self) -> bool:
+        """Caller has fenced all local copies before clearing external objects."""
+        self._ensure_initialized()
+        assert self._store is not None
+        return integer_result("Mooncake remove_all", self._store.remove_all(force=True)) >= 0
+
     def create_sessions(self) -> MooncakeSessions:
         """Create this Worker's session owner after validating native support."""
         return MooncakeSessions(self)

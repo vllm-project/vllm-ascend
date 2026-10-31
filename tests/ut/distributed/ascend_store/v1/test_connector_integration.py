@@ -25,6 +25,7 @@ from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import BackendSpec, LayerwiseAccessKind
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.backend import MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import AscendStoreV1Connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import Resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import LookupCodec
@@ -117,20 +118,30 @@ def test_connector_round_trip_keeps_local_prefix_and_releases_sources(
 
         if load_failure:
             if mode == "gva":
-                monkeypatch.setattr(sdk, "batch_copy", lambda *_: -7)
+                copy = sdk.batch_copy
+                monkeypatch.setattr(
+                    sdk,
+                    "batch_copy",
+                    lambda remote, local, sizes, direction: (
+                        -7 if direction == MmcDirect.COPY_G2L.value else copy(remote, local, sizes, direction)
+                    ),
+                )
             else:
                 method = "batch_get_into_multi_buffer_ranges" if layerwise else "batch_get_into_multi_buffers"
                 monkeypatch.setattr(sdk, method, lambda keys, *_: [-7] * len(keys))
-        request = make_request("consumer", prompt_tokens=8, tokens=9)
-        request.block_hashes = [b"a", b"b"]
+        request = make_request("consumer", prompt_tokens=12, tokens=13)
+        request.block_hashes = [b"a", b"b", b"c"]
         assert scheduler_connector.get_num_new_matched_tokens(request, 4) == (4, async_load)
-        scheduler_connector.update_state_after_alloc(request, FakeBlocks([5, 6]), 4)
+        scheduler_connector.update_state_after_alloc(request, FakeBlocks([5, 6, 7]), 4)
         output = (
             make_output()
             if async_load
-            else make_output(new=(new_request_data("consumer", ([5, 6],), 8),), scheduled_tokens={"consumer": 1})
+            else make_output(new=(new_request_data("consumer", ([5, 6, 7],), 8),), scheduled_tokens={"consumer": 4})
         )
         step = scheduler_connector.build_connector_meta(output)
+        if not async_load:
+            healthy = RangeStoreCommand("healthy", 0, 4, ((4,),), (b"d",), 4)
+            step = replace(step, store=StoreCommandBatch((*step.store.source_pending_commands, healthy)))
         assert [(c.start_token, c.end_token) for c in step.load_commands] == [(4, 8)]
         for tensor in caches.values():
             tensor[5:7].fill_(-1)
@@ -139,12 +150,18 @@ def test_connector_round_trip_keeps_local_prefix_and_releases_sources(
         worker_connector.start_load_kv(None)
         for name in caches:
             worker_connector.wait_for_layer_load(name)
+            worker_connector.save_kv_layer(name, caches[name], None)
         worker.transfer.executor._write.submit(lambda: None).result(timeout=2)
         worker_connector.wait_for_save()
+        worker_connector.handle_preemptions(KVTransferStep(released_request_ids=frozenset({"consumer"})))
         # Only asynchronous admission leaves vLLM waiting for a receive notification.
-        assert worker_connector.get_finished(set()) == (set(), {"consumer"} if async_load else set())
+        result = worker_connector.get_transfer_results(set())
+        assert result.finished_sending == result.failed_recving == set()
+        assert result.finished_recving == ({"consumer"} if async_load else set())
         assert worker_connector.get_block_ids_with_load_errors() == ({6} if load_failure else set())
         worker_connector.clear_connector_metadata()
+        assert any(key.endswith("@63") for key in sdk.readable) is (not async_load and not load_failure)
+        assert any(key.endswith("@64") for key in sdk.readable) is (not async_load)
         for name, tensor in caches.items():
             if load_failure:
                 assert torch.all(tensor[6] == -1)
@@ -161,6 +178,13 @@ def test_connector_round_trip_keeps_local_prefix_and_releases_sources(
         worker_connector.clear_connector_metadata()
     finally:
         scheduler_connector.shutdown()
+        if mode == "gva" and load_failure:
+            # Native GVA has no ownership-safe abort. Retain the unpublished
+            # session until cleanup is confirmed; never delete another writer's key.
+            with pytest.raises(RuntimeError, match="GVA Store cleanup is unconfirmed"):
+                worker_connector.shutdown()
+            assert not sdk.closed
+            monkeypatch.setattr(backend, "revoke_gva", lambda keys: (0,) * len(keys))
         worker_connector.shutdown()
     assert sdk.closed and not sdk.regions
 

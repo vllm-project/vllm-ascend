@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
 import vllm.envs as envs
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.logger import logger
 
+from ..metrics import AscendStoreKVConnectorStats, AscendStorePromMetrics
 from .backend import LayerwiseAccessKind, resolve_backend_spec
 from .infrastructure.configuration import KVPoolConfig, resolve_kv_pool_config, validate_kv_pool_config
 from .infrastructure.coordinator import Coordinator
@@ -25,12 +28,14 @@ from .infrastructure.resources import Resources
 from .infrastructure.topology import resolve_worker_topology
 from .protocol.lookup import LookupClient, LookupServer
 from .protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
+from .protocol.observations import StoreEvents
 from .protocol.results import LoadResult
 from .scheduler import AsynchronousScheduler, KVPoolScheduler, SynchronousScheduler
 from .worker import Worker
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import PromMetric, PromMetricT
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -55,11 +60,14 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         validate_kv_pool_config(vllm_config, kv_cache_config, config)
         self._use_layerwise = config.use_layerwise
         self._load_async = config.load_async and not config.use_layerwise
+        self._grouped_cache = len(config.group_specs) > 1
+        self.requires_mamba_state_copy_after_load = not config.use_layerwise and not self._load_async
         self.scheduler: KVPoolScheduler | None = None
         self.worker: Worker | None = None
         self.lookup_server: LookupServer | None = None
         self._pending_load_result: LoadResult | None = None
         self._released_store_job_ids: set[int] = set()
+        self._kv_events: StoreEvents | None = None
         if role == KVConnectorRole.SCHEDULER:
             lookup_address = self._resolve_lookup_address(vllm_config)
             self.scheduler = self._create_scheduler(config, lookup_address)
@@ -68,7 +76,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             if vllm_config.parallel_config.rank == 0:
                 try:
                     lookup_address = self._resolve_lookup_address(vllm_config)
-                    self.lookup_server = LookupServer(self.worker.lookup, lookup_address)
+                    self.lookup_server = LookupServer(self.worker.lookup, lookup_address, reset=self.worker.reset_cache)
                 except BaseException:
                     self.worker.close()
                     raise
@@ -156,6 +164,17 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         if self.scheduler is not None:
             self.scheduler.accept_worker_metadata(connector_output.kv_connector_worker_meta)
+        events = connector_output.kv_cache_events
+        if isinstance(events, StoreEvents):
+            if self._kv_events is None:
+                self._kv_events = events
+            else:
+                self._kv_events.merge(events)
+
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        events, self._kv_events = self._kv_events, None
+        if events is not None:
+            yield from events.aggregate().get_all_events()
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
         assert self.scheduler is not None
@@ -260,14 +279,6 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             if self._pending_load_result is not None:
                 raise RuntimeError("Previous Load result has not been fully consumed")
             load_result = worker.collect_load_result()
-            if load_result.failed_request_ids:
-                failed_locations = sorted(
-                    (location.group_id, location.block_id) for location in load_result.failed_locations
-                )
-                raise RuntimeError(
-                    "Hybrid KV Load failed, but this vLLM version cannot report request-level Load failures: "
-                    f"{sorted(load_result.failed_request_ids)}; cache group/block failures {failed_locations}"
-                )
             self._pending_load_result = load_result
             # Only async admission makes vLLM wait for finished_recving, including
             # late completion needed to release a finished request's held blocks.
@@ -275,11 +286,20 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             done_recving = set(load_result.completed_request_ids) if self._load_async else set()
             return set(), done_recving
 
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        sending, receiving = self.get_finished(finished_req_ids)
+        assert self._pending_load_result is not None
+        return KVConnectorTransferResults(
+            finished_sending=sending,
+            finished_recving=receiving,
+            failed_recving=set(self._pending_load_result.failed_request_ids) if self._grouped_cache else set(),
+        )
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.worker is not None
         if self._pending_load_result is None:
             return set()
-        failed_block_ids = set(self._pending_load_result.failed_block_ids)
+        failed_block_ids = set() if self._grouped_cache else set(self._pending_load_result.failed_block_ids)
         self._pending_load_result = None
         return failed_block_ids
 
@@ -297,6 +317,39 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_block_frees(self) -> bool:
         return self.scheduler is not None and self.scheduler.has_pending_block_frees()
+
+    def reset_cache(self) -> bool | None:
+        result = self.scheduler.reset_cache() if self.scheduler is not None else None
+        if result is not None:
+            self._kv_events = None
+        return result
+
+    def get_kv_connector_kv_cache_events(self) -> StoreEvents | None:
+        if self.worker is None:
+            return None
+        events = self.worker.take_events()
+        return StoreEvents(list(events)) if events else None
+
+    def get_kv_connector_stats(self) -> AscendStoreKVConnectorStats | None:
+        if self.worker is not None:
+            return self.worker.get_stats()
+        if self.scheduler is not None:
+            return self.scheduler.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> AscendStoreKVConnectorStats:
+        return AscendStoreKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> AscendStorePromMetrics:
+        return AscendStorePromMetrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
     def shutdown(self) -> None:
         if self.scheduler is not None:

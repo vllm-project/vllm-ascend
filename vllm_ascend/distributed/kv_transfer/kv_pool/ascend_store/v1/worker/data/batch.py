@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 
@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from ...backend import GVARegion
 from ...infrastructure.mapping import PartitionId
 from ...protocol.messages import StoreCommand
-from ...protocol.results import LoadResult, StoreResult
+from ...protocol.results import LoadFailureLocation, LoadResult, StoreResult
 from .selection import CachePartition, LoadSelection, StoreSelection
 
 
@@ -65,6 +65,8 @@ class LoadBatch:
     plan: LayerTransferPlan | None = None
     # One result per local destination, including all targets of a shared object.
     codes: list[int] = field(default_factory=list)
+    failures: dict[int, tuple[int, LoadFailureLocation]] = field(default_factory=dict)
+    transfer_seconds: float = 0.0
     copied_layers: set[int] = field(default_factory=set)
     error: BaseException | None = None
 
@@ -91,6 +93,17 @@ class StoreBatch:
     error: Exception | None = None
     contract_error: Exception | None = None
     fatal_error: Exception | None = None
+    invalid_requests: set[str] = field(default_factory=set)
+    invalid_objects: set[int] = field(default_factory=set)
+
+    def invalidate_sources(self, request_ids: Collection[str]) -> None:
+        self.invalid_requests.update(request_ids)
+        if self.selection is not None:
+            self.invalid_objects.update(
+                index
+                for index, (_, _, owner) in enumerate(self.selection.sources)
+                if self.commands[owner].request_id in request_ids
+            )
 
     def __post_init__(self) -> None:
         self.request_ids = frozenset(command.request_id for command in self.commands)

@@ -6,14 +6,17 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 import torch
+from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 
 from ...attention_fence import reset_attention_compute_start_gate
+from ...metrics import AscendStoreKVConnectorStats
 from ..backend import GVABackend, KeyRangeBackend, LayerwiseAccessKind
 from ..backend.naming import WireKeyBuilder
 from ..infrastructure.collective import CollectiveGroup
 from ..infrastructure.coordinator import Coordinator
 from ..infrastructure.executor import BulkExecutor, Executor, LayerwiseExecutor
+from ..infrastructure.mapping import BlockHashMapping
 from ..infrastructure.resources import Resources
 from ..infrastructure.topology import KVPoolTopology
 from ..protocol.messages import KVTransferStep, LookupRequest, LookupResult
@@ -83,7 +86,17 @@ class Worker:
                 resources.bind_execution_cleanup(collective.close)
             elif collective is not None:
                 raise ValueError("A Store collective requires shared GVA Store objects")
-            self._lookup = LookupService(topology, resources.backend, coordinator, key_builder=key_builder)
+            self._block_hash_mappings = {
+                group.group_id: BlockHashMapping(group.block_size, topology.config.hash_block_size)
+                for group in topology.transfer_groups
+            }
+            self._lookup = LookupService(
+                topology,
+                resources.backend,
+                coordinator,
+                block_hash_mappings=self._block_hash_mappings,
+                key_builder=key_builder,
+            )
             backend_sessions = None
             if access is not None:
                 backend_sessions = cast(KeyRangeBackend | GVABackend, resources.backend).create_sessions()
@@ -127,6 +140,7 @@ class Worker:
                 self._topology,
                 caches,
                 self._kv_cache_layout,
+                block_hash_mappings=self._block_hash_mappings,
                 layerwise_access=self._access,
                 key_builder=self._key_builder,
             )
@@ -149,13 +163,22 @@ class Worker:
                     write_async=self._topology.config.load_async,
                 )
             self.transfer = transfer
-            self.load = LoadService(self.context, self._coordinator, transfer)
             self.store = StoreService(
                 self.context,
                 self._coordinator,
                 transfer,
                 requires_exists=resources.backend_spec.requires_exists_before_put,
                 collective=self._collective,
+            )
+            self.load = LoadService(
+                self.context,
+                self._coordinator,
+                transfer,
+                require_complete_load=(
+                    len(self._topology.config.group_specs) > 1
+                    and (self._access is not None or not self._topology.config.load_async)
+                ),
+                on_failure=self.store.invalidate_requests,
             )
             resources.register_kv_buffers()
             resources.start_executors()
@@ -255,6 +278,24 @@ class Worker:
 
     def take_released_store_job_ids(self) -> set[int]:
         return self.store.take_released_jobs()
+
+    def take_events(self) -> list[BlockStored]:
+        return self.store.take_events()
+
+    def get_stats(self) -> AscendStoreKVConnectorStats | None:
+        return self.load.take_stats()
+
+    def reset_cache(self) -> bool:
+        """Reset between paused steps without closing queues, registrations or admission."""
+        self._check_available()
+        if self._step is not None or self._access is not None or self.load.pending:
+            return False
+        reset = getattr(self._resources.backend, "reset_cache", None)
+        if not callable(reset):
+            return False
+        self.store.fence()
+        self.store.take_events()
+        return reset()
 
     def close(self) -> None:
         """Call after synchronous Lookup/RPC callers have quiesced; keep resources on unsafe drain."""

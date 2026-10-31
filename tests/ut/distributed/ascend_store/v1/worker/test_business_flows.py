@@ -6,7 +6,12 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.gva_fixtures import FakeGVABackend
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, make_coordinator, make_topology
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeBackend,
+    make_block_hash_mappings,
+    make_coordinator,
+    make_topology,
+)
 from tests.ut.distributed.ascend_store.v1.worker.fixtures import make_worker as make_bulk
 from tests.ut.distributed.ascend_store.v1.worker.test_layerwise import layer_names
 from tests.ut.distributed.ascend_store.v1.worker.test_layerwise import make_worker as make_layerwise
@@ -20,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.batch import LayerTransferPlan
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.batch import LayerTransferPlan, LoadBatch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.lookup import (
     LookupRequest,
     LookupService,
@@ -98,7 +103,9 @@ def test_partial_open_scatter_preserves_shared_targets_and_only_projects_success
         assert codes == [0, -7, -7] and opened == {0}
         assert all(ids.tolist() == [1] for ids in plan.block_ids.values())
         assert all(tuple(plan.result_indices(layer)) == (0,) for layer in plan.layers)
-        result = worker.load._result(("first", "second"), selection, codes)
+        batch = LoadBatch(("first", "second"), selection, codes=codes)
+        worker.load._check_ready(batch)
+        result = worker.load._complete(batch)
         assert result.failed_block_ids == {2, 3}
         assert result.completed_request_ids == {"first", "second"}
     finally:
@@ -144,7 +151,7 @@ def test_gva_success_never_expands_layer_result_indices(monkeypatch):
 def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_holes(groups, monkeypatch):
     topology = make_topology(group_ids=groups)
     backend, coordinator = FakeBackend(), make_coordinator(topology)
-    lookup = LookupService(topology, backend, coordinator)
+    lookup = LookupService(topology, backend, coordinator, block_hash_mappings=make_block_hash_mappings(topology))
     original = coordinator.resolve_available_end
     seen = []
 
@@ -188,7 +195,7 @@ def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_hol
 def test_lookup_deduplicates_cross_family_aliases_and_reduces_all_partitions(monkeypatch):
     topology = make_topology(pp_size=2)
     backend, coordinator = FakeBackend(), make_coordinator(topology)
-    lookup = LookupService(topology, backend, coordinator)
+    lookup = LookupService(topology, backend, coordinator, block_hash_mappings=make_block_hash_mappings(topology))
     # First candidate is shared across families; the second family's second candidate is absent.
     lookup._keys[0] = (("x", ""), ("", "x"))
     calls = []

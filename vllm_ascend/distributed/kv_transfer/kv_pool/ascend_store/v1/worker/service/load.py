@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable
 from concurrent.futures import Future
+from queue import Empty, SimpleQueue
 
+from ....metrics import AscendStoreKVConnectorStats
 from ...infrastructure.coordinator import Coordinator
 from ...protocol.messages import LoadCommand
 from ...protocol.results import DrainResult, LoadFailureLocation, LoadResult
@@ -25,13 +27,19 @@ class LoadService:
         context: TransferContext,
         coordinator: Coordinator,
         transfer: BulkTransfer | LayerwiseTransfer,
+        *,
+        require_complete_load: bool = False,
+        on_failure: Callable[[frozenset[str]], None] | None = None,
     ) -> None:
         self.context, self.coordinator = context, coordinator
         self.transfer = transfer
+        self._require_complete_load = require_complete_load
+        self._on_failure = on_failure
         self._accepting = True
         self._pending: deque[LoadBatch] = deque()
         self._request_ids: set[str] = set()
         self._fatal_error: Exception | None = None
+        self._timings: SimpleQueue[tuple[float, int]] = SimpleQueue()
 
     def submit(self, commands: tuple[LoadCommand, ...]) -> None:
         self.check_available()
@@ -81,6 +89,15 @@ class LoadService:
     def stop_accepting(self) -> None:
         self._accepting = False
 
+    def take_stats(self) -> AscendStoreKVConnectorStats | None:
+        stats = AscendStoreKVConnectorStats()
+        while True:
+            try:
+                duration, count = self._timings.get_nowait()
+            except Empty:
+                return None if stats.is_empty() else stats
+            stats.record_operation("load_get", duration, count)
+
     def drain(self) -> DrainResult:
         """Wait for every submitted task without consuming normal completion notifications."""
         self.stop_accepting()
@@ -97,6 +114,10 @@ class LoadService:
             raise RuntimeError("Worker cannot continue after a fatal Load failure") from self._fatal_error
 
     @property
+    def pending(self) -> bool:
+        return bool(self._pending)
+
+    @property
     def safe_to_release(self) -> bool:
         return all(batch.completion.done() and batch.destination_writes_stopped for batch in self._pending)
 
@@ -105,25 +126,47 @@ class LoadService:
     # ================================================
 
     def _complete(self, batch: LoadBatch) -> LoadResult:
-        return self._result(batch.request_ids, batch.selection, batch.codes)
+        if batch.transfer_seconds > 0:
+            self._timings.put((batch.transfer_seconds, len(batch.selection.keys)))
+        failures = [value for _, value in sorted(batch.failures.items(), key=lambda item: (item[1][0], item[0]))]
+        return LoadResult(
+            frozenset(batch.request_ids),
+            frozenset(batch.request_ids[request_index] for request_index, _ in failures),
+            frozenset(location.block_id for _, location in failures),
+            tuple(dict.fromkeys(location for _, location in failures)),
+        )
 
-    def _check_ready(self, batch: LoadBatch) -> None:
-        """Grouped state cannot be consumed after a partial Load in the current framework contract."""
-        if len(self.context.groups) <= 1:
-            return
+    def _check_ready(self, batch: LoadBatch, failed_indices: set[int] | None = None) -> None:
+        """Interpret each failed destination once, then enforce the caller's consumption policy."""
         failed_requests: set[str] = set()
         failed_locations: set[tuple[int, int]] = set()
         selection = batch.selection
         if len(batch.codes) != selection.target_count:
             raise ValueError("Backend Load result count does not match its parameters")
+        indices = iter(
+            sorted(failed_indices)
+            if failed_indices is not None
+            else [index for index, code in enumerate(batch.codes) if code != 0]
+        )
+        index = next(indices, None)
         for (group_id, _), local in selection.iter_local():
-            for index, (request_index, block_id) in enumerate(
-                zip(local.request_indices, local.block_ids, strict=True), local.start
-            ):
-                if batch.codes[index] != 0:
+            while index is not None and index < local.start + len(local.block_ids):
+                position = index - local.start
+                if position < 0:
+                    raise ValueError("Load result has no destination ownership")
+                if index not in batch.failures:
+                    request_index, block_id = local.request_indices[position], local.block_ids[position]
+                    batch.failures[index] = (request_index, LoadFailureLocation(group_id, block_id))
                     failed_requests.add(batch.request_ids[request_index])
                     failed_locations.add((group_id, block_id))
-        if failed_requests:
+                index = next(indices, None)
+            if index is None:
+                break
+        if index is not None:
+            raise ValueError("Load result has no destination ownership")
+        if failed_requests and self._on_failure is not None:
+            self._on_failure(frozenset(failed_requests))
+        if failed_requests and self._require_complete_load:
             raise RuntimeError(
                 f"Hybrid KV Load failed for requests {sorted(failed_requests)}; "
                 f"cache group/block failures {sorted(failed_locations)}"
@@ -173,29 +216,6 @@ class LoadService:
         if selection.keys:
             selection.bind_results()
         return selection
-
-    def _result(self, request_ids: tuple[str, ...], selection: LoadSelection, codes: Sequence[int]) -> LoadResult:
-        failed_requests, failed_blocks = set(), set()
-        failures: dict[int, list[LoadFailureLocation]] = {}
-        if len(codes) != selection.target_count:
-            raise ValueError("Backend Load result count does not match its parameters")
-        if not any(codes):
-            return LoadResult(frozenset(request_ids), frozenset(), frozenset(), ())
-        for (group_id, _), local in selection.iter_local():
-            for index, (request_index, block_id) in enumerate(
-                zip(local.request_indices, local.block_ids, strict=True), local.start
-            ):
-                if codes[index] == 0:
-                    continue
-                if len(self.context.groups) > 1:
-                    failed_requests.add(request_ids[request_index])
-                else:
-                    failed_blocks.add(block_id)
-                failures.setdefault(request_index, []).append(LoadFailureLocation(group_id, block_id))
-        locations = dict.fromkeys(location for index in range(len(request_ids)) for location in failures.get(index, ()))
-        return LoadResult(
-            frozenset(request_ids), frozenset(failed_requests), frozenset(failed_blocks), tuple(locations)
-        )
 
     def _observe(self, batch: LoadBatch) -> LoadResult:
         try:

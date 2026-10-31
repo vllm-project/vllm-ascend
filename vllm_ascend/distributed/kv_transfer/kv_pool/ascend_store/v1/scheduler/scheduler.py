@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
 
+from ...metrics import AscendStoreKVConnectorStats
 from ..infrastructure.configuration import KVPoolConfig
 from ..protocol.lookup import LookupClient
 from ..protocol.messages import (
@@ -52,6 +53,7 @@ class KVPoolScheduler:
     # ================================
 
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        self._pending_lookups.pop(request.request_id, None)
         if not self._config.load_enabled:
             return 0, False
 
@@ -145,6 +147,9 @@ class KVPoolScheduler:
                 _freeze_block_ids(scheduled.block_ids),
                 scheduled.num_computed_tokens,
                 scheduler_output.num_scheduled_tokens[scheduled.req_id],
+                len(scheduled.prefill_token_ids)
+                if getattr(scheduled, "prefill_token_ids", None) is not None
+                else self._requests[scheduled.req_id].num_prompt_tokens,
             )
             if load_command is not None:
                 load_commands.append(load_command)
@@ -190,6 +195,7 @@ class KVPoolScheduler:
         block_ids_by_group: tuple[tuple[int, ...], ...],
         num_computed_tokens: int,
         num_scheduled_tokens: int,
+        prefill_end_token: int,
     ) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
         request, allocation = self._allocated_request(request_id)
         if block_ids_by_group != allocation.block_ids_by_group:
@@ -200,7 +206,7 @@ class KVPoolScheduler:
             scheduled_end,
             block_ids_by_group,
             tuple(request.block_hashes),
-            request.num_prompt_tokens,
+            prefill_end_token,
             allocation.store_skip_end_token,
             min(scheduled_end, request.num_tokens),
         )
@@ -307,22 +313,25 @@ class KVPoolScheduler:
         if not self._config.store_enabled:
             return None
         transfer_end = self._resolve_transfer_end(progress.store_end_token, len(progress.block_hashes))
-        if transfer_end <= progress.store_skip_end_token:
+        store_start = progress.store_skip_end_token
+        if not self._config.store_prefill_enabled:
+            store_start = max(store_start, progress.prefill_end_token)
+        if transfer_end <= store_start:
             return None
         next_chunk_end = (
-            cdiv(progress.store_skip_end_token + 1, self._config.cache_transfer_granularity)
-            * self._config.cache_transfer_granularity
+            cdiv(store_start + 1, self._config.cache_transfer_granularity) * self._config.cache_transfer_granularity
         )
         if transfer_end < next_chunk_end:
             return None
 
         command = RangeStoreCommand(
             progress.request_id,
-            progress.store_skip_end_token,
+            store_start,
             transfer_end,
             progress.block_ids_by_group,
             progress.block_hashes,
             progress.prefill_end_token,
+            event_tokens=self._event_tokens(progress.request_id, store_start, transfer_end),
         )
         leased_command = self._source_leases.acquire(command)
         self._request_progress[progress.request_id] = progress.with_store_skip_end(transfer_end)
@@ -355,6 +364,9 @@ class KVPoolScheduler:
                     tuple(
                         StateCheckpointSource(group_id, block_id, boundary_token)
                         for group_id, block_id in boundary_entries
+                    ),
+                    event_tokens=self._event_tokens(
+                        request_id, min(progress.store_skip_end_token, boundary_token - 1), boundary_token
                     ),
                 )
                 commands.append(self._source_leases.acquire(command))
@@ -397,6 +409,9 @@ class KVPoolScheduler:
             tuple(request.block_hashes),
             progress.store_skip_end_token,
             sources,
+            event_tokens=self._event_tokens(
+                request.request_id, min(progress.store_skip_end_token, boundary - 1), boundary
+            ),
         )
         self._finished_checkpoint_stores.append(self._source_leases.acquire(command))
         # vLLM may release its request object; the exact source blocks remain leased.
@@ -404,6 +419,15 @@ class KVPoolScheduler:
 
     def bind_gpu_block_pool(self, block_pool: BlockPool) -> None:
         self._source_leases.bind_block_pool(block_pool)
+
+    def _event_tokens(self, request_id: str, start_token: int, end_token: int) -> tuple[int, tuple[int, ...]] | None:
+        if not self._config.enable_kv_events:
+            return None
+        start = min(
+            start_token // self._config.group_specs[group_id].block_size * self._config.group_specs[group_id].block_size
+            for group_id in self._config.transfer_group_ids
+        )
+        return start, tuple(self._requests[request_id].all_token_ids[start:end_token])
 
     def accept_worker_metadata(self, metadata: Any) -> None:
         if isinstance(metadata, StoreSourceReleaseMetadata):
@@ -414,6 +438,22 @@ class KVPoolScheduler:
 
     def has_pending_block_frees(self) -> bool:
         return self._source_leases.has_pending_block_frees()
+
+    def get_stats(self) -> AscendStoreKVConnectorStats:
+        stats = AscendStoreKVConnectorStats()
+        jobs, blocks = self._source_leases.pending_counts()
+        stats.set_delayed_release(jobs, blocks)
+        return stats
+
+    def reset_cache(self) -> bool | None:
+        """Reset only a quiescent supported route; caller must pause generation first."""
+        if self._config.backend_name != "mooncake":
+            return None
+        if self._config.use_layerwise or self.has_pending_push_work() or self._confirmed_loads:
+            return False
+        # A failed reply cannot prove that the remote reset did not execute.
+        self._pending_lookups.clear()
+        return self._lookup_client.reset()
 
     # ================================
     # Request and Scheduler Lifecycle

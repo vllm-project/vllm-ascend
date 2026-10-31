@@ -6,7 +6,15 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.align_state_fixtures import make_align_state_topology
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, FakeEvent, make_coordinator, make_topology
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeBackend,
+    FakeEvent,
+    FakeResources,
+    make_backend_spec,
+    make_block_hash_mappings,
+    make_coordinator,
+    make_topology,
+)
 from tests.ut.distributed.ascend_store.v1.worker.fixtures import make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     KVTransferStep,
@@ -17,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.results import DrainResult
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.lookup import LookupService
 
 
@@ -24,7 +33,9 @@ def test_lookup_binds_and_queries_without_local_buffers_or_resource_owner():
     topology = make_topology()
     backend = FakeBackend()
     backend.presence = [True, False]
-    lookup = LookupService(topology, backend, make_coordinator(topology))
+    lookup = LookupService(
+        topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+    )
     assert (
         lookup(
             LookupRequest(end_token=8, transfer_group_ids=(0,), block_hashes=(b"a", b"b"), local_available_tokens=0)
@@ -35,11 +46,34 @@ def test_lookup_binds_and_queries_without_local_buffers_or_resource_owner():
     assert not backend.closed
 
 
+def test_worker_shares_logical_mappings_across_lookup_and_local_kv_binding():
+    topology = make_topology(group_ids=(0, 2))
+    backend = FakeBackend()
+    resources = FakeResources(backend, make_backend_spec(), topology)
+    worker = Worker(topology, resources, coordinator=make_coordinator(topology), source_ready_event_factory=FakeEvent)
+    try:
+        mappings = worker._lookup._block_hash_mappings
+        query = LookupRequest(
+            end_token=8, transfer_group_ids=(0, 2), block_hashes=(b"a", b"b"), local_available_tokens=0
+        )
+        before = worker._lookup(query)
+        assert before.available_end_token == 8
+        worker.bind_kv_caches({})
+        assert worker.context.block_hash_mappings is mappings
+        assert tuple(mappings) == (0, 2)
+        assert worker.lookup(query) == before
+    finally:
+        worker.close()
+    assert resources.closed
+
+
 def test_lookup_resolves_partial_checkpoints_without_local_block_assignments(monkeypatch):
     topology = make_align_state_topology(attention_block_size=16, state_block_size=32, hash_block_size=8, tp_size=1)
     backend = FakeBackend()
     monkeypatch.setattr(backend, "exists", lambda keys: tuple(not key.endswith("@04") for key in keys))
-    lookup = LookupService(topology, backend, make_coordinator(topology))
+    lookup = LookupService(
+        topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+    )
     result = lookup(
         LookupRequest(
             end_token=32,
@@ -55,7 +89,9 @@ def test_lookup_resolves_partial_checkpoints_without_local_block_assignments(mon
 def test_lookup_distinguishes_query_failure_from_malformed_results(monkeypatch):
     topology = make_topology()
     backend = FakeBackend()
-    lookup = LookupService(topology, backend, make_coordinator(topology))
+    lookup = LookupService(
+        topology, backend, make_coordinator(topology), block_hash_mappings=make_block_hash_mappings(topology)
+    )
     request = LookupRequest(end_token=4, transfer_group_ids=(0,), block_hashes=(b"a",), local_available_tokens=0)
     monkeypatch.setattr(backend, "exists", Mock(side_effect=RuntimeError("query unavailable")))
     assert lookup(request).available_end_token == 0

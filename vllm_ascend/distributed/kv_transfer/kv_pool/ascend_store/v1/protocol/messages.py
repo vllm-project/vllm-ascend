@@ -58,6 +58,8 @@ class RangeStoreCommand:
     block_hashes: tuple[BlockHash, ...]
     num_prompt_tokens: int
     store_job_id: int | None = None
+    # First token position and immutable values needed by this Store range's events.
+    event_tokens: tuple[int, tuple[int, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +81,7 @@ class CheckpointStoreCommand:
     published_store_end_token: int
     sources: tuple[StateCheckpointSource, ...]
     store_job_id: int | None = None
+    event_tokens: tuple[int, tuple[int, ...]] | None = None
 
 
 StoreCommand: TypeAlias = RangeStoreCommand | CheckpointStoreCommand

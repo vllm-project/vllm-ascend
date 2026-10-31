@@ -146,10 +146,12 @@ def cluster(tp=2, pcp=1, dcp=2, put_step=2, *, separate_allocations=False):
             owner.close()
 
 
-def submit_stores(group, *, skip_layer_rank=None, failed_hook_rank=None):
+def submit_stores(group, *, skip_layer_rank=None, failed_hook_rank=None, invalid_source_rank=None):
     for index, worker in enumerate(group.workers):
         commands = (RangeStoreCommand("store", 0, 8, ((1, 2),), (b"a", b"b"), 8, 17),)
         worker.begin_step(KVTransferStep(store=StoreCommandBatch(commands)))
+        if index == invalid_source_rank:
+            worker.store.invalidate_requests(frozenset({"store"}))
         for layer in (3, 4):
             if index == failed_hook_rank:
                 with pytest.raises(RuntimeError, match="source_record"):
@@ -237,6 +239,7 @@ def test_every_required_writer_fills_both_keys_before_publication_and_loads_its_
         "missing_layer",
         "regions",
         "malformed",
+        "invalid_source",
     ),
 )
 def test_failed_or_empty_writer_still_joins_and_prevents_partial_publication(failure, monkeypatch):
@@ -290,6 +293,7 @@ def test_failed_or_empty_writer_still_joins_and_prevents_partial_publication(fai
             group,
             skip_layer_rank=1 if failure == "missing_layer" else None,
             failed_hook_rank=1 if failure == "source_record" else None,
+            invalid_source_rank=1 if failure == "invalid_source" else None,
         )
         (result,) = group.workers[0].fence_previous_store()
         assert not result.succeeded and result.result_codes == (None, None) and result.source_release_confirmed

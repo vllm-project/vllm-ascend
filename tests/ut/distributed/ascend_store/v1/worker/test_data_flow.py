@@ -5,7 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.gva_fixtures import FakeGVABackend
-from tests.ut.distributed.ascend_store.v1.helpers import FakeBackend, make_coordinator, make_topology
+from tests.ut.distributed.ascend_store.v1.helpers import (
+    FakeBackend,
+    make_block_hash_mappings,
+    make_coordinator,
+    make_topology,
+)
 from tests.ut.distributed.ascend_store.v1.worker.fixtures import make_worker as make_bulk
 from tests.ut.distributed.ascend_store.v1.worker.test_layerwise import make_worker as make_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import local_addresses
@@ -63,7 +68,7 @@ def test_lookup_without_candidates_returns_a_miss_without_backend_io(monkeypatch
     topology = make_topology()
     backend, coordinator = FakeBackend(), make_coordinator(topology)
     monkeypatch.setattr(coordinator, "select_for_lookup", lambda _end: ((),))
-    result = LookupService(topology, backend, coordinator)(
+    result = LookupService(topology, backend, coordinator, block_hash_mappings=make_block_hash_mappings(topology))(
         LookupRequest(end_token=4, transfer_group_ids=(0,), block_hashes=(b"a",), local_available_tokens=0)
     )
     assert result.available_end_token == 0 and not backend.calls

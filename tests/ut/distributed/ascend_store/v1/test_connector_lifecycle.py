@@ -23,6 +23,7 @@ def connect(worker, monkeypatch, *, layerwise=False, async_load=False):
     connector.scheduler = connector.lookup_server = None
     connector._use_layerwise = layerwise
     connector._load_async = async_load and not layerwise
+    connector._grouped_cache = len(worker._topology.config.group_specs) > 1
     connector._pending_load_result = connector._connector_metadata = None
     connector._released_store_job_ids = set()
     monkeypatch.setattr(runner, "get_kv_transfer_group", lambda: connector)

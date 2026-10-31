@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from functools import partial
 from itertools import groupby
 from operator import itemgetter
+from time import perf_counter
 from typing import Any
 
 from ...backend.interfaces import KVStoreBackend
@@ -59,12 +60,14 @@ class BulkTransfer:
     ) -> LoadResult:
         keys, addresses, sizes = self.arguments(batch.selection)
         batch.destination_writes_stopped = False
+        started = perf_counter()
         codes = self.backend.load(keys, addresses, sizes)
+        batch.transfer_seconds = perf_counter() - started
         batch.destination_writes_stopped = True
         if len(codes) != batch.selection.target_count:
             raise ValueError("Backend Load result count does not match its parameters")
         batch.codes = list(codes)
-        if not self._write_async and any(batch.codes):
+        if any(batch.codes):
             check_ready(batch)
         return finish(batch)
 
@@ -92,6 +95,8 @@ class BulkTransfer:
     ) -> tuple[StoreResult, ...]:
         try:
             batch.selection = prepare()
+            if batch.invalid_requests:
+                batch.invalidate_sources(tuple(batch.invalid_requests))
         except Exception as error:
             batch.open_failed, batch.error = True, error
         if batch.selection is not None:
@@ -103,16 +108,29 @@ class BulkTransfer:
                     keys, addresses, sizes = self.arguments(batch.selection)
                     source_ready = ready()
                     source_ready.synchronize()
-                    started = True
-                    codes = self.backend.store(keys, addresses, sizes)
-                    started = False
-                    if len(codes) != len(batch.selection.keys):
+                    indices = (
+                        [index for index in range(len(keys)) if index not in batch.invalid_objects]
+                        if batch.invalid_objects
+                        else range(len(keys))
+                    )
+                    if len(indices) != len(keys):
+                        keys = [keys[index] for index in indices]
+                        addresses = [addresses[index] for index in indices]
+                        sizes = [sizes[index] for index in indices]
+                    if keys:
+                        started = True
+                        codes = self.backend.store(keys, addresses, sizes)
+                        started = False
+                    else:
+                        codes = ()
+                    if len(codes) != len(indices):
                         batch.contract_error = ValueError("Backend Store result count does not match its parameters")
                     else:
-                        batch.codes = list(codes)
+                        for index, code in zip(indices, codes, strict=True):
+                            batch.codes[index] = code
                 except Exception as error:
                     if started:
-                        batch.unsafe_objects.update(range(len(batch.selection.keys)))
+                        batch.unsafe_objects.update(indices)
                     batch.error = error
         return finish(batch)
 

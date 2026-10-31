@@ -124,7 +124,7 @@ def test_multiple_load_requests_keep_group_block_and_return_code_ownership(suffi
         assert canonical(actual, worker) == expected
         assert actual[1].completed_request_ids == {"first", "second", "empty"}
         assert actual[1].failed_request_ids == {"first", "second"}
-        assert not actual[1].failed_block_ids
+        assert actual[1].failed_block_ids == {3, 5}
         assert {(location.group_id, location.block_id) for location in actual[1].failed_locations}.issuperset(
             {(1, 3), (3, 3), (1, 5), (3, 5)}
         )
