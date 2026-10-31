@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -719,7 +719,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        comm_type = _EXTRA_CTX.moe_comm_type
+        if (
+            _EXTRA_CTX.use_mega_moe
+            and self.quant_type == QuantType.NONE
+            and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        ):
+            # A5 MegaMoe requires MXFP scales. Keep unquantized layers on
+            # All-to-All, which also supports profile batches above MC2's cap.
+            comm_type = MoECommType.ALLTOALL
+        moe_comm_method = get_moe_comm_method(comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
         if lora_context is not None:
