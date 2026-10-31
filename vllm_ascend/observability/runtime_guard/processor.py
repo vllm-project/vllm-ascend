@@ -371,9 +371,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         :meth:`~RequestGuardStore.mark_finished` runs here so the last stamp /
         detect / append still see the same state. Sidecars + clear happen in
         :meth:`_reap_finished_requests`.
+
+        Also flushes ``rare_chars`` look-ahead (rc4 decides the held-back last
+        token at stream end) before the Store finished bit is set.
         """
         if not finished_req_ids:
             return
+        ids = [str(r) for r in finished_req_ids if r]
+        if ids and bool(self.runtime_config.detector_get("rare_chars", "enabled", False)):
+            for alert in self.detectors.finish_rare_chars(ids):
+                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
 
     def _current_wave(self) -> int:
@@ -496,6 +503,15 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
         if result.input_batch is not None:
             self._last_input_batch = result.input_batch
+        # Hook 2b: rare_chars from Guard-stashed logits (no API
+        # SamplingParams.logprobs). Must run before logits reuse /
+        # async after-sample deferral.
+        self._soft_fail(
+            "check_rare_chars",
+            lambda: self.check_rare_chars_from_stash(
+                sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
+            ),
+        )
         # Hook 3: mark_finished
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
@@ -554,6 +570,177 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
         self._soft_fail("check_before_sample", _run)
+
+    def check_rare_chars_from_stash(
+        self,
+        *,
+        sampled_token_ids: Any,
+    ) -> None:
+        """After-sample: ``rare_chars`` from stashed pre-sample logits.
+
+        Uses sampler-side v35 Triton narrow collect (``_v35_partials`` /
+        ``_v35_finish`` → ``(top1, chosen)`` only — no full logprob table, no
+        ranks, no ``SamplingParams.logprobs``). Soft-fail wrapper is applied by
+        the caller.
+        """
+        # Lazy import avoids hooks ↔ processor cycle (hooks imports SamplePhaseResult).
+        from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
+
+        want_rare = bool(self.runtime_config.detector_get("rare_chars", "enabled", False))
+        if not want_rare:
+            # Drop any stale stash so logits are not retained across steps.
+            take_pre_sample_logits(self.runner)
+            return
+
+        logits = take_pre_sample_logits(self.runner)
+        if logits is None:
+            return
+        self._schedule_rare_collect(logits, sampled_token_ids)
+
+    def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
+        """Queue (top1, chosen) on the token-id copy stream. Do not feed rc4 here.
+
+        Sampled ids stay on device. The v35 kernels read the stashed logits by
+        stride, including when the row order is already ``0..B-1``. Output rank
+        only. Sync and async scheduling both materialize the pair in
+        ``get_output``.
+        """
+        from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
+
+        if not is_async_output_rank():
+            return
+        import torch
+
+        from vllm_ascend.observability.runtime_guard.detector.rare_chars import device_chosen_token_ids
+
+        if not isinstance(logits, torch.Tensor) or not isinstance(sampled_token_ids, torch.Tensor):
+            logger.warning("[runtime_guard: rare_chars] collect skipped: logits or sampled ids are not tensors")
+            return
+        if logits.numel() == 0 or logits.dim() != 2:
+            return
+        try:
+            chosen = device_chosen_token_ids(sampled_token_ids)
+            if chosen.numel() != logits.shape[0]:
+                logger.warning(
+                    "[runtime_guard: rare_chars] collect skipped: sampled rows %s != logits rows %s",
+                    chosen.numel(),
+                    logits.shape[0],
+                )
+                return
+            from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
+
+            packed = compute_top1_and_chosen_logprobs(logits, chosen, packed=True)
+            if not isinstance(packed, torch.Tensor):
+                logger.warning("[runtime_guard: rare_chars] collect skipped: kernel did not return a packed tensor")
+                return
+            self._queue_rare_pair_d2h(packed)
+        except Exception:
+            logger.exception("[runtime_guard: rare_chars] collect failed")
+
+    def _queue_rare_pair_d2h(self, packed: Any) -> None:
+        """Copy ``[rows, 2]`` on ``output_copy_stream`` after the token-id copy."""
+        import torch
+        from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
+
+        self._drop_unconsumed_rare_pair()
+        runner = self.runner
+        copy_stream = getattr(runner, "output_copy_stream", None)
+        main_stream = getattr(runner, "main_stream", None)
+        if copy_stream is None or main_stream is None:
+            cpu = packed.detach().float().cpu()
+            self._pending_rare_pair = (cpu, None)
+            runner._rg_rare_pair_hold = packed
+            return
+        cpu = torch.empty(packed.shape, dtype=torch.float32, device="cpu", pin_memory=True)
+        event = torch.cuda.Event(blocking=True)
+        with copy_stream_ctx(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            cpu.copy_(packed, non_blocking=True)
+            event.record(copy_stream)
+        runner._rg_rare_pair_hold = packed
+        self._pending_rare_pair = (cpu, event)
+
+    def _drop_unconsumed_rare_pair(self) -> None:
+        pending = getattr(self, "_pending_rare_pair", None)
+        if pending is None:
+            return
+        _cpu, event = pending
+        if event is not None:
+            event.synchronize()
+        self._pending_rare_pair = None
+        if getattr(self, "runner", None) is not None:
+            self.runner._rg_rare_pair_hold = None
+
+    def consume_rare_pairs(self, output: Any) -> None:
+        """After token-id ``get_output``: wait for the pair copy and enqueue rc4."""
+        pending = getattr(self, "_pending_rare_pair", None)
+        self._pending_rare_pair = None
+        hold = getattr(self.runner, "_rg_rare_pair_hold", None)
+        self.runner._rg_rare_pair_hold = None
+        if pending is None:
+            return
+        cpu, event = pending
+        if event is not None:
+            event.synchronize()
+        del hold
+        try:
+            rows = cpu.tolist()
+        except Exception:
+            logger.exception("[runtime_guard: rare_chars] pair D2H materialize failed")
+            return
+        req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
+        sampled = getattr(output, "sampled_token_ids", None) or []
+        n = min(len(rows), len(req_ids), len(sampled))
+        token_ids: list[int] = []
+        top1: list[float] = []
+        chosen: list[float] = []
+        kept_ids: list[str] = []
+        for i in range(n):
+            pair = rows[i]
+            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                continue
+            step_ids = sampled[i] if isinstance(sampled[i], (list, tuple)) else [sampled[i]]
+            valid = [int(t) for t in step_ids if int(t) >= 0]
+            if not valid:
+                continue
+            kept_ids.append(req_ids[i])
+            token_ids.append(valid[-1])
+            top1.append(float(pair[0]))
+            chosen.append(float(pair[1]))
+        if kept_ids:
+            self._enqueue_rare_chars_feed(kept_ids, token_ids, top1, chosen)
+
+    def _enqueue_rare_chars_feed(
+        self,
+        req_ids: list[str],
+        token_ids: list[int],
+        top1: list[float],
+        chosen: list[float],
+    ) -> None:
+        """Rc4 ``feed`` on ActionQueue. ``get_output`` only submits."""
+
+        def _cpu_job() -> None:
+            try:
+                detector = self.detectors.get("rare_chars")
+                if detector is None:
+                    return
+                for alert in detector.feed_precomputed(
+                    req_ids=req_ids,
+                    token_ids=token_ids,
+                    top1_logprobs=top1,
+                    chosen_logprobs=chosen,
+                ):
+                    self._handle_alert(alert, detector=detector)
+            except Exception:
+                logger.exception("[runtime_guard: rare_chars] queued feed failed")
+
+        queue = self.action_executor.action_queue
+        ok = bool(queue.submit(_cpu_job, heavy=True))
+        if not ok:
+            logger.warning(
+                "[runtime_guard: rare_chars] queued feed dropped (queue full or stopping); req_ids=%s",
+                req_ids,
+            )
 
     def check_after_sample(
         self,

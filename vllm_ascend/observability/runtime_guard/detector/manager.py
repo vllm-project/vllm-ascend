@@ -29,6 +29,7 @@ from vllm_ascend.observability.runtime_guard.detector.base import (
     resolve_batch_req_ids,
 )
 from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
+from vllm_ascend.observability.runtime_guard.detector.rare_chars import RareCharsDetector
 from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
 from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager, has_nonempty_sampled_row
@@ -36,6 +37,8 @@ from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.observability.runtime_guard.state import Incident, RequestGuardStore
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
 logger = init_logger_ascend(__name__)
@@ -81,11 +84,16 @@ class DetectorManager:
             runtime_config=runtime_config,
             runner=runner,
         )
+        self._rare_chars_det = RareCharsDetector(
+            runtime_config=runtime_config,
+            runner=runner,
+        )
         self._registry = DetectorRegistry()
         for det in (
             self._spec_det,
             self._token_repeat_det,
             self._logits_finite_det,
+            self._rare_chars_det,
         ):
             self._registry.register(det)
 
@@ -153,11 +161,21 @@ class DetectorManager:
         return bool(self._spec_det.enabled)
 
     def any_after_sample_cpu_enabled(self) -> bool:
-        """``token_repeat`` (not logits_finite)."""
+        """``token_repeat`` (not logits_finite / rare_chars)."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
         return bool(self._token_repeat_det.enabled)
+
+    def rare_chars_enabled(self) -> bool:
+        """True when Guard should stash logits and run rc4 rare_chars."""
+        if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
+            return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
+        return bool(self._rare_chars_det.enabled)
+
+    def needs_pre_sample_logits(self) -> bool:
+        """True when any detector needs Guard-stashed pre-sample logits."""
+        return self.rare_chars_enabled()
 
     def check_after_spec(
         self,
@@ -268,3 +286,45 @@ class DetectorManager:
             skip_req_ids=skip,
         )
         return []
+
+    def check_rare_chars(
+        self,
+        *,
+        logits: torch.Tensor | None,
+        sampled_token_ids: Any,
+        req_ids: list[str] | None = None,
+        top1_logprobs: Any = None,
+        chosen_logprobs: Any = None,
+    ) -> list[Incident]:
+        """Run rc4 rare_chars from Guard-stashed logits or precomputed (top1, chosen).
+
+        Prefer sampler-side narrow collect (``top1_logprobs`` / ``chosen_logprobs``)
+        so the detector skips a second full-vocab softmax. Falls back to fused
+        LSE+gather on ``logits`` when pairs are not provided.
+        """
+        if self._gated("rare_chars"):
+            return []
+        if logits is None and (top1_logprobs is None or chosen_logprobs is None):
+            return []
+        skip = RequestGuardStore.get().stopped_req_ids()
+        return self._rare_chars_det.check_from_logits(
+            logits=logits,
+            sampled_token_ids=sampled_token_ids,
+            req_ids=req_ids,
+            skip_req_ids=skip,
+            top1_logprobs=top1_logprobs,
+            chosen_logprobs=chosen_logprobs,
+        )
+
+    def finish_rare_chars(self, req_ids: list[str] | set[str] | tuple[str, ...]) -> list[Incident]:
+        """Flush rc4 look-ahead state when requests finish."""
+        if not self.rare_chars_enabled():
+            return []
+        alerts: list[Incident] = []
+        for rid in req_ids:
+            if not rid:
+                continue
+            alert = self._rare_chars_det.finish_request(str(rid))
+            if alert is not None:
+                alerts.append(alert)
+        return alerts

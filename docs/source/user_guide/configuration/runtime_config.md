@@ -110,6 +110,25 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
+### rare_chars
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 (rc4) |
+| `table` | str | `"qwen3"` | Shipped name (`qwen3` / `glm` / `dsv4`) or path to a `*_rare.npz` built from the served tokenizer |
+| `think_end` | str | `"auto"` | `"</think>"` token id, `auto` for shipped tables, or `none` (chat / no think boundary) |
+| `alert_monitor` | bool | `false` | Also raise on rc4 monitor-tier rules (looser false-positive band) |
+
+Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
+stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
+``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
+logits by stride. The pair is copied on the token-id copy stream and read in
+``get_output`` for both sync and async scheduling. rc4 ``feed`` runs on the
+action queue, one sampled token per step. Tables are per-tokenizer; `rc4_gb`
+is shared.
+Prefer shadow/`report` first — strict-tier holdout false-positive rate can
+exceed 0.1% on some corpora.
+
 Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
 path launches a non-blocking host copy of that gate and waits in
 ``check_deferred``. On a hit only, bad rows / ``logits_indices`` / ``finite_kind``
