@@ -1016,14 +1016,21 @@ class AscendConfig:
         platforms. Where the operators currently differ, the stricter bound is
         applied and the per-platform actuals are documented inline.
         """
-        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        # Guard against early-init phases where model_config is still None, and
+        # against dense models: both would otherwise crash or slip through the
+        # size checks below. derive_and_validate may run before model_config is
+        # fully populated (other validators in it check for None as well).
+        model_config = vllm_config.model_config
+        if model_config is None or not model_config.is_moe:
+            return False
+        model_architectures = getattr(model_config, "architectures", None) or []
         # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
         # field; their intermediate_size IS the MoE expert FFN width (the dense
         # layers use a separate dense_intermediate_size field). For every other
         # family intermediate_size carries dense-FFN semantics and must NOT be
         # used as a fallback, so this quirk is gated on the architecture.
         is_minimax = any(architecture.startswith("MiniMaxM") for architecture in model_architectures)
-        hf_text_config = vllm_config.model_config.hf_text_config
+        hf_text_config = model_config.hf_text_config
 
         # Latent-MoE models (e.g. Kimi K3) project the residual stream before the
         # routed FFN and expose the expert width as routed_expert_hidden_size;
@@ -1031,8 +1038,8 @@ class AscendConfig:
         hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
         if hidden_size is None:
             hidden_size = getattr(hf_text_config, "hidden_size", None)
-        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None and hasattr(model_config, "get_hidden_size"):
+            hidden_size = model_config.get_hidden_size()
         if hidden_size is None:
             return False
         # hidden must be in [1024, 8192] and aligned to 512.
@@ -1094,6 +1101,11 @@ class AscendConfig:
             "num_experts_per_tok",
             getattr(hf_text_config, "num_experts_per_token", getattr(hf_text_config, "top_k_experts", 1)),
         )
+        # The getattr chain only falls back on *missing* attributes; a field
+        # explicitly set to null in the HF config resolves to None and would
+        # crash int(num_top_k) below.
+        if num_top_k is None:
+            num_top_k = 1
         if not (1 <= int(num_top_k) <= 16):
             logger.warning(
                 "MegaMoe requires num_top_k in [1, 16]; got %s.",
