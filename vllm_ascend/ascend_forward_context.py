@@ -406,6 +406,11 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
+    if get_ascend_config().deepgemm_mega_moe:
+        # DeepGEMM owns EP dispatch/combine. Keep local tokens through the
+        # existing TP1 prepare/finalize path; never all-gather them first.
+        return MoECommType.ALLTOALL
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
