@@ -1340,10 +1340,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
         # Device arguments remain for upstream API compatibility.
-        del num_sampled, num_rejected, query_start_loc
+        del num_sampled, num_rejected, query_start_loc, draft_tokens
         if self._sampled_tokens_cpu is not None:
             assert self.rejection_sampler is not None
             self.rejection_sampler.synchronize_cpu()

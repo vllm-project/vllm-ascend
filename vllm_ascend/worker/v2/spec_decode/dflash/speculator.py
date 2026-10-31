@@ -125,6 +125,10 @@ def prepare_dflash_inputs_factory(
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

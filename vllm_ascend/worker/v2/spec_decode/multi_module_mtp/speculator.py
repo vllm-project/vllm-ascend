@@ -50,6 +50,10 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
