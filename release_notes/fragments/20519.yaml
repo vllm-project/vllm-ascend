@@ -1,0 +1,6 @@
+pr: 20519
+entries:
+  - category: feature
+    text: Added an experimental opt-in DeepInfer MegaMoE backend with fused shared experts for DeepSeek V4.1 on Ascend 950, using TP1 and linear EP8.
+  - category: bugfix
+    text: Reduced deferred MLA tensor reuse with a same-stream lifetime adjustment, replacing the experimental MegaMoE Prefill host synchronization.
