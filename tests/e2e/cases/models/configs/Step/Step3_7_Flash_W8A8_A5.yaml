@@ -1,0 +1,77 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+_envs: &envs
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  HCCL_BUFFSIZE: "1024"
+  HCCL_OP_EXPANSION_MODE: "CCU_SCHED"
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_EXEC_TIMEOUT: "240"
+  TASK_QUEUE_ENABLE: "0"
+  TRITON_ALL_BLOCKS_PARALLEL: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--max-num-batched-tokens"
+  - "16328"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--max-num-seqs"
+  - "72"
+  - "--no-enable-prefix-caching"
+  - "--safetensors-load-strategy"
+  - "prefetch"
+  - "--gpu-memory-utilization"
+  - "0.96"
+  - "--enable-expert-parallel"
+  - "--additional-config"
+  - '{"enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens":3,"method":"mtp"}'
+
+
+# ==========================================
+# Actual Test Cases
+# ==========================================
+test_cases:
+  - name: "Step3_7_Flash_W8A8_MXFP"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Step-3.7-Flash-w8a8-mxfp8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      acc_aime2026:
+        case_type: accuracy
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/aime2026
+        request_conf: vllm_api_general_chat
+        dataset_conf: aime2026/aime2026_gen_0_shot_chat_prompt
+        max_out_len: 125000
+        batch_size: 16
+        # Record accuracy without imposing a quality gate until a known
+        # Step3.7 baseline is available.
+        baseline: 96.43
+        threshold: 4
+        temperature: 0.6
+        ignore_eos: false
+        top_p: 0.95
+      perf_gsm8k:
+        case_type: performance
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gsm8k_step
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 256
+        max_out_len: 4096
+        batch_size: 64
+        request_rate: 0
+        temperature: 0
+        ignore_eos: true
+        baseline: 1962.4616
+        threshold: 0.97
