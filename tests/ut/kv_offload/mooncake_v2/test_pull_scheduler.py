@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call
 
 import msgspec
@@ -89,7 +90,9 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
 def test_kda_contract_survives_scheduler_merge_and_wire_roundtrip() -> None:
     name = "model.layers.0.self_attn"
     contract = kda_metadata(1, 2)
-    workers = {(0, pcp, 0): replace(make_transfer_metadata(), kda_state_metadata={name: contract}) for pcp in range(2)}
+    workers: dict[int | tuple[int, ...], Any] = {
+        (0, pcp, 0): replace(make_transfer_metadata(), kda_state_metadata={name: contract}) for pcp in range(2)
+    }
     thread = make_sending_thread(workers, pcp_size=2)
     decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
     assert decoded.metadata_by_pp_rank[0].kda_state_metadata == {name: contract}

@@ -14,7 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.kda_transfer import (
 
 
 def metadata(tp=1, pcp=1, *, recover=False, layout="DS", mode="none"):
-    dtypes = ("torch.bfloat16", "torch.float32")
+    dtypes: tuple[str, ...] = ("torch.bfloat16", "torch.float32")
     if recover:
         dtypes += ("torch.float32", "torch.bfloat16")
     return MooncakeKDAStateMetadata(

@@ -1078,7 +1078,7 @@ def test_kda_pure_dp_decode_reconstructs_full_state_on_every_replica(dp_rank: in
     rs, rl, rst = geometry(remote_meta)
     local_addrs = [100_000 + dp_rank * 1_000_000 + cache * 10_000 for cache in range(4)]
     memory = {addr: bytearray([0xA5] * (3 * stride)) for addr, stride in zip(local_addrs, lst)}
-    peer_addrs = {}
+    peer_addrs: dict[int, dict[int, list[list[int]]]] = {}
     for pcp in range(2):
         peer_addrs[pcp] = {}
         for tp in range(4):

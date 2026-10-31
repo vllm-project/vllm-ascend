@@ -993,15 +993,34 @@ of the warmup metadata captured by Dynamo. Use a fresh `VLLM_CACHE_ROOT`
 when upgrading from the previous PCP graph. Use the same effective Mamba
 state block size on both peers. In this revision, cache mode `none` derives
 that size from `--max-model-len`, so both peers need the same context limit
-even when an explicit `--mamba-block-size` is supplied. The A3 validation
-setup uses `--mamba-block-size 1280` on both peers for cache planning.
-The joint `TP4/PCP2` producer configuration hit an AllGather timeout during
-an A3 concurrency run with a 4096-token batch budget; it has not passed
-stability validation. The alternative eight-NPU producer uses `TP1/PCP8`.
+even when an explicit `--mamba-block-size` is supplied. Attention KV block
+geometry must also match. Different TP sizes can derive different minimum
+attention block sizes from their local state pages; set the same explicit
+`--block-size` on both peers, large enough for the larger minimum. Setting
+only `--mamba-block-size` does not fix attention geometry.
+
+A pure-DP decode deployment uses `--tensor-parallel-size 1` together with
+`--data-parallel-size`. Every D replica owns the complete KDA head range;
+its DP rank identifies the serving instance and never partitions the state.
+For example, native P `TP4/PCP2` supplies four head groups to whichever
+replica serves the request in D `TP1/DP8`. The connector selects one PCP
+replica per producer head group and reconstructs the full state on that D
+replica. It does not broadcast the request's state to all D replicas.
+For MoE models, `--enable-expert-parallel` distributes expert weights across
+the eight workers while D's attention and SSM execution remain TP1.
+Use the serving CLI's DP launcher so every replica gets its own connector
+instance and ports.
+
+PCP query capacity can include TP-alignment padding beyond the indexer's
+actual query rows. NoPE SFA appends invalid sparse selections for those
+padding rows while preserving the original valid selections.
 Cross-TP runs can produce
 different token streams. Validate model accuracy and the actual total accepted
 and proposed draft-token counts against standalone D. Treat this path as
 experimental.
+
+Reproducible configurations, measured results, and known failed configurations
+are tracked in [the validation record](https://github.com/vllm-project/vllm-ascend/pull/20453#issuecomment-6541117335).
 
 For fewer transfer ranges, set the existing upstream environment variable
 `VLLM_SSM_CONV_STATE_LAYOUT=DS` on both peers. The connector reuses upstream
