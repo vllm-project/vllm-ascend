@@ -1836,3 +1836,22 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+#
+# ** File: platform/patch_minimax_m31_reasoning.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.reasoning.minimax_m3_reasoning_parser.MiniMaxM3ReasoningParser`
+#    Why:
+#       Explicit thinking_mode=enabled assumes the template prefills a thinking marker.
+#       M3.1's adaptive-only effort template does not. Historical end markers
+#       also make the composed streaming parser skip a new adaptive turn.
+#    How:
+#       Keep the original parser registration and wrap its constructor and
+#       reasoning-end check. Adaptive-only effort templates start outside
+#       reasoning; a bare MiniMax assistant prefix starts a fresh turn.
+#       Legacy M3 thinking switches and request kwargs remain unchanged.
+#    Related PR (if no, explain why):
+#       Compatibility fix for adaptive templates and new-turn prompt suffixes.
+#    Future Plan:
+#       Remove the patch and platform import once all supported vLLM versions
+#       include both the adaptive-template and assistant-prefix fixes.
+#
