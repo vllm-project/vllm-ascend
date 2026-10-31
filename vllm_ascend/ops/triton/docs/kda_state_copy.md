@@ -52,6 +52,11 @@ never needs to span the live cache. Startup synchronizes before releasing it.
 The strided fallback separately prepares one byte-copy variant with scratch
 source/destination pointers, not live cache pointers.
 
+Preparation also binds the explicit constexpr arguments retained by each
+compiled launcher's signature. Triton Ascend 3.2.2 uses runtime-only arguments;
+3.6.0 retains `TO_CACHE`, `HAS_FLAGS`, and `BLOCK_SIZE`. Serving appends the
+prepared constants without inspecting signatures or reentering JIT.
+
 Serving invokes only stored compiled objects. An unsealed plan, changed cache
 layout, excess selected count, or unexpected JIT hook is rejected before launch.
 No request can add a variant or evict one. Different worker layouts require
@@ -98,7 +103,7 @@ full-model compilation or every compilation backend.
 
 CPU tests cover device/layout routing, startup deduplication,
 all-or-nothing publication and actual prefill dispatch. NPU integration tests
-cover optional exact FP32/BF16 comparisons with a separately built PR17301 native operator,
+cover exact FP32/BF16 comparisons with an independent CPU Torch reference,
 INT32/INT64, dynamic selected counts, gaps/offsets, invalid indices, graph replay,
 real prefill/chunk math, and the FP16 strided byte-copy fallback.
 
@@ -162,13 +167,13 @@ but invokes sealed production plans rather than a standalone registry.
 
 ### Reproducible paired performance check
 
-The optional native differential tests skip only when the separately built
-PR #17301 reference op is absent; all independent correctness tests remain
-required. Production does not depend on that op. The benchmark requires it
-explicitly and fails early if unavailable:
+Correctness tests do not require the separately built PR #17301 reference op;
+the large-page-stride cases compare gather/scatter and the entire cache backing
+against CPU Torch operations. The paired native benchmark still requires that
+op explicitly and fails early if unavailable:
 
 ```bash
-python -m tests.e2e.nightly.single_node.ops.singlecard_ops.benchmark_kda_state_copy_triton \
+python benchmarks/benchmark_kda_state_copy_triton.py \
   --output /tmp/kda-round-1.json --seed 41 --trials 100
 ```
 

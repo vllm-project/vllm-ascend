@@ -6,6 +6,27 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 ## Overview
 
+### KDA state-copy microbenchmark
+
+[`benchmark_kda_state_copy_triton.py`](benchmark_kda_state_copy_triton.py) is a manual
+performance comparison between prepared Triton state-copy plans and the separately
+built native reference from PR #17301. It requires an Ascend A5 environment and that
+native operator; it is not part of the nightly or CI operator test suite.
+
+Run from the repository root with a new output file:
+
+```shell
+python benchmarks/benchmark_kda_state_copy_triton.py \
+  --output /tmp/kda-round-1.json --seed 41 --trials 100
+```
+
+See the [KDA state-copy guide](../vllm_ascend/ops/triton/docs/kda_state_copy.md#reproducible-paired-performance-check)
+for measurement scope. Correctness coverage remains in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/test_kda_state_copy_triton.py` and
+`test_kda_state_copy_integration.py`.
+
+### Model benchmarks
+
 **Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas 800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
 
 - Latency tests

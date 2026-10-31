@@ -18,9 +18,6 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.kda_state_copy_plan import KDAStateCopyPlan, initialize_kda_state_copy
 from vllm_ascend.ops.triton import kda_state_copy_kernel as lowlevel
 
-# Triton Ascend KDA state-copy launcher arguments are incompatible.
-KDA_LAUNCHER_SKIP = pytest.mark.skip(reason="Triton Ascend KDA state-copy launcher arguments are incompatible")
-
 
 def _forbid_compilation(monkeypatch):
     """Fail loudly on both kernel JIT and compiler API entry during serving."""
@@ -35,7 +32,6 @@ def _forbid_compilation(monkeypatch):
             monkeypatch.setattr(module, "compile", forbidden)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -104,7 +100,6 @@ def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
     assert all(layer._ascend_kda_state_copy is None for layer in layers)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -134,7 +129,6 @@ def test_worker_plan_graph_replay_and_rejections(monkeypatch):
         plan.gather(state, indices, flags[:1])
 
 
-@KDA_LAUNCHER_SKIP
 @torch.inference_mode()
 def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     """Run the actual prefill method and installed native chunk (no model load).
@@ -188,7 +182,6 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     torch.testing.assert_close(state, reference, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -222,40 +215,37 @@ def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
-def test_plan_matches_pr17301_native_operator(monkeypatch, dtype, index_dtype):
-    """Optional differential test against the separately built PR17301 op.
-
-    A clean main/Triton build intentionally does not include that unmerged
-    native operator. Primary Torch-reference tests above remain mandatory.
-    """
-    importlib.import_module("vllm_ascend.vllm_ascend_C")
-    if not hasattr(torch.ops._C_ascend, "kda_state_copy"):
-        pytest.skip("optional native reference requires a separate PR17301 build")
+def test_plan_matches_torch_reference_large_page_stride(monkeypatch, dtype, index_dtype):
+    """Check realistic cache page gaps against an independent CPU oracle."""
     shape, rows, stride, offset = (12, 128, 128), 8, 5308416, 393216
     payload = 12 * 128 * 128
     backing = torch.full(((rows - 1) * stride + offset + payload + 32,), -23, dtype=dtype, device="npu")
     state = backing.as_strided((rows, *shape), (stride, 16384, 128, 1), offset)
     state.copy_(torch.randn_like(state))
-    reference_backing = backing.clone()
+    reference_backing = backing.cpu()
     reference = reference_backing.as_strided(state.shape, state.stride(), offset)
     plan = KDAStateCopyPlan.prepare(state, 16)
     plan.seal()
     _forbid_compilation(monkeypatch)
     for count in (0, 1, 4, 8):
-        indices = torch.arange(count, dtype=index_dtype, device="npu")
+        host_indices = torch.arange(count, dtype=index_dtype)
         if count > 1:
-            indices[-1] = rows
-            indices[0] = -1
+            host_indices[-1] = rows
+            host_indices[0] = -1
+        indices = host_indices.to("npu")
+        valid = (host_indices >= 0) & (host_indices < rows)
         for flag in (None, True, False):
             flags = None if flag is None else torch.full((count,), flag, device="npu", dtype=torch.bool)
-            expected = torch.empty((count, *shape), dtype=dtype, device="npu")
-            torch.ops._C_ascend.kda_state_copy(reference, expected, indices, flags, False)
+            expected = torch.zeros((count, *shape), dtype=dtype)
+            if flag is not False:
+                expected[valid] = reference[host_indices[valid].long()]
             actual = plan.gather(state, indices, flags)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(backing.cpu(), reference_backing, rtol=0, atol=0)
         final = torch.randn((count, *shape), dtype=dtype, device="npu")
-        torch.ops._C_ascend.kda_state_copy(reference, final, indices, None, True)
+        reference[host_indices[valid].long()] = final.cpu()[valid]
         plan.scatter(state, final, indices)
-        torch.testing.assert_close(backing, reference_backing, rtol=0, atol=0)
+        torch.testing.assert_close(backing.cpu(), reference_backing, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
@@ -340,7 +330,6 @@ def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype,
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -366,7 +355,6 @@ def test_scatter_graph_replay_int64_extremes(monkeypatch):
     torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -397,7 +385,6 @@ def test_production_plan_offsets_beyond_four_gib(monkeypatch):
     assert torch.all(backing[-32:] == -23).item()
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Automatic fused KDA selection requires Ascend A5"
 )
@@ -418,7 +405,6 @@ def test_automatic_startup_uses_fused_plan(monkeypatch):
     torch.testing.assert_close(actual, state[ids], rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -439,7 +425,6 @@ def test_prepared_plan_nan_inf_signed_zero_bits(monkeypatch):
     torch.testing.assert_close(state[1].view(torch.int32), actual[0].view(torch.int32), rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -475,8 +460,8 @@ def test_plan_current_stream_and_device_guard(monkeypatch):
 @pytest.mark.parametrize(
     "dtype",
     [
-        pytest.param(torch.float32, marks=KDA_LAUNCHER_SKIP),
-        pytest.param(torch.bfloat16, marks=KDA_LAUNCHER_SKIP),
+        torch.float32,
+        torch.bfloat16,
         torch.float16,
     ],
 )
@@ -551,8 +536,8 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
 @pytest.mark.parametrize(
     "dtype",
     [
-        pytest.param(torch.float32, marks=KDA_LAUNCHER_SKIP),
-        pytest.param(torch.bfloat16, marks=KDA_LAUNCHER_SKIP),
+        torch.float32,
+        torch.bfloat16,
         torch.float16,
     ],
 )
@@ -607,7 +592,6 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
         torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )

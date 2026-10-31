@@ -16,11 +16,7 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops import kda_state_copy_plan as production
 
-# Triton Ascend KDA state-copy launcher arguments are incompatible.
-KDA_LAUNCHER_SKIP = pytest.mark.skip(reason="Triton Ascend KDA state-copy launcher arguments are incompatible")
 
-
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -66,7 +62,6 @@ def test_kda_state_copy_preserves_gaps_offsets_and_invalid_rows(dtype, index_dty
     torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -94,7 +89,6 @@ def test_kda_state_copy_graph_replay_changed_indices_and_flags():
     assert torch.all(backing[0::3] == -23) and torch.all(backing[2::3] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -123,7 +117,6 @@ def test_kda_state_copy_address_beyond_four_gib():
     assert torch.all(backing[:offset] == -23) and torch.all(backing[-32:] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -139,7 +132,6 @@ def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
         _copy_state(state.transpose(-1, -2), torch.empty((0, 2, 4, 3), device="npu"), indices, None, False)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -226,7 +218,6 @@ def prepared_state_copy():
         torch.npu.synchronize()
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
