@@ -67,11 +67,21 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to anbale dynamic EPLB
+    # Whether to enable dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to enable FlashComm1. "1" or "true" enables it; otherwise disabled.
+    # Read in ascend_config.py; kept here so it shows up in the auto-generated
+    # env_vars doc and is reachable via `from vllm_ascend import envs`.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower(),
+    # Whether to defer the last save in layerwise KV transfer. "1" defers;
+    # otherwise the save runs eagerly. Read in ascend_store/pool_worker.py.
+    "VLLM_ASCEND_LW_DEFER_LAST_SAVE": lambda: os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0"),
+    # Whether to use dot(k, q) with [N,D] K load in MiniMax-M3 decode on A5.
+    # "1" enables; otherwise disabled. Read in msa_m3_triton_a5.py.
+    "VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ": lambda: os.environ.get("VLLM_MINIMAX_M3_DECODE_INDEX_SCORE_KQ", "0"),
 }
 
 # end-env-vars-definition
