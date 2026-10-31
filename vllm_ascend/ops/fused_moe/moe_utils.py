@@ -31,6 +31,10 @@ from torch.nn.functional import pad
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
@@ -291,6 +295,69 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         weight_type,
     )
     return mega_moe_quant_settings
+
+
+# Dispatch quant modes each MegaMoe device family can actually execute. A2/A3
+# MegaMoe is INT8-quantized only, Ascend 950 (A5) MegaMoe is MXFP-only, so a
+# quant layout that is valid for one family is an operator-level failure on the
+# other. The unquantized mode is left to the operator's own checks because it is
+# not the INT/MXFP split this gate exists to enforce.
+_CANN_MEGA_MOE_INT_DISPATCH_MODES = frozenset({_CANN_MEGA_MOE_QUANT_MODE_NONE, _CANN_MEGA_MOE_QUANT_MODE_INT8})
+_CANN_MEGA_MOE_MXFP_DISPATCH_MODES = frozenset({_CANN_MEGA_MOE_QUANT_MODE_NONE, _CANN_MEGA_MOE_QUANT_MODE_MXFP})
+
+
+def _cann_mega_moe_supported_dispatch_modes(profile=None) -> frozenset[int]:
+    """Dispatch quant modes the currently configured device supports.
+
+    Whether the device may run MegaMoe at all is decided upstream by
+    ``use_cann_megamoe``. This only adds the quant-layout dimension that decision
+    ignores, so a device without the MXFP contract keeps the long-standing INT
+    behaviour instead of being rejected twice.
+    """
+
+    if profile is None:
+        profile = get_current_hardware_profile()
+    if profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        return _CANN_MEGA_MOE_MXFP_DISPATCH_MODES
+    return _CANN_MEGA_MOE_INT_DISPATCH_MODES
+
+
+def validate_cann_mega_moe_dispatch_mode(quant_type: QuantType, dispatch_quant_mode: int, profile=None) -> None:
+    """Reject quant layouts the current device's MegaMoe cannot dispatch.
+
+    ``_QUANT_SETTING_MAP`` is platform agnostic, so resolving a quant type alone
+    says nothing about whether this device can run the resulting dispatch mode.
+    Checking here keeps an A5-only MXFP layout from being handed to A2/A3 (and
+    vice versa), where the failure surfaces deep inside the operator as a weight
+    or dtype check instead of an actionable message.
+    """
+
+    supported = _cann_mega_moe_supported_dispatch_modes(profile)
+    if dispatch_quant_mode in supported:
+        return
+    if profile is None:
+        profile = get_current_hardware_profile()
+    capabilities = (
+        ", ".join(
+            capability.name
+            for capability in (
+                HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.CANN_MEGAMOE_MXFP,
+            )
+            if profile.supports(capability)
+        )
+        or "none"
+    )
+    raise RuntimeError(
+        f"CANN MegaMoe cannot dispatch quant type {quant_type} on the current device "
+        f"(MegaMoe capabilities: {capabilities}): it resolves to "
+        f"dispatch_quant_mode={dispatch_quant_mode}, but the supported modes here are "
+        f"{sorted(supported) or 'none'}. "
+        "W8A8/W4A8 INT MegaMoe requires an A2/A3 MegaMoe platform; "
+        "W8A8MXFP/W4A8MXFP/W4A4MXFP requires an Ascend 950 (A5) MXFP platform. "
+        "Quantize with a layout this device supports, or disable fused MC2 "
+        "(VLLM_ASCEND_ENABLE_FUSED_MC2=0)."
+    )
 
 
 def get_moe_num_logical_experts(

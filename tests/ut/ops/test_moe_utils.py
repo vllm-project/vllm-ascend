@@ -7,6 +7,7 @@ import torch
 import torch_npu  # noqa: F401 -- registers torch.npu used by the module under test
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
     _get_cann_mega_moe_quant_settings,
@@ -14,6 +15,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     cumsum_group_list,
     load_cann_mega_moe_ops,
     select_mega_moe_activation_kwargs,
+    validate_cann_mega_moe_dispatch_mode,
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -118,6 +120,73 @@ class TestMegaMoeQuantSettings(unittest.TestCase):
         ):
             with self.subTest(quant_type=quant_type):
                 self.assertEqual(_get_cann_mega_moe_quant_settings(quant_type), expected)
+
+
+class TestMegaMoeDispatchModeGate(unittest.TestCase):
+    @staticmethod
+    def _profile(*capabilities):
+        profile = MagicMock()
+        profile.supports.side_effect = lambda capability: capability in capabilities
+        return profile
+
+    def _validate(self, quant_type, profile):
+        dispatch_quant_mode, _, _ = _get_cann_mega_moe_quant_settings(quant_type)
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_utils.get_current_hardware_profile",
+            return_value=profile,
+        ):
+            validate_cann_mega_moe_dispatch_mode(quant_type, dispatch_quant_mode)
+
+    def test_int_layouts_accepted_on_a2_a3_megamoe(self):
+        profile = self._profile(HardwareCapability.CANN_MEGAMOE)
+        for quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.NONE):
+            with self.subTest(quant_type=quant_type):
+                self._validate(quant_type, profile)
+
+    def test_mxfp_layouts_accepted_on_a5_megamoe(self):
+        profile = self._profile(
+            HardwareCapability.CANN_MEGAMOE,
+            HardwareCapability.CANN_MEGAMOE_MXFP,
+        )
+        for quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP):
+            with self.subTest(quant_type=quant_type):
+                self._validate(quant_type, profile)
+
+    def test_unquantized_layout_accepted_on_both_families(self):
+        profiles = {
+            "int": self._profile(HardwareCapability.CANN_MEGAMOE),
+            "mxfp": self._profile(HardwareCapability.CANN_MEGAMOE_MXFP),
+        }
+        for family, profile in profiles.items():
+            with self.subTest(family=family):
+                self._validate(QuantType.NONE, profile)
+
+    def test_mxfp_layout_rejected_on_int_only_device(self):
+        profile = self._profile(HardwareCapability.CANN_MEGAMOE)
+        for quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP):
+            with (
+                self.subTest(quant_type=quant_type),
+                self.assertRaisesRegex(RuntimeError, "requires an Ascend 950"),
+            ):
+                self._validate(quant_type, profile)
+
+    def test_int_layout_rejected_on_mxfp_only_device(self):
+        profile = self._profile(HardwareCapability.CANN_MEGAMOE_MXFP)
+        for quant_type in (QuantType.W8A8, QuantType.W4A8):
+            with (
+                self.subTest(quant_type=quant_type),
+                self.assertRaisesRegex(RuntimeError, "requires an A2/A3"),
+            ):
+                self._validate(quant_type, profile)
+
+    def test_device_without_mxfp_contract_keeps_int_behaviour(self):
+        # Whether MegaMoe may run at all is use_cann_megamoe()'s decision; this
+        # gate only adds the INT/MXFP dimension, so a device lacking the MXFP
+        # contract must not reject INT layouts a second time.
+        profile = self._profile()
+        self._validate(QuantType.W8A8, profile)
+        with self.assertRaisesRegex(RuntimeError, "requires an Ascend 950"):
+            self._validate(QuantType.W8A8MXFP, profile)
 
 
 class TestMegaMoeActivationKwargs(unittest.TestCase):
