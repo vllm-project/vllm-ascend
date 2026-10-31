@@ -383,13 +383,44 @@ async def send_request_to_service(
                 result_future = proxy_state.req_id_future[request_id]
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "P notification rejected, not retrying: request_id=%s endpoint=%s attempt=%s status=%s error=%s",
+                request_id,
+                endpoint,
+                attempt,
+                e.response.status_code,
+                e,
+            )
+            raise
+        except httpx.RequestError as e:
+            if not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                logger.error(
+                    "P notification transport failure after send, not retrying: "
+                    "request_id=%s endpoint=%s attempt=%s error_type=%s",
+                    request_id,
+                    endpoint,
+                    attempt,
+                    type(e).__name__,
+                )
+                raise
+            logger.warning(
+                "Pre-send transport failure, retrying: request_id=%s endpoint=%s attempt=%s error_type=%s",
+                request_id,
+                endpoint,
+                attempt,
+                type(e).__name__,
+            )
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error(
+                    "All %s connection attempts failed for %s: request_id=%s",
+                    max_retries,
+                    endpoint,
+                    request_id,
+                )
                 raise last_exc
 
 
