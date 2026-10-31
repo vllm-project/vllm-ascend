@@ -925,6 +925,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
             if fused is not None:
+                # This path returns before the request-level fields below are
+                # attached, but ``update_block_table`` still needs them when a
+                # later cache group reuses this metadata.
+                fused.gdn_num_reqs = m.num_reqs
+                fused.gdn_seq_lens = m.seq_lens
                 return fused
 
         query_start_loc = m.query_start_loc
@@ -1379,7 +1384,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if checkpoint is not None:
             result.checkpoint = checkpoint.regather_state_indices(blk_table)
         for name in ("gdn_num_reqs", "gdn_seq_lens", "spec_sequence_indices", "non_spec_sequence_indices"):
-            setattr(result, name, getattr(m, name))
+            if hasattr(m, name):
+                setattr(result, name, getattr(m, name))
         result.non_spec_prefill_metadata = m.non_spec_prefill_metadata
         if m.non_spec_prefill_metadata is not None:
             assert conv_cache_indices is not None, "Prefill metadata requires cache indices"
