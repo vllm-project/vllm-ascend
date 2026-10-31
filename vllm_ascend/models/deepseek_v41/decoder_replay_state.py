@@ -74,6 +74,7 @@ class DecoderReplayState:
         self._pcp_replay_start = CpuGpuBuffer(local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.slots: torch.Tensor | None = None
         self.builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self.first_swa_builder: tuple[int, list[str], AscendDSAV41MetadataBuilder] | None = None
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
         self.num_tokens = 0
         self.num_actual_tokens = 0
@@ -184,6 +185,17 @@ class DecoderReplayState:
                         builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)
                         builder.prepare_source_rope()
                         self.builders.append((group_id, group.layer_names, builder))
+                        if self.layers.first_swa_prefix in group.layer_names:
+                            assert self.first_swa_builder is None
+                            first_swa_builder = builder_cls(
+                                group.kv_cache_spec, group.layer_names, self.config, self.rows.device
+                            )
+                            first_swa_builder.prepare_source_rope()
+                            self.first_swa_builder = (group_id, group.layer_names, first_swa_builder)
+        if self.layers.first_swa_prefix is not None:
+            assert self.first_swa_builder is not None, (
+                f"No decoder replay metadata builder owns {self.layers.first_swa_prefix}"
+            )
         self._gather(inputs, warmup=True)
 
     def _gather(self, inputs: DecoderReplayInputs, *, warmup: bool = False) -> None:
@@ -387,6 +399,27 @@ class DecoderReplayState:
                 task.run()
             for name in layer_names:
                 metadata[name] = value
+            if self.first_swa_builder is not None:
+                first_group_id, _, first_builder = self.first_swa_builder
+                first_swa_prefix = self.layers.first_swa_prefix
+                if group_id == first_group_id and first_swa_prefix in layer_names:
+                    first_common = replace(
+                        common,
+                        replay_start=inputs.encoder_replay_start[:num_reqs],
+                    )
+                    first_value = first_builder.build(
+                        0,
+                        first_common,
+                        num_actual_reqs=num_reqs,
+                        common_v41_batch_metadata={},
+                        common_v41_metadata={},
+                        rope_views=rope,
+                        **build_kwargs,
+                    )
+                    for task in first_builder.take_device_metadata_tasks():
+                        task.run()
+                    assert first_swa_prefix is not None
+                    metadata[first_swa_prefix] = first_value
         return metadata
 
     @contextmanager

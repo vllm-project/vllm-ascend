@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
@@ -22,10 +24,14 @@ class AscendDecoderReplayLayers:
         window: int,
         run_layers: Callable[..., tuple[torch.Tensor, ...]],
         row_buffers: list[torch.Tensor],
+        write_batch_kv: Callable[..., None] | None = None,
+        first_swa_prefix: str | None = None,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
+        self.write_batch_kv = write_batch_kv
+        self.first_swa_prefix = first_swa_prefix
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
         self.num_actual_rows = 0
@@ -43,6 +49,10 @@ class AscendDecoderReplayLayers:
         assert self.context_factory is not None
         positions = states[2]
         assert positions is not None
+        if self.write_batch_kv is not None:
+            # The cut layer's cache is shared by later layers, so populate it
+            # for every token before switching to replay-only metadata.
+            self.write_batch_kv(*states)
         with self.context_factory():
             rows = self.rows
             for buffer in self.row_buffers:
@@ -79,6 +89,62 @@ class AscendDecoderReplayLayers:
                     output = output.chunk(tp.world_size)[tp.rank_in_group]
                 outputs.append(output)
             return tuple(outputs)
+
+
+def dsv41_decoder_replay_forward(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    output_hidden_states: torch.Tensor,
+    output_pre_mix: torch.Tensor,
+    output_aux: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Run the decoder tail outside Dynamo's compiled model graph.
+
+    The replay rows and attention context are mutable per-forward state. Resolve
+    them only when this custom op executes so the compiler cannot specialize on
+    the warmup value of ``AscendDecoderReplayLayers.rows``. During graph capture,
+    ordinary tail operators remain in the graph; nested Ascend attention ops
+    keep their own capture boundaries.
+    """
+    forward_context = get_forward_context()
+    replay = forward_context.no_compile_layers[layer_name]
+    outputs = replay(hidden_states, pre_mix, positions, input_ids)
+    output_hidden_states.copy_(outputs[0])
+    output_pre_mix.copy_(outputs[1])
+    aux_outputs = outputs[2:]
+    if len(aux_outputs) != output_aux.shape[0]:
+        raise RuntimeError(
+            f"Decoder replay returned {len(aux_outputs)} auxiliary outputs, "
+            f"but the compiled call reserved {output_aux.shape[0]}"
+        )
+    for index, output in enumerate(aux_outputs):
+        output_aux[index].copy_(output)
+
+
+def dsv41_decoder_replay_forward_fake(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    output_hidden_states: torch.Tensor,
+    output_pre_mix: torch.Tensor,
+    output_aux: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Fake implementation for the in-place replay custom op."""
+    return None
+
+
+direct_register_custom_op(
+    op_name="dsv41_decoder_replay_forward",
+    op_func=dsv41_decoder_replay_forward,
+    mutates_args=["output_hidden_states", "output_pre_mix", "output_aux"],
+    fake_impl=dsv41_decoder_replay_forward_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:
@@ -118,22 +184,43 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     elif config.lora_config is not None:
         reason = "LoRA token mappings need to follow the replay batch"
     else:
-        model.decoder_replay_start = cut + 1
+        # Recompute the cut layer on the retained rows only after its shared KV
+        # caches have been written for the full batch. Keep the older boundary
+        # for layouts where that cache-only write has not been validated.
+        trim_cut_layer = (
+            hasattr(model, "layers")
+            and parallel.prefill_context_parallel_size == 1
+            and not model.use_sequence_parallel
+            and not enable_dsa_cp()
+            and cut not in getattr(model.config, "engram_layer_ids", ())
+        )
+        replay_start = cut if trim_cut_layer else cut + 1
+        model.decoder_replay_start = replay_start
+        row_buffers = []
+        cut_writes_index_outputs = trim_cut_layer and cut in getattr(model.config, "index_source_layer_ids", ())
+        cut_writes_candidate_outputs = trim_cut_layer and cut == getattr(
+            model.config, "candidate_source_layer_id", None
+        )
+        if not cut_writes_index_outputs:
+            row_buffers.append(model.topk_indices_buffer)
+        if not cut_writes_candidate_outputs:
+            row_buffers.extend((model.candidate_indices_buffer, model.candidate_lengths_buffer))
+        if not cut_writes_index_outputs:
+            row_buffers.append(model.topk_lengths_buffer)
+        write_batch_kv = model.layers[cut].write_kv if trim_cut_layer else None
+        first_swa_prefix = model.layers[cut].self_attn.v41_impl.swa_prefix if trim_cut_layer else None
         logger.info_once(
             "Ascend MRV2 decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
-            cut + 1,
+            replay_start,
             model.end_layer - 1,
             model.config.sliding_window,
         )
         replay = AscendDecoderReplayLayers(
             model.config.sliding_window,
             model._run_replay_layers,
-            [
-                model.topk_indices_buffer,
-                model.candidate_indices_buffer,
-                model.candidate_lengths_buffer,
-                model.topk_lengths_buffer,
-            ],
+            row_buffers,
+            write_batch_kv=write_batch_kv,
+            first_swa_prefix=first_swa_prefix,
         )
         replay.sequence_parallel = model.use_sequence_parallel
         return replay

@@ -764,6 +764,10 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
         return output
 
+    def write_kv(self, hidden_states):
+        output = torch.empty(0, dtype=hidden_states.dtype, device=hidden_states.device)
+        torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
+
 
 class DeepseekV41DecoderLayer(nn.Module):
     """V4.1 block with the checkpoint's delayed mHC coefficient handoff."""
@@ -875,6 +879,20 @@ class DeepseekV41DecoderLayer(nn.Module):
             post.unsqueeze(0),
             comb.unsqueeze(0),
         ).squeeze(0)
+
+    def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
+        """Project the attention input and write this layer's cache only."""
+        assert not self.use_sequence_parallel and not self.enable_dsa_cp
+        del positions, input_ids
+        x, _, _, _ = self.hc_pre(
+            hidden_states,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            pre_mix,
+        )
+        x = self.input_layernorm(x)
+        self.self_attn.write_kv(x)
 
     def forward(
         self,
@@ -1094,6 +1112,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+        self.decoder_replay_layer_name: str | None = None
+        if self.decoder_replay_layers is not None:
+            self.decoder_replay_layer_name = f"{prefix}.decoder_replay" if prefix else "decoder_replay"
+            static_forward_context = vllm_config.compilation_config.static_forward_context
+            if self.decoder_replay_layer_name in static_forward_context:
+                raise ValueError(f"Duplicate decoder replay layer name: {self.decoder_replay_layer_name}")
+            # Custom ops resolve the mutable per-forward replay state through
+            # ForwardContext, following the same pattern as Ascend DSA ops.
+            static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1567,9 +1594,31 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux_hidden_states = []
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
-                hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
-                    hidden_states, pre_mix, positions, input_ids
-                )
+                if torch.compiler.is_compiling():
+                    assert self.decoder_replay_layer_name is not None
+                    num_late_aux = sum(
+                        layer_idx + 1 in self.aux_hidden_state_layers
+                        for layer_idx in range(self.decoder_replay_start, self.end_layer)
+                    )
+                    replay_hidden_states = torch.empty_like(hidden_states)
+                    replay_pre_mix = torch.empty_like(pre_mix)
+                    replay_aux = hidden_states.new_empty((num_late_aux, positions.shape[0], self.config.hidden_size))
+                    torch.ops.vllm.dsv41_decoder_replay_forward(
+                        hidden_states,
+                        pre_mix,
+                        positions,
+                        input_ids,
+                        replay_hidden_states,
+                        replay_pre_mix,
+                        replay_aux,
+                        self.decoder_replay_layer_name,
+                    )
+                    hidden_states, pre_mix = replay_hidden_states, replay_pre_mix
+                    late_aux = list(replay_aux.unbind(0))
+                else:
+                    hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
+                        hidden_states, pre_mix, positions, input_ids
+                    )
                 aux_hidden_states.extend(late_aux)
                 last_layer = self.layers[self.end_layer - 1]
                 break
