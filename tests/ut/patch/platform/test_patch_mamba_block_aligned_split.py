@@ -56,6 +56,7 @@ def _scheduler(
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         hash_block_size=384,
+        num_hash_lookahead_tokens=0,
         mamba_partial_cache_hit=False,
         **scheduler_kwargs,
     )
@@ -129,6 +130,28 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
 
     # 4800 rounds down to 4608; EAGLE keeps one 384-token verifier block.
     assert result == 4224
+
+
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_kv_both_chunked_prefill_keeps_reusable_kda_checkpoints(use_eagle):
+    scheduler = _scheduler(
+        is_kv_consumer=True,
+        is_kv_producer=True,
+        uses_sparse_index_kpool=True,
+    )
+    scheduler.block_size = scheduler.cache_config.block_size = 640
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = use_eagle
+    request = _request(num_computed_tokens=0, num_prompt_tokens=58981, num_tokens=58981)
+    endpoints = []
+    while request.num_computed_tokens < request.num_prompt_tokens:
+        width = min(16384, request.num_prompt_tokens - request.num_computed_tokens)
+        scheduled = _mamba_block_aligned_split(scheduler, request, width)
+        assert scheduled > 0
+        request.num_computed_tokens += scheduled
+        endpoints.append(request.num_computed_tokens)
+
+    expected_checkpoint = 58240 if use_eagle else 58880
+    assert endpoints == [16000, 32000, 48000, expected_checkpoint, 58981]
 
 
 def test_producer_splits_window_after_external_cache_hit():

@@ -370,6 +370,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
 
+        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
+            # Scratch-slot hashes outlive their overwritten payload. Admit
+            # only externally verified prefixes through the store connector.
+            # Remove when upstream can reject nonresident scratch-cache hits.
+            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), 0, 0
+
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             return block_hashes
 
@@ -475,6 +481,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
+        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
+            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), tuple(
+                0 for _ in self.kv_cache_config.kv_cache_groups
+            )
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
         # producer and on standalone instances (see
         # ``self.skips_eagle_block_drop``): matched content blocks are

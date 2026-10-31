@@ -103,6 +103,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.models.glm5next.cache_config import get_glm5_next_alignment_reserve
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -660,6 +661,17 @@ class NPUWorker(WorkerBase):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    def _reserve_glm5_next_cache_alignment(self, available_bytes: int) -> int:
+        if self.vllm_config.kv_transfer_config is None:
+            return available_bytes
+        specs = self.get_kv_cache_spec()
+        if not any(getattr(spec, "model_version", None) == "glm5_next" for spec in specs.values()):
+            return available_bytes
+        groups = get_kv_cache_groups(self.vllm_config, specs)
+        reserve = get_glm5_next_alignment_reserve(self.vllm_config, groups)
+        logger.info("Reserve %d bytes for GLM-Next KV cache backing alignment.", reserve)
+        return max(available_bytes - reserve, 0)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -693,7 +705,9 @@ class NPUWorker(WorkerBase):
                 GiB(kv_cache_memory_bytes),
             )
             return self._apply_kvpp_memory_budget(
-                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+                self._reserve_glm5_next_cache_alignment(
+                    self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+                )
             )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -766,7 +780,9 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
-        return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+        return self._apply_kvpp_memory_budget(
+            self._reserve_glm5_next_cache_alignment(self.available_kv_cache_memory_bytes)
+        )
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
@@ -1235,6 +1251,11 @@ class NPUWorker(WorkerBase):
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
         num_buffer_assignments = len(reuse_layout.buffer_slots)
+
+        if any(getattr(spec, "model_version", None) == "glm5_next" for spec in kv_cache_spec.values()):
+            # The GLM builder budgets the final shared descriptors directly.
+            # Inflating available memory here would apply the saving twice.
+            return num_layers, num_buffer_assignments, 1.0
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
         physical_page_bytes = sum(kv_cache_spec[name].page_size_bytes for name in excluded_layer_names)

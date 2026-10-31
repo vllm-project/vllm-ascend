@@ -10,6 +10,7 @@ classes: main MLA/KDA pages and compressed-indexer/tail pages.
 
 from dataclasses import dataclass
 
+import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
@@ -24,6 +25,10 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
 from vllm_ascend.utils import vllm_version_is
+
+# NPUModelRunner._allocate_int8_cache_tensor reserves this many extra bytes
+# per backing when KV transfer requires a 2 MiB aligned address.
+GLM5_NEXT_CACHE_ALIGNMENT = 2 * 1024 * 1024
 
 # vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.32.0
 # lane still ships them in `kv_cache_utils`.
@@ -376,13 +381,24 @@ def get_glm5_next_kv_cache_groups(
     return groups
 
 
-def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
+def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec], vllm_config: VllmConfig | None = None) -> int:
     """Return physical bytes represented by one global block ID."""
 
+    if vllm_config is not None:
+        plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
+        return sum(tensor.size for tensor in plan.kv_cache_tensors)
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
     return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+
+
+def get_glm5_next_alignment_reserve(vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]) -> int:
+    """Fixed allocation overhead, excluded from the planner's page budget."""
+    if getattr(vllm_config, "kv_transfer_config", None) is None:
+        return 0
+    plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
+    return len(plan.kv_cache_tensors) * GLM5_NEXT_CACHE_ALIGNMENT
 
 
 def get_glm5_next_kv_cache_config(
@@ -392,12 +408,52 @@ def get_glm5_next_kv_cache_config(
 ) -> KVCacheConfig:
     """Describe one standard unpacked tensor per physical cache slot."""
 
+    plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
+    bytes_per_block = sum(tensor.size for tensor in plan.kv_cache_tensors)
+    plan.num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    for tensor in plan.kv_cache_tensors:
+        tensor.size *= plan.num_blocks
+    return plan
+
+
+def _build_glm5_next_kv_cache_config(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec], num_blocks: int
+) -> KVCacheConfig:
+    # Imported here because the layerwise planner also consumes GLM specs.
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+        apply_layerwise_kv_cache_plan,
+        get_layerwise_reuse_config,
+    )
+
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    transfer = getattr(vllm_config, "kv_transfer_config", None)
+    reuse = get_layerwise_reuse_config(transfer)
+    if reuse is not None and reuse.get("layerwise_independent_layers") != "all":
+        if transfer.kv_connector == "MultiConnector":
+            raise NotImplementedError("GLM-Next shared layerwise buffers currently support standalone AscendStore only")
+        if getattr(transfer, "kv_role", "kv_producer") not in ("kv_producer", "kv_both"):
+            raise ValueError("GLM-Next shared layerwise buffers require a store save role")
+        parallel = vllm_config.parallel_config
+        if any(
+            getattr(parallel, name, 1) != 1
+            for name in (
+                "data_parallel_size",
+                "pipeline_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            )
+        ):
+            raise NotImplementedError("GLM-Next shared layerwise buffers require DP=PP=PCP=DCP=1")
+        if getattr(vllm_config, "use_v2_model_runner", False):
+            raise NotImplementedError("GLM-Next shared layerwise buffers require Model Runner V1")
+        if not getattr(vllm_config.model_config, "enforce_eager", True):
+            raise ValueError("GLM-Next shared layerwise buffers require eager execution")
+        if any(spec.dtype != torch.bfloat16 for spec in layout.full_group.kv_cache_spec.kv_cache_specs.values()):
+            raise NotImplementedError("GLM-Next shared layerwise buffers require BF16 main/indexer KV caches")
+
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
@@ -437,11 +493,14 @@ def get_glm5_next_kv_cache_config(
             )
         )
 
-    return KVCacheConfig(
+    plan = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
     )
+    if getattr(vllm_config, "kv_transfer_config", None) is not None:
+        apply_layerwise_kv_cache_plan(plan, vllm_config)
+    return plan
 
 
 def get_glm5_next_max_memory_usage(
@@ -461,4 +520,4 @@ def get_glm5_next_max_memory_usage(
         // group.kv_cache_spec.page_size_bytes
         for group in groups
     )
-    return blocks * get_glm5_next_pool_bytes_per_block(groups)
+    return blocks * get_glm5_next_pool_bytes_per_block(groups, vllm_config)

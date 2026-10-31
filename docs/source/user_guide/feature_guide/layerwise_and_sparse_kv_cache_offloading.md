@@ -120,6 +120,78 @@ The following log confirms that buffer reuse is enabled:
 Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
 ```
 
+### GLM-5.3-Flash standalone cache offload
+
+GLM-5.3-Flash has an experimental standalone shared-buffer path with
+`AscendStoreConnector`, `backend=memcache`, and `use_layerwise=true`.
+One instance handles Prefill and ordinary non-speculative Decode. It requires
+model runner V1, eager execution, a store save role (`kv_both` or `kv_producer`),
+and DP=PP=PCP=DCP=1. Use BF16 main/indexer KV caches and
+`mamba_cache_mode=align` without extra prefill checkpoint blocks.
+P/D separation through `MultiConnector` is rejected before cache allocation.
+
+Main MLA and KDA views retain their ordinary cross-group packing. For the
+full 45-layer model, set `layerwise_num_shared_buffers=4` and
+`layerwise_independent_layers=[0,1,2,3]`: L4-L7 share S0, L8-L11 share S1,
+L12-L15 share S2, and L16-L19 share S3. L20-L23 reuse S0; L44 reuses only
+S2's first KDA group pages. The four resident target layers retain
+their ordinary shared backing, with distinct global block IDs for each group.
+This produces five main backings and eleven resident indexer/tail backings.
+The planner uses this physical layout to increase `num_blocks` within the KV
+memory budget. The worker reserves an additional 2 MiB per backing for address
+alignment before planning blocks. Configurations that do not reduce physical
+main backings retain the ordinary layout and capacity.
+
+Set `layerwise_prefetch_layers=4` to submit loads up to four logical layers
+ahead; this is separate from the number of shared tensors. Loads and cold
+writes wait for the previous owner in the same `(tensor, scheduler group)`
+to finish its store save: L20 waits for L4, L21 for L5, and so on.
+Only that group's allocated pages may be loaded or initialized. Shared
+recurrent forwards drain their saves before the next step resets events or
+copies state. These waits also protect one-token Decode steps.
+
+Use the following configuration for a single instance:
+
+```json
+{
+  "kv_connector": "AscendStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "backend": "memcache",
+    "use_layerwise": true,
+    "layerwise_num_shared_buffers": 4,
+    "layerwise_prefetch_layers": 4,
+    "layerwise_independent_layers": [0, 1, 2, 3]
+  }
+}
+```
+
+Start with `VLLM_USE_V2_MODEL_RUNNER=0`, `--enforce-eager`,
+`--mamba-cache-mode align`, and `--kv-cache-dtype auto`. Leave
+`--speculative-config` and `--use-replayssm` unset for standalone generation.
+Draft descriptors are kept resident and charged to capacity when present,
+but speculative Decode commits are unsupported: sampling may roll back the
+computed endpoint after the shared state has been saved.
+
+Set a fixed `--kv-cache-memory-bytes` for capacity comparisons and leave
+`--num-gpu-blocks-override` unset. Chunked Prefill and ordinary Decode save
+request-scoped snapshots at the exact computed endpoint, including partial
+blocks and KDA state. Snapshot data is restored before the layer consumes
+its shared slot. Decode may finish a full page before its prefix hash is
+published: attention pages keep their request-scoped identity until promotion,
+and recurrent state restores the exact previous endpoint even after hashes
+arrive. An older recurrent checkpoint cannot be reconstructed from later state.
+Ordinary `kv_both` Prefill chunks retain cache-group alignment, including the
+final full block before the prompt tail, so their KDA checkpoints can be
+published for other requests. Only a padded final-token MTP verifier window
+bypasses that split. External prefix hit rates count computation avoided across
+requests; restoring this request's previous chunk is not another prefix hit.
+Local prefix hashes are not treated as resident cache hits
+after buffer reuse; prefix reuse is admitted only after the external store
+verifies a restore point. Transfer failures stop execution because a reused
+slot has no resident fallback copy. This feature does not enable the separate
+sparse Decode offload deployment described below.
+
 ## 3. Sparse KV Cache Offload on Decode
 
 Requirements and limitations:

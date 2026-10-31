@@ -659,7 +659,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+        return get_glm5_next_pool_bytes_per_block(kv_cache_groups, vllm_config)
     qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
     if qwen_bytes is not None:
         return qwen_bytes

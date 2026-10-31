@@ -326,6 +326,21 @@ def test_standard_lookup_skips_drop_on_standalone():
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
+@pytest.mark.parametrize("per_group", [False, True])
+def test_shared_layer_buffers_do_not_admit_overwritten_local_prefixes(per_group):
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.kv_cache_config.layerwise_kv_cache_reuse = True
+    previous_calls = (len(_RecordingFA.calls), len(_RecordingMamba.calls))
+    if per_group:
+        blocks, lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
+        assert lengths == (0, 0)
+    else:
+        blocks, length, surplus = coordinator.find_longest_cache_hit([], 2048)
+        assert length == surplus == 0
+    assert blocks == ([], [])
+    assert previous_calls == (len(_RecordingFA.calls), len(_RecordingMamba.calls))
+
+
 # ---------------------------------------------------------------------------
 # Fix ③: per-group lookup drop gating + call-site signature
 # ---------------------------------------------------------------------------

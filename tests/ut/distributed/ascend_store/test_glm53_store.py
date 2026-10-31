@@ -17,9 +17,12 @@ from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
-from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
+from tests.ut.models.test_glm5next_cache_config import make_config, make_full_prefill_specs, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+    AscendStoreConnector,
+    create_kv_pool_scheduler,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -345,6 +348,137 @@ class TestGLM53Store(unittest.TestCase):
         hit_request.request_id = "missing"
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
 
+    def test_shared_hybrid_payload_survives_partial_chunks_and_slot_overwrites(self):
+        for buffers in (1, 2, 3, 4):
+            with self.subTest(buffers=buffers):
+                self._check_shared_hybrid_payload(buffers)
+                self.doCleanups()
+
+    def _check_shared_hybrid_payload(self, buffers):
+        config = make_config()
+        config.model_config.get_num_layers = lambda _: 45
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+                "layerwise_num_shared_buffers": buffers,
+                "layerwise_independent_layers": [0, 1, 2, 3],
+            },
+        )
+        groups = get_glm5_next_kv_cache_groups(config, make_full_prefill_specs())
+        cost = get_glm5_next_pool_bytes_per_block(groups, config)
+        plan = get_glm5_next_kv_cache_config(config, groups, 16 * cost)
+        worker = make_worker(
+            self,
+            kv_cache_config=plan,
+            use_layerwise=True,
+            use_mla=True,
+            num_layers=45,
+            extra_config={
+                "backend": "memcache",
+                "layerwise_num_shared_buffers": buffers,
+                "layerwise_independent_layers": [0, 1, 2, 3],
+            },
+        )
+        buffers, readable = {}, set()
+        worker.vllm_config.speculative_config = None
+
+        def alloc(keys, sizes, ttl):
+            for key, size in zip(keys, sizes):
+                buffers.setdefault(key, ctypes.create_string_buffer(size))
+            return [ctypes.addressof(buffers[key]) for key in keys]
+
+        def copy(gvas, addresses, sizes, direction):
+            for gva, address, size in zip(gvas, addresses, sizes):
+                ctypes.memmove(gva if direction == 0 else address, address if direction == 0 else gva, size)
+            return 0
+
+        worker.m_store.batch_alloc.side_effect = alloc
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [int(key in readable) for key in keys]
+        worker.m_store.batch_get_key_info.side_effect = lambda keys, **kw: [
+            SimpleNamespace(
+                size=lambda key=key: int(key in readable), gva_list=lambda key=key: [ctypes.addressof(buffers[key])]
+            )
+            for key in keys
+        ]
+        worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
+        worker.m_store.batch_write_finish.side_effect = lambda keys, results: readable.update(keys) or results
+        worker.m_store.store.batch_copy.side_effect = copy
+        caches = make_glm53_caches(plan)
+        worker.register_kv_caches(caches)
+        block_ids = [[1, 2, 10], [3], [4, 5, 11], [6, 7, 12], [8, 9, 13]]
+        expected = {}
+        previous = 0
+        # Prefill ends at 513; subsequent one-token steps cross another full
+        # boundary with the same request-scoped recurrent snapshots.
+        for end in (511, 512, 513, 514, 515, 1023, 1024, 1025):
+            # Decode can compute a full page before its hash is published.
+            hashes = [bytes([i + 1]) * 32 for i in range((end - 1) // 512)]
+            metadata = AscendConnectorMetadata(set())
+            metadata.add_request(
+                ReqMeta(
+                    "chunks",
+                    token_len_chunk=end,
+                    save_end_token=len(hashes) * 512,
+                    target_token_len=end,
+                    num_prompt_tokens=513,
+                    block_ids_by_group=block_ids,
+                    block_ids_by_group_np=[np.asarray(ids) for ids in block_ids],
+                    block_hashes=hashes,
+                    kv_cache_group_ids=list(range(5)),
+                    can_save=True,
+                    load_spec=LoadSpec(
+                        previous,
+                        previous,
+                        True,
+                        layerwise_previous_step=True,
+                        layerwise_snapshot_end_token=previous,
+                        layerwise_snapshot_start_block=(previous - 1) // 512,
+                    )
+                    if previous
+                    else None,
+                )
+            )
+            worker.prepare_layerwise_step(metadata)
+            for layer in range(45):
+                worker.wait_for_layer_load()
+                for group_id, layer_in_group in worker._groups_for_layerwise_transfer(layer):
+                    name = next(
+                        name
+                        for name in plan.kv_cache_groups[group_id].layer_names
+                        if name.startswith(f"model.layers.{layer}.") and ".indexer." not in name
+                    )
+                    # Indexer stays resident; exercise the main and both KDA
+                    # components through actual byte copies and shared storage.
+                    if "indexer" in name:
+                        continue
+                    state = isinstance(plan.kv_cache_groups[group_id].kv_cache_spec, MambaSpec)
+                    old_rows = (
+                        [block_ids[group_id][(previous - 1) // 512]]
+                        if state and previous
+                        else block_ids[0][: (previous + 511) // 512]
+                    )
+                    for component, cache in enumerate(caches[name]):
+                        key = (name, component)
+                        if previous:
+                            torch.testing.assert_close(
+                                cache[old_rows],
+                                expected[key],
+                                rtol=0,
+                                atol=0,
+                                msg=f"buffer={buffers}, layer={layer}, end={end}, component={component}",
+                            )
+                        rows = [block_ids[group_id][(end - 1) // 512]] if state else block_ids[0][: (end + 511) // 512]
+                        # Decode appends to its active page; completed MLA
+                        # pages are immutable once published under a hash.
+                        cache[block_ids[group_id][(end - 1) // 512]] = layer + end / 512
+                        expected[key] = cache[rows].clone()
+                worker.save_kv_layer(metadata)
+            worker.kv_send_thread.request_queue.join()
+            worker.kv_send_thread.raise_if_failed()
+            previous = end
+
     def test_mooncake_layerwise_excludes_private_tail(self):
         plan = make_glm53_plan()
         worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
@@ -358,6 +492,74 @@ class TestGLM53Store(unittest.TestCase):
         for layer in range(worker.num_layers):
             for group_id, _ in worker._groups_for_layerwise_transfer(layer):
                 self.assertIn(group_id, worker.cacheable_group_ids)
+
+    def test_glm_draft_forwards_do_not_advance_target_ring(self):
+        config = make_config()
+        config.model_config.get_num_layers = lambda _: 45
+        config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+        extra = {
+            "backend": "memcache",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": 4,
+            "layerwise_independent_layers": [0, 1, 2, 3],
+        }
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector", kv_role="kv_producer", kv_connector_extra_config=extra
+        )
+        specs = make_full_prefill_specs()
+        for name, spec in make_specs(pool=4).items():
+            if not isinstance(spec, MambaSpec):
+                specs[name.replace("layers.3.", "layers.45.")] = replace(spec)
+        groups = get_glm5_next_kv_cache_groups(config, specs)
+        plan = get_glm5_next_kv_cache_config(config, groups, 1 << 27)
+        worker = make_worker(
+            self,
+            kv_cache_config=plan,
+            use_layerwise=True,
+            use_mla=True,
+            num_layers=45,
+            num_hidden_layers=45,
+            extra_config=extra,
+        )
+        self.assertEqual(worker.num_layers, 45)
+        self.assertEqual(worker.layerwise_key_layers, 45)
+        self.assertEqual(set(worker._global_to_local_layer), set(range(45)))
+        self.assertEqual(worker.prefetch_layer_map[20], 4)
+        self.assertEqual(worker.prefetch_layer_map[21], 5)
+        self.assertEqual(set(worker._dspark_draft_layer_names), set(plan.layerwise_draft_layer_names))
+        worker.current_layer = 45
+        worker.external_slot_release_waiter = MagicMock()
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector.connector_worker = worker
+        draft_main = next(name for name in plan.layerwise_draft_layer_names if name.endswith(".attn"))
+        for _ in range(5):
+            connector.wait_for_layer_load(draft_main)
+            worker.save_kv_layer(AscendConnectorMetadata(set()))
+        self.assertEqual(worker.current_layer, 45)
+        worker.external_slot_release_waiter.assert_not_called()
+
+    def test_group_prefetch_window_keeps_empty_load_overwrite_fences(self):
+        worker = SimpleNamespace(
+            num_layers=45,
+            current_layer=16,
+            num_prefetch_layers=4,
+            next_layer_to_submit=16,
+            layer_load_tasks=[[] for _ in range(45)],
+            prefetch_layer_map={layer: layer - 16 for layer in range(20, 45)},
+            kv_recv_thread=MagicMock(),
+        )
+        LayerwiseKVPoolWorker._submit_ready_layer_loads(worker)
+        submitted = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
+        self.assertEqual([(task.layer_id, task.wait_for_save_layer) for task in submitted], [(20, 4)])
+        self.assertEqual(submitted[0].transfer_tasks, [])
+        worker.current_layer = 19
+        LayerwiseKVPoolWorker._submit_ready_layer_loads(worker)
+        submitted = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
+        self.assertEqual(
+            [(task.layer_id, task.wait_for_save_layer) for task in submitted],
+            [(20, 4), (21, 5), (22, 6), (23, 7)],
+        )
 
     def test_empty_final_layer_waits_for_pending_save_before_reusing_events(self):
         pending: queue.Queue[str] = queue.Queue()
@@ -424,6 +626,25 @@ class TestGLM53Store(unittest.TestCase):
         worker._wait_for_final_layer_save = MethodType(LayerwiseKVPoolWorker._wait_for_final_layer_save, worker)
         with self.assertRaisesRegex(RuntimeError, "save failed"):
             LayerwiseKVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))
+
+    def test_reused_state_never_continues_after_a_failed_transfer(self):
+        for failure in ("save", "load", "invalid_block", "request"):
+            with self.subTest(failure=failure):
+                worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+                worker.layerwise_offload = worker.use_layerwise_transfer = True
+                worker._save_disabled = threading.Event()
+                worker.kv_recv_thread = SimpleNamespace(load_disabled=threading.Event())
+                worker._layer_load_aborted = threading.Event()
+                worker._invalid_block_ids_lock = threading.Lock()
+                worker._invalid_block_ids = {1} if failure == "invalid_block" else set()
+                worker._failed_requests = {"r"} if failure == "request" else set()
+                if failure == "save":
+                    worker._save_disabled.set()
+                if failure == "load":
+                    worker.kv_recv_thread.load_disabled.set()
+                with self.assertRaisesRegex(RuntimeError, "refusing incomplete KV/state"):
+                    worker._check_layerwise_transfer_errors()
+                self.assertTrue(worker._layer_load_aborted.is_set())
 
     def test_layerwise_null_kda_slots_never_publish_readable_keys(self):
         plan = make_glm53_plan()
