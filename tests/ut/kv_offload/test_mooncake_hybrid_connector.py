@@ -61,6 +61,8 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.request_task_counts = defaultdict(int)
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
+        thread.failed_recv_requests = set()
+        thread.failed_recv_requests_lock = threading.Lock()
         return thread
 
     def test_group_transfer_and_completion(self):
@@ -134,6 +136,127 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 self.assertFalse(thread.finished_request_markers)
                 self.assertFalse(thread.proc_not_transfer_request)
                 self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def _make_receive_worker(self):
+        thread = self._make_thread()
+        self.addCleanup(thread.executor.shutdown, wait=True)
+        thread.use_hybrid = True
+        thread.task_tracker = KVCacheTaskTracker()
+        thread.request_queue = queue.Queue()
+        thread.proc_not_transfer_request = {}
+        thread.proc_not_transfer_request_lock = threading.Lock()
+        thread._send_done_signal_to_free_remote_port = MagicMock()
+        thread._send_done_recv_signal = MagicMock()
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_consumer"
+        worker.tp_rank = 0
+        worker.kv_recv_thread = thread
+        connector = object.__new__(MooncakeConnector)
+        connector.connector_worker = worker
+        return thread, connector
+
+    def _submit_receive(self, thread, request_id, last, blocks=None):
+        meta = dict(
+            request_id=request_id,
+            remote_request_id=f"prefill-{request_id}",
+            remote_host="192.0.2.1",
+            remote_handshake_port=31000,
+            remote_port_send_num={},
+            all_task_done=last,
+            local_block_ids=([1], [2]) if blocks is None else blocks,
+        )
+        thread.request_queue.put(meta)
+        thread.request_queue.get_nowait()
+        thread._mark_request_task_submitted(meta)
+        return meta
+
+    def test_receive_failure_is_request_scoped_and_drained_once(self):
+        for hybrid in (False, True):
+            for fail_first in (False, True):
+                with self.subTest(hybrid=hybrid, fail_first=fail_first):
+                    thread, connector = self._make_receive_worker()
+                    thread.use_hybrid = hybrid
+                    transfer = MagicMock(side_effect=[RuntimeError("read failed"), None])
+                    thread._transfer_kv_cache = thread._transfer_kv_cache_all_groups = transfer
+                    thread.task_tracker.add_req_to_process("failed")
+                    first = self._submit_receive(thread, "failed", False)
+                    last = self._submit_receive(thread, "failed", True)
+                    if not fail_first:
+                        first, last = last, first
+                    thread._handle_request(first)
+                    result = connector.get_transfer_results(set())
+                    self.assertFalse(result.finished_recving)
+                    self.assertFalse(result.failed_recving)
+                    thread._handle_request(last)
+                    result = connector.get_transfer_results(set())
+                    self.assertEqual(result.finished_recving, {"failed"})
+                    self.assertEqual(result.failed_recving, {"failed"})
+                    self.assertFalse(connector.get_transfer_results(set()).failed_recving)
+                    self.assertFalse(thread.failed_recv_requests)
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                    self.assertEqual(thread._send_done_recv_signal.call_count, 2)
+                    # A later task for the failed request must not start another read.
+                    self.assertEqual(transfer.call_count, 1)
+                    thread.task_tracker.add_req_to_process("healthy")
+                    healthy = self._submit_receive(thread, "healthy", True)
+                    thread._handle_request(healthy)
+                    result = connector.get_transfer_results(set())
+                    self.assertEqual(result.finished_recving, {"healthy"})
+                    self.assertFalse(result.failed_recving)
+
+    def test_receive_failure_waits_for_inflight_write(self):
+        thread, connector = self._make_receive_worker()
+        writing = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def transfer(meta):
+            if meta["all_task_done"]:
+                raise RuntimeError("peer read failed")
+            writing.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release the writer")
+
+        thread._transfer_kv_cache_all_groups = transfer
+        thread.task_tracker.add_req_to_process("r")
+        first = self._submit_receive(thread, "r", False)
+        last = self._submit_receive(thread, "r", True)
+        future = thread.executor.submit(thread._handle_request, first)
+        self.assertTrue(writing.wait(5))
+        thread._handle_request(last)
+        result = connector.get_transfer_results(set())
+        self.assertFalse(result.finished_recving)
+        self.assertFalse(result.failed_recving)
+        release.set()
+        future.result(timeout=5)
+        result = connector.get_transfer_results(set())
+        self.assertEqual(result.finished_recving, {"r"})
+        self.assertEqual(result.failed_recving, {"r"})
+
+    def test_failed_metadata_with_empty_blocks_does_not_leak_request(self):
+        thread, connector = self._make_receive_worker()
+        thread._transfer_kv_cache_all_groups = MagicMock(side_effect=KeyError("remote engine"))
+        thread.task_tracker.add_req_to_process("r")
+        thread._handle_request(self._submit_receive(thread, "r", True, blocks=[]))
+        result = connector.get_transfer_results(set())
+        self.assertEqual(result.finished_recving, {"r"})
+        self.assertEqual(result.failed_recving, {"r"})
+        self.assertFalse(thread.failed_recv_requests)
+        self.assertFalse(thread.task_tracker.reqs_to_process)
+
+    def test_producer_transfer_results_and_legacy_completion(self):
+        tracker = KVCacheTaskTracker()
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_producer"
+        worker.tp_rank = 0
+        worker.kv_send_thread = tracker
+        tracker.add_not_transfer_request("sent")
+        result = worker.get_transfer_results()
+        self.assertEqual(result.finished_sending, {"sent"})
+        self.assertFalse(result.finished_recving)
+        self.assertFalse(result.failed_recving)
+        tracker.add_not_transfer_request("legacy")
+        self.assertEqual(worker.get_finished(), ({"legacy"}, set()))
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
         expected_device_index = 5

@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -509,6 +510,9 @@ class KVCacheRecvingThread(threading.Thread):
         self.request_task_counts: defaultdict[str, int] = defaultdict(int)
         self.finished_request_markers: set[str] = set()
         self.request_task_counts_lock = threading.Lock()
+        # Cache group block IDs cannot safely identify a failed request.
+        self.failed_recv_requests: set[str] = set()
+        self.failed_recv_requests_lock = threading.Lock()
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -673,6 +677,21 @@ class KVCacheRecvingThread(threading.Thread):
             self.finished_request_markers.discard(request_id)
             return has_finished_marker
 
+    def _is_failed_recv_request(self, request_id: str) -> bool:
+        with self.failed_recv_requests_lock:
+            return request_id in self.failed_recv_requests
+
+    def _mark_failed_recv_request(self, request_id: str) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.add(request_id)
+
+    def get_and_clear_failed_recv_requests(self, finished_req_ids: set[str]) -> set[str]:
+        # Publish failure only with completion, after all local tasks end.
+        with self.failed_recv_requests_lock:
+            failed_req_ids = self.failed_recv_requests & finished_req_ids
+            self.failed_recv_requests.difference_update(failed_req_ids)
+        return failed_req_ids
+
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]
         remote_request_id = req_meta["remote_request_id"]
@@ -682,6 +701,8 @@ class KVCacheRecvingThread(threading.Thread):
         all_task_done = req_meta["all_task_done"]
 
         try:
+            if self._is_failed_recv_request(request_id):
+                return
             logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
             if not self.use_hybrid:
                 self._transfer_kv_cache(req_meta)
@@ -689,11 +710,12 @@ class KVCacheRecvingThread(threading.Thread):
                 self._transfer_kv_cache_all_groups(req_meta)
             logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
         except Exception:
+            self._mark_failed_recv_request(request_id)
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
-                if len(req_meta["local_block_ids"]) > 0:
+                if len(req_meta["local_block_ids"]) > 0 or self._is_failed_recv_request(request_id):
                     self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
@@ -1264,6 +1286,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1929,6 +1955,10 @@ class MooncakeConnectorWorker:
             time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         done_sending = (
             self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
             )
@@ -1947,7 +1977,18 @@ class MooncakeConnectorWorker:
                 len(done_sending),
                 len(done_recving),
             )
-        return done_sending, done_recving
+        failed_recving = (
+            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)
+            if self.kv_role == "kv_consumer"
+            else set()
+        )
+        if failed_recving:
+            logger.error("KV_RECV_FAILED requests=%s", sorted(failed_recving))
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
