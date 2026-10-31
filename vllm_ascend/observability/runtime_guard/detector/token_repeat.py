@@ -197,8 +197,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
         unit tests), tokens are appended here first.
 
         Always advances via Store ``cumulative_output_since`` + ``_consumed_len``
-        so a second call in the same wave cannot re-score ids that append
-        dedupe skipped (W1-1 / R-04).
+        so a second call does not re-score ids already folded.
         """
         if not self._precheck():
             return []
@@ -211,7 +210,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
 
         io_mgr = RequestIoSnapshotManager.get()
         if sampled_token_ids is not None:
-            io_mgr.append_batch(req_ids, sampled_token_ids)
+            io_mgr.append_batch(req_ids, sampled_token_ids, runner=runner)
 
         alerts: list[Incident] = []
         for batch_idx, req_id in enumerate(req_ids):

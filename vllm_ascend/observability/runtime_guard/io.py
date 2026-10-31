@@ -150,6 +150,7 @@ class RequestIoSnapshot:
     output_token_count: int
     prompt_token_ids: list[int] | None = None
     output_token_ids: list[int] | None = None
+    first_device_output_token_ids: list[int] | None = None
 
     def as_detail_fields(self) -> dict[str, Any]:
         """Fields merged into anomaly report detail (counts always; ids optional)."""
@@ -161,6 +162,8 @@ class RequestIoSnapshot:
             out["prompt_token_ids"] = self.prompt_token_ids
         if self.output_token_ids is not None:
             out["output_token_ids"] = self.output_token_ids
+        if self.first_device_output_token_ids is not None:
+            out["first_device_output_token_ids"] = self.first_device_output_token_ids
         return out
 
 
@@ -199,13 +202,11 @@ class RequestIoSnapshotManager:
         RequestGuardStore.reset_for_tests()
 
     def clear_wave_cache(self) -> None:
-        """Drop snapshot cache and same-wave append dedupe on Store.
+        """Drop the same-wave snapshot cache.
 
-        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave
-        so content-identical chunks from a later step are not swallowed.
+        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave.
         """
         self._cache.clear()
-        RequestGuardStore.get().clear_wave_append_frontier()
 
     def clear_req_cache(self, req_id: str) -> None:
         """Drop wave snapshot cache entries for ``req_id`` (Store on_clear hook)."""
@@ -223,18 +224,37 @@ class RequestIoSnapshotManager:
         """
         return RequestGuardStore.get().new_output_ids_since(req_id, consumed)
 
-    def append_output(self, req_id: str, token_ids: Any) -> None:
+    def _record_first_device_output(self, runner: Any, req_id: str) -> None:
+        """Save the device output row once, while Store output is still empty."""
+        store = RequestGuardStore.get()
+        state = store.get_state(req_id)
+        if state is not None and (state.output_token_ids or state.first_device_output_token_ids is not None):
+            return
+        read = _output_from_req_states(runner, req_id, None)
+        if read is None:
+            return
+        ids = read[1]
+        if not ids:
+            return
+        store.set_first_device_output_if_empty(req_id, list(ids))
+
+    def append_output(self, req_id: str, token_ids: Any, *, runner: Any | None = None) -> None:
         """Normalize accepted ids and append into :class:`RequestGuardStore`.
 
-        Drops ``-1`` placeholders. Within one engine wave, duplicate chunks
-        for the same req are skipped (Store ``last_append_chunk``). Across
-        waves, identical chunks are kept after :meth:`clear_wave_cache`.
+        Drops ``-1`` placeholders. MR v2 records each step once, in
+        ``after_sample_hot_path``, and always appends that row to
+        ``output_token_ids``. The first append, while that list is empty,
+        also saves the device output row as ``first_device_output_token_ids``
+        so a detector enabled mid-request still has the earlier output in
+        the report. Fully-off never calls this.
         """
         if not req_id:
             return
         new_ids = filter_valid_token_ids(token_ids)
         if not new_ids:
             return
+        if runner is not None:
+            self._record_first_device_output(runner, req_id)
         RequestGuardStore.get().append_output_ids(req_id, new_ids)
         # Same-wave ``include_token_ids`` snapshots must not keep pre-append ids.
         self.clear_req_cache(req_id)
@@ -243,6 +263,8 @@ class RequestIoSnapshotManager:
         self,
         req_ids: list[str] | None,
         sampled_rows: Any,
+        *,
+        runner: Any | None = None,
     ) -> None:
         """Append one step of per-req sampled / accepted token rows."""
         if not req_ids or sampled_rows is None:
@@ -254,7 +276,7 @@ class RequestIoSnapshotManager:
                 row = sampled_rows[i]
             except (IndexError, TypeError, KeyError):
                 continue
-            self.append_output(req_id, row)
+            self.append_output(req_id, row, runner=runner)
 
     def snapshot(
         self,
@@ -289,6 +311,11 @@ class RequestIoSnapshotManager:
         store = RequestGuardStore.get()
         st_out = store.get_state(req_id)
         built_output = list(st_out.output_token_ids) if st_out is not None else []
+        first_device = (
+            list(st_out.first_device_output_token_ids)
+            if st_out is not None and st_out.first_device_output_token_ids is not None
+            else None
+        )
         if include_token_ids and runner is not None:
             raw_prompt = prompt_token_ids_for_request(runner, req_id, req_idx, scheduler_output=scheduler_output)
             prompt_ids = list(raw_prompt) if raw_prompt is not None else []
@@ -319,6 +346,7 @@ class RequestIoSnapshotManager:
             output_token_count=output_count,
             prompt_token_ids=prompt_ids,
             output_token_ids=output_ids if include_token_ids else None,
+            first_device_output_token_ids=first_device if include_token_ids else None,
         )
         if cacheable:
             self._cache[cache_key] = snap

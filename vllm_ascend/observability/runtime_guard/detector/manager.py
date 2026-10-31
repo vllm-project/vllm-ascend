@@ -146,14 +146,14 @@ class DetectorManager:
 
     # ---- stage hooks ------------------------------------------------------
 
-    def any_enabled_for_spec(self) -> bool:
+    def spec_acceptance_enabled(self) -> bool:
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("spec_acceptance", "enabled", False))
         return bool(self._spec_det.enabled)
 
-    def any_after_sample_cpu_enabled(self) -> bool:
-        """``token_repeat`` (not logits_finite)."""
+    def token_repeat_enabled(self) -> bool:
+        """``token_repeat`` only. ``logits_finite`` does not use this path."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
@@ -169,8 +169,7 @@ class DetectorManager:
 
         Accepted tokens are recorded once in :meth:`check_after_sample` from
         the engine's validated sampled ids. Appending here as well doubled
-        MTP/Eagle output in reports (same-wave dedupe fails under async
-        scheduling when ``clear_wave_cache`` runs before ``get_output``).
+        MTP/Eagle output in reports.
         """
         if self._gated("after_spec"):
             return []
@@ -195,22 +194,18 @@ class DetectorManager:
         resolved_ids, need_io, io_owner, skip = self._after_sample_setup(req_ids)
         if self._gated("after_sample"):
             if need_io and io_owner:
-                RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
+                RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids, runner=self._runner)
             return [], None
 
         if need_io and io_owner:
-            RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
+            RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids, runner=self._runner)
 
         alerts: list[Incident] = []
         alerts.extend(self._logits_finite_det.check_deferred(skip_req_ids=skip))
 
         # CPU snapshot only when there is something left to detect: no reqs,
         # CPU detectors off, or every req already stop-detected (max_per_req).
-        if (
-            not resolved_ids
-            or not self.any_after_sample_cpu_enabled()
-            or all(rid in skip for rid in resolved_ids if rid)
-        ):
+        if not resolved_ids or not self.token_repeat_enabled() or all(rid in skip for rid in resolved_ids if rid):
             return alerts, None
 
         snap = AfterSampleCpuSnapshot(
@@ -223,11 +218,9 @@ class DetectorManager:
     def run_after_sample_cpu(self, snap: AfterSampleCpuSnapshot) -> list[Incident]:
         """``token_repeat`` after hot-path Store append.
 
-        Reads :class:`RequestGuardStore` only. Do **not** re-fold from a frozen
-        sampled chunk: same-wave append dedupe can skip a second Store write
-        while a frozen chunk would still be scored twice (W1-1 / R-04:
-        ``content_tokens_seen`` > ``output_token_count`` on v2 when after-sample
-        ran twice with width-1 identical rows).
+        Reads :class:`RequestGuardStore` only. MR v2 appends each step once in
+        :meth:`after_sample_hot_path`. Passing the sampled rows here would
+        append them again.
         """
         skip = snap.skip_req_ids if snap.skip_req_ids is not None else RequestGuardStore.get().stopped_req_ids()
         return self._token_repeat_det.check_all(

@@ -52,6 +52,8 @@ Manual dump / manual trigger skip auto quota and cooldown. Requires `runtime_con
 
 GPU `block_ids` are always included in report detail. Decoding token ids to text follows `save_sensitive_info` (no separate toggle).
 
+`output_token_ids` is the cumulative sampled output, appended the same way as before. The report also keeps `first_device_output_token_ids`: the device output row at the moment `output_token_ids` is first stored. Detection turned on after a request already has output would otherwise leave that earlier output out of the report. The device row is saved once and is not updated; later samples still append only to `output_token_ids`.
+
 `[SamplingMeta]` is emitted at DEBUG on the after-sample path (TP0 + last PP). Enable with `ascend_log` / logger level for `vllm_ascend.observability.runtime_guard` — there is no JSON toggle.
 
 ## ascend_log
