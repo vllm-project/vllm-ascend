@@ -45,6 +45,48 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
 
+##### Transport selection
+
+Both the transfer engine and its transport are launch parameters of
+`MooncakeConnectorV1`, read from its `kv_connector_extra_config`. Prefill and
+decode must be configured identically.
+
+| Key | Values | Default |
+| :--- | :--- | :--- |
+| `transfer_backend` | `mooncake`, `memfabric` | `mooncake` |
+| `transfer_protocol` | transport handed to the Mooncake engine; the accepted values are defined by the engine (`ascend` is the only one exercised here) | `ascend` |
+| `memfabric_transfer_protocol` | `sdma`, `device_rdma`, `device_urma` | `sdma` |
+
+`ascend` does not by itself guarantee a direct path: when the machine exposes
+neither RoCE nor fabric memory, the Ascend transport falls back to
+`aclrtMemcpy` staging. `transfer_backend="memfabric"` moves registered device
+memory with SDMA instead and is the option to try when the interconnect is the
+bottleneck. It is experimental, and on an A2 single node only `sdma`
+initializes. Expect the two backends to reach the same bulk bandwidth there:
+the four TP ranks share one interconnect, so per-rank throughput does not
+scale with the number of ranks. The measured gain is in the prefill instance's
+post-prefill request latency, not in bulk transfer bandwidth; the connector is
+pull-only, so the mechanism is not attributed here.
+
+MemFabric has not been validated on A3 or on 950PR&950DT Products.
+`device_urma`, the UB data path for 950PR&950DT, is accepted and passed through
+to the engine but has not been exercised here, and none of the numbers above
+carry over to A3 or 950 because their interconnect ceilings differ.
+
+`transfer_backend="memfabric"` requires the connector's `kv_role` to be
+`kv_producer` or `kv_consumer`; `kv_both` has no Prefill/Decode mapping. It is
+not supported with `--enable-sleep-mode`, because the worker only
+unregisters and re-registers buffers through the Mooncake registry, and
+MemFabric has no counterpart yet.
+
+Of the Mooncake connectors, only `MooncakeConnectorV1` honours these keys. The
+layerwise, hybrid and D2RH connectors and `MooncakeConnectorV2` raise if
+`transfer_backend` selects anything other than `mooncake` or if
+`transfer_protocol` is not the default. `SfaRemoteD2HConnector` reads the same
+`transfer_backend` key with its own default (`memfabric`) and semantics. The
+MemFabric engine is process-wide, so when several connectors in one
+`MultiConnector` use it they must agree on `memfabric_transfer_protocol`.
+
 #### Mooncake Layerwise Connector
 
 1. The request is sent to the Proxy's `_handle_completions` endpoint.
