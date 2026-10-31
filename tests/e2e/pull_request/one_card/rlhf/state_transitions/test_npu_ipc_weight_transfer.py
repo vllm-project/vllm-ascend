@@ -11,7 +11,6 @@ restoration. Cases whose model is not ready for the transaction are skipped in
 both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
 attention-sink fix that lives in #16355. One-card CI runs the Qwen3.5-35B-A3B
 MoE transaction; GLM-5.1 stays on the shared matrix for the two-card lane.
-An offline GLM-5.3-Flash KDA/SFA/mHC fixture extends the unpacked IPC lane only.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -51,7 +50,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     generation_signature,
     live_update_serve_args,
     packed_buffer_size_for,
-    pytest_ipc_model_cases,
+    pytest_model_cases,
     reference_signature,
     register_engines_once,
     wait_for_free_device_memory,
@@ -80,7 +79,8 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
 )
-@pytest.mark.parametrize(("case", "packed"), pytest_ipc_model_cases())
+@pytest.mark.parametrize("case", pytest_model_cases())
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
@@ -96,7 +96,6 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
-        **dict(case.server_env),
     }
 
     # Independent oracle first: a server that loads exactly this payload at

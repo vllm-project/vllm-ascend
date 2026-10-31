@@ -160,7 +160,7 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
 
 
 def glm53flash_ipc_case() -> WeightUpdateModelCase:
-    """Build the offline Flash fixture for the IPC unpacked lane only."""
+    """Build the offline Flash fixture for the two-card IPC unpacked lane."""
     return WeightUpdateModelCase(
         id="glm-5.3-flash-kda-sfa-mhc",
         model=str(GLM53FLASH_ASSETS.resolve()),
@@ -302,29 +302,6 @@ def pytest_model_cases() -> list[Any]:
     import pytest
 
     return [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in MODEL_CASES]
-
-
-def pytest_ipc_model_cases() -> list[Any]:
-    """Keep existing IPC pairs and add exactly one offline Flash unpacked case.
-
-    HCCL continues to use ``pytest_model_cases``. The local fixture has no remote
-    model marker, so CI does not try to download its path as a checkpoint ID.
-    """
-    import pytest
-
-    cases = [
-        pytest.param(
-            parameter.values[0],
-            packed,
-            id=f"{'packed' if packed else 'unpacked'}-{parameter.id}",
-            marks=parameter.marks,
-        )
-        for packed in (False, True)
-        for parameter in pytest_model_cases()
-    ]
-    flash = glm53flash_ipc_case()
-    cases.append(pytest.param(flash, False, id=f"unpacked-{flash.id}"))
-    return cases
 
 
 # The packed lanes are disabled here because the packed HCCL transfer is flaky: a
