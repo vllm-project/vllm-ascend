@@ -1,0 +1,4 @@
+pr: 21454
+entries:
+  - category: bugfix
+    text: Fixed the balance scheduling and dyntra load balancing schedulers dropping the synchronous external KV load flag, which deferred external KV loads until after the forward pass and could corrupt generated output.

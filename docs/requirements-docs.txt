@@ -1,0 +1,10 @@
+mkdocs
+mkdocs-material
+mkdocs-material-extensions
+mkdocs-exclude
+mkdocs-macros-plugin
+polib
+pymdown-multimd-table
+regex
+openai
+zhconv

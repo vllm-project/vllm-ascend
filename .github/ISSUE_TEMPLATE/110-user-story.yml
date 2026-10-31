@@ -1,0 +1,37 @@
+name: 📚 User Story
+description: Apply for an user story to be displayed on https://docs.vllm.ai/projects/ascend/en/latest/community/user_stories/index.html
+title: "[User Story]: "
+labels: ["user-story"]
+
+body:
+- type: textarea
+  attributes:
+    label: 📚 Title
+    description: >
+      A clear title about what your user story is about.
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: About / Introduction
+    description: >
+      A brief introduction about the background of your use case, like your scenario, hardware size etc.
+- type: textarea
+  attributes:
+    label: Business Challenges
+    description: >
+      Tell us how what kind of challenge you faced in this user story.
+- type: textarea
+  attributes:
+    label: Solving challenges with vLLM Ascend and benefits
+    description: >
+      Tell us how vLLM Ascend helped you overcome the challenges, including details like how you use it, what version you used, hardware info, etc. And what kind of benefit do you get from using vLLM Ascend
+- type: textarea
+  attributes:
+    label: Extra Info
+    description: >
+      Any extra information you want to include in this story
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!

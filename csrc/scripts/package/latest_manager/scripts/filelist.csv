@@ -1,0 +1,16 @@
+module,operation,relative_path_in_pkg,relative_install_path,is_in_docker,permission,owner:group,install_type,softlink,feature,is_common_path,configurable,hash,block,pkg_inner_softlink,chip
+NA,mkdir,NA,manager,TRUE,550,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/filelist.csv,manager/filelist.csv,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/install.sh,manager/install.sh,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/manager.sh,manager.sh,TRUE,550,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/manager_func.sh,manager/manager_func.sh,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/script_operator.inc,manager/script_operator.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/uninstall.sh,manager/uninstall.sh,TRUE,550,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/version.info,manager/version.info,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/version_compatiable.inc,manager/version_compatiable.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/check_version_required.awk,manager/check_version_required.awk,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/common_func_v2.inc,manager/common_func_v2.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/common_func.inc,manager/common_func.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/common_installer.inc,manager/common_installer.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/install_common_parser.sh,manager/install_common_parser.sh,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all
+NA,copy,latest_manager/version_cfg.inc,manager/version_cfg.inc,TRUE,440,\\$username:\\$usergroup,all,NA,all,N,FALSE,NA,latest_manager,NA,all

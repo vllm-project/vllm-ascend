@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<block name="OpsTransformer" copy_type="delivery" src_path="" dst_path="" install_path="" install_own="$username:$usergroup" install_mod="550" install_type="run;devel">
+    <dir_info install_mod="550">
+        <path value="$(TARGET_ENV)/lib64"/>
+        <path value="$(TARGET_ENV)/include"/>
+        <path value="$(TARGET_ENV)/include/aclnn_kernels"/>
+        <path value="$(TARGET_ENV)/include/aclnnop"/>
+    </dir_info>
+    <file_info value="opapi_transformer_lib" copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe/op_api/lib/linux/$(ARCH)/"
+        install_path="$(TARGET_ENV)/lib64/">
+        <file value="libopapi_transformer.so" install_mod="550"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe/op_api/include"
+        install_path="$(TARGET_ENV)/include/" install_type="all">
+        <file value="aclnnop" install_mod="550"/>
+    </file_info>
+    <file_info value="rtkb" copy_type="source" src_path="" dst_path="built-in/data" install_path="opp/built-in/data">
+        <file value="op" entity="true" optional="true"/>
+    </file_info>
+    <dir_info value="rtkb_path" install_mod="750" install_type="all">
+        <path value="opp/built-in/data"/>
+        <path value="opp/built-in/data/op"/>
+    </dir_info>
+</block>

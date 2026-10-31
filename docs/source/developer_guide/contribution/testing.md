@@ -1,0 +1,417 @@
+# Testing
+
+This document explains how to write unit tests, E2E tests, and nightly tests to verify your feature implementation.
+
+## Set up a test environment
+
+The fastest way to set up a test environment is to use the main branch's container image:
+
+=== "Local (CPU)"
+
+    You can run the unit tests on CPUs with the following steps:
+
+    ```bash
+
+    cd ~/vllm-project/
+    # ls
+    # vllm  vllm-ascend
+
+    # Use mirror to speed up download
+    # docker pull m.daocloud.io/quay.io/ascend/cann:{{ cann_image_tag }}
+    export IMAGE=quay.io/ascend/cann:{{ cann_image_tag }}
+    docker run --rm --name vllm-ascend-ut \
+        -v $(pwd):/vllm-project \
+        -v ~/.cache:/root/.cache \
+        -ti $IMAGE bash
+    ```
+
+    Run the remaining commands inside the container:
+
+    ```bash
+    # (Optional) Configure mirror to speed up download
+    sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
+    pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+
+    # For TorchNPU dev version or x86 machine
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+
+    # src path
+    export SRC_WORKSPACE=/vllm-workspace
+    mkdir -p $SRC_WORKSPACE
+    cd $SRC_WORKSPACE
+
+    apt-get update -y
+    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+    git clone -b {{ vllm_ascend_version }} --depth 1 https://github.com/vllm-project/vllm-ascend.git
+    git clone -b {{ vllm_version }} --depth 1 https://github.com/vllm-project/vllm.git
+
+    # vllm
+    cd $SRC_WORKSPACE/vllm
+    VLLM_TARGET_DEVICE=empty python3 -m pip install .
+    python3 -m pip uninstall -y triton
+
+    # vllm-ascend
+    cd $SRC_WORKSPACE/vllm-ascend
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+    # For cpu environment, set SOC_VERSION for different chips.
+    # See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
+    export SOC_VERSION="ascend910b1"
+    python3 -m pip install .
+    python3 -m pip install -r requirements-dev.txt
+    ```
+
+=== "Single-card"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --device $DEVICE \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
+
+    After starting the container, you should install the required packages:
+
+    ```bash
+    # Prepare
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+    # Switch to the /vllm-workspace/vllm-ascend directory
+    cd /vllm-workspace/vllm-ascend/
+
+    # Install required packages
+    pip install -r requirements-dev.txt
+    ```
+
+=== "Multi-cards"
+
+    ```bash
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
+
+    After starting the container, you should install the required packages:
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Prepare
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+    # Install required packages
+    pip install -r requirements-dev.txt
+    ```
+
+## Running tests
+
+### Unit tests
+
+There are several principles to follow when writing unit tests:
+
+- The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> `tests/ut/worker/test_worker.py`
+- The vLLM Ascend test uses unittest framework. See [the Python unittest documentation](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
+- All unit tests can be run on CPUs, so you must mock the device-related functions on the host.
+- Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
+- You can run the unit tests using `pytest`:
+
+=== "Local (CPU)"
+
+    ```bash
+    # Run unit tests
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
+    ```
+
+=== "Single-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all single-card tests
+    pytest -sv tests/ut
+
+    # Run single test
+    pytest -sv tests/ut/test_ascend_config.py
+    ```
+
+=== "Multi-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all multi-card tests
+    pytest -sv tests/ut
+
+    # Run single test
+    pytest -sv tests/ut/test_ascend_config.py
+    ```
+
+### E2E test
+
+Although vllm-ascend CI provides E2E tests on Ascend CI (for example,
+[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml), [schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), [pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)), you can run them locally.
+
+#### PR-triggered E2E test
+
+You can run tests with `pytest` as well. Typical examples:
+
+=== "Local (CPU)"
+
+    You can't run the E2E test on CPUs.
+
+=== "Single-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all single-card tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
+
+    # Run a certain test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+
+    # Run a certain case in test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
+    ```
+
+=== "Multi-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all multi-card tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/
+
+    # Run a certain test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+
+    # Run a certain case in test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
+    ```
+
+This will reproduce the E2E test behavior.
+
+#### Nightly-triggered E2E test
+
+You can run tests with `pytest` as well. Typical examples:
+
+=== "Local (CPU)"
+
+    You can't run the E2E test on CPUs.
+
+=== "Single-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # run all single-card op tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
+    ```
+
+=== "Multi-card"
+
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # run all multi-card op tests on A3
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
+    ```
+
+For running nightly single-node model test cases locally, refer to the following example.
+
+```bash
+export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Qwen
+export CONFIG_YAML_PATH=Qwen3-32B.yaml
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
+```
+
+For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
+
+#### E2E test examples
+
+- Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
+
+### Csrc incremental build cache checks
+
+For changes to native build inputs or the cache adapter, run the cache engine,
+concurrency, and snapshot-key tests before requesting an NPU build:
+
+```bash
+pytest -q --confcutdir=tests/ut/_tools \
+  tests/ut/_tools/test_build_cache.py \
+  tests/ut/_tools/test_build_cache_concurrency.py \
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+```
+
+On CI, a successful restore step only proves that an outer L1 snapshot was
+available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
+establish whether a source build actually reused compiled work. See the
+[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
+for the identity and failure contracts.
+
+### PR selective testing (CI)
+
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
+
+How tests are selected:
+
+1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
+2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
+
+Adding a new test requires no configuration change: place the UT file under the
+matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
+`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
+the test tree. Routing metadata (runner mapping, partitions) lives in
+[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+Estimated times used for load balancing live in
+`.github/workflows/scripts/estimated_times.yaml`.
+
+You can preview locally which runners a set of tests would be routed to:
+
+```bash
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+
+# Full suite routing (mirrors the ready-all mode)
+python3 .github/workflows/scripts/select_tests.py --all-tests
+```
+
+For debugging a specific test on CI hardware before requesting a label, see
+[E2E CI Test](./e2e_ci_test.md).
+
+#### E2E test model resource reduction
+
+The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
+
+1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
+2. Set `num_hidden_layers` to the expected number of layers, e.g., `{"num_hidden_layers": 2,}`
+3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
+
+    ```python
+    import torch
+    from transformers import AutoTokenizer, AutoConfig
+    from modeling_deepseek import DeepseekV3ForCausalLM
+    from modelscope import snapshot_download
+
+    MODEL_LOCAL_PATH = "~/.cache/modelscope/models/vllm-ascend/DeepSeek-V3-Pruning"
+    DIST_DTYPE = torch.bfloat16
+    DIST_MODEL_PATH = "./random_deepseek_v3_with_2_hidden_layer"
+
+    config = AutoConfig.from_pretrained(MODEL_LOCAL_PATH, trust_remote_code=True)
+    model = DeepseekV3ForCausalLM(config)
+    model = model.to(DIST_DTYPE)
+    model.save_pretrained(DIST_MODEL_PATH)
+    ```
+
+### CI workflow triggers and the `schedule_` prefix
+
+Workflow files under `.github/workflows/` whose names start with `schedule_`
+belong to the recurring CI family (nightly, weekly, doc, coverage, and similar
+periodic jobs). The `schedule_` prefix does **not** guarantee that the workflow
+declares a GitHub Actions `schedule:` (cron) trigger.
+
+Some `schedule_*.yaml` files intentionally omit `schedule:` and are dispatched by
+the project's external automation through `workflow_dispatch` instead. This is by
+design, not a missing cron entry, because the external scheduler has more control
+over when resource-heavy NPU jobs run.
+
+Workflows with a native GitHub cron trigger:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_linkcheck.yaml` | PR path filter, `workflow_dispatch` |
+| `schedule_doc_translate.yaml` | `workflow_dispatch` |
+| `schedule_e2e_upstream_test.yaml` | - |
+| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
+| `schedule_main2main.yaml` | `workflow_dispatch` |
+| `schedule_stale_manage.yaml` | `issue_comment` |
+
+Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_getting_started_test.yaml` | PR path filter |
+| `schedule_e2e_test.yaml` | - |
+| `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_nightly_test_310p.yaml` | - |
+| `schedule_nightly_test_a2.yaml` | - |
+| `schedule_nightly_test_a3.yaml` | - |
+| `schedule_nightly_test_a3_560t.yaml` | - |
+| `schedule_nightly_test_a5.yaml` | - |
+| `schedule_release_code_and_wheel.yml` | tag `push` |
+| `schedule_test_coverage.yaml` | - |
+| `schedule_weekly_test_310p.yaml` | - |
+| `schedule_weekly_test_a2.yaml` | - |
+| `schedule_weekly_test_a3.yaml` | - |
+| `schedule_weekly_test_a3_560t.yaml` | - |
+
+### Run doctest
+
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+
+Run one of these commands from the repository root in a prepared NPU environment:
+
+```bash
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart a2
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart 310p
+
+./tests/e2e/doctests/scripts/run_doctests.sh installation pip
+./tests/e2e/doctests/scripts/run_doctests.sh installation uv
+./tests/e2e/doctests/scripts/run_doctests.sh installation source
+```
+
+The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
+
+In CI, `.github/workflows/schedule_doc_getting_started_test.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. External automation can dispatch it on a schedule, or you can run it manually with comma-separated `quickstart_devices` and/or `installation_methods`; leave an input empty to skip that test type. Each selected case runs on both operating systems.
+
+For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
+
+### Run docs link check
+
+You can validate external links in the Sphinx docs locally with:
+
+```bash
+make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+```
+
+To check links in a specific Markdown file, pass the file to `sphinx-build`.
+For example, to check only `docs/source/user_guide/release_notes.md`:
+
+```bash
+cd docs
+sphinx-build -b linkcheck -W --keep-going \
+  source _build/linkcheck source/user_guide/release_notes.md
+```
+
+The detailed report will be written to:
+
+- `docs/_build/linkcheck/output.txt`
+- `docs/_build/linkcheck/output.json`

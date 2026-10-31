@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config name="ops_transformer" copy_type="delivery" src_path="lib/" dst_path="ops_transformer" install_type="all" install_mod="550" install_own="$username:$usergroup">
+    <package_info>
+        <product_name>cann</product_name>
+        <chip_name>910b</chip_name>
+        <func_name>ops-transformer</func_name>
+        <suffix>run</suffix>
+        <install_script>share/info/ops_transformer/script/install.sh</install_script>
+        <help>share/info/ops_transformer/script/help.info</help>
+        <cleanup>share/info/ops_transformer/script/cleanup.sh</cleanup>
+    </package_info>
+    <generate_info value="ops_transformer_version.h" dst_path="share/info/ops_transformer" install_path="$(TARGET_ENV)/include/version" install_mod="440" install_type="devel" generator="version_header">
+       <OPS_TRANSFORMER_VERSION>$(ASCEND_VER)</OPS_TRANSFORMER_VERSION>
+       <OPS_TRANSFORMER_TIMESTAMP>$(TIMESTAMP_NO)</OPS_TRANSFORMER_TIMESTAMP>
+    </generate_info>
+    <generate_info value="scene.info" dst_path="share/info/ops_transformer" install_path="share/info/ops_transformer" install_mod="440">
+        <os>$(OS_NAME)</os>
+        <os_version>$(OS_VER)</os_version>
+        <arch>$(ARCH)</arch>
+    </generate_info>
+    <file_info value="ops_transformer_script" copy_type="source" src_path="" dst_path="share/info/ops_transformer" install_path="share/info/ops_transformer">
+        <file value="script" entity="true"/>
+        <file value="version.info"/>
+    </file_info>
+    <block_info dependtree="false" dst_path="ops_transformer" block_conf_path="ascend">
+        <block name="EngineeringCommon"/>
+        <block name="EngineeringFiles"/>
+        <block name="OpsTransformer"/>
+        <block name="OpsTransformerInc"/>
+    </block_info>
+    <dir_info value="ops_transformer" install_path="ops_transformer" install_type="all">
+        <path value="share" install_mod="550"/>
+        <path value="share/info" install_mod="750"/>
+        <path value="share/info/ops_transformer" install_mod="550"/>
+        <path value="share/info/ops_transformer/script" install_mod="550"/>
+    </dir_info>
+    <dir_info value="opp" install_path="opp" install_type="all">
+        <path value="opp" install_mod="750"/>
+        <path value="opp/script" install_mod="550"/>
+        <path value="opp/bin" install_mod="550"/>
+        <path value="opp/include" install_mod="550"/>
+        <path value="opp/lib64" install_mod="550"/>
+        <path value="opp/built-in" install_mod="550"/>
+		<path value="opp/built-in/op_graph" install_mod="550"/>
+		<path value="opp/built-in/op_graph/inc" install_mod="550"/>
+		<path value="opp/built-in/op_graph/lib" install_mod="550"/>
+		<path value="opp/built-in/op_graph/lib/linux" install_mod="550"/>
+		<path value="opp/built-in/op_graph/lib/linux/$(ARCH)" install_mod="550"/>
+		<path value="opp/built-in/op_impl" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core/tbe" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core/tbe/op_host" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core/tbe/op_host/lib" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core/tbe/op_host/lib/linux" install_mod="550"/>
+		<path value="opp/built-in/op_impl/ai_core/tbe/op_host/lib/linux/$(ARCH)" install_mod="550"/>
+        <path value="opp/built-in/framework" install_mod="550"/>
+        <path value="opp/built-in/framework/onnx" install_mod="550"/>
+	</dir_info>
+</config>

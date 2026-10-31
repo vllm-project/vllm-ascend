@@ -1,0 +1,365 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+import torch
+from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorScaleParameter
+from vllm.model_executor.utils import set_weight_attrs
+
+from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
+
+from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+from .methods.base import PreparedLinearInput
+
+# vLLM's typed parameter classes take these through their constructor and expose
+# them as read-only properties, so replaying them via set_weight_attrs raises.
+_VLLM_PARAMETER_CTOR_ATTRS = frozenset({"weight_loader", "output_dim", "input_dim"})
+
+
+def _forwardable_weight_attrs(extra_weight_attrs: dict) -> dict:
+    return {key: value for key, value in extra_weight_attrs.items() if key not in _VLLM_PARAMETER_CTOR_ATTRS}
+
+
+def _make_mx_scale_weight_loader(
+    weight_loader,
+    tp_rank: int,
+    input_size_per_partition: int,
+    group_size: int,
+):
+    """Load scales without losing the global MX group phase at TP boundaries."""
+
+    def mx_scale_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+        # Some checkpoint loaders provide an already sharded tensor. Accept an
+        # exact local shape before applying any global TP offset to avoid
+        # slicing the same shard twice.
+        if loaded_weight.shape == param.shape:
+            param.data.copy_(loaded_weight)
+            return None
+
+        input_dim = getattr(param, "input_dim", None)
+        if input_dim is not None and input_size_per_partition % group_size != 0:
+            global_start = tp_rank * input_size_per_partition
+            # A TP boundary can split an MX group. Start from the scale of
+            # that shared boundary group instead of evenly chunking scales.
+            scale_start = global_start // group_size
+            scale_count = param.shape[input_dim]
+            loaded_weight = loaded_weight.narrow(input_dim, scale_start, scale_count)
+            param.data.copy_(loaded_weight)
+            return None
+        return weight_loader(param, loaded_weight)
+
+    return mx_scale_weight_loader
+
+
+class AscendLinearMethod(LinearMethodBase):
+    """Linear method for Ascend quantization.
+
+    This wrapper class delegates to the actual quantization scheme implementation.
+    The scheme is determined by the Config class and passed directly to this wrapper.
+
+    Args:
+        scheme: The quantization scheme instance (e.g., AscendW8A8DynamicLinearMethod).
+    """
+
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        self.quant_method = scheme
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
+
+        # Extract packing information (if present)
+        packed_dim = weight_dict.pop("_packed_dim", None)
+        packed_factor = weight_dict.pop("_packed_factor", None)
+
+        for weight_name, weight_param in weight_dict.items():
+            param = torch.nn.Parameter(weight_param, requires_grad=False)
+            set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+
+            # Set packing attributes if the weight is packed
+            if packed_dim is not None and packed_factor is not None:
+                set_weight_attrs(param, {"packed_dim": packed_dim, "packed_factor": packed_factor})
+
+            layer.register_parameter(weight_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+        # NOTE: In flatquant quantization implementation,
+        # the shape of pertensor_param requires introducing layer_type
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
+
+        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype, layer_type=layer_type)
+        for pertensor_name, pertensor_param in pertensor_dict.items():
+            param = PerTensorScaleParameter(data=pertensor_param, weight_loader=weight_loader)
+            # disable warning
+            param.ignore_warning = True
+            layer.register_parameter(pertensor_name, param)
+            param.weight_loader = extra_weight_attrs.get("weight_loader")
+
+        perchannel_dict = self.quant_method.get_perchannel_param(output_size_per_partition, params_dtype)
+        for perchannel_name, perchannel_param in perchannel_dict.items():
+            param = torch.nn.Parameter(perchannel_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(perchannel_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+        # NOTE: In w4a8 quantization implementation,
+        # for down_proj and o_proj scale_bias shape is [output_size, 16],
+        # others are [output_size, 1]
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
+
+        pergroup_dict = self.quant_method.get_pergroup_param(
+            input_size_per_partition, output_size_per_partition, params_dtype, layer_type=layer_type
+        )
+        scale_packed_dim = pergroup_dict.pop("_packed_dim", None)
+        scale_packed_factor = pergroup_dict.pop("_packed_factor", None)
+        # Schemes whose scales are sharded along the reduction dim can say so
+        # directly instead of relying on the name/type heuristics below.
+        scale_input_dim = pergroup_dict.pop("_input_dim", None)
+        # Block-wise scales must not reuse packed_dim/packed_factor below: that
+        # mechanism exists for bit packing, where a shard is always a whole
+        # number of packs, so it converts shard bounds with a plain division.
+        # Block sizes divide no such guarantee, and truncating there drops the
+        # tile covering a shard's tail. vLLM rounds up for this parameter type.
+        block_quant_scale = pergroup_dict.pop("_block_quant_scale", None)
+        if block_quant_scale is not None:
+            layer.weight_block_size = block_quant_scale
+        for pergroup_name, pergroup_param in pergroup_dict.items():
+            if block_quant_scale is not None:
+                param = BlockQuantScaleParameter(
+                    data=pergroup_param,
+                    output_dim=0,
+                    input_dim=1,
+                    weight_loader=weight_loader,
+                )
+                layer.register_parameter(pergroup_name, param)
+                set_weight_attrs(param, _forwardable_weight_attrs(extra_weight_attrs))
+                continue
+            param = torch.nn.Parameter(pergroup_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(pergroup_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+            if scale_packed_dim is not None and scale_packed_factor is not None:
+                set_weight_attrs(param, {"packed_dim": scale_packed_dim, "packed_factor": scale_packed_factor})
+            if scale_input_dim is not None:
+                param.input_dim = scale_input_dim
+            elif (
+                "weight_scale_second" in pergroup_name
+                or "weight_offset_second" in pergroup_name
+                or is_mx_quant_type(self.quant_method)
+            ):
+                param.input_dim = 1
+            if isinstance(layer, RowParallelLinear) and getattr(
+                self.quant_method, "supports_unaligned_tp_groups", False
+            ):
+                assert hasattr(self.quant_method, "group_size")
+                param.weight_loader = _make_mx_scale_weight_loader(
+                    weight_loader,
+                    layer.tp_rank,
+                    input_size_per_partition,
+                    self.quant_method.group_size,
+                )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(self.quant_method, "process_weights_after_loading"):
+            self.quant_method.process_weights_after_loading(layer)
+
+    def get_computed_params(self) -> set[str]:
+        """Return parameter name patterns that are computed, not loaded.
+
+        These parameters are computed during process_weights_after_loading
+        rather than loaded from checkpoint:
+        - weight_offset: Zero for symmetric quantization
+        - quant_bias: Computed from weight statistics
+        - deq_scale: Computed as input_scale * weight_scale
+        - weight_scale: May be computed or have default values for some models
+        """
+        return {"weight_offset", "quant_bias", "deq_scale", "weight_scale"}
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if isinstance(layer, RowParallelLinear):
+            if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
+                tp_rank = get_otp_group().rank_in_group
+            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
+                tp_rank = get_mlp_tp_group().rank_in_group
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+        else:
+            tp_rank = 0
+        return self.quant_method.apply(layer, x, bias, tp_rank)
+
+
+class AscendKVCacheMethod(BaseKVCacheMethod):
+    """KVCache method for Ascend quantization.
+
+    This wrapper class delegates to the actual attention quantization scheme.
+
+    Args:
+        scheme: The attention quantization scheme instance.
+    """
+
+    def __init__(self, scheme: AscendAttentionScheme) -> None:
+        self.quant_method = scheme
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        # Different from linear method, there are no weight processing/slicing
+        # steps for attention in vllm. So the whole process of create weights
+        # is hidden into the specific quant method.
+        self.quant_method.create_weights(layer)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_method.process_weights_after_loading(layer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        attn_type,
+        scale,
+        output,
+    ) -> torch.Tensor:
+        return self.quant_method.apply(layer, query, key, value, kv_cache, attn_metadata, attn_type, scale, output)
+
+
+class AscendFusedMoEMethod(FusedMoEMethodBase):
+    """FusedMoE method for Ascend quantization.
+
+    This wrapper class delegates to the actual MoE quantization scheme.
+
+    Args:
+        scheme: The MoE quantization scheme instance.
+        moe_config: The FusedMoE configuration.
+    """
+
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig, tid2eid=None) -> None:
+        super().__init__(moe_config)
+        self.quant_method = scheme
+        self.tid2eid = tid2eid
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    def maybe_make_prepare_finalize(self, routing_tables=None):
+        # Ascend uses its own MoE communication and forward_impl path.
+        # Do not let upstream modular-kernel initialization replace it.
+        return None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        weight_param = self.quant_method.get_weight(
+            num_experts, intermediate_size_per_partition, hidden_size, params_dtype
+        )
+        for param_key, param_value in weight_param.items():
+            param = torch.nn.Parameter(param_value, requires_grad=False)
+            layer.register_parameter(param_key, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+        extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+        per_group_param = ["weight_scale_second", "weight_offset_second", "scale_bias"] + (
+            ["weight_scale", "weight_offset"]
+            if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
+            else []
+        )
+        dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
+            num_experts, intermediate_size_per_partition, hidden_size, params_dtype
+        )
+        for param_key, param_value in dynamic_quant_param.items():
+            param = torch.nn.Parameter(param_value, requires_grad=False)
+            layer.register_parameter(param_key, param)
+            set_weight_attrs(param, extra_weight_attrs)
+            if any(fields in param_key for fields in per_group_param):
+                param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts=None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.quant_method.apply(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        return self.quant_method.get_eplb_weight_views(layer)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(self.quant_method, "process_weights_after_loading"):
+            self.quant_method.process_weights_after_loading(layer)
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        pass
+
+    @property
+    def supports_eplb(self):
+        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
+        return supports_eplb
+
+
+class AscendEmbeddingMethod(AscendLinearMethod):
+    """Embedding method for Ascend quantization.
+
+    This is essentially the same as AscendLinearMethod, just with a different name
+    for clarity when used with VocabParallelEmbedding layers.
+
+    Args:
+        scheme: The quantization scheme instance.
+    """
+
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        self.quant_method = scheme

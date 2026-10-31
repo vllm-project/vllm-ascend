@@ -1,0 +1,7 @@
+pr: 22429
+entries:
+  - category: bugfix
+    text: >-
+      Fixed quantization-format rejection for native packed MXFP4 checkpoints
+      without an activation recipe on A5. These checkpoints now use dynamic
+      MXFP8 activations through the existing W4A8 MXFP backend.

@@ -1,0 +1,64 @@
+# See https://help.github.com/articles/about-codeowners/
+# for more info about CODEOWNERS file
+
+# Infra, CI
+/.gemini @wangxiyuan @Yikun
+/.github @wangxiyuan @Yikun
+/tools @wangxiyuan @Yikun
+/.gitignore @wangxiyuan
+/.gitmodules @wangxiyuan @zzzzwwjj
+/.pre-commit-config.yaml @wangxiyuan
+/codecov.yml @wangxiyuan
+/Dockerfile* @wangxiyuan
+/format.sh @wangxiyuan
+/mypy.ini @wangxiyuan
+/requirements* @wangxiyuan
+/setup.py @wangxiyuan
+/typos.toml @wangxiyuan
+
+# benchmark
+# /benchmarks
+
+# docs
+/docs @Yikun @LCAIZJ
+/.readthedocs.yaml @Yikun
+/README* @wangxiyuan @Yikun
+
+# # example
+# /examples
+
+# # tests
+# /tests
+
+# c++ source code
+/cmake @zzzzwwjj @ZT-AIA
+/csrc @zzzzwwjj @ZT-AIA
+/CMakeLists.txt @zzzzwwjj @ZT-AIA
+
+# python source code
+/vllm_ascend/attention @weijinqian0
+/vllm_ascend/compilation @yiz-liu
+# /vllm_ascend/core
+/vllm_ascend/device @weijinqian0 @zzzzwwjj
+/vllm_ascend/device_allocator @weijinqian0
+/vllm_ascend/distributed @LCAIZJ
+# /vllm_ascend/eplb
+/vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
+/vllm_ascend/lora @paulyu12
+# /vllm_ascend/model_loader
+/vllm_ascend/ops @zzzzwwjj @realliujiaxu
+# /vllm_ascend/patch
+/vllm_ascend/quantization @kunpengW-code
+/vllm_ascend/sample @realliujiaxu
+# /vllm_ascend/spec_decode
+# /vllm_ascend/worker
+# /vllm_ascend/xlite
+# /vllm_ascend/ascend_config.py
+# /vllm_ascend/ascend_forward_context.py
+# /vllm_ascend/batch_invariant.py
+# /vllm_ascend/cpu_binding.py
+# /vllm_ascend/envs.py
+# /vllm_ascend/meta_registration.py
+# /vllm_ascend/platform.py
+# /vllm_ascend/profiling_config.py
+# /vllm_ascend/utils.py

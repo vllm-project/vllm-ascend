@@ -1,0 +1,387 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Prefill-Decode Disaggregation (Qwen2.5-VL)"
+msgstr "# 预填充-解码分离（Qwen2.5-VL）"
+
+msgid "## Getting Started"
+msgstr "## 快速开始"
+
+msgid ""
+"Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend "
+"{{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 "
+"server to deploy the \"1P1D\" architecture (one Prefiller and one Decoder on"
+" the same node). Assume the IP address is 192.0.0.1."
+msgstr ""
+"以 Qwen2.5-VL-7B-Instruct 模型为例，在 1 台 Atlas 800T A2 服务器上使用 vLLM-Ascend "
+"{{vllm_ascend_version}}（搭配 vLLM "
+"{{vllm_version}}）部署“1P1D”架构（同一节点上一个预填充器和一个解码器）。假设 IP 地址为 192.0.0.1。"
+
+msgid "## Verify Communication Environment"
+msgstr "## 验证通信环境"
+
+msgid "### Verification Process"
+msgstr "### 验证流程"
+
+msgid "1. Single Node Verification:"
+msgstr "1. 单节点验证："
+
+msgid ""
+"Execute the following commands in sequence. The results must all be "
+"`success` and the status must be `UP`:"
+msgstr "依次执行以下命令。结果必须全部为 `success`，且状态必须为 `UP`："
+
+msgid "2. Check NPU HCCN Configuration:"
+msgstr "2. 检查 NPU HCCN 配置："
+
+msgid ""
+"Ensure that the hccn.conf file exists in the environment. If using Docker, "
+"mount it into the container."
+msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
+
+msgid "3. Get NPU IP Addresses"
+msgstr "3. 获取 NPU IP 地址"
+
+msgid "4. Cross-Node PING Test"
+msgstr "4. 跨节点 PING 测试"
+
+msgid "5. Check NPU TLS Configuration"
+msgstr "5. 检查 NPU TLS 配置"
+
+msgid "## Run with Docker"
+msgstr "## 使用 Docker 运行"
+
+msgid "Start a Docker container."
+msgstr "启动 Docker 容器。"
+
+msgid "## Install Mooncake"
+msgstr "## 安装 Mooncake"
+
+msgid ""
+"Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.\n"
+"First, we need to obtain the Mooncake project. Refer to the following command:"
+msgstr ""
+"Mooncake 是 Kimi（Moonshot AI 提供的领先 LLM 服务）的服务平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>。\n"
+"首先，我们需要获取 Mooncake 项目。请参考以下命令："
+
+msgid ""
+"Install the relevant dependencies. The installation of Go is not required."
+msgstr "安装相关依赖。无需安装 Go。"
+
+msgid "Compile and install."
+msgstr "编译并安装。"
+
+msgid "Set environment variables."
+msgstr "设置环境变量。"
+
+msgid "**Note:**"
+msgstr "**注意：**"
+
+msgid ""
+"- Adjust the Python path according to your specific Python installation\n"
+"- Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`"
+msgstr ""
+"- 根据您的具体 Python 安装调整 Python 路径\n"
+"- 确保 `/usr/local/lib` 和 `/usr/local/lib64` 位于您的 `LD_LIBRARY_PATH` 中"
+
+msgid "## Prefiller/Decoder Deployment"
+msgstr "## 预填充器/解码器部署"
+
+msgid ""
+"We can run the following scripts to launch a server on the prefiller/decoder"
+" NPU, respectively."
+msgstr "我们可以运行以下脚本，分别在预填充器/解码器 NPU 上启动服务器。"
+
+msgid "=== \"Prefiller\""
+msgstr "=== \"预填充器\""
+
+msgid "=== \"Decoder\""
+msgstr "=== \"解码器\""
+
+msgid "## Example Proxy for Deployment"
+msgstr "## 部署示例代理"
+
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. You"
+" can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"在与预填充器服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+msgid "## Verification"
+msgstr "## 验证"
+
+msgid "Check service health using the proxy server endpoint."
+msgstr "使用代理服务器端点检查服务健康状态。"
+
+msgid "|Parameter  | Meaning |"
+msgstr "|参数 | 含义 |"
+
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
+"provides step-by-step instructions to verify this feature in resource-"
+"constrained environments."
+msgstr "vLLM-Ascend 现已支持预填充-解码（PD）分离。本指南提供在资源受限环境中验证此功能的分步说明。"
+
+msgid "(Optional) Replace go install URL if the network is poor."
+msgstr "（可选）如果网络状况不佳，请替换 go install 的 URL。"
+
+msgid "Install MPI."
+msgstr "安装 MPI。"
+
+msgid ""
+"If you want to run \"2P1D\" (two Prefiller and one Decoder), please set "
+"ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process."
+msgstr ""
+"如果您想运行“2P1D”（两个预填充进程和一个解码进程），请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口值。"
+
+msgid "| --port | Proxy port |"
+msgstr "| --port | 代理端口 |"
+
+msgid "| --prefiller-port | All prefiller ports |"
+msgstr "| --prefiller-port | 所有预填充端口 |"
+
+msgid "| --decoder-ports | All decoder ports |"
+msgstr "| --decoder-ports | 所有解码端口 |"
+
+msgid ""
+"For P/D transfer priority settings, see [QoS "
+"Configuration](pd_disaggregation_mooncake_multi_node.md#qos-configuration)."
+msgstr ""
+"关于 P/D 传输优先级设置，请参阅 [QoS 配置](pd_disaggregation_mooncake_multi_node.md#qos-"
+"configuration)。"
+
+msgid "!!! note \"Timeout for long sequences or high concurrency\""
+msgstr "!!! note \"长序列或高并发场景下的超时设置\""
+
+msgid ""
+"For long sequences or high concurrency, the default KV-cache release timeout"
+" of 480 seconds may be insufficient. Increase it as needed in the prefiller "
+"startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for "
+"this timeout, add:"
+msgstr ""
+"对于长序列或高并发场景，默认的 480 秒 KV 缓存释放超时可能不够用。请根据需要在 prefiller 启动脚本中调大该值。对于使用 "
+"`VLLM_MOONCAKE_CONNECTOR_TIMEOUT` 控制该超时的版本，请添加："
+
+msgid ""
+"The value is in seconds: `1800` allows 30 minutes before timeout. In current"
+" versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use "
+"`export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the "
+"variable name supported by your installed version."
+msgstr ""
+"该值以秒为单位：`1800` 表示允许 30 分钟后才超时。在当前版本中，该设置名为 "
+"`VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`；请改用 `export "
+"VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800`。请确认你所安装版本支持的变量名。"
+
+msgid ""
+"Increasing this timeout generally does not affect inference accuracy or "
+"performance during normal operation. If a decoder (D) node fails while "
+"requests still have KV caches on the prefiller (P) node that the decoder has"
+" not received, a longer timeout delays releasing those caches. They continue"
+" to occupy HBM, reducing the memory available for other requests on the P "
+"node until they are released."
+msgstr ""
+"调大该超时通常不会影响正常运行时的推理精度或性能。如果 decoder（D）节点发生故障，而请求仍有 KV 缓存留在 prefiller（P）节点上且 "
+"decoder 尚未接收，那么更长的超时会延迟释放这些缓存。在释放之前，它们会持续占用 HBM，从而减少 P 节点上可供其他请求使用的内存。"
+
+msgid "## MooncakeConnectorV2 (experimental)"
+msgstr "## MooncakeConnectorV2（实验性）"
+
+msgid "!!! note \"Experimental feature\""
+msgstr "!!! note \"实验性功能\""
+
+msgid ""
+"MooncakeConnectorV2 is currently experimental. Its configuration and "
+"supported feature combinations may change as development continues."
+msgstr "MooncakeConnectorV2 目前处于实验阶段。随着开发的推进，其配置和支持的功能组合可能会发生变化。"
+
+msgid ""
+"MooncakeConnectorV2 is a refactored version of MooncakeConnectorV1, with "
+"design improvements and support for more features. It uses asynchronous, "
+"decoder-initiated KV-cache transfers. Its capabilities and restrictions are "
+"summarized below; support for an individual feature does not imply that "
+"every model and feature combination has been validated."
+msgstr ""
+"MooncakeConnectorV2 是 MooncakeConnectorV1 的重构版本，在设计上进行了改进并支持更多功能。它采用异步、由 "
+"decoder 发起的 KV 缓存传输。其能力和限制总结如下；支持某一项功能并不意味着所有模型和功能组合都已通过验证。"
+
+msgid "| Feature | Support and restrictions |"
+msgstr "| 功能 | 支持情况与限制 |"
+
+msgid ""
+"| Parallel deployment | TP, DP, PP, PCP, and DCP, including per-rank "
+"endpoint discovery and PP layer mapping. GQA CP is outside the validated "
+"scope below. |"
+msgstr ""
+"| 并行部署 | 支持 TP、DP、PP、PCP 和 DCP，包括按 rank 的 endpoint 发现和 PP 层映射。GQA CP "
+"不在下述已验证范围内。 |"
+
+msgid ""
+"| Different P/D TP sizes | Cache-layout-aware transfer for MLA, GQA, and "
+"Mamba state. Supported TP ratios and head/state shapes depend on the cache "
+"type; arbitrary P/D TP combinations are not supported. |"
+msgstr ""
+"| 不同的 P/D TP 规格 | 针对 MLA、GQA 和 Mamba 状态进行缓存布局感知的传输。支持的 TP 比例和 head/state "
+"形状取决于缓存类型；不支持任意的 P/D TP 组合。 |"
+
+msgid ""
+"| KVPP | Supported for **pure MLA models only**. Do not enable KVPP and DCP "
+"together on the producer. A KVPP producer can transfer to a DCP decoder. |"
+msgstr ""
+"| KVPP | **仅支持纯 MLA 模型**。请勿在 producer 上同时启用 KVPP 和 DCP。KVPP producer 可以传输到 "
+"DCP decoder。 |"
+
+msgid ""
+"| Hybrid cache groups | Attention KV caches and Mamba convolution/recurrent "
+"states, including hybrid model cache-group mapping. |"
+msgstr "| 混合缓存组 | 支持 Attention KV 缓存和 Mamba 卷积/循环状态，包括混合模型缓存组映射。 |"
+
+msgid ""
+"| GQA | **Experimental; only the `LBHNC` and `HND` KV-cache layouts are "
+"supported.** Validated with Qwen3 pure GQA models and Qwen3.5 GQA + Mamba "
+"hybrid models. **GQA CP (PCP/DCP) and GQA C8 (INT8 KV cache) are not "
+"included in this validation.** |"
+msgstr ""
+"| GQA | **实验性；仅支持 `LBHNC` 和 `HND` KV 缓存布局。** 已使用 Qwen3 纯 GQA 模型和 Qwen3.5 GQA"
+" + Mamba 混合模型进行验证。**本次验证不包含 GQA CP（PCP/DCP）和 GQA C8（INT8 KV 缓存）。** |"
+
+msgid ""
+"| P/D block sizes and scales | Full-attention/MLA paths can map different "
+"logical block sizes/scales when the underlying kernel block size and "
+"physical transfer layout are compatible. SWA requires equal P/D logical "
+"block sizes. |"
+msgstr ""
+"| P/D block 大小和 scale | 当底层 kernel block 大小和物理传输布局兼容时，full-attention/MLA "
+"路径可以映射不同的逻辑 block 大小/scale。SWA 要求 P/D 逻辑 block 大小相等。 |"
+
+msgid ""
+"| Prefix-cache reuse | Accounts for local prefix-cache hits when determining"
+" the KV blocks to receive, including hybrid cache groups. |"
+msgstr ""
+"| Prefix-cache 复用 | 在确定要接收的 KV block 时会考虑本地 prefix-cache 命中情况，包括混合缓存组。 |"
+
+msgid ""
+"| Model Runner V2 cache layouts | Includes compressed attention/indexer and "
+"hybrid state handling used by GLM-5.3-Flash. This does not imply support for"
+" every model-specific cache specification. |"
+msgstr ""
+"| Model Runner V2 缓存布局 | 包括 GLM-5.3-Flash 使用的压缩 attention/indexer "
+"和混合状态处理。这并不意味着支持所有模型特定的缓存规范。 |"
+
+msgid ""
+"| Receive failure handling | Reports failed KV loads to the scheduler for "
+"the configured `kv_load_failure_policy`, and notifies the producer to "
+"release retained blocks. |"
+msgstr ""
+"| 接收失败处理 | 按照配置的 `kv_load_failure_policy` 将失败的 KV 加载上报给 scheduler，并通知 "
+"producer 释放保留的 block。 |"
+
+msgid ""
+"| Completion and cleanup | Decoder completion notifications release producer"
+" blocks; timeout cleanup handles requests whose completion notification is "
+"missing. |"
+msgstr "| 完成与清理 | Decoder 完成通知会释放 producer block；超时清理会处理缺少完成通知的请求。 |"
+
+msgid ""
+"| Transfer metrics | Transfer duration, transferred bytes, and failed-"
+"transfer metrics. |"
+msgstr "| 传输指标 | 传输耗时、传输字节数和传输失败指标。 |"
+
+msgid "### Layout and port configuration"
+msgstr "### 布局与端口配置"
+
+msgid ""
+"GQA is supported only with the `LBHNC` or `HND` KV-cache layout. Set "
+"`VLLM_KV_CACHE_LAYOUT=LBHNC` or `VLLM_KV_CACHE_LAYOUT=HND` in **both** P and"
+" D startup scripts, using the same value on both sides. Select "
+"`MooncakeConnectorV2`, with `kv_producer` on P and `kv_consumer` on D. Use "
+"compatible vLLM/vLLM-Ascend versions and the same model weights on both "
+"sides."
+msgstr ""
+"GQA 仅在 `LBHNC` 或 `HND` KV 缓存布局下受支持。请在 P 和 D 的**两个**启动脚本中都设置 "
+"`VLLM_KV_CACHE_LAYOUT=LBHNC` 或 `VLLM_KV_CACHE_LAYOUT=HND`，且两侧使用相同的值。选择 "
+"`MooncakeConnectorV2`，在 P 上使用 `kv_producer`，在 D 上使用 `kv_consumer`。两侧请使用兼容的 "
+"vLLM/vLLM-Ascend 版本以及相同的模型权重。"
+
+msgid ""
+"If `kv_port` is omitted from `--kv-transfer-config`, MooncakeConnectorV2 "
+"derives its endpoints from vLLM's default `kv_port` (currently `14579`). It "
+"does not derive the KV endpoints from the HTTP `--port`."
+msgstr ""
+"如果 `--kv-transfer-config` 中省略了 `kv_port`，MooncakeConnectorV2 会从 vLLM 的默认 "
+"`kv_port`（当前为 `14579`）推导其 endpoint。它不会从 HTTP `--port` 推导 KV endpoint。"
+
+msgid ""
+"- **Single-host PD or multiple instances on one host:** explicitly configure a different `kv_port` for each instance, and reserve non-overlapping port ranges. Different HTTP ports alone are insufficient.\n"
+"- **Multiple hosts with one instance per host:** `kv_port` can be omitted. Each host can use the same default port, provided the required ports are free and reachable.\n"
+"- Each instance reserves worker handshake ports starting at `kv_port`, followed by scheduler control ports. Reserve `DP * PP * PCP * TP + DP` consecutive ports per instance. For the TP=DP=PP=PCP=1 examples below, this is two ports per instance. Increase the spacing when scaling parallelism, and keep these ranges separate from API, proxy, and distributed communication ports."
+msgstr ""
+"- **单机 PD 或单机多实例：** 请为每个实例显式配置不同的 `kv_port`，并预留互不重叠的端口范围。仅使用不同的 HTTP 端口是不够的。\n"
+"- **多机且每机一个实例：** 可以省略 `kv_port`。只要所需端口空闲且可达，每台主机都可以使用相同的默认端口。\n"
+"- 每个实例会从 `kv_port` 开始预留 worker 握手端口，随后是 scheduler 控制端口。请为每个实例预留 `DP * PP * PCP * TP + DP` 个连续端口。对于下面 TP=DP=PP=PCP=1 的示例，即每个实例两个端口。在扩展并行度时请增大端口间隔，并将这些范围与 API、代理和分布式通信端口分开。"
+
+msgid "### Complete GQA startup example"
+msgstr "### 完整的 GQA 启动示例"
+
+msgid ""
+"Complete the environment and Mooncake installation steps earlier in this "
+"guide first. Run the scripts from the vllm-ascend repository root in "
+"separate terminals. Replace the model path, host IPs, network interface, and"
+" NPU IDs with your deployment values. These examples use Qwen3-8B with one "
+"NPU per role; for Qwen3.5, replace the model path on both sides with the "
+"same GQA + Mamba model and choose enough NPUs and matching TP settings for "
+"that model."
+msgstr ""
+"请先完成本指南前面的环境和 Mooncake 安装步骤。在单独的终端中从 vllm-ascend 仓库根目录运行脚本。请将模型路径、主机 "
+"IP、网络接口和 NPU ID 替换为你的部署值。这些示例使用 Qwen3-8B，每个角色一个 NPU；对于 "
+"Qwen3.5，请将两侧的模型路径替换为相同的 GQA + Mamba 模型，并为该模型选择足够数量的 NPU 和匹配的 TP 设置。"
+
+msgid ""
+"The examples keep CP, KVPP, and KV-cache quantization disabled. To try "
+"`HND`, replace `LBHNC` with `HND` in both startup scripts."
+msgstr ""
+"这些示例保持 CP、KVPP 和 KV 缓存量化处于禁用状态。如需尝试 `HND`，请在两个启动脚本中将 `LBHNC` 替换为 `HND`。"
+
+msgid ""
+"This example deploys P and D on `192.168.0.1`, using NPU 0 and NPU 1. P "
+"reserves KV ports `30000`–`30001`; D reserves `30100`–`30101`. Their API "
+"ports are `8100` and `8200`."
+msgstr ""
+"本示例在 `192.168.0.1` 上部署 P 和 D，使用 NPU 0 和 NPU 1。P 预留 KV 端口 `30000`–`30001`；D "
+"预留 `30100`–`30101`。它们的 API 端口分别为 `8100` 和 `8200`。"
+
+msgid "#### Prefiller"
+msgstr "#### Prefiller"
+
+msgid "#### Decoder"
+msgstr "#### Decoder"
+
+msgid "#### Proxy and verification"
+msgstr "#### 代理与验证"
+
+msgid "After both P and D are ready, start the proxy on `192.168.0.1`:"
+msgstr "在 P 和 D 都就绪后，在 `192.168.0.1` 上启动代理："
+
+msgid "Send a request from another terminal:"
+msgstr "从另一个终端发送请求："

@@ -1,0 +1,856 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+import torch_npu
+from vllm.config import get_current_vllm_config
+from vllm.logger import logger
+from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.utils.math_utils import cdiv
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    FP8_METHOD,
+    _should_trans_nz,
+    dispose_tensor,
+    maybe_trans_nz,
+    maybe_trans_nz_with_scale,
+)
+
+from ..base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    PreparedLinearInput,
+    QuantType,
+    WeightSwitchGatherSpec,
+)
+from ..registry import register_scheme
+
+
+@register_scheme("W8A8_MXFP8", "linear")
+class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W8A8_MXFP8 (Microscaling FP8) quantization.
+
+    This scheme uses microscaling FP8 quantization with per-group scales.
+    The activation is dynamically quantized to FP8 (E4M3FN format) with
+    microscaling, and weights are stored in FP8 format with per-group scales.
+    """
+
+    model_dtype = None
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
+    )
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_weight_switch = True
+    supports_unaligned_tp_groups = True
+
+    def __init__(self):
+        vllm_config = get_current_vllm_config()
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
+        return params_dict
+
+    def get_pergroup_param(
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+    ) -> dict[str, Any]:
+        params_dict = {}
+        params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
+        return params_dict
+
+    def _quantize_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        return torch_npu.npu_dynamic_mx_quant(
+            x,
+            dst_type=torch.float8_e4m3fn,
+            scale_alg=self.dynamic_mx_quant_scale_alg,
+        )
+
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        """Move MX quant before the router wait while keeping QMM after it.
+
+        Shared-expert inputs are two-dimensional. Higher-dimensional inputs
+        keep the original wrapper so its output reshape remains unchanged.
+        """
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = self._quantize_input(layer, x)
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            if x.scale is None:
+                raise ValueError("PreparedLinearInput scale must not be None for MXFP8 linear projection.")
+            pertoken_scale = x.scale
+            original_shape = quantized_x.shape
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            original_shape = quantized_x.shape
+            output_dtype = torch.bfloat16
+        else:
+            # reshape x for Qwen VL models
+            original_shape = x.shape
+            if x.dim() > 2:
+                x = x.view(-1, x.shape[-1])
+            quantized_x, pertoken_scale = self._quantize_input(layer, x)
+            output_dtype = x.dtype
+
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
+
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight,
+            layer.weight_scale,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            pertoken_scale=pertoken_scale,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            bias=bias,
+            output_dtype=output_dtype,
+            group_sizes=[1, 1, self.group_size],
+        )
+        # reshape output for Qwen VL models
+        if len(original_shape) > 2:
+            output = output.view(*original_shape[:-1], -1)
+
+        return output
+
+    def apply_single_group_gmm(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Use single-group GMM for a bias-free, 2-D MXFP8 projection.
+
+        This eager path targets QMM workspace/tiling submission overhead,
+        for example in prefill QKV and routed down/up projections. The caller
+        selects it only in eager execution; graph capture/replay, biased and
+        higher-dimensional projections continue through ``apply``.
+
+        ``x`` contains [tokens, K] activations, either unquantized or already
+        quantized with MX scales (a tuple or PreparedLinearInput). All token
+        rows form one group. Weights must have completed post-processing:
+        ND uses [K, N]; single-group NZ uses [1, K, N] with the corresponding
+        scale layout and ``_mxfp8_gmm_nz_layout`` set on the layer.
+        """
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            if x.scale is None:
+                raise ValueError("PreparedLinearInput scale must not be None for single-group GMM.")
+            pertoken_scale = x.scale
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            output_dtype = torch.bfloat16
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                x,
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
+            )
+            output_dtype = x.dtype
+
+        weight = layer.weight
+        weight_scale = layer.weight_scale
+        if not getattr(layer, "_mxfp8_gmm_nz_layout", False):
+            # Post-processing already adds the group dimension for NZ.
+            # ND weights only need a view for this single-group call.
+            weight = weight.unsqueeze(0)
+            weight_scale = weight_scale.unsqueeze(0)
+        group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
+        return torch_npu.npu_grouped_matmul(
+            x=[quantized_x],
+            weight=[weight],
+            scale=[weight_scale],
+            per_token_scale=[pertoken_scale],
+            group_list=group_list,
+            split_item=2,
+            group_type=0,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+
+    def process_weights_after_loading(self, layer):
+        """Process weights after loading for MXFP8 inference.
+
+        This method transforms weights for NPU MXFP8 computation:
+        - weight: (output_size, input_size) -> (input_size, output_size)
+        - weight_scale: (n_dim, k_dim) -> (k_dim//2, n_dim, 2)
+
+        For RL training scenarios where weights need to be reloaded multiple times,
+        this method stores original shapes and can be called multiple times safely.
+        Use restore_weights_for_rl_loading() before weight reload, then call this
+        method again after loading.
+
+        Address stability for ACL graph:
+        The transformed buffer is what the ACL graph captures and replays. It is
+        allocated once and cached on the layer; subsequent calls copy the
+        (re)loaded original-shape data in place into the cached buffer so its
+        data_ptr never changes across RL weight reloads.
+        """
+
+        # Check if already transformed to avoid double transformation
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+
+        # Store the unpadded shapes expected by the checkpoint loader.
+        if not hasattr(layer, "_mxfp8_original_shapes"):
+            layer._mxfp8_original_shapes = {
+                "weight": tuple(layer.weight.data.shape),
+                "weight_scale": tuple(layer.weight_scale.data.shape),
+            }
+
+        prefix_padding = suffix_padding = 0
+        if isinstance(layer, RowParallelLinear):
+            global_start = layer.tp_rank * layer.input_size_per_partition
+            prefix_padding = global_start % self.group_size
+            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+        layer.mxfp8_tp_padding = (prefix_padding, suffix_padding)
+
+        padded_weight = layer.weight.data
+        if prefix_padding or suffix_padding:
+            padded_weight = F.pad(
+                padded_weight,
+                (prefix_padding, suffix_padding),
+                mode="constant",
+                value=0,
+            )
+
+        n_dim, k_dim = layer.weight_scale.data.shape
+        # Shape should be padded if it cannot be divided by 2
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        target_scale = reshaped_scale.transpose(0, 1)
+
+        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        layer._mxfp8_gmm_nz_layout = (
+            getattr(layer, "_single_group_gmm_nz", False)
+            and not getattr(layer, "_fused_preprocess_managed", False)
+            and _should_trans_nz(transposed_weight)
+        )
+        if layer._mxfp8_gmm_nz_layout:
+            # Add the group dimension before casting: WeightNz GMM needs
+            # physical rank-5 NZ storage, not a view of rank-4 NZ storage.
+            transposed_weight = transposed_weight.unsqueeze(0)
+            target_scale = target_scale.unsqueeze(0)
+
+        if not hasattr(layer, "_mxfp8_weight_buf"):
+            # First call: allocate the persistent transformed buffers.
+            layer._mxfp8_weight_buf = transposed_weight
+            if not getattr(layer, "_fused_preprocess_managed", False):
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
+            layer._mxfp8_scale_buf = target_scale.contiguous()
+        else:
+            # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
+            if layer._mxfp8_gmm_nz_layout:
+                # A5 only supports NZ-to-NZ copies into an internal-format buffer.
+                transposed_weight = maybe_trans_nz(transposed_weight, customize_dtype=torch.float8_e4m3fn)
+            layer._mxfp8_weight_buf.copy_(transposed_weight)
+            layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
+
+        layer.weight.data = layer._mxfp8_weight_buf
+        layer.weight_scale.data = layer._mxfp8_scale_buf
+
+        # Mark as transformed
+        layer._mxfp8_transformed = True
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Restore weights to original shapes for RL weight reloading.
+
+        This method must be called BEFORE model.load_weights() in RL training
+        loops to restore the tensors to their original shapes that the weight
+        loader expects.
+
+        After weight loading, call process_weights_after_loading() again to
+        re-apply the MXFP8 transformations.
+
+        Shape transformations reversed:
+        - weight: (input_size, output_size) -> (output_size, input_size)
+        - weight_scale: (k_dim//2, n_dim, 2) -> (n_dim, k_dim)
+        """
+
+        if not getattr(layer, "_mxfp8_transformed", False):
+            # Not transformed, nothing to restore
+            return
+
+        if not hasattr(layer, "_mxfp8_original_shapes"):
+            err_msg = (
+                "[vllm-ascend/W8A8_MXFP8] Cannot restore weights: original "
+                "shapes not recorded. "
+                "This should not happen if process_weights_after_loading was called first."
+            )
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
+        orig_shapes = layer._mxfp8_original_shapes
+        orig_scale_shape = orig_shapes["weight_scale"]
+
+        if getattr(layer, "_mxfp8_gmm_nz_layout", False):
+            restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
+            target_weight = restored_weight.squeeze(0).transpose(0, 1).contiguous()
+            layer.weight.data = target_weight
+            target_scale = layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()
+            layer.weight_scale.data = target_scale
+            # Retain the transformed buffers captured by ACL graphs.
+            # process_weights_after_loading copies reloaded data into them.
+            layer._mxfp8_gmm_nz_layout = False
+        else:
+            target_weight = layer.weight.data.transpose(0, 1).contiguous()
+            layer.weight.data = layer.weight.data.transpose(0, 1)
+            layer.weight.data.copy_(target_weight)
+
+            target_scale = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape).contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape)
+            layer.weight_scale.data.copy_(target_scale)
+
+        # Mark as not transformed (ready for weight loading)
+        layer._mxfp8_transformed = False
+
+
+@register_scheme("W8A8_MXFP8", "moe")
+class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
+    """FusedMoe method for Ascend W8A8_MXFP8."""
+
+    model_dtype = None
+    quant_type: QuantType = QuantType.W8A8MXFP
+    act_quant_type: torch.dtype = torch.float8_e4m3fn
+    fused_activations = frozenset({"silu"})
+    supports_eplb = True
+
+    def __init__(self):
+        vllm_config = get_current_vllm_config()
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
+        ascend_config = get_ascend_config()
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
+
+    @staticmethod
+    def get_weight(
+        num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        param_dict = {}
+        param_dict["w13_weight"] = torch.empty(
+            num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=torch.float8_e4m3fn
+        )
+        param_dict["w2_weight"] = torch.empty(
+            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=torch.float8_e4m3fn
+        )
+        return param_dict
+
+    def get_dynamic_quant_param(
+        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        param_dict = {}
+        param_dict["w13_weight_scale"] = torch.empty(
+            num_experts, 2 * intermediate_size_per_partition, hidden_sizes // self.group_size, dtype=torch.uint8
+        )
+
+        param_dict["w2_weight_scale"] = torch.empty(
+            num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.uint8
+        )
+        return param_dict
+
+    def apply(
+        self,
+        layer: "AscendRoutedExperts",
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if topk_weights is None or topk_ids is None:
+            raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
+
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
+        return moe_comm_method.fused_experts(
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                layer=layer,
+                quant_type=self.quant_type,
+                dynamic_eplb=self.use_expert_weight_list,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
+                mxfp_act_quant_type=torch.float8_e4m3fn,
+                mxfp_weight_quant_type=torch.float8_e4m3fn,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
+            ),
+            quant_method=self,
+        )
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return MoEWeights(
+                w1=layer.cann_mega_moe_w13_weight_list,
+                w2=layer.cann_mega_moe_w2_weight_list,
+                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        if self.use_expert_weight_list:
+            return MoEWeights(
+                w1=layer.w13_weight_list,
+                w2=layer.w2_weight_list,
+                w1_scale=layer.w13_weight_scale_list,
+                w2_scale=layer.w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        return MoEWeights(
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_scale_bias=None,
+            w2_scale_bias=None,
+        )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return [
+                layer.cann_mega_moe_w13_weight_list,
+                layer.cann_mega_moe_w2_weight_list,
+                layer.cann_mega_moe_w13_weight_scale_list,
+                layer.cann_mega_moe_w2_weight_scale_list,
+            ]
+        return [
+            layer.w13_weight_list,
+            layer.w2_weight_list,
+            layer.w13_weight_scale_list,
+            layer.w2_weight_scale_list,
+        ]
+
+    def process_weights_after_loading(self, layer):
+        """Process weights after loading for MXFP8 inference.
+
+        This method transforms weights for NPU MXFP8 computation:
+        - w13_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
+        - w2_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
+        - w13_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
+        - w2_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
+
+        For RL training scenarios where weights need to be reloaded multiple times,
+        this method stores original shapes and can be called multiple times safely.
+        Use restore_weights_for_rl_loading() before weight reload, then call this
+        method again after loading.
+        """
+
+        # Check if already transformed to avoid double transformation
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+
+        # Store original shapes for RL weight reloading
+        # Only store on first call (when shapes are in original format)
+        if not hasattr(layer, "_mxfp8_original_shapes"):
+            layer._mxfp8_original_shapes = {
+                "w13_weight": tuple(layer.w13_weight.data.shape),
+                "w13_weight_scale": tuple(layer.w13_weight_scale.data.shape),
+                "w2_weight": tuple(layer.w2_weight.data.shape),
+                "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
+            }
+
+        use_mega_moe = use_cann_megamoe(get_current_vllm_config())
+        if not self.use_expert_weight_list and not use_mega_moe:
+            if not hasattr(layer, "_mxfp8_moe_buffers"):
+                layer._mxfp8_moe_buffers = {}
+            for weight_name in ("w13_weight", "w2_weight"):
+                weight = getattr(layer, weight_name)
+                scale = getattr(layer, f"{weight_name}_scale")
+                g_num, n_size, k_size = scale.shape
+                target_scale = scale.data.reshape(g_num, n_size, k_size // 2, 2)
+                if weight_name not in layer._mxfp8_moe_buffers:
+                    layer._mxfp8_moe_buffers[weight_name] = maybe_trans_nz_with_scale(
+                        weight.data,
+                        target_scale,
+                        transpose_dims=(1, 2),
+                        customize_dtype=torch.float8_e4m3fn,
+                    )
+                else:
+                    weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
+                    weight_buffer.copy_(weight.data.transpose(1, 2).contiguous())
+                    scale_buffer.copy_(target_scale.transpose(1, 2).contiguous())
+                weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
+            layer._mxfp8_transformed = True
+            return
+
+        if not hasattr(layer, "_mxfp8_moe_parameters"):
+            layer._mxfp8_moe_parameters = {
+                name: getattr(layer, name)
+                for name in (
+                    "w13_weight",
+                    "w2_weight",
+                    "w13_weight_scale",
+                    "w2_weight_scale",
+                )
+            }
+
+        for weight_name in ("w13_weight", "w2_weight"):
+            scale_name = f"{weight_name}_scale"
+            weight = getattr(layer, weight_name)
+            scale = getattr(layer, scale_name)
+            g_num, n_size, k_size = scale.shape
+            scale_nd = scale.data.reshape(g_num, n_size, k_size // 2, 2)
+            if use_mega_moe:
+                weight_list = [expert.clone() for expert in weight.data.unbind(dim=0)]
+                list_prefix = "cann_mega_moe_"
+            else:
+                weight_nd = weight.data.transpose(1, 2).contiguous()
+                scale_nd = scale_nd.transpose(1, 2).contiguous()
+                weight_list = []
+                for expert in weight_nd.unbind(dim=0):
+                    expert = expert.clone()
+                    if expert.device.type == "npu":
+                        torch_npu.npu_format_cast_(
+                            expert,
+                            ACL_FORMAT_FRACTAL_NZ,
+                            customize_dtype=torch.float8_e4m3fn,
+                        )
+                    weight_list.append(expert)
+                list_prefix = ""
+            if use_mega_moe:
+                scale_list = [expert.clone().view(torch.float8_e8m0fnu) for expert in scale_nd.unbind(dim=0)]
+            else:
+                scale_list = [expert.clone() for expert in scale_nd.unbind(dim=0)]
+
+            self._update_expert_list(layer, f"{list_prefix}{weight_name}_list", weight_list)
+            self._update_expert_list(layer, f"{list_prefix}{scale_name}_list", scale_list)
+
+        for tensor_name, parameter in layer._mxfp8_moe_parameters.items():
+            dispose_tensor(parameter)
+            delattr(layer, tensor_name)
+
+        layer._mxfp8_transformed = True
+        torch.npu.empty_cache()
+
+    @staticmethod
+    def _update_expert_list(layer: torch.nn.Module, name: str, values: list[torch.Tensor]) -> None:
+        """Install expert tensors or refresh the existing graph-stable buffers."""
+        current = getattr(layer, name, None)
+        if current is None:
+            setattr(layer, name, values)
+            return
+        if len(current) != len(values):
+            raise ValueError(f"{name} changed expert count across weight reloads")
+        for destination, source in zip(current, values):
+            if destination.shape != source.shape or destination.dtype != source.dtype:
+                raise ValueError(f"{name} changed tensor schema across weight reloads")
+            if destination.device.type == "npu":
+                destination_format = int(torch_npu.get_npu_format(destination))
+                source_format = int(torch_npu.get_npu_format(source))
+                if destination_format != source_format:
+                    source = torch_npu.npu_format_cast(
+                        source,
+                        destination_format,
+                        customize_dtype=destination.dtype,
+                    )
+            destination.copy_(source)
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Restore weights to original shapes for RL weight reloading.
+
+        This method must be called BEFORE model.load_weights() in RL training
+        loops to restore the tensors to their original shapes that the weight
+        loader expects.
+
+        After weight loading, call process_weights_after_loading() again to
+        re-apply the MXFP8 transformations.
+
+        Shape transformations reversed:
+        - w13_weight: (g_num, k_size, n_size) -> (g_num, n_size, k_size)
+        - w2_weight: (g_num, k_size, n_size) -> (g_num, n_size, k_size)
+        - w13_weight_scale: (g_num, k_size//2, n_size, 2) -> (g_num, n_size, k_size)
+        - w2_weight_scale: (g_num, k_size//2, n_size, 2) -> (g_num, n_size, k_size)
+        """
+
+        if not getattr(layer, "_mxfp8_transformed", False):
+            # Not transformed, nothing to restore
+            return
+
+        if not hasattr(layer, "_mxfp8_original_shapes"):
+            err_msg = (
+                "[vllm-ascend/W8A8_MXFP8] Cannot restore weights: original "
+                "shapes not recorded. "
+                "This should not happen if process_weights_after_loading was called first."
+            )
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
+        orig_shapes = layer._mxfp8_original_shapes
+        use_mega_moe = hasattr(layer, "cann_mega_moe_w13_weight_list")
+        if not self.use_expert_weight_list and not use_mega_moe:
+
+            def restore(weight_name: str, scale_name: str) -> None:
+                weight = getattr(layer, weight_name)
+                restored_weight = weight.data.transpose(1, 2).contiguous()
+                weight.data = weight.data.transpose(1, 2)
+                weight.data.copy_(restored_weight)
+
+                scale = getattr(layer, scale_name)
+                restored_scale = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name]).contiguous()
+                scale.data = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name])
+                scale.data.copy_(restored_scale)
+
+            restore("w13_weight", "w13_weight_scale")
+            restore("w2_weight", "w2_weight_scale")
+            layer._mxfp8_transformed = False
+            return
+
+        parameters = layer._mxfp8_moe_parameters
+
+        list_prefix = "cann_mega_moe_" if use_mega_moe else ""
+        for weight_name in ("w13_weight", "w2_weight"):
+            scale_name = f"{weight_name}_scale"
+            weight_list = getattr(layer, f"{list_prefix}{weight_name}_list")
+            scale_list = getattr(layer, f"{list_prefix}{scale_name}_list")
+
+            weight_nd = [
+                torch_npu.npu_format_cast(weight, torch_npu.Format.ND) if weight.device.type == "npu" else weight
+                for weight in weight_list
+            ]
+            restored_weight = torch.stack(weight_nd)
+            restored_scale = torch.stack(scale_list)
+            if not use_mega_moe:
+                restored_weight = restored_weight.transpose(1, 2)
+                restored_scale = restored_scale.transpose(1, 2)
+            else:
+                restored_scale = restored_scale.view(torch.uint8)
+            restored_weight = restored_weight.contiguous()
+            restored_scale = restored_scale.reshape(orig_shapes[scale_name]).contiguous()
+
+            weight_parameter = parameters[weight_name]
+            scale_parameter = parameters[scale_name]
+            weight_parameter.data = restored_weight
+            scale_parameter.data = restored_scale
+            setattr(layer, weight_name, weight_parameter)
+            setattr(layer, scale_name, scale_parameter)
+
+        # Mark as not transformed (ready for weight loading)
+        layer._mxfp8_transformed = False
+
+    def _get_weights(self, layer, name):
+        """Return the weight or scale payload expected by grouped matmul."""
+        if self.use_expert_weight_list:
+            return getattr(layer, f"{name}_list")
+        return [getattr(layer, name)]
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+
+        hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=hidden_states,
+            weight=self._get_weights(layer, "w13_weight"),
+            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
+            weight_scale=self._get_weights(layer, "w13_weight_scale"),
+            x_scale=pertoken_scale,
+            dequant_mode=2,
+            quant_mode=2,
+            dequant_dtype=torch.float32,
+            quant_dtype=torch.float8_e4m3fn,
+            x_dtype=None,
+            weight_dtype=None,
+            weight_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_scale_dtype=torch_npu.float8_e8m0fnu,
+        )
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=self._get_weights(layer, "w13_weight"),
+            scale=self._get_weights(layer, "w13_weight_scale"),
+            per_token_scale=[pertoken_scale],
+            bias=None,
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=torch.bfloat16,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states
+
+    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states, dst_type=self.act_quant_type, scale_alg=get_dynamic_mx_quant_scale_alg()
+        )
+        return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        input_dtype = mlp_compute_input.hidden_states.dtype
+        use_bf16 = input_dtype in [torch.bfloat16, torch.float8_e4m3fn]
+        output_dtype = (
+            input_dtype
+            if input_dtype in [torch.bfloat16, torch.float16]
+            else (torch.bfloat16 if use_bf16 else torch.float16)
+        )
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=self._get_weights(layer, "w2_weight"),
+            scale=self._get_weights(layer, "w2_weight_scale"),
+            bias=None,
+            per_token_scale=[act_out_scale],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_dtype=None,
+            weight_dtype=None,
+        )[0]
+
+
+@register_scheme(FP8_METHOD, "ds_linear")
+class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
+
+    Checkpoint block scales are expanded to the per-output, per-32 layout
+    consumed by ``npu_quant_matmul``. Both the original 128x128 export and
+    newer 32x32 DeepSeek V4.1 exports are supported.
+    """
+
+    model_dtype = None
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
+    )
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
+    )
+    supports_weight_switch = True
+
+    def __init__(self, weight_block_size):
+        super().__init__()
+        self.block_size = weight_block_size[0]
+        hf_config = get_current_vllm_config().model_config.hf_config
+        self.o_lora_rank = hf_config.o_lora_rank
+
+    def get_pergroup_param(
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+    ) -> dict[str, Any]:
+        params_dict = {}
+        params_dict["weight_scale"] = torch.empty(
+            output_size // self.block_size, input_size // self.block_size, dtype=torch.float32
+        )
+        params_dict["_packed_dim"] = 0
+        params_dict["_packed_factor"] = self.block_size
+        return params_dict
+
+    def process_weights_after_loading(self, layer):
+        if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
+        else:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
+            layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
+        if self.block_size % self.group_size != 0:
+            raise ValueError(
+                "MXFP8 weight block size must be divisible by the "
+                f"runtime group size, got block_size={self.block_size}, "
+                f"group_size={self.group_size}"
+            )
+        input_repeat = self.block_size // self.group_size
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
+        n_dim, k_dim = layer.weight_scale.data.shape
+        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+
+        if layer.prefix.endswith("wo_a"):
+            # The layer may use OTP instead of the model's ordinary TP group.
+            # Derive the group count from the loaded output shard.
+            n_local_groups = layer.weight.shape[1] // self.o_lora_rank
+            layer.weight.data = (
+                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            )
+            layer.weight_scale.data = (
+                layer.weight_scale.data.transpose(0, 1)
+                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
+                .transpose(1, 2)
+                .contiguous()
+            )
+        elif layer.prefix.endswith("wo_b"):
+            # DSA PCP gathers these tensors directly along the leading
+            # dimension, which requires contiguous HCCL inputs.
+            layer.weight.data = layer.weight.data.contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.contiguous()

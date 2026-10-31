@@ -1,0 +1,31 @@
+{
+  "architectures": ["Glm5NextForConditionalGeneration"],
+  "model_type": "glm5_next",
+  "image_token_id": 154854,
+  "video_token_id": 154855,
+  "image_start_token_id": 154830,
+  "image_end_token_id": 154831,
+  "video_start_token_id": 154832,
+  "video_end_token_id": 154833,
+  "tie_word_embeddings": false,
+  "vision_config": {
+    "attention_bias": true,
+    "attention_dropout": 0,
+    "depth": 24,
+    "hidden_act": "silu",
+    "hidden_size": 1024,
+    "image_size": 448,
+    "in_channels": 3,
+    "initializer_range": 0.02,
+    "intermediate_size": 4096,
+    "model_type": "glm5_next_vision",
+    "num_heads": 16,
+    "out_hidden_size": 4096,
+    "patch_size": 14,
+    "projection_intermediate_size": 10240,
+    "rms_norm_eps": 0.00001,
+    "spatial_merge_size": 2,
+    "swiglu_limit": 10,
+    "temporal_patch_size": 2
+  }
+}

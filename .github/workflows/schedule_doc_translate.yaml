@@ -1,0 +1,196 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Auto Doc Translate
+
+on:
+  schedule:
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch for the upstream PR'
+        required: false
+        default: 'main'
+        type: string
+      force:
+        description: 'Force full regeneration of ALL .po files (discard existing translations)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: translation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  translate:
+    runs-on: linux-amd64-cpu-8-hk
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          ref: ${{ inputs.target_branch || 'main' }}
+
+      - name: Setup git and branch
+        run: |
+          TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
+          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> $GITHUB_ENV
+          BRANCH_NAME="auto-pr/doc-translate-$(date +%Y%m%d%H%M%S)"
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git checkout -B "${BRANCH_NAME}"
+          git remote add fork "https://github.com/vllm-ascend-ci/vllm-ascend.git"
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Build docs and generate PO files
+        working-directory: ./docs
+        run: |
+          pip install -r requirements-docs.txt
+          cd ..
+          FORCE_FLAG=""
+          if [ "${{ inputs.force }}" = "true" ]; then FORCE_FLAG="--force"; fi
+          python .github/workflows/scripts/detect_po_changes.py --output-json /tmp/po_changes.json $FORCE_FLAG
+
+      - name: Detect PO files to translate
+        id: detect
+        run: |
+          [ ! -f /tmp/po_changes.json ] && echo "No changes detected" && exit 0
+
+          has_changes=$(python3 -c "import json; print(json.load(open('/tmp/po_changes.json')).get('has_changes', False))")
+          echo "has_changes=$has_changes" >> $GITHUB_OUTPUT
+
+          if [ "$has_changes" = "True" ]; then
+            files=$(python3 -c "
+          import json
+          with open('/tmp/po_changes.json') as f:
+              data = json.load(f)
+          print(','.join(data.get('files', [])))
+          ")
+            echo "files=$files" >> $GITHUB_OUTPUT
+            echo "PO files: $files"
+          else
+            echo "No PO files to translate"
+          fi
+
+      - name: Translate PO files
+        if: steps.detect.outputs.has_changes == 'true'
+        id: translate
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python .github/workflows/scripts/po_translate.py \
+            --files "${{ steps.detect.outputs.files }}" \
+            --output-json /tmp/translation_results.json \
+            --ignore-validation-error
+
+      - name: Validate translation coverage
+        if: steps.translate.outcome == 'success'
+        id: validate
+        run: |
+          python .github/workflows/scripts/po_translate.py \
+            --files "${{ steps.detect.outputs.files }}" \
+            --validate-only \
+            --ignore-validation-error
+
+      - name: Process translated files
+        if: steps.translate.outcome == 'success'
+        id: results
+        run: |
+          [ ! -f /tmp/translation_results.json ] && echo "No results" && exit 1
+
+          success_files=$(python3 -c "
+          import json, os
+          with open('/tmp/translation_results.json') as f:
+              for p in json.load(f).get('success_files', []):
+                  if os.path.exists(p): print(p)
+          ")
+          [ -z "$success_files" ] && echo "No files translated" && exit 1
+
+          count=0
+          file_list=""
+          mkdir -p /tmp/translated_po_files
+          while IFS= read -r file; do
+            [ -n "$file" ] && [ -f "$file" ] && {
+              count=$((count + 1))
+              file_list="${file_list}- <code>${file}</code>"$'\n'
+              git add "$file"
+            }
+          done <<< "$success_files"
+
+          [ $count -eq 0 ] && echo "No files processed" && exit 1
+          echo "Processed $count file(s)"
+          {
+            echo "file_count=$count"
+            echo "file_list<<EOF"
+            echo "$file_list"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Commit and push
+        if: steps.translate.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git diff --cached --quiet && echo "Nothing to commit" && exit 1
+          count=$(git diff --cached --name-only | wc -l)
+          git commit -s -m "[Doc] Auto-translate ${count} file(s)"
+          git push -f fork "${{ env.BRANCH_NAME }}"
+
+      - name: Create PR in upstream
+        if: steps.translate.outcome == 'success'
+        uses: actions/github-script@v9
+        env:
+          FILE_LIST: ${{ steps.results.outputs.file_list }}
+          FILE_COUNT: ${{ steps.results.outputs.file_count }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PR_HEAD: vllm-ascend-ci:${{ env.BRANCH_NAME }}
+          PR_BASE: ${{ env.TARGET_BRANCH }}
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            try {
+              const branchLabel = process.env.PR_BASE.split('/').pop();
+              const date = new Date().toISOString().slice(0, 10);
+              const prTitle = branchLabel === 'main'
+                ? '[Doc] Translated Doc files ' + date
+                : '[' + branchLabel + '][Doc] Translated Doc files ' + date;
+              const prBody = '## Auto-Translation Summary\n\n' +
+                'Translated **' + process.env.FILE_COUNT + '** file(s):\n\n' +
+                process.env.FILE_LIST + '\n---\n\n' +
+                '[Workflow run](' + process.env.RUN_URL + ')';
+              const pr = await github.rest.pulls.create({
+                owner: 'vllm-project', repo: 'vllm-ascend',
+                head: process.env.PR_HEAD, base: process.env.PR_BASE,
+                title: prTitle, body: prBody
+              });
+              core.info('Created PR #' + pr.data.number);
+            } catch (error) {
+              if (error.message.includes('A pull request already exists')) {
+                core.warning('PR already exists');
+              } else { throw error; }
+            }
