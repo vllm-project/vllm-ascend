@@ -1,0 +1,8 @@
+pr: 20484
+entries:
+  - category: performance
+    text: Avoided redundant zero initialization of fully overwritten DeepSeek V4 attention outputs.
+    model: deepseek-v4
+  - category: performance
+    text: Reduced duplicate PCP RoPE lookups across DeepSeek V4.1 attention metadata builders.
+    model: deepseek-v4.1
