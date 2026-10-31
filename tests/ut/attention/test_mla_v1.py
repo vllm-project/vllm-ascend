@@ -6,6 +6,7 @@ import torch
 from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
@@ -25,6 +26,7 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.ops.triton.attention_update import _PREPARE_ATTENTION_UPDATE_KERNEL
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
@@ -973,11 +975,16 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.speculative_config = None
 
         ascend_config = MagicMock()
-        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
+        registry = JitWarmupRegistry(mock_vllm_config)
+        with (
+            patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config),
+            registry.activate(),
+        ):
             builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
+        self.assertIn(_PREPARE_ATTENTION_UPDATE_KERNEL, registry._registrations)
 
     def test_metadata_builder_uses_layer_rope_mode(self):
         mock_vllm_config = MagicMock()
