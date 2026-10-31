@@ -19,8 +19,11 @@
 
 - harness follows the one_card precedent (Popen + /health polling).
 - serialization discipline: the offline reference engine runs FIRST and is
-  released before the server starts (single-card exclusive); after the run,
-  kill the server and confirm HBM release with npu-smi info.
+  released before the server starts (single-card exclusive); the served
+  fixture blocks on wait_until_npu_memory_free so the server does not race
+  the engine's asynchronous HBM teardown. After the run, kill the server
+  and confirm HBM release with npu-smi info. Server stdout/stderr go to a
+  log file (never an undrained PIPE, which deadlocks once full).
 - assertion policy (issue #10677, expert-adjudicated): serve and offline
   batch assembly and float reduction order differ, so bit-level equality is
   NOT asserted; online greedy vs offline greedy requires the first 16
@@ -35,9 +38,12 @@ tests/e2e/pull_request/one_card/test_phi4_mini_serve.py
 
 import os
 import subprocess
+import tempfile
 import time
 
 import pytest
+
+from tests.e2e.conftest import wait_until_npu_memory_free
 
 # Default ModelScope id (pre-downloaded in CI via model_dataset_list.json);
 # override with PHI4_MODEL_PATH for local runs.
@@ -70,13 +76,17 @@ def _wait_healthy(timeout_s: int = 900) -> None:
 def offline_refs():
     """Offline greedy reference, computed BEFORE the server starts.
 
-    Returns {lang: (text, n_tokens)} so the serve-vs-offline comparison can
-    run after the offline engine has been released (single-card serial).
+    Returns ({lang: (text, n_tokens)}, tok): the tokenizer resolved by the
+    vLLM engine is reused for the serve-vs-offline comparison, so the test
+    does not make a second direct HF-hub resolution of the ModelScope id.
     """
     import gc
 
     from vllm import LLM, SamplingParams
 
+    # In a single pytest session the offline test module's engine is torn
+    # down right before this module starts; wait out its HBM release.
+    _wait_hbm_free()
     llm = LLM(
         model=MODEL,
         dtype="bfloat16",
@@ -95,42 +105,57 @@ def offline_refs():
     finally:
         del llm
         gc.collect()
-    return refs
+    return refs, tok
+
+
+def _wait_hbm_free():
+    """Block until >= 50% NPU HBM is free (engine teardown is asynchronous).
+
+    wait_until_npu_memory_free is a decorator in tests/e2e/conftest.py;
+    applying it to a no-op and calling the wrapper gives the wait alone.
+    """
+    wait_until_npu_memory_free(target_free_percentage=0.5, max_wait_seconds=120)(lambda: None)()
 
 
 @pytest.fixture(scope="module")
 def served(offline_refs):
-    """Start vllm serve only after the offline engine is released."""
-    proc = subprocess.Popen(
-        [
-            "vllm",
-            "serve",
-            MODEL,
-            "--port",
-            str(PORT),
-            "--served-model-name",
-            SERVED_NAME,
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "4096",
-            "--gpu-memory-utilization",
-            "0.8",
-            "--enforce-eager",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        _wait_healthy()
-        yield f"http://127.0.0.1:{PORT}"
-    finally:
-        proc.terminate()
+    """Start vllm serve only after the offline engine's HBM is released."""
+    _wait_hbm_free()
+    # Logs go to a file: an undrained stdout PIPE deadlocks the server once
+    # the OS pipe buffer fills, and the file doubles as a run artifact.
+    log_path = os.path.join(tempfile.gettempdir(), f"phi4_mini_serve_{os.getpid()}.log")
+    print(f"server log: {log_path}")
+    with open(log_path, "wb") as log_file:
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "serve",
+                MODEL,
+                "--port",
+                str(PORT),
+                "--served-model-name",
+                SERVED_NAME,
+                "--dtype",
+                "bfloat16",
+                "--max-model-len",
+                "4096",
+                "--gpu-memory-utilization",
+                "0.8",
+                "--enforce-eager",
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
         try:
-            proc.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=30)
+            _wait_healthy()
+            yield f"http://127.0.0.1:{PORT}"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=30)
 
 
 def _online_chat(base_url: str, prompt: str, temperature: float, seed=None, max_tokens=64):
@@ -152,13 +177,11 @@ def test_online_greedy_matches_offline_prefix(served, offline_refs):
     """Online greedy vs offline greedy: first 16 tokens >= half equal +
     output length within 4 (not bit-level; batch assembly and float
     reduction order differ)."""
-    from transformers import AutoTokenizer
-
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    refs, tok = offline_refs
 
     for lang, prompt in ONLINE_CASES:
         on_text, on_len = _online_chat(served, prompt, temperature=0)
-        off_text, off_len = offline_refs[lang]
+        off_text, off_len = refs[lang]
         eq = 0
         for a, b in zip(tok(off_text).input_ids[:PREFIX_N], tok(on_text).input_ids[:PREFIX_N]):
             if a != b:
