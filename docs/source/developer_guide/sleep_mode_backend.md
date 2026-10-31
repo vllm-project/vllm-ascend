@@ -45,6 +45,12 @@ preservation capability methods remain conservatively false. The legacy adapter
 retains the previous lifecycle ordering. A backend `close()` never wakes
 discarded weights or destroys borrowed allocator / process-group resources.
 
+CaMem marks a successfully released physical handle empty while retaining its
+virtual reservation. Deleting a sleeping tensor then releases only its virtual
+address, instead of unmapping the already-released allocation a second time.
+The existing four-field Python handle is unchanged. This does not add recovery
+from a partially failed driver unmap/free or a corrupted device context.
+
 ## New lifecycle and failure behavior
 
 ```text
