@@ -18,8 +18,9 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+The deployment scripts on this page use model runner V1 and set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+
+Model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) can skip redundant KPool query selection for full-visible query prefixes. On A3 with TP8 and `--kv-cache-dtype int8`, eligible long prefill prefixes use dense FIA attention, while the remaining queries use SFA. Decode graphs retain the SFA path.
 
 ## 3 Prerequisites
 

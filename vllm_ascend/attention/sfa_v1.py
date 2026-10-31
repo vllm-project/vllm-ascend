@@ -28,6 +28,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.kpool_dense_attention import execute_kpool_hybrid_attention
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -2024,15 +2025,34 @@ class AscendSFAImpl(MLAAttentionImpl):
         # inside the indexer's forward would leave their gate closed.
         with attention_transfer_window():
             if has_local_query:
-                attn_output = self._execute_sparse_flash_attention_process(
-                    ql_nope,
-                    q_pe,
-                    kv_cache,
-                    topk_indices,
-                    attn_metadata,
-                    actual_seq_lengths_query,
-                    actual_seq_lengths_key,
+                query_plan = (
+                    getattr(indexer_attn_metadata, "query_plan", None)
+                    # Subclasses may prepare resident KV or CP views inside sparse dispatch.
+                    if type(self) is AscendSFAImpl and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+                    else None
                 )
+                attn_output = None
+                if query_plan is not None and query_plan.dense is not None:
+                    attn_output = execute_kpool_hybrid_attention(
+                        ql_nope,
+                        kv_cache[0],
+                        topk_indices,
+                        attn_metadata,
+                        actual_seq_lengths_key,
+                        query_plan,
+                        self.scale,
+                        self._execute_sparse_flash_attention_process,
+                    )
+                if attn_output is None:
+                    attn_output = self._execute_sparse_flash_attention_process(
+                        ql_nope,
+                        q_pe,
+                        kv_cache,
+                        topk_indices,
+                        attn_metadata,
+                        actual_seq_lengths_query,
+                        actual_seq_lengths_key,
+                    )
 
         if has_local_query:
             attn_output = self._v_up_proj(attn_output)

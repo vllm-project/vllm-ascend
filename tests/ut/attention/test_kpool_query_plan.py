@@ -128,3 +128,77 @@ def test_query_plan_staging_ignores_default_tensor_device():
     assert plan is not None
     assert plan.selection_index.tolist() == [-1, -1, -1]
     assert plan.cum_query_lens.tolist() == [0]
+
+
+def test_host_upper_bound_does_not_invoke_legacy_syncing_property():
+    class Common:
+        num_reqs = 1
+        num_actual_tokens = 8192
+        query_start_loc_cpu = torch.tensor([0, 8192])
+        seq_lens_cpu_upper_bound = torch.tensor([8192])
+
+        @property
+        def seq_lens_cpu(self):
+            raise AssertionError("unexpected D2H")
+
+    assert build_kpool_query_plan(Common(), 2048, torch.device("cpu")) is not None
+    common = Common()
+    common.seq_lens_cpu_upper_bound = None
+    assert build_kpool_query_plan(common, 2048, torch.device("cpu")) is None
+
+
+def test_dense_plan_preserves_other_requests_and_original_key_history():
+    common = SimpleNamespace(
+        num_reqs=3,
+        num_actual_tokens=1553,
+        query_start_loc_cpu=torch.tensor([0, 0, 1536, 1553]),
+        seq_lens_cpu=torch.tensor([0, 2560, 65553]),
+        is_prefilling=torch.tensor([True, True, False]),
+    )
+    with torch.device("meta"), patch.object(torch.Tensor, "cpu", side_effect=AssertionError("unexpected D2H")):
+        plan = build_kpool_query_plan(common, 2048, torch.device("cpu"), plan_dense_attention=True)
+    assert plan is not None and plan.dense is not None
+    assert plan.dense.request_index == 1
+    assert plan.dense.seq_len == 2048
+    assert plan.dense.query_rows.tolist() == list(range(1024))
+    assert plan.dense.sparse_rows.tolist() == list(range(1024, 1553))
+    assert plan.dense.sparse_cum_query_lens.tolist() == [0, 512, 529]
+    assert plan.dense.block_table.tolist() == [list(range(16))]
+    assert plan.cum_query_lens.tolist() == [0, 512, 529]
+
+
+@pytest.mark.parametrize("prefilling", [None, torch.tensor([False]), torch.empty(1, device="meta")])
+def test_dense_plan_requires_exact_host_prefill_lengths(prefilling):
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=8192,
+        query_start_loc_cpu=torch.tensor([0, 8192]),
+        seq_lens_cpu=torch.tensor([8192]),
+        is_prefilling=prefilling,
+    )
+    plan = build_kpool_query_plan(common, 2048, torch.device("cpu"), plan_dense_attention=True)
+    assert plan is not None and plan.dense is None
+
+
+@pytest.mark.parametrize("queries", [[33], [1024], [8193], [2048, 2048]])
+def test_dense_plan_admits_only_measured_prefix_shapes(queries):
+    common = SimpleNamespace(
+        num_reqs=len(queries),
+        num_actual_tokens=sum(queries),
+        query_start_loc_cpu=torch.tensor([0, *torch.tensor(queries).cumsum(0).tolist()]),
+        seq_lens_cpu=torch.tensor(queries),
+        is_prefilling=torch.ones(len(queries), dtype=torch.bool),
+    )
+    plan = build_kpool_query_plan(common, 2048, torch.device("cpu"), plan_dense_attention=True)
+    assert plan is not None and plan.dense is None
+
+
+def test_device_causal_flag_cannot_introduce_a_host_sync():
+    common = SimpleNamespace(seq_lens_cpu=torch.tensor([3]), causal=torch.tensor(True))
+    with patch.object(torch.Tensor, "__bool__", side_effect=AssertionError("unexpected D2H")):
+        assert build_kpool_query_plan(common, 2048, torch.device("cpu")) is None
+
+
+def test_bidirectional_document_ranges_keep_normal_selection():
+    common = SimpleNamespace(seq_lens_cpu=torch.tensor([3]), mm_req_doc_ranges={0: [(0, 3)]})
+    assert build_kpool_query_plan(common, 2048, torch.device("cpu")) is None

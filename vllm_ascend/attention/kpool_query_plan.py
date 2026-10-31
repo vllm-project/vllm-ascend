@@ -7,6 +7,20 @@ from dataclasses import dataclass
 import torch
 
 MIN_PARTIAL_BYPASS_ROWS = 1024
+MIN_DENSE_PREFIX_ROWS = 1024
+MAX_HYBRID_QUERY_ROWS = 8192
+DENSE_KERNEL_BLOCK_SIZE = 128
+DENSE_SELECTION_BUDGET = 2048
+
+
+@dataclass(frozen=True)
+class KPoolDensePlan:
+    request_index: int
+    query_rows: torch.Tensor
+    sparse_rows: torch.Tensor
+    sparse_cum_query_lens: torch.Tensor
+    block_table: torch.Tensor
+    seq_len: int
 
 
 @dataclass(frozen=True)
@@ -16,13 +30,30 @@ class KPoolQueryPlan:
     selective_rows: torch.Tensor
     selection_index: torch.Tensor
     cum_query_lens: torch.Tensor
+    dense: KPoolDensePlan | None = None
 
 
 def build_kpool_query_plan(
-    common, topk: int | None, device: torch.device, *, min_partial_rows: int = MIN_PARTIAL_BYPASS_ROWS
+    common,
+    topk: int | None,
+    device: torch.device,
+    *,
+    min_partial_rows: int = MIN_PARTIAL_BYPASS_ROWS,
+    plan_dense_attention: bool = False,
 ) -> KPoolQueryPlan | None:
-    seq_lens = getattr(common, "seq_lens_cpu", None)
-    if topk is None or topk <= 0 or seq_lens is None or not getattr(common, "causal", True):
+    seq_lens = getattr(common, "seq_lens_cpu_upper_bound", None)
+    if seq_lens is None:
+        # Do not invoke upstream's deprecated property, which can copy device lengths.
+        seq_lens = getattr(common, "__dict__", {}).get("seq_lens_cpu")
+    causal = getattr(common, "causal", True)
+    if (
+        topk is None
+        or topk <= 0
+        or seq_lens is None
+        or not isinstance(causal, bool)
+        or not causal
+        or getattr(common, "mm_req_doc_ranges", None)
+    ):
         return None
     query_starts = common.query_start_loc_cpu
     # A host upper bound only shortens the bypass prefix. Selection still
@@ -62,4 +93,46 @@ def build_kpool_query_plan(
         rows.to(device, non_blocking=True),
         selection_index.to(device, non_blocking=True),
         torch.tensor(ends, dtype=torch.int64, device=device),
+        _build_dense_plan(common, starts, lengths, topk, device) if plan_dense_attention else None,
+    )
+
+
+def _build_dense_plan(common, starts, lengths, topk: int, device: torch.device) -> KPoolDensePlan | None:
+    prefilling = getattr(common, "is_prefilling", None)
+    if (
+        topk != DENSE_SELECTION_BUDGET
+        or common.num_actual_tokens > MAX_HYBRID_QUERY_ROWS
+        or prefilling is None
+        or prefilling.device.type != "cpu"
+        or prefilling.numel() < common.num_reqs
+    ):
+        return None
+    candidates = []
+    for request, (begin, end, length, is_prefill) in enumerate(zip(starts, starts[1:], lengths, prefilling.tolist())):
+        end = min(end, common.num_actual_tokens)
+        context = length - (end - begin)
+        count = min(end - begin, max(0, topk - context))
+        # Scheduler bounds are exact for prefill requests; async-spec decode
+        # bounds cannot supply FIA's host-side causal lengths.
+        # C8 admission is measured with a full selection-budget KV prefix.
+        if is_prefill and count >= MIN_DENSE_PREFIX_ROWS and context + count == topk:
+            candidates.append((request, begin, count, context + count))
+    # Admission is limited to the single-prefix shapes measured on Ascend.
+    if len(candidates) != 1:
+        return None
+    request, begin, count, seq_len = candidates[0]
+    sparse_rows = torch.cat(
+        [torch.arange(begin, device="cpu"), torch.arange(begin + count, common.num_actual_tokens, device="cpu")]
+    )
+    sparse_ends = [
+        min(end, common.num_actual_tokens) - (count if i >= request else 0) for i, end in enumerate(starts[1:])
+    ]
+    pages = (seq_len + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
+    return KPoolDensePlan(
+        request,
+        torch.arange(begin, begin + count, device="cpu").to(device, non_blocking=True),
+        sparse_rows.to(device, non_blocking=True),
+        torch.tensor(sparse_ends, dtype=torch.int32, device=device),
+        torch.arange(pages, dtype=torch.int32, device=device).unsqueeze(0),
+        seq_len,
     )

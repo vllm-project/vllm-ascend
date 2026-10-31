@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
+from vllm_ascend.attention.kpool_dense_attention import supports_dense_kpool_attention
 from vllm_ascend.attention.kpool_query_plan import KPoolQueryPlan, build_kpool_query_plan
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -128,6 +129,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = compress_ratio
         self.topk_tokens = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "index_topk", None)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.plan_dense_attention = supports_dense_kpool_attention(vllm_config)
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the SFA "
@@ -222,7 +224,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
             and not torch.npu.is_current_stream_capturing()
         ):
-            metadata.query_plan = build_kpool_query_plan(common_attn_metadata, self.topk_tokens, self.device)
+            metadata.query_plan = build_kpool_query_plan(
+                common_attn_metadata,
+                self.topk_tokens,
+                self.device,
+                plan_dense_attention=self.plan_dense_attention,
+            )
         pcp_context = common_attn_metadata.pcp_context
         if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
