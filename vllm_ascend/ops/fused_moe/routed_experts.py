@@ -34,7 +34,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.lora.fused_moe import has_lora, sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -242,7 +242,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # the comm method provided routing metadata in lora_context.
         self._lora_routing = None
         lora_context = mlp_compute_input.lora_context
-        if lora_context is not None:  # LoRA applied
+        # Gate on ``has_lora`` rather than on "a context is published": a batch
+        # that maps every token to the -1 sentinel contributes a zero LoRA
+        # delta, so recovering the routing below would be pure overhead (and it
+        # asserts on routing metadata that an idle context does not carry).
+        if has_lora(lora_context):
             from vllm_ascend.lora.fused_moe import (
                 _recover_moe_lora_routing_all2all,
                 _recover_moe_lora_routing_allgather,
@@ -722,7 +726,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
-        if lora_context is not None:
+        # Publish the context only when the batch selects an adapter. An idle
+        # context would otherwise make the dispatcher exchange LoRA indices and
+        # the finalize stage split them for a guaranteed-zero delta.
+        if has_lora(lora_context):
             sync_lora_context(self.quant_method, lora_context)
 
         prepare_output = moe_comm_method.prepare(

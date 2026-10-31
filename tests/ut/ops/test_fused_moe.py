@@ -1094,6 +1094,218 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     )
 
 
+@pytest.mark.parametrize(
+    ("no_lora", "expected_publication"),
+    [
+        (None, "none"),
+        (True, "clear_only"),
+        (False, "publish_then_clear"),
+    ],
+)
+def test_routed_experts_forward_impl_publishes_lora_context_only_for_active_batch(
+    monkeypatch, no_lora, expected_publication
+):
+    """An idle (all -1) LoRA context must not reach the MoE comm singletons.
+
+    Publishing it would make the token dispatcher exchange LoRA indices and the
+    finalize stage split them, all for a delta that is zero by construction.
+    """
+    _disable_force_eplb(monkeypatch)
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    hidden_states = torch.randn(2, 4)
+    prepared_hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    prepared_router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    finalized = torch.randn(2, 4)
+    quant_method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+    quant_method.apply = MagicMock(
+        return_value=SimpleNamespace(
+            routed_out=routed_out,
+            expert_tokens=None,
+            group_list_type=1,
+            before_dispatch_evt=None,
+            before_gmm2_evt=None,
+            before_combine_evt=None,
+            shared_activation_overlap_start_evt=None,
+            swiglu_limit=0.0,
+        )
+    )
+    object.__setattr__(routed_experts, "quant_method", quant_method)
+    routed_experts.enable_npugraph_ex_static_kernel = False
+    routed_experts.router = SimpleNamespace(
+        _select_experts=MagicMock(return_value=(torch.ones(2, 2), torch.zeros(2, 2, dtype=torch.int64))),
+    )
+    routed_experts.moe_config = SimpleNamespace(num_experts=3, ep_rank=0, ep_size=1, is_sequence_parallel=False)
+    routed_experts.ascend_expert_map = None
+    routed_experts.log2phy = None
+    routed_experts.n_shared_experts = 0
+    routed_experts.global_redundant_expert_num = 0
+    routed_experts._use_v2_model_runner = False
+    routed_experts.dynamic_eplb = False
+    routed_experts.return_with_event = False
+    lora_context = None
+    if no_lora is not None:
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=no_lora))
+        routed_experts._ascend_moe_lora_context = lora_context
+    moe_comm_method = MagicMock()
+    moe_comm_method.prepare.return_value = SimpleNamespace(
+        hidden_states=prepared_hidden_states,
+        router_logits=prepared_router_logits,
+        mc2_mask=None,
+        padded_hidden_states_shape=torch.Size([2, 4]),
+        pertoken_scale=None,
+    )
+    moe_comm_method.finalize.return_value = finalized
+    monkeypatch.setattr(
+        routed_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            in_profile_run=False,
+            moe_comm_type=MoECommType.MC2,
+            moe_comm_method=moe_comm_method,
+            eplb_heat_collection_status=False,
+        ),
+    )
+    monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
+    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *_: moe_comm_method)
+    monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
+    sync_lora_context = MagicMock()
+    monkeypatch.setattr(routed_experts_module, "sync_lora_context", sync_lora_context)
+
+    result = routed_experts.forward_impl(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        input_ids=None,
+    )
+
+    assert result is finalized
+    published = [sync_call.args[1] for sync_call in sync_lora_context.call_args_list]
+    if expected_publication == "none":
+        assert published == []
+    elif expected_publication == "clear_only":
+        assert published == [None]
+    else:
+        assert published == [lora_context, None]
+
+
+def _make_unquant_method() -> AscendUnquantizedFusedMoEMethod:
+    method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+    method.moe = SimpleNamespace(has_bias=False)
+    method.lora_context = None
+    method._lora_routing = None
+    return method
+
+
+def _make_unquant_mlp_input(lora_context, *, routing_kind: str):
+    if routing_kind == "allgather":
+        expanded_row_idx = torch.arange(2)
+        topk_ids = torch.zeros((1, 2), dtype=torch.int64)
+    else:
+        expanded_row_idx = None
+        topk_ids = None
+    return SimpleNamespace(
+        layer=SimpleNamespace(w13_weight=torch.zeros(4, 4), w2_weight=torch.zeros(4, 4)),
+        hidden_states=torch.zeros(2, 4),
+        need_trans=False,
+        group_list=torch.tensor([2]),
+        group_list_type=0,
+        lora_context=lora_context,
+        expanded_row_idx=expanded_row_idx,
+        topk_ids=topk_ids,
+    )
+
+
+@pytest.mark.parametrize("lora_state", ["absent", "idle", "active"])
+@pytest.mark.parametrize("routing_kind", ["allgather", "all2all", "missing"])
+def test_unquant_apply_gmm1_applies_moe_lora_only_for_active_batch(monkeypatch, lora_state, routing_kind):
+    """Idle contexts skip routing recovery instead of asserting on missing metadata."""
+    method = _make_unquant_method()
+    lora_context = None
+    if lora_state != "absent":
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=lora_state == "idle"))
+        if routing_kind == "all2all":
+            lora_context.exchanged_lora_indices = torch.tensor([0, -1])
+    mlp_compute_input = _make_unquant_mlp_input(lora_context, routing_kind=routing_kind)
+    gate_up_out = torch.zeros(2, 4)
+    routing = (torch.tensor([0, 0]), torch.tensor([0, -1]))
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "npu_grouped_matmul",
+        lambda **kwargs: [gate_up_out],
+        raising=False,
+    )
+
+    with (
+        patch("vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather", return_value=routing) as allgather,
+        patch("vllm_ascend.lora.fused_moe._recover_moe_lora_routing_all2all", return_value=routing) as all2all,
+        patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as apply_w13,
+    ):
+        lora_active = lora_state == "active"
+        if lora_active and routing_kind == "missing":
+            with pytest.raises(AssertionError, match="MoE LoRA requires"):
+                method.apply_gmm1(mlp_compute_input)
+            return
+        output = method.apply_gmm1(mlp_compute_input)
+
+    assert output is gate_up_out
+    if not lora_active:
+        allgather.assert_not_called()
+        all2all.assert_not_called()
+        apply_w13.assert_not_called()
+        assert method._lora_routing is None
+        return
+    if routing_kind == "allgather":
+        allgather.assert_called_once_with(
+            lora_context,
+            mlp_compute_input.expanded_row_idx,
+            mlp_compute_input.topk_ids,
+        )
+        all2all.assert_not_called()
+    else:
+        all2all.assert_called_once_with(lora_context, group_list=mlp_compute_input.group_list)
+        allgather.assert_not_called()
+    apply_w13.assert_called_once_with(
+        lora_context,
+        gate_up_out=gate_up_out,
+        hidden_states=mlp_compute_input.hidden_states,
+        lora_routing=routing,
+    )
+
+
+@pytest.mark.parametrize("has_routing", [False, True])
+def test_unquant_apply_gmm2_applies_w2_delta_only_with_routing(monkeypatch, has_routing):
+    method = _make_unquant_method()
+    method.lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+    routing = (torch.tensor([0]), torch.tensor([0]))
+    method._lora_routing = routing if has_routing else None
+    mlp_compute_input = _make_unquant_mlp_input(method.lora_context, routing_kind="missing")
+    down_out = torch.zeros(2, 4)
+    silu_out = torch.zeros(2, 4)
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "npu_grouped_matmul",
+        lambda **kwargs: [down_out],
+        raising=False,
+    )
+
+    with patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w2") as apply_w2:
+        output = method.apply_gmm2(mlp_compute_input, silu_out, None)
+
+    assert output is down_out
+    if not has_routing:
+        apply_w2.assert_not_called()
+        return
+    apply_w2.assert_called_once_with(
+        method.lora_context,
+        down_out=down_out,
+        silu_out=silu_out,
+        lora_routing=routing,
+    )
+    assert method._lora_routing is None
+
+
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None
