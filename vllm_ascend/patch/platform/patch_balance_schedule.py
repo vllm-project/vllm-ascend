@@ -397,7 +397,7 @@ class BalanceScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             # Both supported versions prioritize waiting requests holding KV blocks.
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -411,16 +411,22 @@ class BalanceScheduler(Scheduler):
                     step_skipped_waiting.appendleft(skipped)
 
             while token_budget > 0:
-                # Requests holding KV blocks are always drained first.
-                request_queue = self.kv_holding_waiting or self.waiting
+                # Port vllm-project/vllm#60572: PAUSED_NEW admission must match
+                # upstream Scheduler.get_num_unfinished_requests() counting KV holders.
+                # Ordinary waiting requests stay queued until resume.
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
                 if not request_queue:
                     break
                 if len(self.running) == self.max_num_active_reqs:
                     break
 
-                # Keep admission balanced across DP ranks: if any rank was at
-                # the running cap after the previous step, stop admitting new
-                # waiting requests on every rank.
+                # Intentionally retain the global admission freeze under PAUSED_NEW,
+                # including for KV holders, to preserve the existing balancing policy.
+                # During a coordinated wait-mode pause, running requests continue and
+                # balance_gather() refreshes their counts; drain waits for capacity.
+                # This policy does not guarantee minimum drain latency.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 

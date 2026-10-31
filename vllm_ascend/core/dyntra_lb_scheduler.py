@@ -152,7 +152,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
                 self._handle_blocked_waiting_request(request)
 
     def _run_lb_kv_prefetch(self) -> set[str]:
-        if self.connector is None or not self._lb_kv_prefetch_enabled:
+        if self._pause_state != PauseState.UNPAUSED or self.connector is None or not self._lb_kv_prefetch_enabled:
             return set()
 
         kv_prefetch_limit = 2 * self.max_num_running_reqs - len(self.running)
@@ -232,6 +232,11 @@ class DyntraLBPolicyMixin(_SchedulerBase):
 
     def _apply_load_balance_modifications(self) -> None:
         self._lb_admit_req_ids = None
+        if self._pause_state != PauseState.UNPAUSED:
+            # A pause drains existing KV holders independently of the LB plan.
+            self.modifications = None
+            self.lb_freeze = False
+            return
         if self.modifications is None:
             self.lb_freeze = False
             return
@@ -646,7 +651,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -665,8 +670,14 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                request_queue = self.kv_holding_waiting or self.waiting
-                assert request_queue is not None
+                # Port vllm-project/vllm#60572: PAUSED_NEW admission must match
+                # upstream Scheduler.get_num_unfinished_requests() counting KV holders.
+                # Ordinary waiting requests stay queued until resume.
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
+                if not request_queue:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
