@@ -1591,13 +1591,45 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     return runner, scheduler_output, batch_req_state, batch_desc
 
 
-def _fake_async_copy(src, device=None, out=None):
-    tensor = torch.as_tensor(src, dtype=torch.int32)
+def _fake_async_copy(src, device=None, dtype=None, out=None):
+    tensor = torch.as_tensor(src, dtype=dtype or torch.int32)
     if out is not None:
         n = min(out.numel(), tensor.numel())
         out.view(-1)[:n].copy_(tensor.view(-1)[:n])
         return out
     return tensor
+
+
+@pytest.mark.parametrize(
+    ("upstream_source", "expected"),
+    [
+        ("expanded_local_pos = idx_mapping.new_empty(total_num_logits)", torch.int32),
+        ("expanded_local_pos = torch.empty(total_num_logits, dtype=torch.int32)", None),
+    ],
+)
+def test_idx_mapping_dtype_follows_upstream_snapshot(upstream_source, expected, monkeypatch):
+    from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
+
+    monkeypatch.setattr(ascend_model_runner.inspect, "getsource", lambda _fn: upstream_source)
+    ascend_model_runner._idx_mapping_dtype.cache_clear()
+    try:
+        assert ascend_model_runner._idx_mapping_dtype() is expected
+    finally:
+        ascend_model_runner._idx_mapping_dtype.cache_clear()
+
+
+def test_idx_mapping_dtype_falls_back_when_source_unavailable(monkeypatch):
+    from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
+
+    def _raise(_fn):
+        raise OSError("source unavailable")
+
+    monkeypatch.setattr(ascend_model_runner.inspect, "getsource", _raise)
+    ascend_model_runner._idx_mapping_dtype.cache_clear()
+    try:
+        assert ascend_model_runner._idx_mapping_dtype() is torch.int32
+    finally:
+        ascend_model_runner._idx_mapping_dtype.cache_clear()
 
 
 def _run_prepare_inputs(
