@@ -80,6 +80,7 @@ public:
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
         __gm__ uint8_t *blockTable);
     __aicore__ inline void InitOutputSingleCore(ConstInfo &constInfo);
+    __aicore__ inline void InitOutputTail(ConstInfo &constInfo);
     __aicore__ inline void ClearEmptyQueryOutput(const RunParamStr &runParam, const ConstInfo &constInfo);
     __aicore__ inline void ProcessVec0(Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &outputL1,
         Buffer<BufferType::GM, SyncType::CROSS_CORE_SYNC_BACKWARD> &v0ResGm,
@@ -826,6 +827,43 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::CopyOutAttentionOut(
 }
 
 TEMPLATES_DEF_NO_DEFAULT
+__aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::InitOutputTail(ConstInfo &constInfo)
+{
+    // Zero only the TND capacity tail [actual, T) on every call, including graph
+    // replay (reads the device-side cumulative query lengths each time).
+    if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+        if (constInfo.bSize == 0 || GetBlockNum() == 0) {
+            return;
+        }
+        uint32_t actualRows = cuSeqlensQGm.GetValue(constInfo.bSize - 1);
+        if (actualRows >= constInfo.s1Size) {
+            return;
+        }
+        uint64_t rowSize = static_cast<uint64_t>(constInfo.n2Size) * constInfo.gSize * constInfo.dSizeV;
+        uint64_t tailSize = (constInfo.s1Size - actualRows) * rowSize;
+        constexpr uint64_t alignElements = BUFFER_SIZE_BYTE_32B / sizeof(OUTPUT_T);
+        uint64_t coreCount = CV_RATIO * GetBlockNum();
+        uint64_t singleCoreSize = (tailSize + coreCount - 1) / coreCount;
+        singleCoreSize = (singleCoreSize + alignElements - 1) / alignElements * alignElements;
+        uint64_t coreOffset = constInfo.aivIdx * singleCoreSize;
+        if (coreOffset >= tailSize) {
+            return;
+        }
+        uint64_t initSize = Min(singleCoreSize, tailSize - coreOffset);
+        GlobalTensor<OUTPUT_T> tailGm =
+            attentionOutGm[static_cast<uint64_t>(actualRows) * rowSize + coreOffset];
+        AscendC::Fill<OUTPUT_T>(tailGm, initSize, static_cast<OUTPUT_T>(0));
+        // Fill borrows UB before the compute buffers are initialized. Finish its
+        // local MTE3 reads before reusing UB; disjoint tail writes need no
+        // cross-core barrier.
+        auto eventId = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
+        SetFlag<HardEvent::MTE3_V>(eventId);
+        WaitFlag<HardEvent::MTE3_V>(eventId);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(eventId);
+    }
+}
+
+TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::InitOutputSingleCore(ConstInfo &constInfo)
 {
     uint32_t coreNum = GetBlockNum();
@@ -884,6 +922,8 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::CleanOutput(__gm__ uint
         }
         if (constInfo.needInit == 1 && !returnSoftmaxLse) {
             InitOutputSingleCore(constInfo);
+        } else {
+            InitOutputTail(constInfo);
         }
     }
 }
