@@ -34,6 +34,7 @@ import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
+import vllm_ascend.patch.platform.patch_mamba_checkpoint  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
