@@ -116,13 +116,26 @@ Push runs link to [recipes.vllm.ai](https://recipes.vllm.ai); close events do
 not advertise a preview URL.
 
 The independent `Recipes Preview Comment` workflow posts one preview-link
-comment on open PRs targeting `main` that change `recipes/**`, including fork
-PRs. It reuses the fixed preview URL above and the existing GitHub Actions bot,
-updates the same comment with the current PR commit after a push, and skips
-unchanged comments on reruns. Closing or merging a PR, removing all recipe
-changes, or changing its base away from `main` updates an existing comment to
-an inactive status; reopening or restoring eligible changes restores the link.
-The comment does not confirm deployment success, cleanup, or publication.
+comment on open PRs targeting `main` that have the `recipe` label and change
+`recipes/**`, including fork PRs. It reuses the fixed preview URL above and the
+existing GitHub Actions bot, updates the same comment with the current PR
+commit after a push, and skips unchanged comments on reruns. While the label
+remains, closing or merging a PR, removing all recipe changes, or changing its
+base away from `main` updates an existing comment to an inactive status;
+reopening or restoring eligible changes restores the link. The comment does
+not confirm deployment success, cleanup, or publication.
+
+The workflow also scans open PRs targeting `main` with the `recipe` label once
+per hour, at minute 23 (`23 * * * *`), to backfill or refresh comments. GitHub
+may delay scheduled runs, so this is not a guaranteed one-hour delivery time.
+Adding the `recipe` label manually triggers a comment check immediately. Labels
+added by another workflow using `GITHUB_TOKEN` do not trigger another workflow;
+the hourly scan covers that case. PR events without the label skip processing
+and can still appear as skipped runs in Actions. Manual backfills also require
+the label. Removing it stops updates and leaves any existing comment unchanged.
+All entry points share per-PR concurrency and recheck the live label before
+processing comments. This schedule only maintains comments; preview builds
+remain the responsibility of the recipes repository.
 
 Comments use only the repository's `GITHUB_TOKEN` with `pull-requests: write`;
 they do not need App credentials or `RECIPES_PREVIEW_ENABLED`. The workflow
