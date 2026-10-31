@@ -94,7 +94,6 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
     enable_custom_op,
-    enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
     vllm_version_is,
@@ -492,7 +491,6 @@ class DeepseekV4Attention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         reduce_results: bool = True,
-        need_gather_q_kv: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -513,10 +511,8 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
-        self.enable_dsa_cp = enable_dsa_cp()
 
-        attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-        self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
+        self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
         self.wq_a = ReplicatedLinear(
             self.dim,
             self.q_lora_rank,
@@ -527,8 +523,7 @@ class DeepseekV4Attention(nn.Module):
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-        wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
-        self.wq_b = wq_b_cls(
+        self.wq_b = ColumnParallelLinear(
             self.q_lora_rank,
             self.n_heads * self.head_dim,
             bias=False,
@@ -682,7 +677,6 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
-            need_gather_q_kv=need_gather_q_kv,
         )
 
     def forward(
@@ -739,7 +733,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = DeepseekV4Attention
 
@@ -752,7 +745,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -813,13 +805,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
 
-        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+        if self.use_sequence_parallel_moe:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
 
-        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+        if self.use_sequence_parallel_moe:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
@@ -1285,12 +1277,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 # lands on the meta tensor (a no-op), so attention sinks would
                 # silently keep their dummy values after an update.
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if enable_dsa_cp():
-                    weight_loader(param, loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    weight_loader(param, narrow_weight)
+                # Handle attention sinks (distributed across ranks)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

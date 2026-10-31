@@ -72,7 +72,6 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
 )
@@ -394,10 +393,8 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     self.eps = config.rms_norm_eps
     self.norm_eps = config.rms_norm_eps
     self.scale = self.head_dim**-0.5
-    self.enable_dsa_cp = enable_dsa_cp()
 
-    attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-    self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
+    self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
     self.wq_a = ReplicatedLinear(
         self.dim,
         self.q_lora_rank,
@@ -408,8 +405,7 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     )
     self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
     self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-    wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
-    self.wq_b = wq_b_cls(
+    self.wq_b = ColumnParallelLinear(
         self.q_lora_rank,
         self.n_heads * self.head_dim,
         bias=False,
@@ -603,7 +599,6 @@ class DeepseekV41SWAAttention(nn.Module):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
         *,
         use_yarn=False,
     ):
@@ -677,7 +672,6 @@ class DeepseekV41SWAAttention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
-            need_gather_q_kv=need_gather_q_kv,
         )
 
 
@@ -696,7 +690,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
     ):
         layer_idx = int(prefix.split(".")[-2])
         topology = build_layer_plan(config)
@@ -710,7 +703,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=reduce_results,
-            need_gather_q_kv=need_gather_q_kv,
             use_yarn=role.has_long_context,
         )
         block_size = vllm_config.cache_config.block_size
@@ -802,7 +794,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = self.attention_cls
 
@@ -815,7 +806,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV41MoE(
@@ -1932,12 +1922,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                # Handle attention sinks (distributed across ranks)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 
