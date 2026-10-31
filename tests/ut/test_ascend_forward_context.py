@@ -95,7 +95,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, mega_moe_max_tokens=65536),
     )
 
 
@@ -195,6 +195,12 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
 
 def test_is_decode_only_node_false_without_kv_transfer():
     assert afc._is_decode_only_node(_make_vllm_config()) is False
+
+
+def test_a5_mega_moe_uses_prefill_capacity_without_kv_transfer(monkeypatch):
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(mega_moe_max_tokens=65536))
+    config = _make_vllm_config(world_size=8, max_num_batched_tokens=4096)
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(config, mc2_tokens_capacity=32) == 4096
 
 
 def test_is_decode_only_node_true_for_decode_bench_connector(monkeypatch):
@@ -474,14 +480,15 @@ def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_to
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8, max_num_batched_tokens=4096)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == MoECommType.FUSED_MC2
 
 
 @pytest.mark.parametrize("num_tokens", [128, 4096])
 @pytest.mark.parametrize("draft_quant", [QuantType.NONE, QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP])
-def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_tokens, draft_quant):
+@pytest.mark.parametrize("different_topology", [False, True])
+def test_select_moe_comm_method_a5_draft_topology_guard(monkeypatch, num_tokens, draft_quant, different_topology):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A5,
@@ -489,9 +496,15 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4, max_num_batched_tokens=4096)
+    vllm_config.model_config.hf_text_config.n_routed_experts = 384
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(n_routed_experts=128 if different_topology else 384, top_k_experts=4)
+        )
+    )
     expected = MoECommType.FUSED_MC2
-    if draft_quant == QuantType.NONE:
+    if different_topology or draft_quant == QuantType.NONE:
         expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=draft_quant)
@@ -509,7 +522,11 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
 
 
 @pytest.mark.parametrize("model_owned", [False, True])
-def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_owned):
+@pytest.mark.parametrize("is_draft_model", [False, True])
+@pytest.mark.parametrize("different_topology", [False, True])
+def test_set_ascend_forward_context_pins_current_vllm_config(
+    monkeypatch, model_owned, is_draft_model, different_topology
+):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -536,6 +553,13 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
     monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _config: True)
+    vllm_config.model_config.hf_text_config.n_routed_experts = 384
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(n_routed_experts=128 if different_topology else 384, top_k_experts=1)
+        )
+    )
 
     legacy_method = object()
     target_method = object()
@@ -548,9 +572,12 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
 
     for expected in (target_method, draft_method, target_method):
         model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
-        with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
+        with afc.set_ascend_forward_context(
+            None, vllm_config, num_tokens=4, model_instance=model, is_draft_model=is_draft_model
+        ):
             assert seen["inside"] is True
             assert seen["config"] is vllm_config
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
+            assert forward_context.use_mega_moe is (not (is_draft_model and different_topology))
 
     assert seen["inside"] is False

@@ -703,6 +703,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_experts=None,
+        shared_experts_input: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -749,8 +751,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                shared_experts=None,
-                shared_experts_input=None,
+                shared_experts=shared_experts,
+                shared_experts_input=shared_experts_input,
             )
         finally:
             self.ascend_pertoken_scale = None
@@ -794,6 +796,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         if self.return_with_event:
             return routed_out, RoutedMoEMilestones(
+                shared_experts_fused=fused_experts_results.shared_experts_fused,
                 routed_dispatch_start=fused_experts_results.before_dispatch_evt,
                 shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
                 routed_combine_start=fused_experts_results.before_combine_evt,
