@@ -161,6 +161,10 @@ class AscendConfig:
             )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
+        # Sleep Mode lifecycle policies (HCCL lightweight + ACL Graph in-place).
+        self.sleep_hccl_policy = additional_config.get("sleep_hccl_policy", "lightweight")
+        self.sleep_acl_graph_policy = additional_config.get("sleep_acl_graph_policy", "inplace")
+        self.sleep_allow_fallback = additional_config.get("sleep_allow_fallback", True)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 

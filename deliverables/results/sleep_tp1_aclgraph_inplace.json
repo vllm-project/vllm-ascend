@@ -1,0 +1,12 @@
+{
+  "case": "tp1_aclgraph_inplace",
+  "ok": true,
+  "sleep_s": 2.6813,
+  "wake_s": 0.8185,
+  "enforce_eager": false,
+  "cudagraph_mode": "PIECEWISE",
+  "acl_graph_policy": "inplace",
+  "text1": " I'm a 16 year old girl. I'm very happy. I",
+  "text2": " I'm a 16 year old girl. I'm very happy. I",
+  "elapsed_s": 82.28
+}

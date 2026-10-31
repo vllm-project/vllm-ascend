@@ -1,0 +1,43 @@
+{
+  "gates": {
+    "sleep_e2e_tp1.json": false,
+    "sleep_smoke_tp1.json": true,
+    "sleep_tp1_aclgraph_inplace.json": true,
+    "sleep_tp1_final.json": true,
+    "sleep_tp2_final.json": true,
+    "sleep_tp2_suspend.json": true
+  },
+  "highlights": {
+    "sleep_tp1_aclgraph_inplace.json": {
+      "case": "tp1_aclgraph_inplace",
+      "ok": true,
+      "sleep_s": 2.6813,
+      "wake_s": 0.8185,
+      "enforce_eager": false,
+      "acl_graph_policy": "inplace"
+    },
+    "sleep_tp1_final.json": {
+      "ok": true,
+      "tp": 1,
+      "policy": "lightweight+inplace",
+      "sleep_ms": 3124.910839833319,
+      "wake_ms": 1211.0676607117057,
+      "generate_after_wake": true
+    },
+    "sleep_tp2_final.json": {
+      "ok": true,
+      "tp": 2,
+      "policy": "lightweight+inplace",
+      "sleep_ms": 2056.0746202245355,
+      "wake_ms": 863.9069702476263,
+      "generate_after_wake": true
+    },
+    "sleep_tp2_suspend.json": {
+      "case": "tp2_lightweight_destroy_restore",
+      "ok": true,
+      "sleep_s": 1.7531,
+      "wake_s": 0.8476,
+      "mode": "destroy_restore_multi"
+    }
+  }
+}

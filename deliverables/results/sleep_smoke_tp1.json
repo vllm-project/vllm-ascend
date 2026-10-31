@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "policy": "lightweight+inplace",
+  "tp": 1,
+  "sleep_ms": 3098.828559741378,
+  "wake_ms": 1479.1277702897787,
+  "first_token_ms": 7816.391220316291,
+  "free_before_gib": 60.60295867919922,
+  "free_after_sleep_gib": 60.265872955322266,
+  "free_after_wake_gib": 23.999542236328125,
+  "out": " I'm a 16 year old",
+  "out_after_rounds": " I'm a 16 year old"
+}

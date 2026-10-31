@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "tp": 1,
+  "policy": "lightweight+inplace",
+  "sleep_ms": 3124.910839833319,
+  "wake_ms": 1211.0676607117057,
+  "first_token_ms": 368.32274962216616,
+  "out": " I'm a 16 year old",
+  "out_after_rounds": " I'm a 16 year old",
+  "generate_after_wake": true
+}

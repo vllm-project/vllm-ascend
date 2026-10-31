@@ -1,0 +1,53 @@
+[
+  {
+    "name": "combined_lightweight_inplace",
+    "ok": true,
+    "sleep_ms": 2897.405699826777,
+    "wake_ms": 1219.8947500437498,
+    "first_token_ms": 360.0331898778677,
+    "free_before_gib": 60.60300064086914,
+    "free_after_sleep_gib": 60.266441345214844,
+    "free_after_wake_gib": 30.093441009521484,
+    "output": " I'm a 16 year old",
+    "output_rounds": " I'm a 16 year old",
+    "error": ""
+  },
+  {
+    "name": "hccl_destroy_acl_recapture",
+    "ok": true,
+    "sleep_ms": 1257.4357595294714,
+    "wake_ms": 1201.4834005385637,
+    "first_token_ms": 358.42130985111,
+    "free_before_gib": 60.601829528808594,
+    "free_after_sleep_gib": 60.27378463745117,
+    "free_after_wake_gib": 30.121463775634766,
+    "output": " I'm a 16 year old",
+    "output_rounds": " I'm a 16 year old",
+    "error": ""
+  },
+  {
+    "name": "workspace_only",
+    "ok": true,
+    "sleep_ms": 2900.402519851923,
+    "wake_ms": 1214.3037300556898,
+    "first_token_ms": 372.2853194922209,
+    "free_before_gib": 60.602142333984375,
+    "free_after_sleep_gib": 60.2661247253418,
+    "free_after_wake_gib": 30.092987060546875,
+    "output": " I'm a 16 year old",
+    "output_rounds": " I'm a 16 year old",
+    "error": ""
+  },
+  {
+    "name": "fallback_enabled_combo",
+    "ok": false,
+    "sleep_ms": 0.0,
+    "wake_ms": 0.0,
+    "first_token_ms": 0.0,
+    "free_before_gib": 0.0,
+    "free_after_sleep_gib": 0.0,
+    "free_after_wake_gib": 0.0,
+    "output": "",
+    "error": "Engine core initialization failed. See root cause above. Failed core proc(s): {}"
+  }
+]

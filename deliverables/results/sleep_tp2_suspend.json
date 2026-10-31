@@ -1,0 +1,11 @@
+{
+  "case": "tp2_lightweight_destroy_restore",
+  "ok": true,
+  "sleep_s": 1.7531,
+  "wake_s": 0.8476,
+  "text1": " I'm a 16 year old girl. I'm a bit shy and",
+  "text2": " I'm a 16 year old girl. I'm a bit shy and",
+  "elapsed_s": 91.98,
+  "hccl_policy": "lightweight",
+  "mode": "destroy_restore_multi"
+}
