@@ -1064,6 +1064,28 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
 #
+# ** File: worker/patch_kv_transfer_engine_id.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.kv_transfer.kv_transfer_state._sync_engine_id_across_tp`
+#    Why:
+#       vLLM v0.30.0 and current main synchronize KV engine IDs across TP and
+#       PP, but omit PCP. With PP2/PCP8/TP2 on four 8-device nodes, per-node
+#       IDs remain different across PCP replicas and Mooncake rejects worker
+#       handshake metadata belonging to the same logical engine.
+#    How:
+#       Replace the function at module import during NPU worker initialization,
+#       before ensure_kv_transfer_initialized creates the worker connector.
+#       Run the upstream TP/PP synchronization, then broadcast the resulting
+#       ID from PCP rank 0 when PCP > 1. The final ID comes from PP0/PCP0/TP0;
+#       PCP = 1 keeps upstream behavior and DP engines remain independent.
+#       No new UUID is generated and the Scheduler's engine ID is unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PCP engine-ID synchronization PR has been submitted yet;
+#       this patch supplies the missing collective for supported vLLM versions.
+#    Future Plan:
+#       Remove the wrapper and its worker import once the supported vLLM
+#       versions synchronize KV engine IDs across TP, PCP and PP upstream.
+#
 # ** 9. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
