@@ -1025,7 +1025,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # Only tiling metadata is captured. C2 state preparation stays outside
         # the graph, with its actual counts and state-update policy.
         metadata_in_graph = self._device_metadata_in_graph
-        metadata_tokens = num_input_tokens if metadata_in_graph else num_actual_tokens
         shared = kwargs.get("common_v41_metadata")
         if shared is None:
             shared = {}
@@ -1258,42 +1257,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         smla_metadata = None
         qli_metadata = None
 
-        if (
-            self._build_query_metadata
-            and self._uses_a5_packed_cache
-            and cache_kind == "swa"
-            and self._a5_smla_metadata is not None
-            and self._a5_smla_length_rows is not None
-        ):
-
-            def build_a5_smla_metadata() -> None:
-                if metadata_tokens == 0:
-                    self._a5_smla_metadata.zero_()
-                    return
-                length_rows = self._a5_smla_length_rows[:metadata_tokens]
-                assert self._device_backend is not None
-                value = self._device_backend.mixed_quant_sparse_flash_mla_metadata(
-                    length_rows,
-                    length_rows,
-                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int().contiguous(),
-                    num_heads_q=64,
-                    num_heads_kv=1,
-                    head_dim=512,
-                    quant_mode=1,
-                    layout_q="TND",
-                    layout_kv="PA_BBND",
-                    has_ori_kv=True,
-                    has_cmp_kv=True,
-                )
-                self._a5_smla_metadata.copy_(value)
-
-            smla_metadata = self._publish_task(
-                batch_shared,
-                "smla:a5",
-                self._a5_smla_metadata,
-                DeviceMetadataStage.ATTENTION,
-                build_a5_smla_metadata,
-            )
+        # A5 FD task metadata is generated in qsmla from the actual per-layer
+        # lengths after indexer execution; shape-only shared metadata is invalid.
 
         if (
             self._build_query_metadata
