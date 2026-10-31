@@ -35,6 +35,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.expert_offload.quantization import maybe_offload_quant_method
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -573,8 +574,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
-            return super()._get_quant_method(prefix, quant_config, moe_config)
-        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+            method = super()._get_quant_method(prefix, quant_config, moe_config)
+        else:
+            method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+        return maybe_offload_quant_method(self, method)
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""

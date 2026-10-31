@@ -29,6 +29,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 180
   tests/e2e/pull_request/one_card/compile/test_graphex_qkvnorm_rope_fusion.py: 240
   tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 170
+  tests/e2e/pull_request/one_card/test_expert_offload_a5.py: 600
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 190
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 280
   tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 300
