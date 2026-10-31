@@ -408,6 +408,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.pcp_size > 1:
+            # Warmup has no real PCP prefill metadata. Keep the gather and
+            # restore decisions inside an opaque op so Dynamo cannot freeze
+            # their warmup values into the compiled projection graph.
+            return torch.ops.vllm.glm5next_kda_pcp_layer(hidden_states, positions, self.prefix)
+        return self._forward_impl(hidden_states, positions)
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
@@ -717,6 +729,31 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+def glm5next_kda_pcp_layer(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    return layer._forward_impl(hidden_states, positions)
+
+
+def glm5next_kda_pcp_layer_fake(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_pcp_layer",
+    op_func=glm5next_kda_pcp_layer,
+    mutates_args=[],
+    fake_impl=glm5next_kda_pcp_layer_fake,
+)
 
 
 def glm5next_kda_forward(

@@ -33,6 +33,10 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.kda_transfer import (
+    kda_remote_rank_groups,
+    kda_transfer_slices,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
@@ -272,7 +276,22 @@ class MooncakePullRecvingThread(threading.Thread):
                 matched_local_layer_indices.add(local_layer_index)
                 local_spec_index = self.spec_indices[local_layer_index]
                 raw_tp_rank_groups = raw_tp_rank_groups_by_spec.get(local_spec_index)
-                if raw_tp_rank_groups is None:
+                local_kda = self.local_metadata.kda_state_metadata.get(layer_name)
+                remote_kda = pp_metadata.kda_state_metadata.get(layer_name)
+                if local_kda is not None or remote_kda is not None:
+                    if local_kda is None or remote_kda is None:
+                        raise ValueError("Mooncake GLM KDA requires state metadata on both peers; upgrade both sides")
+                    raw_tp_rank_groups = kda_remote_rank_groups(
+                        local_kda,
+                        remote_kda,
+                        tp_rank=self.tp_rank,
+                        pcp_rank=self.pcp_rank,
+                        tp_size=self.tp_size,
+                        pcp_size=self.pcp_size,
+                        remote_tp_size=remote_metadata.tp_size,
+                        remote_pcp_size=remote_metadata.pcp_size,
+                    )
+                elif raw_tp_rank_groups is None:
                     raw_tp_rank_groups = self._get_layer_remote_tp_rank_groups(
                         local_layer_index,
                         remote_layer_index,
@@ -933,6 +952,20 @@ class MooncakePullRecvingThread(threading.Thread):
         length_list: list[int],
     ) -> None:
         """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        if any(
+            self.layer_names[index] in self.local_metadata.kda_state_metadata for index, _ in transfer_entries_by_layer
+        ):
+            self._append_kda_transfer_addresses(
+                remote_pcp_rank,
+                remote_tp_rank,
+                remote_tp_size,
+                transfer_entries_by_layer,
+                remote_metadata,
+                src_list,
+                dst_list,
+                length_list,
+            )
+            return
         tp_replicated = getattr(spec, "tp_replicated", False)
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
@@ -1112,6 +1145,69 @@ class MooncakePullRecvingThread(threading.Thread):
                             src_list.append(local_block_addr + local_inner_offset)
                             dst_list.append(remote_block_addr + remote_inner_offset)
                             length_list.append(transfer_len)
+
+    def _append_kda_transfer_addresses(
+        self,
+        remote_pcp_rank: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+        transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+        remote_metadata: MooncakePPTransferMetadata,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+    ) -> None:
+        """Read committed GLM state; RecoverSSM records remain D-local scratch."""
+        remote_pcp_size = len(remote_metadata.metadata_by_pcp_rank)
+        peer = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
+        for (local_index, remote_index), entries in transfer_entries_by_layer.items():
+            local = self.local_metadata.kda_state_metadata[self.layer_names[local_index]]
+            remote = remote_metadata.kda_state_metadata[remote_metadata.layer_names[remote_index]]
+            local_rank = local.head_rank(self.tp_rank, self.pcp_rank, self.tp_size, self.pcp_size)
+            remote_rank = remote.head_rank(remote_tp_rank, remote_pcp_rank, remote_tp_size, remote_pcp_size)
+            if self.layer_block_sizes[local_index] != remote_metadata.layer_block_sizes[remote_index]:
+                raise ValueError(
+                    "Mooncake GLM KDA requires matching state block sizes: "
+                    f"local={self.layer_block_sizes[local_index]}, "
+                    f"remote={remote_metadata.layer_block_sizes[remote_index]}, cache_mode={local.cache_mode}"
+                )
+            local_bases = self.kv_caches_base_addr[local_index]
+            remote_bases = peer.kv_caches_base_addr[remote_index]
+            if len(local_bases) != len(local.dtypes) or len(remote_bases) != len(remote.dtypes):
+                raise ValueError("Mooncake GLM KDA cache address count mismatch")
+            slices = kda_transfer_slices(
+                local,
+                remote,
+                self.block_shapes[local_index],
+                remote_metadata.block_shapes[remote_index],
+                self.block_lens[local_index],
+                remote_metadata.block_lens[remote_index],
+                self.block_strides[local_index],
+                remote_metadata.block_strides[remote_index],
+                local_head_rank=local_rank,
+                remote_head_rank=remote_rank,
+            )
+            for _, local_blocks, remote_blocks in entries:
+                if len(local_blocks) != len(remote_blocks):
+                    raise ValueError("Mooncake GLM KDA state block counts differ")
+                for local_block, remote_block in zip(local_blocks, remote_blocks):
+                    if not (
+                        0 <= local_block < self.local_metadata.num_blocks
+                        and 0 <= remote_block < remote_metadata.num_blocks
+                    ):
+                        raise ValueError("Mooncake GLM KDA state block ID is out of range")
+                    for cache_index, local_offset, remote_offset, size in slices:
+                        src_list.append(
+                            local_bases[cache_index]
+                            + local_block * self.block_strides[local_index][cache_index]
+                            + local_offset
+                        )
+                        dst_list.append(
+                            remote_bases[cache_index]
+                            + remote_block * remote_metadata.block_strides[remote_index][cache_index]
+                            + remote_offset
+                        )
+                        length_list.append(size)
 
     @staticmethod
     def _append_block_transfer_addresses(

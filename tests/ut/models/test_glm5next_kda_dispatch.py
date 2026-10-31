@@ -67,8 +67,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.pcp_size = pcp_group.world_size
     layer.pcp_rank = pcp_group.rank_in_group
 
-    # The KDA custom op is registered against the NPU dispatch key, so a CPU
-    # runner cannot dispatch it. Call its implementation directly instead.
+    # Both KDA custom ops use the NPU dispatch key. Exercise their Python
+    # implementations in this CPU plumbing test; compiled dispatch has its
+    # own coverage in test_glm5next_kda_pcp.py.
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_pcp_layer", model_kda.glm5next_kda_pcp_layer)
     monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
 
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]

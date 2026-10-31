@@ -21,10 +21,12 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.logger import logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -34,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.kda_transfer import MooncakeKDAStateMetadata
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -308,6 +311,7 @@ class MooncakeBaseConnectorWorker:
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
         configured_layer_names: set[str] = set()
+        kda_state_metadata: dict[str, MooncakeKDAStateMetadata] = {}
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(tensor_config):
@@ -336,6 +340,26 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if isinstance(spec, MambaSpec) and self.vllm_config.model_config.hf_text_config.model_type in (
+                    "glm5_next",
+                    "glm5_next_text",
+                ):
+                    if any(not cache[0].is_contiguous() for cache in caches[:2]):
+                        raise ValueError("Mooncake GLM KDA requires contiguous bytes within each base state page")
+                    parallel = self.vllm_config.parallel_config
+                    speculative = self.vllm_config.speculative_config
+                    kda_state_metadata[layer_name] = MooncakeKDAStateMetadata(
+                        head_shards=parallel.prefill_context_parallel_size
+                        if parallel.tensor_parallel_size == 1
+                        else parallel.tensor_parallel_size,
+                        pcp_head_sharded=parallel.tensor_parallel_size == 1
+                        and parallel.prefill_context_parallel_size > 1,
+                        conv_layout="DS" if is_conv_state_dim_first() else "SD",
+                        dtypes=tuple(str(cache.dtype) for cache in caches),
+                        num_speculative_tokens=speculative.num_speculative_tokens if speculative else 0,
+                        recoverssm=self.vllm_config.cache_config.use_replayssm,
+                        cache_mode=self.vllm_config.cache_config.mamba_cache_mode,
+                    )
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
@@ -411,6 +435,7 @@ class MooncakeBaseConnectorWorker:
             block_size_scales=block_size_scales_per_layer,
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
+            kda_state_metadata=kda_state_metadata,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata

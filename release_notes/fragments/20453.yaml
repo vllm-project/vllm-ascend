@@ -1,0 +1,9 @@
+pr: 20453
+entries:
+  - category: feature
+    text: Added experimental native-GLM PCP prefill to RecoverSSM decode handoff through MooncakeConnectorV2, including committed-state layout and head ownership conversion.
+    model: glm-5.3-flash
+    hardware: [A3]
+  - category: bugfix
+    text: Fixed PD MTP bootstrap inputs, preserved runtime PCP metadata decisions through warmup compilation, and matched sparse-index rows to padded PCP queries.
+    model: glm-5.3-flash
