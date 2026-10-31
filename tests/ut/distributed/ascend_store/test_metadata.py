@@ -20,6 +20,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerMultiBlockReqMeta,
@@ -42,6 +44,74 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     uses_hybrid_kv_cache,
 )
+
+
+@pytest.mark.parametrize("layer_id", [1, 2, 3])
+@pytest.mark.parametrize("start,end,byte_offset,byte_count", [(0, 16, 0, 160), (20, 28, 40, 80)])
+# Verify multi-layer cache addresses use the selected layer and byte range.
+def test_multilayer_addresses(layer_id, start, end, byte_offset, byte_count):
+    db = ChunkedTokenDatabase([KeyMetadata("llama", 0, 0, 0)], [16], None)
+    bases = [10000 * (index + 1) for index in range(8)]
+    db.set_group_buffers({0: bases}, {0: [160, 320] * 4}, group_num_layers={0: 4})
+    addresses, sizes, block_id = db.prepare_value_layer(start, end, [5, 7], layer_id)
+    expected_block = 5 if start == 0 else 7
+    assert block_id == expected_block
+    assert addresses == [
+        bases[2 * layer_id] + expected_block * 160 + byte_offset,
+        bases[2 * layer_id + 1] + expected_block * 320 + 2 * byte_offset,
+    ]
+    assert sizes == [byte_count, 2 * byte_count]
+
+
+@pytest.mark.parametrize("layer_id", [-1, 4, 99])
+# Verify invalid layer IDs do not alias another layer buffer.
+def test_invalid_layer_does_not_alias_another_layer(layer_id):
+    db = ChunkedTokenDatabase([KeyMetadata("llama", 0, 0, 0)], [16], None)
+    db.set_group_buffers({0: [1000, 2000, 3000, 4000]}, {0: [160] * 4}, group_num_layers={0: 4})
+    assert db.prepare_value_layer(0, 16, [5], layer_id) == ([], [], 0)
+
+
+@pytest.mark.parametrize("partitions", [[1, 3], [0, 4], [1, 1, 2]])
+# Verify uneven and empty PP partitions preserve every key, address, and size.
+def test_uneven_pp_partitions_preserve_all_entries(partitions):
+    db = ChunkedTokenDatabase([KeyMetadata("llama", 0, 0, 0)], [16], partitions)
+    db.set_group_buffers({0: list(range(8))}, {0: [16] * 8}, group_num_layers={0: 4})
+    keys = ["model@pp_rank:0@hash-a", "model@pp_rank:0@hash-b"]
+    addresses = [list(range(8)), list(range(100, 108))]
+    sizes = [[16] * 8, [32] * 8]
+    actual_keys, actual_addresses, actual_sizes = db.decode_adaptor_prefill_pp(keys, addresses, sizes)
+    width = len(partitions)
+    assert len(actual_keys) == 2 * width
+    for chunk in range(2):
+        rows = slice(chunk * width, (chunk + 1) * width)
+        assert actual_keys[rows] == [keys[chunk].replace("@pp_rank:0", f"@pp_rank:{rank}") for rank in range(width)]
+        assert [len(row) for row in actual_addresses[rows]] == [2 * count for count in partitions]
+        assert [value for row in actual_addresses[rows] for value in row] == addresses[chunk]
+        assert [value for row in actual_sizes[rows] for value in row] == sizes[chunk]
+    assert addresses == [list(range(8)), list(range(100, 108))]
+
+
+@pytest.mark.parametrize("is_last_chunk", [None, False, True])
+@pytest.mark.parametrize("discard_partial_chunks,expected_tokens", [(True, 16), (False, 20)])
+# Verify bytes hashes and final partial chunks across all is_last_chunk states.
+def test_bytes_hashes_and_final_partial_chunk(is_last_chunk, discard_partial_chunks, expected_tokens):
+    hashes = [b"\x00\xff", b"\x80\x01"]
+    tracker = RequestTracker("partial", token_len=20, allocated_block_ids=[5, 7], token_ids=list(range(20)))
+    meta = ReqMeta.from_request_tracker(
+        tracker,
+        cache_transfer_granularity=16,
+        block_hashes=hashes,
+        is_last_chunk=is_last_chunk,
+        discard_partial_chunks=discard_partial_chunks,
+    )
+    assert meta is not None and meta.can_save
+    assert meta.is_last_chunk is is_last_chunk
+    assert meta.block_hashes == hashes
+    assert meta.token_len_chunk == meta.save_end_token == tracker.num_saved_tokens == expected_tokens
+    assert meta.target_token_len == 20
+    assert meta.token_ids == list(range(expected_tokens))
+    tracker.token_ids[0] = 999
+    assert meta.token_ids[0] == 0
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):

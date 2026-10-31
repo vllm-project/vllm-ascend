@@ -17,7 +17,9 @@
 
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 # isort: off
 from zmq.error import ZMQError
@@ -89,6 +91,96 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.clear_events.assert_called_once()
         ev._aggregator.add_events.assert_called_once_with(common)
         ev._aggregator.reset_workers.assert_called_once()
+
+
+# Verify all lookup/reset protocol branches execute the server loop and release resources.
+@pytest.mark.parametrize("scenario", ["lookup", "empty-hashes", "reset", "reset-error", "unknown", "malformed"])
+def test_lookup_server_protocol_results_and_cleanup(scenario):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with (
+        patch(f"{module}.threading.Thread") as threads,
+        patch(f"{module}.zmq.Poller") as poller,
+        patch(f"{module}.make_zmq_socket") as make_socket,
+        patch(f"{module}.zmq.Context") as contexts,
+    ):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        worker = MagicMock()
+        worker.lookup_scheduler.return_value = 32
+        if scenario == "reset-error":
+            worker.reset_store.side_effect = RuntimeError("reset failed")
+        socket = make_socket.return_value
+        poller.return_value.poll.return_value = [(socket, 1)]
+        server = LookupKeyServer(worker, config)
+        hashes = [] if scenario == "empty-hashes" else ["00ff"]
+        server.decoder = MagicMock()
+        server.decoder.decode.side_effect = [[0, 2], hashes]
+
+        def receive(**kwargs):
+            server.running = False
+            if scenario in ("lookup", "empty-hashes"):
+                return [b"lookup", (64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"hashes"]
+            if scenario.startswith("reset"):
+                return [b"reset"]
+            return [] if scenario == "malformed" else [b"unknown"]
+
+        socket.recv_multipart.side_effect = receive
+        threads.return_value.start.assert_called_once_with()
+        threads.call_args.kwargs["target"]()
+        if scenario in ("lookup", "empty-hashes"):
+            assert server.decoder.decode.call_args_list == [call([b"groups"]), call([b"hashes"])]
+            worker.lookup_scheduler.assert_called_once_with(64, hashes, [0, 2], use_layerwise=False, hbm_hit_tokens=16)
+            socket.send.assert_called_once_with((32).to_bytes(4, "big"))
+            worker.reset_store.assert_not_called()
+        else:
+            worker.lookup_scheduler.assert_not_called()
+            assert worker.reset_store.call_count == int(scenario.startswith("reset"))
+            socket.send.assert_called_once_with(b"\x01" if scenario == "reset" else b"\x00")
+        socket.close.assert_called_once_with(linger=0)
+        contexts.return_value.term.assert_called_once_with()
+
+
+# Verify the same kv_both connector dispatches a full step in batch and layerwise modes.
+@pytest.mark.parametrize("layerwise", [False, True])
+@pytest.mark.parametrize("has_forward", [False, True])
+def test_kv_both_step_dispatches_load_and_save(layerwise, has_forward):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+    with patch(f"{module}.create_kv_pool_worker") as factory, patch(f"{module}.LookupKeyServer") as servers:
+        config = MagicMock()
+        config.kv_transfer_config.kv_role = "kv_both"
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": layerwise}
+        config.parallel_config.rank = 0
+        connector = AscendStoreConnector(config, KVConnectorRole.WORKER)
+        metadata = AscendConnectorMetadata(set())
+        connector.bind_connector_metadata(metadata)
+        worker = factory.return_value
+        connector.start_load_kv(MagicMock() if has_forward else None)
+        connector.wait_for_layer_load("layer_0")
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+        connector.wait_for_save()
+        worker.get_finished.return_value = ({"saved"}, {"loaded"})
+        assert connector.get_finished(set()) == ({"saved"}, {"loaded"})
+        assert worker.m_store.ensure_initialized.call_count == int(has_forward)
+        assert connector._current_step_has_real_forward is False
+        worker.get_finished.assert_called_once_with(set(), metadata)
+        assert connector.can_put
+        worker.start_load_kv.assert_called_once_with(metadata)
+        if layerwise:
+            worker.prepare_layerwise_step.assert_called_once_with(metadata)
+            worker.wait_for_layer_load.assert_called_once_with()
+            worker.save_kv_layer.assert_called_once_with(metadata)
+            worker.wait_for_save.assert_not_called()
+            servers.assert_not_called()
+        else:
+            worker.prepare_layerwise_step.assert_not_called()
+            worker.wait_for_layer_load.assert_not_called()
+            worker.save_kv_layer.assert_not_called()
+            worker.wait_for_save.assert_called_once_with(metadata)
+            servers.assert_called_once_with(worker, config)
 
 
 class TestLookupKeyServer(unittest.TestCase):
