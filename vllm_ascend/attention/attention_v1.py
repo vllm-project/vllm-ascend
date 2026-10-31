@@ -1164,23 +1164,72 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
-        _: torch.Tensor,
+        output: torch.Tensor,
     ) -> torch.Tensor:
-        # use default sparse_mode 0 in normal scenario, which means no mask works on it
-        # Pad actual_seq_len with 0 when num_tokens > actual_seq_len in TND layout
-        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        if query.shape[0] > actual_seq_qlen[-1]:
-            actual_seq_qlen = actual_seq_qlen + [0]
-        return torch_npu.npu_fusion_attention(
-            query=query,
-            key=key,
-            value=value,
-            head_num=self.num_heads,
+        # TND separates requests; encoder sliding attention additionally needs
+        # a symmetric band with abs(i - j) < sliding_window.
+        actual_seq_qlen = list(attn_metadata.actual_seq_lengths_q)
+        num_tokens = actual_seq_qlen[-1]
+        # The mask may be no larger than the query token count, so drop the
+        # padding rows (they are never pooled and produce garbage anyway).
+        query_t = query[:num_tokens] if query.shape[0] > num_tokens else query
+        key_t = key[:num_tokens] if key.shape[0] > num_tokens else key
+        value_t = value[:num_tokens] if value.shape[0] > num_tokens else value
+        fia_kwargs = dict(
+            query=query_t,
+            key=key_t,
+            value=value_t,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
             input_layout="TND",
             scale=self.scale,
-            actual_seq_qlen=actual_seq_qlen,
-            actual_seq_kvlen=actual_seq_qlen,
-        )[0]
+            actual_seq_lengths=actual_seq_qlen,
+            actual_seq_lengths_kv=actual_seq_qlen,
+        )
+        # A sequence that already fits inside one window cannot be masked, so
+        # keep the original maskless call for it; that covers the short-request
+        # common case at no extra cost. The boundary is inclusive, so every pair
+        # of a sequence is visible as soon as ``max_seq_len <= sliding_window``.
+        max_seq_len = 0
+        prev_len = 0
+        for cumulative_len in actual_seq_qlen:
+            max_seq_len = max(max_seq_len, cumulative_len - prev_len)
+            prev_len = cumulative_len
+        if self.sliding_window is not None and max_seq_len > self.sliding_window:
+            # FIA's TND GQA path does not accept an arbitrary band mask.
+            # Use BNSD per request so symmetric windows retain their semantics
+            # without expanding KV heads or mixing tokens between requests.
+            start = 0
+            for end in actual_seq_qlen:
+                seq_len = end - start
+                q = query_t[start:end].reshape(seq_len, self.num_heads, -1).transpose(0, 1).unsqueeze(0)
+                k = key_t[start:end].reshape(seq_len, self.num_kv_heads, -1).transpose(0, 1).unsqueeze(0)
+                v = value_t[start:end].reshape(seq_len, self.num_kv_heads, -1).transpose(0, 1).unsqueeze(0)
+                mask = AttentionMaskBuilder(query.device).get_encoder_band_mask(
+                    seq_len, self.sliding_window, query.device
+                )
+                result = torch_npu.npu_fused_infer_attention_score(
+                    query=q.contiguous(),
+                    key=k.contiguous(),
+                    value=v.contiguous(),
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="BNSD",
+                    scale=self.scale,
+                    atten_mask=mask,
+                    sparse_mode=0,
+                )[0]
+                output[start:end] = result.squeeze(0).transpose(0, 1).reshape_as(query_t[start:end])
+                start = end
+            return output
+        attn_output = torch_npu.npu_fused_infer_attention_score(**fia_kwargs)[0]
+        if attn_output.shape == output.shape:
+            return attn_output
+        # Padding rows were trimmed above: hand back the caller's buffer with
+        # the live rows filled in, since the caller slices it by the untrimmed
+        # token count.
+        output[: attn_output.shape[0]] = attn_output
+        return output
 
     def do_kv_cache_update(
         self,
