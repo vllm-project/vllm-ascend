@@ -976,6 +976,157 @@ def test_dummy_run_flushes_dump_window_without_writing(is_profile, lmhead_tp):
     runner.model.compute_logits.assert_not_called()
 
 
+@pytest.fixture
+def decode_profile_runner():
+    runner = _make_runner()
+    runner.max_num_tokens = 1024
+    runner.max_num_reqs = 64
+    runner.decode_query_len = 6
+    runner.speculator = None
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    runner.ascend_config.scheduler_config.recompute_scheduler_enable = True
+    return runner
+
+
+@pytest.mark.parametrize(
+    ("capacity", "max_reqs", "query_len", "scheduler_budget", "requested", "expected"),
+    [
+        (384, 64, 6, 1024, 1024, 384),
+        (512, 64, 6, 1024, 1024, 384),
+        (384, 64, 6, 256, 1024, 252),
+        (384, 64, 6, 1024, 128, 126),
+        (64, 64, 1, 1024, 1024, 64),
+        (6, 1, 6, 1024, 1024, 6),
+        (384, 64, 6, 1024, 384, 384),
+        (256, 64, 6, 1024, 1024, 252),
+    ],
+)
+def test_decode_memory_profile_uses_complete_queries(
+    decode_profile_runner, capacity, max_reqs, query_len, scheduler_budget, requested, expected
+):
+    runner = decode_profile_runner
+    runner.max_num_tokens = scheduler_budget
+    runner.max_num_reqs = max_reqs
+    runner.decode_query_len = query_len
+
+    with (
+        patch("vllm_ascend.utils.get_ascend_config", return_value=runner.ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.get_potential_max_tokens", return_value=capacity),
+        patch.object(GPUModelRunner, "_dummy_run") as parent,
+    ):
+        runner._dummy_run(requested, skip_attn=True, is_profile=True, randomize_inputs=True)
+
+    parent.assert_called_once_with(
+        expected,
+        skip_attn=True,
+        uniform_decode=True,
+        context_len=0,
+        skip_eplb=True,
+        is_profile=True,
+        randomize_inputs=True,
+    )
+    assert runner.max_num_tokens == scheduler_budget
+    assert runner.max_num_reqs == max_reqs
+
+
+@pytest.mark.parametrize(
+    ("role", "recompute", "is_profile", "skip_attn", "profile_cpp"),
+    [
+        ("producer", True, True, True, False),
+        ("both", True, True, True, False),
+        (None, True, True, True, False),
+        ("consumer", False, True, True, False),
+        ("consumer", True, False, True, False),
+        ("consumer", True, True, False, False),
+        ("consumer", True, True, True, True),
+    ],
+)
+def test_decode_memory_profile_leaves_other_dummy_runs_unchanged(
+    decode_profile_runner, role, recompute, is_profile, skip_attn, profile_cpp
+):
+    runner = decode_profile_runner
+    runner.vllm_config.kv_transfer_config = (
+        SimpleNamespace(is_kv_consumer=role in {"consumer", "both"}, is_kv_producer=role in {"producer", "both"})
+        if role
+        else None
+    )
+    runner.ascend_config.scheduler_config.recompute_scheduler_enable = recompute
+
+    with (
+        patch("vllm_ascend.utils.get_ascend_config", return_value=runner.ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.get_potential_max_tokens") as capacity,
+        patch.object(GPUModelRunner, "_dummy_run") as parent,
+    ):
+        runner._dummy_run(1024, skip_attn=skip_attn, is_profile=is_profile, profile_cpp=profile_cpp)
+
+    capacity.assert_not_called()
+    parent.assert_called_once_with(
+        1024,
+        skip_attn=skip_attn,
+        uniform_decode=False,
+        context_len=0,
+        skip_eplb=True,
+        is_profile=is_profile,
+    )
+    assert runner.max_num_tokens == 1024
+    assert runner.max_num_reqs == 64
+
+
+@pytest.mark.parametrize("fail_forward", [False, True])
+def test_decode_profile_run_fits_megamoe_buffer(decode_profile_runner, fail_forward):
+    runner = decode_profile_runner
+    runner.get_model = Mock(return_value="model")
+    batches = []
+
+    def forward(num_tokens, *, uniform_decode, **kwargs):
+        # Reproduce the operator's capacity guard for the reported 64-request,
+        # five-draft-token configuration, including the parent memory profile.
+        if num_tokens > 384:
+            raise ValueError("MegaMoe received more tokens than its symmetric buffer capacity")
+        assert uniform_decode is True
+        assert num_tokens // runner.decode_query_len <= runner.max_num_reqs
+        batches.append(num_tokens)
+        if fail_forward and len(batches) == 2:
+            raise RuntimeError("profile forward failed")
+
+    def profile(**kwargs):
+        runner._dummy_run(runner.max_num_tokens, skip_attn=True, is_profile=True, **kwargs)
+
+    with (
+        patch("vllm_ascend.utils.get_ascend_config", return_value=runner.ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.get_potential_max_tokens", return_value=384),
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=384),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=MoECommType.FUSED_MC2),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=forward),
+        patch.object(GPUModelRunner, "profile_run", side_effect=profile),
+    ):
+        if fail_forward:
+            with pytest.raises(RuntimeError, match="profile forward failed"):
+                runner.profile_run()
+        else:
+            runner.profile_run()
+
+    assert batches == [384, 384]
+    assert runner.max_num_tokens == 1024
+    assert runner.max_num_reqs == 64
+
+
+def test_decode_memory_profile_rejects_incomplete_query(decode_profile_runner):
+    runner = decode_profile_runner
+    with (
+        patch("vllm_ascend.utils.get_ascend_config", return_value=runner.ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.get_potential_max_tokens", return_value=5),
+        patch.object(GPUModelRunner, "_dummy_run") as parent,
+        pytest.raises(ValueError, match="at least one decode query.*6 tokens.*got 5"),
+    ):
+        runner._dummy_run(1024, skip_attn=True, is_profile=True)
+
+    parent.assert_not_called()
+    assert runner.max_num_tokens == 1024
+
+
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
 def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
     runner = _make_runner()

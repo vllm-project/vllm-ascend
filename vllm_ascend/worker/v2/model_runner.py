@@ -101,8 +101,10 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    get_potential_max_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
+    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -1230,6 +1232,24 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
+        if is_profile and skip_attn and not profile_cpp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+            # Pure decode buffers (including OTP and MegaMoE) need only cover
+            # decode batches. The upstream memory profile instead passes the
+            # potentially larger prefill scheduler budget. Profile complete
+            # decode queries without changing that scheduler budget.
+            profile_max_tokens = min(
+                num_tokens,
+                self.max_num_tokens,
+                get_potential_max_tokens(),
+                self.max_num_reqs * self.decode_query_len,
+            )
+            num_tokens = profile_max_tokens // self.decode_query_len * self.decode_query_len
+            if num_tokens == 0:
+                raise ValueError(
+                    "Decode profiling token capacity must accommodate at least "
+                    f"one decode query ({self.decode_query_len} tokens), got {profile_max_tokens}."
+                )
+            uniform_decode = True
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
