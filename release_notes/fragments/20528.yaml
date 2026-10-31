@@ -1,0 +1,12 @@
+pr: 20528
+entries:
+  - category: feature
+    text: >-
+      Users can select the Ascend sleep-mode backend with
+      --sleep-mode-backend ascend for staged recovery, worker-local execution
+      guards and explicit failure handling. The default NPU selection remains
+      the ascend_legacy compatibility backend.
+  - category: bugfix
+    text: >-
+      Preserve caller SIGTERM and SIGINT handlers during Ascend SDK initialization
+      and graph capture so lazy imports do not replace engine shutdown handlers.
