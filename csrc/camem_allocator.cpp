@@ -15,6 +15,7 @@
  */
 
 #include <iostream>
+#include <atomic>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -41,6 +42,17 @@ struct CaMemAllocation {
 // This brings the limitation that the allocator needs to be singleton.
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
+static PyObject* g_python_free_complete_callback = nullptr;
+// A void deleter cannot report failure to its caller safely. Preserve the
+// ownership record and make the next Python lifecycle/inference boundary fail
+// closed instead of unwinding through a tensor destructor or replaying a graph.
+static std::atomic<bool> g_free_failed{false};
+
+void check_free_error() {
+  if (g_free_failed.load()) {
+    throw std::runtime_error("CaMem free callback failed; restart the worker before inference");
+  }
+}
 
 
 // ---------------------------------------------------------------------------
@@ -58,6 +70,10 @@ void ensure_context(unsigned long long device) {
 
 void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
                     CaMemAllocation* allocation) {
+  if (!allocation) {
+    throw std::runtime_error("create_and_map: allocation handle is null");
+  }
+  check_free_error();
   std::lock_guard<std::mutex> lock(allocation->mutex);
   if (allocation->mapped) {
     return;
@@ -104,6 +120,9 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
 void unmap_and_release(unsigned long long device, ssize_t size,
                        void* d_mem,
                        CaMemAllocation* allocation) {
+  if (!allocation) {
+    throw std::runtime_error("unmap_and_release: allocation handle is null");
+  }
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
@@ -156,6 +175,7 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 // Our exported C functions that call Python:
 
 __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device, aclrtStream stream) {
+  check_free_error();
   if (!g_python_malloc_callback) {
     throw std::runtime_error("my_malloc ERROR: g_python_malloc_callback not set." +
                             std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
@@ -240,7 +260,7 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
   return (void*)d_mem;
 }
 
-__attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, int device, aclrtStream stream) {
+void my_free_impl(void* ptr, ssize_t size, int device, aclrtStream stream) {
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     throw std::runtime_error("aclrtDrvMemHandle ERROR: g_python_malloc_callback not set." +
@@ -264,7 +284,7 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
     Py_XDECREF(py_result);
     PyErr_Print();
     PyGILState_Release(gstate);
-    return;
+    throw std::runtime_error("CaMem free callback did not return a valid handle");
   }
 
   unsigned long long recv_device, recv_size;
@@ -275,7 +295,7 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
     Py_DECREF(py_result);
     PyErr_Print();
     PyGILState_Release(gstate);
-    return;
+    throw std::runtime_error("CaMem free callback returned a malformed handle");
   }
 
   Py_DECREF(py_result);
@@ -292,7 +312,35 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
     throw std::runtime_error("aclrtReleaseMemAddress failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
+  if (g_python_free_complete_callback) {
+    // Keep Python ownership until all driver operations succeed. If this
+    // notification fails, retain the empty native record and poison the
+    // worker; a stale Python handle must never be used for restoration.
+    gstate = PyGILState_Ensure();
+    py_ptr = PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(ptr));
+    py_result = PyObject_CallFunctionObjArgs(g_python_free_complete_callback, py_ptr, NULL);
+    Py_DECREF(py_ptr);
+    if (!py_result) {
+      PyErr_Print();
+      PyGILState_Release(gstate);
+      throw std::runtime_error("CaMem free completion callback failed");
+    }
+    Py_DECREF(py_result);
+    PyGILState_Release(gstate);
+  }
   delete p_memHandle;
+}
+
+__attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, int device, aclrtStream stream) noexcept {
+  try {
+    my_free_impl(ptr, size, device, stream);
+  } catch (const std::exception& error) {
+    g_free_failed.store(true);
+    std::cerr << "CaMem my_free failed; ownership retained until worker restart: " << error.what() << std::endl;
+  } catch (...) {
+    g_free_failed.store(true);
+    std::cerr << "CaMem my_free failed with unknown error; restart the worker" << std::endl;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,12 +350,14 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
 static PyObject* py_init_module(PyObject* self, PyObject* args) {
   PyObject* malloc_callback = nullptr;
   PyObject* free_callback = nullptr;
+  PyObject* free_complete_callback = Py_None;
 
-  if (!PyArg_ParseTuple(args, "OO", &malloc_callback, &free_callback)) {
+  if (!PyArg_ParseTuple(args, "OO|O", &malloc_callback, &free_callback, &free_complete_callback)) {
     return nullptr;
   }
 
-  if (!PyCallable_Check(malloc_callback) || !PyCallable_Check(free_callback)) {
+  if (!PyCallable_Check(malloc_callback) || !PyCallable_Check(free_callback) ||
+      (free_complete_callback != Py_None && !PyCallable_Check(free_complete_callback))) {
     PyErr_SetString(PyExc_TypeError, "Both arguments must be callables");
     return nullptr;
   }
@@ -317,7 +367,18 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
   // outside of this module.
   g_python_malloc_callback = malloc_callback;
   g_python_free_callback = free_callback;
+  g_python_free_complete_callback = free_complete_callback == Py_None ? nullptr : free_complete_callback;
 
+  Py_RETURN_NONE;
+}
+
+static PyObject* python_check_free_error(PyObject* self, PyObject* args) {
+  try {
+    check_free_error();
+  } catch (const std::exception& error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    return nullptr;
+  }
   Py_RETURN_NONE;
 }
 
@@ -378,6 +439,8 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
 }
 
 static PyMethodDef module_methods[] = {
+    {"python_check_free_error", (PyCFunction)python_check_free_error, METH_NOARGS,
+     "Reject further use after a native free callback failure; restart is required."},
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
     {"python_create_and_map", (PyCFunction)python_create_and_map, METH_VARARGS,
