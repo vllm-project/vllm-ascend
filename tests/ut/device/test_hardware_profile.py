@@ -56,6 +56,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.GDN_FUSED_DECODE,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,

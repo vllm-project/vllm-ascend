@@ -94,6 +94,8 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
     FLA_GDN_PREFILL = auto()
+    # Fused BF16 single-token GDN gates, normalization and recurrent update.
+    GDN_FUSED_DECODE = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
@@ -278,6 +280,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.GDN_FUSED_DECODE,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }

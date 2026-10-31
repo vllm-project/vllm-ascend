@@ -30,6 +30,7 @@ from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCap
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+from vllm_ascend.ops.triton.fused_gdn_decode import fused_gdn_decode
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
@@ -40,6 +41,9 @@ if TYPE_CHECKING:
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
 INT64_MAX = torch.iinfo(torch.int64).max
+# Beyond this batch size state bandwidth dominates and the FLA path is retained.
+_MAX_FUSED_GDN_DECODE_TOKENS = 32
+_FUSED_GDN_DECODE_HEAD_DIM = 128
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -950,6 +954,26 @@ class BaseDeviceAdaptor:
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+
+    @staticmethod
+    def try_fused_gdn_decode(q, k, v, a, b, A_log, dt_bias, state, state_indices, query_start_loc):
+        """Use the validated A3 single-token path, or retain the FLA implementation."""
+        if (
+            not get_current_hardware_profile().supports(HardwareCapability.GDN_FUSED_DECODE)
+            or q.device.type != "npu"
+            or any(x.dtype != torch.bfloat16 for x in (q, k, v, a, b))
+            or q.shape[-1] != _FUSED_GDN_DECODE_HEAD_DIM
+            or q.shape[0] > _MAX_FUSED_GDN_DECODE_TOKENS
+            or v.shape[-1] != _FUSED_GDN_DECODE_HEAD_DIM
+            or state.dtype not in (torch.float32, torch.bfloat16)
+            or state.ndim != 4
+            or state.stride(1) != state.shape[2] * state.shape[3]
+            or state.stride(2) != state.shape[3]
+            or state.stride(3) != 1
+            or state.stride(0) < state.shape[1] * state.shape[2] * state.shape[3]
+        ):
+            return None
+        return fused_gdn_decode(q, k, v, a, b, A_log, dt_bias, state, state_indices, query_start_loc)
 
     @staticmethod
     def split_qkv_rmsnorm_rope(
