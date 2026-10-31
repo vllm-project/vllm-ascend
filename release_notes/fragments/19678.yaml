@@ -1,0 +1,7 @@
+pr: 19678
+entries:
+  - category: feature
+    text: >-
+      Added IQuest-Coder-V1-40B-Instruct accuracy config on Ascend NPUs
+      (LlamaForCausalLM mapping via hf_overrides), registered in the nightly
+      accuracy group, with a new model tutorial.
