@@ -930,6 +930,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # later cache group reuses this metadata.
                 fused.gdn_num_reqs = m.num_reqs
                 fused.gdn_seq_lens = m.seq_lens
+                if spec_sequence_masks_cpu is not None and not hasattr(fused, "spec_sequence_indices"):
+                    fused.spec_sequence_indices, fused.non_spec_sequence_indices = (
+                        self._copy_sequence_indices_to_device(spec_sequence_masks_cpu, num_spec_decodes)
+                    )
                 return fused
 
         query_start_loc = m.query_start_loc
