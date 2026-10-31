@@ -42,6 +42,14 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
+    # Shared-expert weights in the A5 MegaMoe layout, one tensor per shared
+    # expert: w1 (2*intermediate, hidden) + scale (2*intermediate, k//2, 2),
+    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). Populated only when
+    # shared-expert fusion into the MegaMoe operator is active.
+    shared_w1: list[torch.Tensor] | None = None
+    shared_w2: list[torch.Tensor] | None = None
+    shared_w1_scale: list[torch.Tensor] | None = None
+    shared_w2_scale: list[torch.Tensor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
