@@ -158,9 +158,14 @@ def test_peer_rejection_forces_fallback_before_cleanup(case, monkeypatch):
 
 def test_inventory_exception_still_votes_for_collective_fallback(case, monkeypatch):
     reuse = controller(case)
-    votes = []
+    votes: list[bool] = []
+
+    def vote(local: bool) -> bool:
+        votes.append(local)
+        return local
+
     monkeypatch.setattr(module, "reuse_unsupported_reason", MagicMock(side_effect=RuntimeError("inventory")))
-    monkeypatch.setattr(reuse, "unanimous", lambda vote: votes.append(vote) or vote)
+    monkeypatch.setattr(reuse, "unanimous", vote)
     assert not reuse.prepare_sleep(1, (case.group,))
     assert votes == [False]
     assert reuse.reason == "resource_inventory_failed"
