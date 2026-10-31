@@ -29,7 +29,7 @@
 
 ## Origin and Differences
 
-- **Origin**: The native DCP query gather in `AscendSFADCPImpl`.
+- **Origin**: The native DCP query gather in `AscendSFAImpl`.
 - **Differences**: Fuses query concatenation with layout preparation and final fragment copies. Runtime token/head/work counts and ordinary strides are not exact-value constexpr keys; only vector widths are static kernel configuration.
 
 ## Test Cases

@@ -7,22 +7,11 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device import device_op
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-
-
-def metadata(**kwargs):
-    values = dict(
-        num_actual_tokens=2049,
-        num_reqs=1,
-        is_prefilling=torch.tensor([True]),
-        attn_state=AscendAttentionState.ChunkedPrefill,
-    )
-    return SimpleNamespace(**(values | kwargs))
 
 
 def pa_writer(write):
@@ -220,8 +209,6 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
 @pytest.mark.parametrize("fast_available", [False, True])
 def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, tokens, fast_available):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
-    impl.enable_sparse_sfa_c8 = True
-    impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
     packed = (torch.arange(4 * 656).reshape(4, 656) % 251 - 125).to(torch.int8)
     k_nope, k_pe, scale = packed.split([512, 128, 16], dim=-1)
@@ -245,8 +232,7 @@ def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, 
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.DeviceOperator", device_op.BaseDeviceAdaptor)
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    result = impl._store_parallel_kv(k_pe, k_nope, scale, (cache,), slots, metadata(num_actual_tokens=tokens))
-    assert result[0] is k_pe and result[1] is k_nope
+    impl._store_packed_kv_cache(k_pe, k_nope, scale, (cache,), slots)
     reference = torch.full_like(cache, -7)
     reference.view(-1, 656)[slots[:tokens].long()] = packed[:tokens]
     torch.testing.assert_close(cache, reference, rtol=0, atol=0)

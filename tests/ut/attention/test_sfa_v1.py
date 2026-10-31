@@ -81,7 +81,7 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -89,7 +89,7 @@ class TestAscendSFABackend(TestBase):
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -507,6 +507,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention_vllm(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.dcp_enabled = False
         impl.enable_sparse_sfa_c8 = True
         impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
@@ -650,6 +651,8 @@ class TestAscendSFAKPathFusion(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_reuses_int64_slots_across_layers(self, mock_kv_cache_op):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.dcp_enabled = False
+        impl.pcp_enabled = False
         impl.enable_sparse_sfa_c8 = False
         impl.enable_sparse_sfa_turboquant = False
         impl.num_kv_heads = 1
@@ -1126,12 +1129,8 @@ class TestAscendSFAImpl(TestBase):
             num_actual_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
-        )
-        context = SimpleNamespace(
-            actual_seq_lengths_query=[1, 2],
-            actual_seq_lengths_key=[1, 2],
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=2,
+            cum_query_lens=[1, 2],
+            seq_lens=[1, 2],
         )
         cases = (
             (PreprocessType.NATIVE, True, False),
@@ -1160,7 +1159,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
-                self.impl._get_parallel_forward_context = lambda *_args: context
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(
@@ -1172,8 +1170,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
-                self.impl._record_query_gather_context = lambda *_args: None
-                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
                 self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
                     "cache", (hidden, hidden, hidden, hidden)
                 )
@@ -1768,6 +1764,8 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
     def test_exec_kv_turboquant_uses_latent_helper(self, mock_native, mock_helper):
         """exec_kv with enable_sparse_sfa_turboquant delegates to the TQ4 helper."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.dcp_enabled = False
+        impl.pcp_enabled = False
         impl.enable_sparse_sfa_turboquant = True
         impl.enable_sparse_sfa_c8 = False
         impl.kv_lora_rank = self.KV_LORA_RANK
@@ -1812,6 +1810,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         """The TQ4 quantization type runs on the packed cache and the result is
         rotated back out of Hadamard space."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.dcp_enabled = False
         impl.enable_sparse_sfa_turboquant = True
         impl.scale = 0.125
         impl.qk_rope_head_dim = self.ROPE_HEAD_DIM
@@ -1851,6 +1850,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
     def test_forward_initializes_transform_outside_graph_capture(self):
         """The transform tensors are built before any graph-captured dispatch."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl._parallel_o_proj = None
         impl.enable_sparse_sfa_turboquant = True
         impl.turboquant = MagicMock()
         hidden_states = torch.randn(2, 4)

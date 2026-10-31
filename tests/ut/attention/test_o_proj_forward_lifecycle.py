@@ -8,14 +8,8 @@ import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
-from vllm_ascend.attention.context_parallel.sfa_cp import (
-    AscendSFADCPImpl,
-    AscendSFADCPMetadata,
-    AscendSFAPCPDCPImpl,
-    AscendSFAPCPImpl,
-)
 from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFADCPMetadata, AscendSFAImpl, PreprocessType
 from vllm_ascend.weight_switch import (
     OProjectionMode,
     ParallelOProjection,
@@ -45,12 +39,14 @@ def _make_projection(layer):
 
 
 @pytest.fixture(
-    params=[AscendSFAPCPImpl, AscendSFAPCPDCPImpl],
+    params=[False, True],
     ids=["pcp", "pcp_dcp"],
 )
 def sfa_impl(request, monkeypatch):
-    impl = request.param.__new__(request.param)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.dcp_enabled = request.param
     impl.o_proj_full_pools = {}
+    impl.pcp_enabled = True
     impl.tp_size = 2
     impl.enable_pcp_o_proj_weight_sharding = True
     impl.is_pcp_decode_sharded = False
@@ -93,11 +89,6 @@ def _metadata(attn_state, *, global_prefill=False):
     return metadata
 
 
-def _prepare_forward(impl, metadata, hidden):
-    context = impl._get_parallel_forward_context(metadata, 1, hidden)
-    assert not hasattr(context, "gather_full_o_proj")
-
-
 def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
     entry_modes: list[bool] = []
     modes: list[bool] = []
@@ -108,7 +99,7 @@ def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
         entry_modes.append(impl._parallel_o_proj.uses_full_weight)
         if metadata is None:
             return output.zero_()
-        _prepare_forward(impl, metadata, hidden)
+        impl._parallel_o_proj.all_gather_weights()
         modes.append(impl._parallel_o_proj.uses_full_weight)
         if impl._parallel_o_proj.uses_full_weight:
             with impl._parallel_o_proj.use_full_weights():
@@ -117,7 +108,7 @@ def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
             assert impl.o_proj.weight.data_ptr() == local_address
         return output
 
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    monkeypatch.setattr(AscendSFAImpl, "_forward_impl", forward)
     hidden = torch.empty(1, 4)
     output = torch.empty_like(hidden)
     for state in (
@@ -133,10 +124,10 @@ def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
     sfa_impl.forward("layer", hidden, (), None, output)
     assert not sfa_impl._parallel_o_proj.uses_full_weight
     assert sfa_impl.waits.call_count == 1
-    assert entry_modes == ([True, False, False, False] if isinstance(sfa_impl, AscendSFAPCPImpl) else [False] * 4)
+    assert entry_modes == [True, False, False, False]
 
 
-@pytest.mark.parametrize("sfa_impl", [AscendSFAPCPImpl, AscendSFAPCPDCPImpl], indirect=True)
+@pytest.mark.parametrize("sfa_impl", [False, True], indirect=True)
 @pytest.mark.parametrize(
     "state,global_prefill,decode_sharded,switch_enabled,expected_mode",
     [
@@ -175,11 +166,11 @@ def test_sfa_pcp_forward_selects_batch_mode_before_attention(
     def forward(impl, name, hidden, cache, metadata, output):
         entry_modes.append(projection.mode)
         if metadata is not None:
-            _prepare_forward(impl, metadata, hidden)
+            impl._parallel_o_proj.all_gather_weights()
             assert projection.mode is expected_mode
         return output.zero_()
 
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    monkeypatch.setattr(AscendSFAImpl, "_forward_impl", forward)
     hidden = torch.empty(1, 4)
     output = torch.full((1, 3), float("nan"))
     metadata = None if state is None else _metadata(state, global_prefill=global_prefill)
@@ -199,7 +190,7 @@ def test_failed_sfa_prefill_restores_local_weights_and_next_decode(sfa_impl, mon
     weight_state = sfa_impl._parallel_o_proj._weight_switch_states[0][2]
 
     def forward(impl, name, hidden, cache, metadata, output):
-        _prepare_forward(impl, metadata, hidden)
+        impl._parallel_o_proj.all_gather_weights()
         if metadata.attn_state == AscendAttentionState.DecodeOnly:
             assert not impl._parallel_o_proj.uses_full_weight
             assert not weight_state.handles
@@ -212,7 +203,7 @@ def test_failed_sfa_prefill_restores_local_weights_and_next_decode(sfa_impl, mon
             assert impl.o_proj.weight.data_ptr() != local_address
             raise failure
 
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    monkeypatch.setattr(AscendSFAImpl, "_forward_impl", forward)
     hidden = torch.empty(1, 4)
     output = torch.empty_like(hidden)
     with pytest.raises(RuntimeError) as caught:
@@ -267,7 +258,10 @@ def test_dsa_cleanup_waits_every_layer_without_hiding_attention_failure(monkeypa
 
 @pytest.mark.parametrize(
     "backend,implementation",
-    [(AscendDSASWABackend, AscendDSAPCPImpl), (AscendSFABackend, AscendSFAPCPImpl)],
+    [
+        (AscendDSASWABackend, AscendDSAPCPImpl),
+        (AscendSFABackend, AscendSFAImpl),
+    ],
 )
 def test_upstream_backend_capability_accepts_the_selected_pcp_implementation(backend, implementation, monkeypatch):
     monkeypatch.setattr(backend, "get_impl_cls", staticmethod(lambda: implementation))
@@ -276,18 +270,21 @@ def test_upstream_backend_capability_accepts_the_selected_pcp_implementation(bac
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_native_sfa_dcp_forward_needs_no_projection_component(monkeypatch, fail):
-    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.dcp_enabled = True
+    impl.pcp_enabled = False
+    impl._parallel_o_proj = None
     failure = RuntimeError("native DCP attention failed")
     output = torch.empty(1, 3)
 
     def forward(owner, name, hidden, cache, metadata, result):
         assert owner is impl
-        assert not hasattr(owner, "_parallel_o_proj")
+        assert owner._parallel_o_proj is None
         if fail:
             raise failure
         return result.zero_()
 
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    monkeypatch.setattr(AscendSFAImpl, "_forward_impl", forward)
     if fail:
         with pytest.raises(RuntimeError) as caught:
             impl.forward("layer", torch.empty(1, 4), (), None, output)
@@ -297,63 +294,57 @@ def test_native_sfa_dcp_forward_needs_no_projection_component(monkeypatch, fail)
 
 
 @pytest.mark.parametrize("switch_enabled", [False, True])
-@pytest.mark.parametrize("impl_cls", [AscendSFADCPImpl, AscendSFAPCPDCPImpl])
-def test_sfa_variant_constructors_and_postload_cooperate(impl_cls, switch_enabled, monkeypatch):
-    from vllm_ascend.attention.context_parallel import common_cp, sfa_cp
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switch_enabled, monkeypatch):
+    from vllm_ascend.attention import sfa_v1
 
-    group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
+    group = SimpleNamespace(world_size=2, rank_in_group=0)
     owner = torch.nn.Module()
-    config = SimpleNamespace(
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=4), dtype=torch.float32),
         compilation_config=SimpleNamespace(static_forward_context={"layer": owner}),
     )
-    base_calls = []
-    loaded = []
+    impl.layer_name = "layer"
+    impl.pcp_enabled = pcp_enabled
+    impl.is_pcp_decode_sharded = False
+    impl.enable_mlapo = True
+    impl.q_proj = torch.nn.Linear(4, 4, bias=False)
+    impl.o_proj = torch.nn.Module()
+    impl.o_proj.input_size, impl.o_proj.input_size_per_partition = 8, 4
+    impl.o_proj.output_size = impl.o_proj.output_size_per_partition = 3
+    impl.o_proj.weight = torch.nn.Parameter(torch.ones(3, 4), requires_grad=False)
+    impl.o_proj.weight.input_dim = 1
+    impl.o_proj.weight.weight_loader = Mock()
+    impl.o_proj.quant_method = _LinearMethod()
+    impl.o_proj_full_pools = {}
+    impl.kv_lora_rank, impl.local_num_heads = 2, 2
+    impl.qk_nope_head_dim, impl.v_head_dim = 1, 2
+    impl.kv_b_proj = SimpleNamespace(weight=torch.ones(6, 2))
+    impl.rl_weight_update_enabled = True
+    impl.has_indexer = impl.enable_sparse_sfa_c8 = False
+    monkeypatch.setattr(sfa_v1, "enable_sfa_dcp_replicated_indexer", lambda config: True)
+    monkeypatch.setattr(sfa_v1, "enable_pcp_o_proj_weight_sharding", lambda: switch_enabled)
+    for name in ("get_tp_group", "get_pcp_group", "get_dcp_group"):
+        monkeypatch.setattr(sfa_v1, name, lambda: group)
+    monkeypatch.setattr(impl, "_resolve_preprocess_type", lambda dtype: PreprocessType.NATIVE)
+    monkeypatch.setattr(sfa_v1, "maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr(sfa_v1.torch_npu, "npu_format_cast", lambda tensor, fmt: tensor)
 
-    def initialize_base(impl, *args, **kwargs):
-        base_calls.append(impl)
-        impl.vllm_config = config
-        impl.layer_name = "layer"
-        impl.tp_size, impl.num_heads = 2, 2
-        impl.enable_mlapo = True
-        impl.is_pcp_decode_sharded = False
-        impl.q_proj = torch.nn.Linear(4, 4, bias=False)
-        impl.o_proj = torch.nn.Module()
-        impl.o_proj.input_size, impl.o_proj.input_size_per_partition = 8, 4
-        impl.o_proj.output_size = impl.o_proj.output_size_per_partition = 3
-        impl.o_proj.weight = torch.nn.Parameter(torch.ones(3, 4), requires_grad=False)
-        impl.o_proj.weight.input_dim = 1
-        impl.o_proj.weight.weight_loader = Mock()
-        impl.o_proj.quant_method = _LinearMethod()
-        impl.o_proj_full_pools = {}
-
-    def process_base(impl, dtype):
-        loaded.append(impl)
-        return "loaded"
-
-    monkeypatch.setattr(AscendSFAImpl, "__init__", initialize_base)
-    monkeypatch.setattr(AscendSFAImpl, "process_weights_after_loading", process_base)
-    monkeypatch.setattr(sfa_cp, "enable_pcp_o_proj_weight_sharding", lambda: switch_enabled)
-    for module in (common_cp, sfa_cp):
-        for name in ("get_tp_group", "get_pcp_group", "get_dcp_group"):
-            monkeypatch.setattr(module, name, lambda: group, raising=False)
-    impl = impl_cls(2, 4, 1.0, 1, None, None, "auto", None, "decoder", None)
-    assert base_calls == [impl]
-    has_component = impl_cls is not AscendSFADCPImpl
-    assert hasattr(impl, "_parallel_o_proj") == has_component
-    if has_component:
+    impl._initialize_pcp_o_proj()
+    impl._initialize_dcp()
+    assert impl.dcp_enabled
+    assert not impl.enable_mlapo
+    assert (impl._parallel_o_proj is not None) == pcp_enabled
+    if pcp_enabled:
         assert impl._parallel_o_proj.enabled == switch_enabled
-        assert impl._parallel_o_proj.project_full.__self__ is impl
-        assert impl._parallel_o_proj.project_full.__func__ is AscendSFAImpl._finalize_o_proj
-    assert impl.process_weights_after_loading(torch.float32) == "loaded"
-    states = impl._parallel_o_proj._weight_switch_states if has_component else None
-    assert (states is not None) == (has_component and switch_enabled)
-    assert impl.process_weights_after_loading(torch.float32) == "loaded"
-    assert loaded == [impl, impl]
-    if has_component:
+        assert impl._parallel_o_proj.project_full.__func__ is AscendSFAImpl._project_o_proj_full
+    impl.process_weights_after_loading(torch.float32)
+    states = impl._parallel_o_proj._weight_switch_states if pcp_enabled else None
+    assert (states is not None) == (pcp_enabled and switch_enabled)
+    assert owner._dcp_sfa_remap_order is impl._remap_order
+    assert owner._dcp_sfa_remap_invalid_index is impl._remap_invalid_index
+    impl.process_weights_after_loading(torch.float32)
+    if pcp_enabled:
         assert impl._parallel_o_proj._weight_switch_states is states
-    if isinstance(impl, AscendSFADCPImpl):
-        assert not impl.enable_mlapo
-        assert owner._dcp_sfa_remap_order is impl._remap_order
-        assert owner._dcp_sfa_remap_invalid_index is impl._remap_invalid_index

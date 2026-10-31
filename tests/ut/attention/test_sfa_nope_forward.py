@@ -11,7 +11,6 @@ from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPDCPImpl, AscendSFAPCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 
 
@@ -41,7 +40,14 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
     for slot, value in zip(slots.tolist(), values):
         if slot >= 0:
             expected[1 + slot // block_size, slot % block_size, 0] = value
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
+    impl = SimpleNamespace(
+        dcp_enabled=False,
+        pcp_enabled=False,
+        qk_rope_head_dim=0,
+        kv_lora_rank=dim,
+        kv_a_layernorm=lambda x: x,
+        enable_sparse_sfa_c8=False,
+    )
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
     with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
         result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
@@ -58,7 +64,14 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
     cache = torch.zeros(2, 4, 1, 8, dtype=torch.bfloat16)
     values = torch.randn(2, 8, dtype=torch.float32)
     slots = torch.tensor([1, 4, 7], dtype=torch.int32)
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
+    impl = SimpleNamespace(
+        dcp_enabled=False,
+        pcp_enabled=False,
+        qk_rope_head_dim=0,
+        kv_lora_rank=8,
+        kv_a_layernorm=lambda x: x,
+        enable_sparse_sfa_c8=False,
+    )
     AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
     expected = torch.zeros_like(cache)
     expected[0, 1, 0] = values[0].to(cache.dtype)
@@ -72,7 +85,14 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
     before = backing.clone()
     values = torch.randn(1, 8)
     slots = torch.tensor([4], dtype=torch.int32)
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
+    impl = SimpleNamespace(
+        dcp_enabled=False,
+        pcp_enabled=False,
+        qk_rope_head_dim=0,
+        kv_lora_rank=8,
+        kv_a_layernorm=lambda x: x,
+        enable_sparse_sfa_c8=False,
+    )
     with (
         patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
         pytest.raises(RuntimeError, match="view size is not compatible"),
@@ -439,15 +459,19 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("actual_tokens", [0, 1, 3])
 @pytest.mark.parametrize(
-    "impl_cls,sharded_decode,global_prefill",
-    [(AscendSFAPCPImpl, False, True), (AscendSFAPCPImpl, True, False), (AscendSFAPCPDCPImpl, False, True)],
+    "dcp_enabled,sharded_decode,global_prefill",
+    [(False, False, True), (False, True, False), (True, False, True)],
 )
 def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
-    impl_cls, sharded_decode, global_prefill, actual_tokens, graph_mode
+    dcp_enabled, sharded_decode, global_prefill, actual_tokens, graph_mode
 ):
     """Run the real forward entry; PCP peers need the same padded row count."""
-    impl = impl_cls.__new__(impl_cls)
-    impl._parallel_o_proj = SimpleNamespace(batch=lambda **kwargs: nullcontext(), uses_full_weight=False)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.dcp_enabled = dcp_enabled
+    impl.pcp_enabled = True
+    impl._parallel_o_proj = SimpleNamespace(
+        batch=lambda **kwargs: nullcontext(), uses_full_weight=False, all_gather_weights=MagicMock()
+    )
     impl.qk_rope_head_dim = 0
     impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=2))
     impl.is_pcp_decode_sharded = sharded_decode
@@ -471,24 +495,17 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
         pcp_has_global_prefill=global_prefill,
         attn_state=AscendAttentionState.ChunkedPrefill if global_prefill else AscendAttentionState.DecodeOnly,
         num_prefills=int(global_prefill and actual_tokens > 0),
+        cum_query_lens=torch.tensor([actual_tokens]),
+        seq_lens=torch.tensor([actual_tokens]),
     )
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
-    impl._get_parallel_forward_context = MagicMock(
-        return_value=SimpleNamespace(
-            actual_seq_lengths_query=torch.tensor([actual_tokens]),
-            actual_seq_lengths_key=torch.tensor([actual_tokens]),
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=4,
-        )
-    )
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
-    impl._store_parallel_kv = MagicMock(return_value=(None, None))
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
-    impl._record_query_gather_context = MagicMock()
+    impl._record_dcp_kv_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
     impl.indexer = MagicMock(return_value=torch.zeros(4, 1, 1, dtype=torch.int32))
     impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(4, 2))
@@ -505,12 +522,13 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     ):
         output = torch.empty_like(hidden)
         assert impl.forward("layer", hidden, (), metadata, output) is output
-    impl._get_parallel_forward_context.assert_called_once()
-    assert impl._get_parallel_forward_context.call_args.args[1] == 4
+    impl._get_sfa_kv_slot_mapping.assert_called_once_with(metadata)
+    assert impl.exec_kv.call_args.args[0].shape[0] == 4
+    assert impl.exec_kv.call_args.args[4] is metadata.slot_mapping
     assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
-    impl._store_parallel_kv.assert_called_once()
     impl._finalize_o_proj.assert_called_once()
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
     assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
     assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
+    assert impl._record_dcp_kv_gather_context.call_count == int(dcp_enabled)
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

@@ -248,6 +248,7 @@ def test_rope_sfa_keeps_rotary_tables_and_kernel_pages(monkeypatch):
 @pytest.mark.parametrize("sfa_c8,li_c8", [(False, False), (True, False), (False, True), (True, True)])
 def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8):
     impl = object.__new__(sfa.AscendSFAImpl)
+    impl.dcp_enabled = False
     impl.qk_rope_head_dim = 64
     impl.layer_name = "model.layers.0.self_attn"
     impl.has_indexer = True

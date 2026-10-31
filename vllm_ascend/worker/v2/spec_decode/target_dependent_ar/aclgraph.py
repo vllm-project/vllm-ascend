@@ -165,10 +165,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         # Mirror vLLM's DP graph-replay token-count metadata.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
         attn_metadata = self.speculator.model_state.attn_metadata
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the draft config because set_forward_context()
-        # does not update it.
+        # Attention graph updates must see the draft ModelConfig.
+        # set_forward_context() does not update the current VllmConfig.
         # TODO: Remove this explicit current-config scope once ACL graph replay
         # passes VllmConfig directly through the graph-update interfaces.
         with (

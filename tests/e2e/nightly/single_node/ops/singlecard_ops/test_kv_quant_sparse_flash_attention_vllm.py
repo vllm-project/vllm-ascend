@@ -725,11 +725,11 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     packed = torch.cat((quantized.flatten(0, -2), scale_bytes.cpu().flatten(0, -2)), dim=-1)
     expected_cache[0, :valid_kv_tokens, 0] = packed[:valid_kv_tokens]
     slots = torch.cat((torch.arange(valid_kv_tokens), torch.tensor([-1]))).npu()
-    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, (cache,), slots, metadata)
+    AscendSFAImpl._store_packed_kv_cache(impl, k_rope, k_nope, scale_bytes, (cache,), slots)
     # This includes a valid slot zero together with an invalid slot. Every
     # unwritten byte must retain its sentinel, including the end of the cache.
     assert torch.equal(cache.cpu(), expected_cache)
-    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, (cache,), torch.full_like(slots, -1), metadata)
+    AscendSFAImpl._store_packed_kv_cache(impl, k_rope, k_nope, scale_bytes, (cache,), torch.full_like(slots, -1))
     assert torch.equal(cache.cpu(), expected_cache)
 
     query = torch.zeros((query_capacity, heads, NOPE_DIM), dtype=dtype)

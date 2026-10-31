@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# Triton-Ascend implementation of AscendSFADCPImpl._remap_sparse_indices.
+# Triton-Ascend implementation of AscendSFAImpl._remap_sparse_indices.
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -122,7 +122,7 @@ def remap_sparse_indices_triton(
     interleave_size: int,
 ) -> torch.Tensor:
     """Triton replacement for the torch implementation in
-    ``AscendSFADCPImpl._remap_sparse_indices``.
+    ``AscendSFAImpl._remap_sparse_indices``.
 
     Args:
         topk_indices: [..., topk_count] int32 replicated-view topk indices.
