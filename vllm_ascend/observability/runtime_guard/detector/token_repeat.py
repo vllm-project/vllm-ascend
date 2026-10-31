@@ -45,9 +45,12 @@ def _ids_already_ints(token_ids: Iterable[int]) -> list[int]:
 
 
 @dataclass
-class TokenRepeatState:
-    """Per-request sliding window for local token re-reading detection."""
+class TokenRepeatWindow:
+    """One sliding window: its own content, scores, freq and counters."""
 
+    window: int
+    threshold: int = 0
+    min_tokens: int = 0
     content: deque[int] = field(default_factory=deque)
     scores: deque[int] = field(default_factory=deque)
     freq: dict[int, int] = field(default_factory=dict)
@@ -56,48 +59,118 @@ class TokenRepeatState:
     consecutive_hits: int = 0
 
 
-def push_token_repeat(
-    state: TokenRepeatState,
+@dataclass
+class TokenRepeatState:
+    """Per-request state: several differently-sized sliding windows."""
+
+    windows: list[TokenRepeatWindow] = field(default_factory=list)
+
+
+def push_token_repeat_window(
+    ws: TokenRepeatWindow,
     tid: int,
     *,
-    window: int,
     ignore: frozenset[int] | set[int],
 ) -> int:
-    """Fold one token into the sliding window; return this step's score.
+    """Fold one token into a single window; return this window's score.
 
-    Score = how many times ``tid`` already appears in the prior content window
+    Score = how many times ``tid`` already appears in the window's content
     (ignored tokens score 0 and are not stored). ``repeat_sum`` is the sum of
     the last ``window`` scores.
     """
     if tid in ignore:
         score = 0
     else:
-        score = int(state.freq.get(tid, 0))
-        state.content.append(tid)
-        state.freq[tid] = score + 1
-        state.content_tokens_seen += 1
-        while len(state.content) > window:
-            old = state.content.popleft()
-            left = state.freq.get(old, 0) - 1
+        score = int(ws.freq.get(tid, 0))
+        ws.content.append(tid)
+        ws.freq[tid] = score + 1
+        ws.content_tokens_seen += 1
+        while len(ws.content) > ws.window:
+            old = ws.content.popleft()
+            left = ws.freq.get(old, 0) - 1
             if left <= 0:
-                state.freq.pop(old, None)
+                ws.freq.pop(old, None)
             else:
-                state.freq[old] = left
+                ws.freq[old] = left
 
-    state.scores.append(score)
-    state.repeat_sum += score
-    while len(state.scores) > window:
-        state.repeat_sum -= state.scores.popleft()
+    ws.scores.append(score)
+    ws.repeat_sum += score
+    while len(ws.scores) > ws.window:
+        ws.repeat_sum -= ws.scores.popleft()
     return score
 
 
+def push_token_repeat(
+    state: TokenRepeatState,
+    tid: int,
+    *,
+    ignore: frozenset[int] | set[int],
+) -> list[int]:
+    """Fold one token into every window; return per-window scores."""
+    return [push_token_repeat_window(ws, tid, ignore=ignore) for ws in state.windows]
+
+
+def _as_int_list(
+    raw: Any,
+    *,
+    default: list[int],
+    field: str,
+    min_value: int,
+    max_value: int | None = None,
+) -> list[int]:
+    """Normalize a scalar-or-list config value into a ``list[int]``.
+
+    Direct ``_data`` edits (unit tests / startup overlays that bypass full
+    validation) still funnel through here, so the detector stays robust.
+    Out-of-range values are rejected (not silently clamped) so a bad window
+    keeps the previous config instead of quietly changing behavior.
+    """
+    if raw is None:
+        return list(default)
+    if isinstance(raw, bool):
+        raise ValueError(f"{field} must be an int or list of ints, got {raw!r}")
+    if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and not raw.is_integer():
+            raise ValueError(f"{field} must be an integer, got {raw!r}")
+        _check_window_value(int(raw), field, min_value, max_value)
+        return [int(raw)]
+    if isinstance(raw, (list, tuple)):
+        out: list[int] = []
+        for item in raw:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError(f"{field} entries must be int, got {item!r}")
+            _check_window_value(int(item), field, min_value, max_value)
+            out.append(int(item))
+        return out
+    raise ValueError(f"{field} must be an int or list of ints, got {type(raw).__name__}")
+
+
+def _check_window_value(value: int, field: str, min_value: int, max_value: int | None) -> None:
+    """Reject window sizes outside ``[min_value, max_value]``."""
+    if value < min_value:
+        raise ValueError(f"{field} must be >= {min_value}, got {value}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{field} must be <= {max_value}, got {value}")
+
+
+# Bounds for the multi-window config surface. A window smaller than this is a
+# degenerate "two identical adjacent tokens" detector that W=8 already covers,
+# and more/larger windows only add linear CPU/memory without extra coverage.
+_MIN_WINDOW = 8
+_MAX_WINDOW = 512
+_MAX_WINDOWS = 4
+
+
 class TokenRepeatDetector(ConfigBackedDetector):
-    """Detect local token re-reading via sliding-window ``repeat_sum``.
+    """Detect local token re-reading via one or more sliding-window ``repeat_sum``.
 
     Consumes the cumulative output stream from ``RequestIoSnapshotManager``
     (IO is appended once in after-sample, not in ``check_after_spec``). A
     per-req cursor tracks how far the stream has been folded into the repeat
-    window so each id is pushed once.
+    window so each id is pushed once. ``window`` / ``repeat_sum_threshold`` /
+    ``min_tokens`` each accept a scalar (legacy single window) or a list of the
+    same length (multi-window); any window crossing its own threshold arms the
+    incident.
     """
 
     incident_type = "token_repeat"
@@ -105,23 +178,32 @@ class TokenRepeatDetector(ConfigBackedDetector):
     schema = DetectorSchema(
         section_key="token_repeat",
         stage="after_sample",
-        help="Sliding-window local token re-read (no logprobs).",
+        help="Sliding-window local token re-read (no logprobs); multi-window supported.",
         fields=(
             ConfigField("enabled", False, "bool", help="Master switch"),
-            ConfigField("window", 32, "int", min_value=1, help="Sliding content window"),
+            ConfigField(
+                "window",
+                32,
+                "int_or_list_int",
+                min_value=_MIN_WINDOW,
+                max_value=_MAX_WINDOW,
+                min_items=1,
+                max_items=_MAX_WINDOWS,
+                help="Sliding content window size(s); scalar or list for multi-window",
+            ),
             ConfigField(
                 "repeat_sum_threshold",
                 64,
-                "int",
+                "int_or_list_int",
                 min_value=0,
-                help="Alert when sum of repeat scores exceeds this",
+                help="Repeat-sum alert threshold(s); scalar or list matching window",
             ),
             ConfigField(
                 "min_tokens",
                 32,
-                "int",
+                "int_or_list_int",
                 min_value=0,
-                help="Minimum content tokens before alerting (0 = no warmup)",
+                help="Minimum content tokens per window before alerting (scalar or list)",
             ),
             ConfigField(
                 "consecutive_hits",
@@ -147,9 +229,9 @@ class TokenRepeatDetector(ConfigBackedDetector):
     ) -> None:
         super().__init__(runtime_config=runtime_config, runner=runner, enabled=False)
         _section = self.schema.defaults_dict()
-        self._window = int(_section["window"])
-        self._repeat_sum_threshold = int(_section["repeat_sum_threshold"])
-        self._min_tokens = int(_section["min_tokens"])
+        self._windows: list[int] = [int(_section["window"])]
+        self._repeat_sum_thresholds: list[int] = [int(_section["repeat_sum_threshold"])]
+        self._min_tokens: list[int] = [int(_section["min_tokens"])]
         self._consecutive_hits_thresh = int(_section["consecutive_hits"])
         self._ignore_token_ids: frozenset[int] = frozenset()
         self._states: dict[str, TokenRepeatState] = {}
@@ -160,16 +242,67 @@ class TokenRepeatDetector(ConfigBackedDetector):
             self.refresh_from_config()
 
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
-        new_window = max(1, int(getter("window", self._window)))
-        if new_window != self._window and self._states:
+        try:
+            new_windows = _as_int_list(
+                getter("window", self._windows),
+                default=self._windows,
+                field="token_repeat.window",
+                min_value=_MIN_WINDOW,
+                max_value=_MAX_WINDOW,
+            )
+            if not new_windows:
+                raise ValueError("token_repeat: at least one window is required")
+            if len(new_windows) > _MAX_WINDOWS:
+                raise ValueError(f"token_repeat: at most {_MAX_WINDOWS} windows, got {len(new_windows)}")
+            new_thresholds = _as_int_list(
+                getter("repeat_sum_threshold", self._repeat_sum_thresholds),
+                default=self._repeat_sum_thresholds,
+                field="token_repeat.repeat_sum_threshold",
+                min_value=0,
+            )
+            new_min_tokens = _as_int_list(
+                getter("min_tokens", self._min_tokens),
+                default=self._min_tokens,
+                field="token_repeat.min_tokens",
+                min_value=0,
+            )
+            # A scalar threshold / min_tokens applies to every window.
+            if len(new_thresholds) == 1:
+                new_thresholds = new_thresholds * len(new_windows)
+            if len(new_min_tokens) == 1:
+                new_min_tokens = new_min_tokens * len(new_windows)
+            if len(new_thresholds) != len(new_windows) or len(new_min_tokens) != len(new_windows):
+                raise ValueError(
+                    "token_repeat: window/repeat_sum_threshold/min_tokens lengths must match "
+                    f"(window={len(new_windows)}, thresholds={len(new_thresholds)}, "
+                    f"min_tokens={len(new_min_tokens)})"
+                )
+            if len(set(new_windows)) != len(new_windows):
+                raise ValueError("token_repeat: window sizes must be unique")
+        except (TypeError, ValueError) as exc:
+            logger.error("[runtime_guard: token_repeat] invalid config: %s; keeping previous", exc)
+            return
+
+        windows_changed = new_windows != self._windows
+        levels_changed = new_thresholds != self._repeat_sum_thresholds or new_min_tokens != self._min_tokens
+        if windows_changed and self._states:
             # B12 fix: also clear _alerted — a req already alerted under the
-            # old window would never be re-evaluated under the new window.
+            # old windows would never be re-evaluated under the new windows.
             self._states.clear()
             self._consumed_len.clear()
             self._alerted.clear()
-        self._window = new_window
-        self._repeat_sum_threshold = max(0, int(getter("repeat_sum_threshold", self._repeat_sum_threshold)))
-        self._min_tokens = max(0, int(getter("min_tokens", self._min_tokens)))
+        elif levels_changed and self._states:
+            # Window sizes are unchanged, so in-flight windows keep their content,
+            # scores and hit streaks; only the per-window threshold / warmup captured
+            # at state creation have to follow the hot-reloaded config, otherwise
+            # ongoing requests keep alerting on the stale values until they finish.
+            for state in self._states.values():
+                for ws, threshold, min_tokens in zip(state.windows, new_thresholds, new_min_tokens):
+                    ws.threshold = threshold
+                    ws.min_tokens = min_tokens
+        self._windows = new_windows
+        self._repeat_sum_thresholds = new_thresholds
+        self._min_tokens = new_min_tokens
         self._consecutive_hits_thresh = max(1, int(getter("consecutive_hits", self._consecutive_hits_thresh)))
         try:
             ignore = coerce_list_int(getter("ignore_token_ids", []), "ignore_token_ids")
@@ -253,52 +386,70 @@ class TokenRepeatDetector(ConfigBackedDetector):
     ) -> Incident | None:
         state = self._states.get(req_id)
         if state is None:
-            state = TokenRepeatState()
+            state = TokenRepeatState(
+                windows=[
+                    TokenRepeatWindow(window=w, threshold=t, min_tokens=m)
+                    for w, t, m in zip(self._windows, self._repeat_sum_thresholds, self._min_tokens)
+                ]
+            )
             self._states[req_id] = state
 
         ids_list = _ids_already_ints(token_ids)
-        window = self._window
-        thresh = self._repeat_sum_threshold
         ignore = self._ignore_token_ids
+        cons_thresh = self._consecutive_hits_thresh
         hit = False
-        last_score = 0
+        fired_windows: set[int] = set()
         for tid in ids_list:
-            last_score = push_token_repeat(state, int(tid), window=window, ignore=ignore)
-            warmed = state.content_tokens_seen >= self._min_tokens
-            over = warmed and state.repeat_sum > thresh
-            if over:
-                state.consecutive_hits += 1
-            else:
-                state.consecutive_hits = 0
-            if state.consecutive_hits >= self._consecutive_hits_thresh:
-                hit = True
-                # Keep pushing remaining ids so window state matches the full
-                # cumulative delta already committed via _consumed_len.
+            for ws in state.windows:
+                push_token_repeat_window(ws, int(tid), ignore=ignore)
+                warmed = ws.content_tokens_seen >= ws.min_tokens
+                over = warmed and ws.repeat_sum > ws.threshold
+                if over:
+                    ws.consecutive_hits += 1
+                else:
+                    ws.consecutive_hits = 0
+                if ws.consecutive_hits >= cons_thresh:
+                    fired_windows.add(ws.window)
+                    hit = True
+                    # Keep pushing remaining ids so window state matches the
+                    # full cumulative delta already committed via _consumed_len.
 
         if not hit:
             return None
 
         self._alerted.add(req_id)
+        by_window = {ws.window: ws for ws in state.windows}
+        primary = by_window[min(fired_windows)]
         detail = {
-            "repeat_sum": state.repeat_sum,
-            "repeat_sum_threshold": thresh,
-            "window": window,
-            "content_tokens_seen": state.content_tokens_seen,
-            "last_score": last_score,
-            "consecutive_hits": state.consecutive_hits,
+            "window": primary.window,
+            "repeat_sum": primary.repeat_sum,
+            "repeat_sum_threshold": primary.threshold,
+            "content_tokens_seen": primary.content_tokens_seen,
+            "consecutive_hits": primary.consecutive_hits,
+            "fired_windows": sorted(fired_windows),
+            "window_details": [
+                {
+                    "window": ws.window,
+                    "repeat_sum": ws.repeat_sum,
+                    "repeat_sum_threshold": ws.threshold,
+                    "content_tokens_seen": ws.content_tokens_seen,
+                }
+                for ws in state.windows
+            ],
             "chunk_len": len(ids_list),
             "recent_token_ids": ids_list[-min(32, len(ids_list)) :],
         }
         if log_leader:
             logger.error(
-                "[runtime_guard: token_repeat] req=%s repeat_sum=%s threshold=%s "
-                "window=%s content_seen=%s consecutive=%s",
+                "[runtime_guard: token_repeat] req=%s fired_windows=%s window=%s "
+                "repeat_sum=%s threshold=%s content_seen=%s consecutive=%s",
                 req_id,
-                state.repeat_sum,
-                thresh,
-                window,
-                state.content_tokens_seen,
-                state.consecutive_hits,
+                sorted(fired_windows),
+                primary.window,
+                primary.repeat_sum,
+                primary.threshold,
+                primary.content_tokens_seen,
+                primary.consecutive_hits,
             )
         return Incident(
             incident_type=self.incident_type,
