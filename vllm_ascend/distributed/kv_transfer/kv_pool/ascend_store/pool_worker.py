@@ -180,14 +180,18 @@ class KVPoolWorker:
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
+        self.grouped_block_size = infer_group_block_sizes(
+            vllm_config.cache_config.block_size, kv_cache_groups, self.dcp_size
+        )
+        cacheable_block_sizes = [self.grouped_block_size[i] for i in self.cacheable_group_ids]
+        requested_hash_block_size = (
+            getattr(kv_cache_config, "hash_block_size", None) or vllm_config.cache_config.prefix_match_unit
+        )
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
+            requested_hash_block_size if requested_hash_block_size is not None else math.gcd(*cacheable_block_sizes)
+        )
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"

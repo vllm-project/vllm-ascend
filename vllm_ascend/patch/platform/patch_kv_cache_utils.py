@@ -154,7 +154,9 @@ def _ascend_resolve_kv_cache_block_sizes(
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by DCP for proper alignment.
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp
-        if not cache_config.enable_prefix_caching:
+        # External caching consumes request hashes even with local prefix
+        # caching disabled. Its state pages may be smaller than the CP LCM.
+        if not cache_config.enable_prefix_caching and vllm_config.kv_transfer_config is None:
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
