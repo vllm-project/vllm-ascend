@@ -164,6 +164,26 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+### Speculative draft weight updates
+
+With a model-based speculative decoder and a weight-transfer backend that
+supports draft updates, call `start_draft_weight_update()` instead of
+`start_weight_update()`. Send the draft model's weight chunks through the same
+`update_weights()` interface, then call `finish_weight_update()`. The worker
+selects the draft model and its model configuration for that session and
+restores the transfer engine's target model afterward.
+
+Ascend proposers reuse their model-specific LM-head sharing rules during a
+draft update. Completion restores the original draft head modules and refreshes
+online-quantized head copies in place. Existing ACL graph wrappers and update
+streams are preserved. A draft that shares the target LM head also updates that
+shared source when its LM-head weights are transferred.
+
+Generation must remain paused throughout the update. Overlapping target and
+draft update sessions are rejected. A failed update restores routing and head
+references, but does not roll back partially loaded weights; complete a fresh
+update before resuming generation.
+
 ### Pause and resume generation
 
 With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.
