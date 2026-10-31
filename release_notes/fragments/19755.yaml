@@ -1,0 +1,4 @@
+pr: 19755
+entries:
+  - category: bugfix
+    text: Avoided redundant layerwise KV pool queries and SSD rewarming for complete prefixes already resident in local HBM, while preserving layer-reuse probing.

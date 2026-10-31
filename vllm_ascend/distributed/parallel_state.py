@@ -204,11 +204,11 @@ def init_ascend_model_parallel(
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
-    if lmhead_tp_size > 0:
+    if lmhead_tp_size > 1:
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
-    if embedding_tp_size > 0:
+    if embedding_tp_size > 1:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
-    if mlp_tp_size > 0:
+    if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
 

@@ -8,6 +8,7 @@ import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -375,6 +376,7 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill.max_kv_blocks == 3
         assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
         rebuilt = builder.build(0, common)
+        assert rebuilt.prefill is not None
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
@@ -394,21 +396,27 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
 
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
+    assert metadata.causal_mask is not None
     assert metadata.causal_mask.shape == (2048, 2048)
     if batch_spec.name == "decode_only":
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
+        assert metadata.decode.start_loc is not None
+        assert metadata.decode.context_lens is not None
         assert metadata.decode.start_loc.dtype == torch.int32
         assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
         assert builder.decode_start_loc_buffer is not None
         assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
         rebuilt = builder.build(0, common)
+        assert rebuilt.decode is not None
+        assert rebuilt.decode.start_loc is not None
         assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
+        assert metadata.prefill.start_loc is not None
         assert torch.equal(
             metadata.prefill.start_loc,
             metadata.prefill.context_lens // 128,
@@ -417,6 +425,8 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill.start_loc.data_ptr() == builder.prefill_start_loc_buffer.data_ptr()
         assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
         rebuilt = builder.build(0, common)
+        assert rebuilt.prefill is not None
+        assert rebuilt.prefill.start_loc is not None
         assert rebuilt.prefill.start_loc.data_ptr() == metadata.prefill.start_loc.data_ptr()
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
@@ -495,12 +505,16 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode(monkeypatch: py
     assert first.num_decodes == 15
     assert first.num_decode_tokens == 60
     assert first.decode is not None
+    assert first.decode.cu_seqlens_q is not None
+    assert first.decode.context_lens is not None
     assert first.decode.cu_seqlens_q.shape == (16,)
     assert first.decode.cu_seqlens_q[-1] == 60
     assert first.decode.block_table.shape[0] == 15
     assert first.decode.context_lens.shape == (15,)
     assert second.decode is not None
     assert first.decode.block_table.data_ptr() == second.decode.block_table.data_ptr()
+    assert second.decode.context_lens is not None
+    assert second.decode.cu_seqlens_q is not None
     assert first.decode.context_lens.data_ptr() == second.decode.context_lens.data_ptr()
     assert first.decode.cu_seqlens_q.data_ptr() == second.decode.cu_seqlens_q.data_ptr()
 
@@ -560,21 +574,19 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
+def test_index_score_uses_ascendc_prefill_and_decode_on_all_devices() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _active_decode_num_reqs", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
-        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
-    )
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
 
 
 def _make_mrv2_padding_context(
@@ -594,7 +606,8 @@ def _make_mrv2_padding_context(
     )
 
 
-def test_a5_indexer_forward_keeps_original_decode_path() -> None:
+def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
+    """The A5 Triton decode branch stays patched-reachable as a rollback path."""
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1
@@ -604,9 +617,12 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
-        prefix="layer.attn.index_cache",
-        kv_cache=torch.zeros(4, 128, 4),
+    impl.index_cache = cast(
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(
+            prefix="layer.attn.index_cache",
+            kv_cache=torch.zeros(4, 128, 4),
+        ),
     )
     decode = AscendMiniMaxM3IndexerDecodeMetadata(
         seq_lens=torch.tensor([129], dtype=torch.int32),
@@ -677,9 +693,12 @@ def test_a3_indexer_forward_receives_fused_select_counts() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
-        prefix="layer.attn.index_cache",
-        kv_cache=torch.zeros(4, 128, 4),
+    impl.index_cache = cast(
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(
+            prefix="layer.attn.index_cache",
+            kv_cache=torch.zeros(4, 128, 4),
+        ),
     )
     decode = AscendMiniMaxM3IndexerDecodeMetadata(
         cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
@@ -737,9 +756,12 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
-        prefix="layer.attn.index_cache",
-        kv_cache=torch.zeros(4, 128, 4),
+    impl.index_cache = cast(
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(
+            prefix="layer.attn.index_cache",
+            kv_cache=torch.zeros(4, 128, 4),
+        ),
     )
     prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
         cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
@@ -1713,7 +1735,9 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     impl.topk_blocks = 2
     impl.init_blocks = 1
     impl.local_blocks = 1
-    impl.index_cache = SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+    impl.index_cache = cast(
+        AscendMiniMaxM3IndexerCache, SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+    )
     context = _make_mrv2_padding_context() if idle_dp else SimpleNamespace(additional_kwargs={})
     context.attn_metadata = {"index": metadata}
     monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: context)

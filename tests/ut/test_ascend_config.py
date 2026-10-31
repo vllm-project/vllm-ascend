@@ -54,7 +54,7 @@ from vllm_ascend.ascend_config import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
+from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
@@ -161,7 +161,7 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
-        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (0, 1), (1, 1), (0, 2), (1, 2)):
             with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
                 clear_ascend_config()
                 config = VllmConfig()
@@ -173,7 +173,7 @@ class TestAscendConfig(TestBase):
                     },
                     "scheduler_config": {"recompute_scheduler_enable": False},
                 }
-                if otp_size > 1 or mlp_size > 0:
+                if otp_size > 1 or mlp_size > 1:
                     with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
                         init_ascend_config(config)
                 else:
@@ -214,7 +214,7 @@ class TestAscendConfig(TestBase):
 
         self.assertEqual(config.kvpp_config.size, 1)
         self.assertFalse(config.xlite_graph_config.enabled)
-        self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 1)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
         self.assertFalse(config.rl_config.enabled)
 
@@ -1313,6 +1313,19 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
+    def test_finegrained_tp_config_defaults_to_one(self):
+        # 1 is vLLM's "size 1 = no sharding" default; every knob starts disabled.
+        config = FinegrainedTPConfig()
+        self.assertEqual(
+            (
+                config.oproj_tensor_parallel_size,
+                config.lmhead_tensor_parallel_size,
+                config.embedding_tensor_parallel_size,
+                config.mlp_tensor_parallel_size,
+            ),
+            (1, 1, 1, 1),
+        )
+
     def _oproj_tp_vllm_config(
         self,
         max_num_batched_tokens=8192,
@@ -1369,7 +1382,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         self.assertEqual(config.oproj_tensor_parallel_size, 2)
         # 300 reqs x decode_query_len 2 (spec window) = 600 > 512: disabled with a warning.
         config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
         # An explicit capture size that covers the step keeps the knob on.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
         config._validate_preconditions(
@@ -1390,8 +1403,8 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # The step bound is knob-independent, so an oversized step disables both knobs together.
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
         config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
-        self.assertEqual(config.oproj_tensor_parallel_size, 0)
-        self.assertEqual(config.mlp_tensor_parallel_size, 0)
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
+        self.assertEqual(config.mlp_tensor_parallel_size, 1)
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
@@ -1414,7 +1427,7 @@ class TestUpstreamConfigCompatibility(TestBase):
         vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-        for field, value in (("hidden_size", 896), ("intermediate_size", 4096), ("num_experts_per_tok", 33)):
+        for field, value in (("hidden_size", 896), ("intermediate_size", 4224), ("num_experts_per_tok", 33)):
             with self.subTest(field=field), patch.object(text_config, field, value):
                 self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         for world_size in (1, 3):
@@ -1423,7 +1436,11 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        # The intermediate-size check is a plain range + alignment rule now, so
+        # 6144-wide first projections are accepted for every architecture.
         text_config.moe_intermediate_size = 3072
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 4608
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
@@ -1506,7 +1523,7 @@ class TestUpstreamConfigCompatibility(TestBase):
                 self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
                     ("hidden_size", 3584),
-                    ("moe_intermediate_size", 3072),
+                    ("moe_intermediate_size", 4608),
                     ("moe_intermediate_size", None),
                     ("num_experts_per_tok", 33),
                 ):
@@ -1811,43 +1828,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {
-            "enable_dsa_cp": "false",
             "enable_pcp_o_proj_weight_sharding": "true",
             "draft_window_size": "4096",
         }
 
         config = init_ascend_config(vc)
 
-        self.assertFalse(config.enable_dsa_cp)
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_dsa_cp_model_gate_is_resolved_during_init(self, mock_fix):
-        unsupported_vc = VllmConfig()
-        unsupported_vc.additional_config = {"enable_dsa_cp": True}
-        self.assertFalse(init_ascend_config(unsupported_vc).enable_dsa_cp)
-
-        supported_vc = VllmConfig()
-        supported_vc.model_config = SimpleNamespace(
-            is_moe=False,
-            hf_text_config=SimpleNamespace(index_topk=2048),
-            hf_config=SimpleNamespace(),
-            enforce_eager=True,
-            architectures=[],
-        )
-        supported_vc.additional_config = {"enable_dsa_cp": True}
-        # DSA-CP additionally requires sequence parallelism: EP + TP>1 + DP>1
-        # makes ParallelConfig.use_sequence_parallel_moe True.
-        supported_vc.parallel_config.enable_expert_parallel = True
-        supported_vc.parallel_config.tensor_parallel_size = 2
-        supported_vc.parallel_config.data_parallel_size = 2
-        self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
-
-        # init_ascend_config clears process caches after publishing the new
-        # singleton. This read must not require vLLM's temporary config context.
-        self.assertTrue(enable_dsa_cp())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1862,12 +1850,11 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             vc.parallel_config.all2all_backend = "allgather_reducescatter"
             vc.additional_config = {"enable_flashcomm1": True}
 
-            config = init_ascend_config(vc)
+            init_ascend_config(vc)
 
             self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
             self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
             self.assertTrue(enable_sp(vc))
-            self.assertFalse(config.enable_dsa_cp)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1886,70 +1873,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
             self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
             self.assertFalse(enable_sp(vc))
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_dsa_cp_enabled_auto_keeps_sp_when_conditions_met(self, mock_fix):
-        """Case 3: dsa_cp on + SP conditions met (+indexer) -> SP auto-kept, dsa stays on."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
-            vc = VllmConfig()
-            vc.model_config = SimpleNamespace(
-                is_moe=False,
-                hf_text_config=SimpleNamespace(index_topk=2048),
-                hf_config=SimpleNamespace(),
-                enforce_eager=True,
-                architectures=[],
-            )
-            vc.parallel_config.enable_expert_parallel = True
-            vc.parallel_config.tensor_parallel_size = 2
-            vc.parallel_config.data_parallel_size = 2
-            vc.parallel_config.all2all_backend = "allgather_reducescatter"
-            vc.additional_config = {"enable_dsa_cp": True}
-
-            config = init_ascend_config(vc)
-
-            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
-            self.assertTrue(enable_sp(vc))
-            self.assertTrue(config.enable_dsa_cp)
-            self.assertTrue(enable_dsa_cp())
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_dsa_cp_and_pcp_are_mutually_exclusive(self, mock_fix):
-        vc = VllmConfig()
-        vc.additional_config = {"enable_dsa_cp": True}
-        vc.parallel_config.prefill_context_parallel_size = 4
-
-        with self.assertRaisesRegex(ValueError, "DSA-CP and PCP cannot be enabled at the same time.*Use PCP instead"):
-            init_ascend_config(vc)
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
-        """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
-            vc = VllmConfig()
-            vc.model_config = SimpleNamespace(
-                is_moe=False,
-                hf_text_config=SimpleNamespace(index_topk=2048),
-                hf_config=SimpleNamespace(),
-                enforce_eager=True,
-                architectures=[],
-            )
-            vc.parallel_config.enable_expert_parallel = True
-            vc.parallel_config.tensor_parallel_size = 1
-            vc.parallel_config.data_parallel_size = 2
-            vc.parallel_config.all2all_backend = "allgather_reducescatter"
-            vc.additional_config = {"enable_dsa_cp": True}
-
-            config = init_ascend_config(vc)
-
-            self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
-            self.assertFalse(enable_sp(vc))
-            self.assertFalse(config.enable_dsa_cp)
-            self.assertFalse(enable_dsa_cp())
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)

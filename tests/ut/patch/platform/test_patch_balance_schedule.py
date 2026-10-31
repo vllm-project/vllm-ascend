@@ -72,7 +72,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
-from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -1123,9 +1122,65 @@ def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_
 
     output = scheduler.schedule()
 
-    can_chunk = chunked_prefill or (encoder_only and not vllm_version_is("0.31.0"))
+    can_chunk = chunked_prefill or encoder_only
     expected = min(num_tokens, token_budget) if can_chunk or num_tokens <= token_budget else 0
     assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
     assert output.total_num_scheduled_tokens == expected
     assert (request in scheduler.running) == bool(expected)
     assert (request in scheduler.waiting) == (not expected)
+
+
+# ---------------------------------------------------------------------------
+# M-RoPE multimodal data must survive prefix-cache stripping
+# ---------------------------------------------------------------------------
+
+
+def test_mrope_ascend_schedulers_forward_uses_mrope_to_from_request():
+    """Every ``NewRequestData.from_request`` call in the Ascend schedulers must
+    forward ``uses_mrope``.
+
+    ``from_request`` drops the payload of multimodal items fully covered by a
+    prefix-cache hit (``num_computed_tokens > 0``). With ``uses_mrope=False``
+    (the upstream default) it drops *all* payload fields, including the
+    CPU-side ``image_grid_thw`` / ``video_grid_thw`` kept via ``keep_on_cpu``.
+    An M-RoPE model (e.g. Qwen3.5) then reads ``mm_feature.data`` as ``None``
+    when building positions and the engine dies. See issue #19727.
+    """
+    repo_root = Path(__file__).resolve().parents[4]
+    sources = [
+        repo_root / "vllm_ascend/patch/platform/patch_balance_schedule.py",
+        repo_root / "vllm_ascend/core/dyntra_lb_scheduler.py",
+    ]
+    if not all(path.is_file() for path in sources):
+        pytest.skip("source checkout layout not available")
+
+    for path in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "from_request"
+        ]
+        assert calls, f"{path.name}: no NewRequestData.from_request() call found"
+        for call in calls:
+            assert any(keyword.arg == "uses_mrope" for keyword in call.keywords), (
+                f"{path.name}:{call.lineno}: NewRequestData.from_request() must forward "
+                "uses_mrope=self.model_uses_mrope"
+            )
+
+
+def test_balance_schedule_forwards_uses_mrope_to_new_request_data():
+    """The balance copy of ``schedule()`` must pass the model's real M-RoPE flag
+    into ``NewRequestData.from_request``."""
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+
+    scheduler = _make_balance_scheduler()
+    scheduler.model_uses_mrope = True
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+
+    with patch.object(pbs.NewRequestData, "from_request", wraps=pbs.NewRequestData.from_request) as spy:
+        scheduler.schedule()
+
+    spy.assert_called_once()
+    assert spy.call_args.kwargs["uses_mrope"] is True

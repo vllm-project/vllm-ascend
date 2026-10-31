@@ -33,12 +33,12 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
     AscendDSAC128Backend,
     AscendDSAC128StateBackend,
+    AscendDSAIndexerBackend,
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
@@ -57,7 +57,6 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -362,6 +361,7 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
     )
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
@@ -773,15 +773,12 @@ def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
     for call in RecordingZeroer.calls:
         [component_group] = call["attn_groups"]
-        if vllm_version_is("0.31.0"):
-            assert component_group == group
-        else:
-            # vLLM main made AttentionGroup identity-comparable, so match on
-            # the fields the zeroer preserves.
-            assert component_group.backend is group.backend
-            assert component_group.layer_names == group.layer_names
-            assert component_group.kv_cache_spec == group.kv_cache_spec
-            assert component_group.kv_cache_group_id == group.kv_cache_group_id
+        # vLLM main made AttentionGroup identity-comparable, so match on
+        # the fields the zeroer preserves.
+        assert component_group.backend is group.backend
+        assert component_group.layer_names == group.layer_names
+        assert component_group.kv_cache_spec == group.kv_cache_spec
+        assert component_group.kv_cache_group_id == group.kv_cache_group_id
     for component_id, call in enumerate(RecordingZeroer.calls):
         assert call["static_forward_context"] == {
             "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
@@ -929,13 +926,12 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
             return launch
 
     monkeypatch.setattr("vllm.v1.worker.utils._zero_kv_blocks_kernel", _CpuZeroKernel())
-    if not vllm_version_is("0.31.0"):
-        # vLLM #60766 made async_tensor_h2d resolve pin memory lazily through
-        # is_pin_memory_available(). The NPU platform advertises pinned-memory
-        # support, so this CPU runner would allocate a PrivateUse1-pinned tensor
-        # and fail. The release lane captures PIN_MEMORY at import (False here),
-        # so only the main lane needs the resolver disabled.
-        monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
+    # vLLM #60766 made async_tensor_h2d resolve pin memory lazily through
+    # is_pin_memory_available(). The NPU platform advertises pinned-memory
+    # support, so this CPU runner would allocate a PrivateUse1-pinned tensor
+    # and fail. The release lane captures PIN_MEMORY at import (False here),
+    # so only the main lane needs the resolver disabled.
+    monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
     zeroer.zero_block_ids([0])
 
     # Block 0 payload: k, k_scale and v are cleared, v_scale is preserved.
@@ -1542,20 +1538,6 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
-class _RecordingDSACPMetadataBuilder(AscendDSACPMetadataBuilder):
-    def __init__(self, calls: list[dict[str, Any]], compressor_ratio: int):
-        self.calls = calls
-        self.for_cudagraph_capture = False
-        self.tq_group_block_sizes = None
-        self.compressor_ratio = compressor_ratio
-
-    build = _RecordingDSAMetadataBuilder.build
-
-    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-        self.for_cudagraph_capture = True
-        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
-
-
 def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     layer_names = [
         "model.layers.0.self_attn.compressor",
@@ -1678,7 +1660,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
-    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=4096)
     state.pcp_manager = None
@@ -1919,13 +1901,9 @@ def test_prepare_ascend_kernel_block_sizes_splits_alias_layouts():
     # (`layer_stride == 0`) while the pages stay dense, so SFA still gets its
     # 128-token kernel blocks instead of the 256-token manager block.
     assert selected_kernel_block_sizes(layer_stride=0, block_stride=page_bytes) == [128]
-    if vllm_version_is("0.31.0"):
-        # The release lane has no packing heuristic and always splits.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [128]
-    else:
-        # Block-outermost packing interleaves the layers' pages between blocks,
-        # which no split can address, so #57169 keeps the manager block size.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
+    # Block-outermost packing interleaves the layers' pages between blocks,
+    # which no split can address, so #57169 keeps the manager block size.
+    assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
 
 
 @pytest.mark.parametrize(
@@ -1959,7 +1937,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     swa_cache = cast(deepseek_v4_model.AscendDeepseekV4SWACache, SimpleNamespace())
     c4_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c4_cache)
     c128_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c128_cache)
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAC4Backend
+    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAIndexerBackend
     assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c128_indexer) is AscendDSAC128Backend
     assert deepseek_v4_model.AscendDeepseekV4SWACache.get_attn_backend(swa_cache) is AscendDSASWABackend
     assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c4_state) is AscendDSAC4StateBackend
@@ -1982,7 +1960,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
-@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder, _RecordingDSACPMetadataBuilder])
+@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder])
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     monkeypatch,
     caller,
@@ -2038,7 +2016,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.decoder_replay = None
-        # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+        # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
         # model_config.
         model_state.model_config = SimpleNamespace(max_model_len=8)
         model_state.vllm_config = SimpleNamespace(
@@ -2287,7 +2265,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm_ascend.core import kv_cache_placement
-    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+    from vllm_ascend.patch.worker import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)
@@ -2702,6 +2680,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
     v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
     other_layer = SimpleNamespace(kv_cache=None)
+    other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
         # V4.1 reshape output: one slot tensor per layer.
         "model.layers.0.self_attn.attn": torch.zeros(4, 2),
@@ -2778,6 +2757,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
 
 def _c8_mxfp_vllm_config(cache_dtype: str = "mxfp8") -> SimpleNamespace:
     return SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),

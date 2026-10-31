@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for GLM-Next cache grouping, physical layout, and capacity accounting."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,41 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+@pytest.mark.parametrize("pool", [4, 16])
+@pytest.mark.parametrize("speculative_blocks", [0, 5])
+def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_blocks):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    if not hasattr(planning, "_pool_bytes_per_block_from_builder"):
+        pytest.skip("Requires the upstream builder pool-accounting hook")
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    from vllm_ascend.platform import NPUPlatform
+
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    specs = {
+        name: replace(spec, num_speculative_blocks=speculative_blocks) if isinstance(spec, MambaSpec) else spec
+        for name, spec in make_specs(pool).items()
+    }
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
+    assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
+    expected = sum(tensor.size for tensor in physical.kv_cache_tensors)
+    builder = resolve_obj_by_qualname(NPUPlatform.get_kv_cache_config_builder_cls(config))()
+    config.cache_config.num_gpu_blocks_override = 7
+    assert planning._pool_bytes_per_block_from_builder(builder, config, groups) == expected
+    assert config.cache_config.num_gpu_blocks_override == 7
+
+
+def test_platform_builder_preserves_default_non_glm_accounting():
+    pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
+    groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
+    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:

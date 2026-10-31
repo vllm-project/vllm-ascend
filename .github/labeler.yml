@@ -5,6 +5,11 @@ documentation:
           - 'docs/**'
           - '**/*.md'
 
+recipe:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'recipes/**'
+
 ci/build:
   - changed-files:
       - any-glob-to-any-file:

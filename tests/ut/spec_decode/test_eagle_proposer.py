@@ -33,7 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
@@ -75,7 +75,7 @@ class _NullPatch:
 
 
 def _supports_multimodal_inputs_patch(vllm_config=None):
-    """Keep the proposer on the vLLM 0.31 text-only path.
+    """Keep the proposer on the text-only path for both supported vLLM lanes.
 
     Both supported lanes read ``ModelConfig.supports_multimodal_inputs``.
     Set the fixture flags when a ``vllm_config`` is provided.
@@ -2414,10 +2414,6 @@ class TestRunMergedDraft(TestBase):
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
         assert hasattr(vllm.config, "PassConfig"), "PassConfig not found"
-        # vLLM main (#60517) removed PassConfig.enable_sp with the torch.compile
-        # sequence-parallelism pass; v0.31.0 still declares it.
-        if vllm_version_is("0.31.0"):
-            assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
 
         import vllm.forward_context
 
@@ -4300,7 +4296,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
 
         self.assertEqual(proposer._lim_topk_compactors, [copy_sfa_attention])
 
-    def _run_index_sharing_draft(self, share=True, supports_compact=True, dsa_cp=False):
+    def _run_index_sharing_draft(self, share=True, supports_compact=True):
         """Run the real proposer and MLA hooks with known rows in place of model compute."""
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
         proposer.runner = None
@@ -4348,21 +4344,10 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         observed: list[tuple[bool, torch.Tensor]] = []
         step0_rows = torch.arange(32, dtype=torch.int32).reshape(8, 4)
         indices = torch.tensor([1, 6], dtype=torch.int32)
-        group = MagicMock(world_size=2, rank_in_group=0)
-
-        def all_reduce(rows):
-            expected_contribution = torch.stack([step0_rows[1], torch.zeros(4, dtype=torch.int32)])
-            torch.testing.assert_close(rows, expected_contribution)
-            return step0_rows[indices]
-
-        group.all_reduce.side_effect = all_reduce
 
         def forward(**kwargs):
             if not observed:
-                if dsa_cp:
-                    buffer[:4].copy_(step0_rows[:4])
-                else:
-                    buffer.copy_(step0_rows)
+                buffer.copy_(step0_rows)
             observed.append((impl.skip_topk, buffer.clone()))
             return kwargs["hidden_states"].clone()
 
@@ -4374,8 +4359,6 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer.model.compute_logits = lambda hidden: torch.zeros((hidden.shape[0], 4), dtype=torch.float32)
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
-            patch.object(llm_base_proposer, "get_tp_group", return_value=group),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace()),
             patch("vllm.forward_context._forward_context", SimpleNamespace(moe_layer_index=0)),
         ):
@@ -4390,8 +4373,6 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
             )
         self.assertEqual(result.shape, (2, 2))
         self.assertEqual(len(observed), 2)
-        if dsa_cp:
-            group.all_reduce.assert_called_once()
         return observed, step0_rows, indices, impl
 
     def test_run_merge_draft_mtp_skip_topk(self):
@@ -4404,12 +4385,6 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         observed, original, _, _ = self._run_index_sharing_draft(supports_compact=False)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1], original)
-
-    def test_run_merge_draft_mtp_dsa_cp_compacts_remote_rows(self):
-        observed, original, indices, impl = self._run_index_sharing_draft(dsa_cp=True)
-        self.assertEqual([skip for skip, _ in observed], [False, True])
-        torch.testing.assert_close(observed[1][1][:2], original[indices])
-        impl.compact_lim_topk_metadata.assert_not_called()
 
     def test_run_merge_draft_mtp_sharing_disabled(self):
         observed, original, _, impl = self._run_index_sharing_draft(share=False)

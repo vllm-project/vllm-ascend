@@ -19,7 +19,10 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -41,6 +44,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm_ascend.models.deepseek_v4.dspark import _duplicate_context_wkv_weights
 from vllm_ascend.models.deepseek_v41.model import (
     AscendDeepseekV41SWACache,
     DeepseekV41Attention,
@@ -49,7 +53,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp, normalize_deepseek_v41_config
+from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 
@@ -60,8 +64,9 @@ def _apply_dsv4_rope(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    rope=None,
 ) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
+    cos, sin = rope if rope is not None else get_cos_and_sin_dsa(positions)
     layer_name = rotary_emb.layername
     cos_t = cos[layer_name]
     sin_t = sin[layer_name]
@@ -186,6 +191,22 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
+
+        # The context path feeds the same hidden states to every draft layer.
+        # Pack their WKV projections into one linear to reduce launch overhead
+        # and improve GEMM utilization. Reuse the first layer's real prefix so
+        # ModelSlim selects the checkpoint's WKV quantization scheme for this
+        # synthetic runtime module.
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix="mtp.0.self_attn.wkv",
+            disable_tp=True,
+        )
+
         # V4.1 keeps the checkpoint quantization contract on the composite
         # config.  Its DSpark main projection is FP8 in the release checkpoint,
         # so constructing a BF16 linear drops the scale parameter and makes the
@@ -293,13 +314,14 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
     def _project_shared_kv(
         self,
-        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
         positions: torch.Tensor,
         attn: type[nn.Module],
+        rope=None,
     ) -> torch.Tensor:
-        kv = attn.kv_norm(attn.wkv(hidden_states))
+        kv = attn.kv_norm(kv)
         k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
+        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1), rope=rope).squeeze(1)
         return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
 
     def precompute_and_store_context_kv(
@@ -308,14 +330,27 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         context_positions: torch.Tensor,
         context_slot_mapping: list[torch.Tensor | None] | None = None,
     ) -> None:
-        if context_states.numel() == 0 or context_slot_mapping is None:
+        if context_states.numel() == 0 or context_positions.numel() == 0:
             return
-        for layer_idx, layer in enumerate(self.layers.values()):
-            layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
-            if context_positions.numel() == 0:
-                return
+
+        # Profiling omits slot mappings, but must still execute this projection
+        # so its workspace is included in the memory profile.
+        all_kv = self.context_wkv_proj(context_states).view(
+            context_states.shape[0],
+            self.num_dspark_layers,
+            self.config.head_dim,
+        )
+        if context_slot_mapping is None:
+            return
+
+        rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
+        rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
+        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+            layer_context_slot_mapping = context_slot_mapping[layer_idx]
+            if layer_context_slot_mapping is None:
+                continue
             attn = layer.self_attn
-            shared_kv = self._project_shared_kv(context_states, context_positions, attn)
+            shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
@@ -382,6 +417,9 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
         self.moe_comm_methods = {kind: get_moe_comm_method(kind) for kind in MoECommType}
 
     def _remap_dspark_name(self, name: str) -> str | None:
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
+
         mapped = self._remap_checkpoint_name(name)
         if mapped is None:
             return None
@@ -494,6 +532,12 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
         head_start = n_local_head * tp_rank
         head_end = n_local_head * (tp_rank + 1)
 
+        # Keep per-layer WKV weights for draft-token forward. The merged
+        # projection adds one packed [num_layers * head_dim, hidden_size] copy
+        # per TP rank plus quantization metadata, trading bounded memory for a
+        # single context projection.
+        weights = _duplicate_context_wkv_weights(weights, self.model.num_dspark_layers)
+
         for name, loaded_weight in weights:
             if name == "embed.weight" and not self.rotation_path:
                 name = "model.embed_tokens.weight"
@@ -514,6 +558,12 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
             # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+                loaded_params.add(name)
+                continue
 
             # The multimodal checkpoint also contains one vision-router bias
             # for each MTP/DSpark layer.  DSpark runs only during text decode,
@@ -557,10 +607,7 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
                 break
             else:
                 if "attn_sink" in name:
-                    if enable_dsa_cp():
-                        narrow = loaded_weight
-                    else:
-                        narrow = loaded_weight[head_start:head_end]
+                    narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
                         params_dict[name].copy_(narrow)
                     loaded_params.add(name)

@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -38,7 +38,9 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_decode as minimax_m3_index_decode_ascendc,
 )
@@ -51,12 +53,19 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
-# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
-# A5 decode keeps its lower-latency Triton path.
+# Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
+_MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
+
+# Use CANN MsaIndexScore for prefill and decode on every device, keeping A5
+# aligned with A3. A5's Triton decode kernel stays importable as a rollback
+# path.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
+_USE_ASCENDC_INDEX_SCORE_DECODE = True
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
@@ -103,6 +112,43 @@ def _active_prefill_num_reqs(
     return min(1, num_prefills)
 
 
+def _is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:
+    if vllm_config is None:
+        return False
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    architectures = getattr(getattr(model_config, "hf_config", None), "architectures", None) or ()
+    return (
+        any(
+            architecture in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            for architecture in architectures
+        )
+        and cache_config is not None
+        and cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+        and bool(cache_config.kv_cache_dtype_skip_layers)
+        and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    )
+
+
+class AscendMiniMaxM3DenseBackend(AscendAttentionBackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        if _is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            return [_MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
+        return [128]
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # Only the block declaration differs; retain the parent's CP support.
+        return AscendAttentionBackend.supports_pcp()
+
+
+def _get_minimax_m3_dense_backend(backend: type[AttentionBackend]) -> type[AttentionBackend]:
+    if backend is AscendAttentionBackend and _is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+        return AscendMiniMaxM3DenseBackend
+    return backend
+
+
 class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -120,8 +166,8 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3IndexerImpl]:
@@ -137,6 +183,10 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        if _is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            # Match dense attention's mixed-KV alignment minimum on every PP
+            # stage. Upstream alignment keeps the final FP8 block at 128.
+            return [_MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
         return [128]
 
     @classmethod
@@ -592,8 +642,8 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3SparseImpl]:
@@ -609,6 +659,10 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        if _is_minimax_m3_fp8_kv_cache(get_current_vllm_config_or_none()):
+            # Match dense attention's mixed-KV alignment minimum on every PP
+            # stage. Upstream alignment keeps the final FP8 block at 128.
+            return [_MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE, 128]
         return [128]
 
     @classmethod

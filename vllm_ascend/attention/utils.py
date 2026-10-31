@@ -331,6 +331,23 @@ def is_pcp_enabled():
     return parallel_config.prefill_context_parallel_size > 1
 
 
+def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:
+    """Return whether this step should use the PCP-sharded layout.
+
+    Under PCP, metadata built without a PCP context (e.g. a replicated draft
+    decode) runs replicated on every rank, so its slot mapping must not be
+    expanded to every rank's tokens.
+    """
+    if not use_pcp:
+        return False
+    if common_attn_metadata.pcp_context is None:
+        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
+            "PCP metadata without a PCP context must keep a rank-local slot mapping."
+        )
+        return False
+    return True
+
+
 @dataclass
 class AscendDCPMetadata:
     """Per-batch metadata required by decode context parallelism."""
