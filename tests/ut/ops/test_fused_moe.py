@@ -26,7 +26,9 @@ import torch.nn.functional as F
 from pytest_mock import MockerFixture
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops import register_custom_ops as registered_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import moe_comm_method as moe_comm_method_module
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -395,6 +397,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_fused_mc2 = enable_fused_mc2
         monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: mock_ascend_config)
+        monkeypatch.setattr(fused_moe_module, "catccos_backend_enabled", lambda: False)
         monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
         monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
 
@@ -408,6 +411,27 @@ class TestAscendUnquantizedFusedMoEMethod:
         else:
             assert maybe_trans_nz.call_count == 2
             format_cast.assert_not_called()
+
+    def test_catccos_preserves_native_bf16_fallback_weight_format(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = False
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        layer = self._build_layer()
+        prepare_catccos_weights = MagicMock()
+        maybe_trans_nz = MagicMock(side_effect=lambda weight: weight)
+        format_cast = MagicMock(side_effect=lambda weight, _: weight)
+
+        monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+        monkeypatch.setattr(fused_moe_module, "catccos_backend_enabled", lambda: True)
+        monkeypatch.setattr(fused_moe_module, "prepare_catccos_weights", prepare_catccos_weights)
+        monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+
+        method.process_weights_after_loading(layer)
+
+        prepare_catccos_weights.assert_called_once_with(layer)
+        assert maybe_trans_nz.call_count == 2
+        format_cast.assert_not_called()
 
     def test_process_weights_after_loading_splits_dynamic_eplb_fused_mc2_weights(self, monkeypatch):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
@@ -635,6 +659,47 @@ class TestAscendUnquantizedFusedMoEMethod:
 
 
 class TestAscendMoERunner:
+    def test_fused_catccos_output_skips_outer_allreduce(self, monkeypatch):
+        context = SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, flash_comm_v1_enabled=False)
+        reducer = MagicMock(return_value=torch.ones(2, 4))
+        monkeypatch.setattr(registered_ops, "_EXTRA_CTX", context)
+        monkeypatch.setattr(registered_ops, "tensor_model_parallel_all_reduce", reducer)
+        states = torch.zeros(2, 4)
+
+        assert registered_ops._maybe_all_reduce_tensor_model_parallel_impl(states) is states
+        reducer.assert_not_called()
+
+        context.moe_comm_type = MoECommType.ALLGATHER
+        assert registered_ops._maybe_all_reduce_tensor_model_parallel_impl(states) is reducer.return_value
+        reducer.assert_called_once_with(states)
+
+    def test_layer_comm_binding_uses_each_layer_and_restores_context(self, monkeypatch):
+        original = object()
+        context = SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, moe_comm_method=original)
+        monkeypatch.setattr(moe_comm_method_module, "_EXTRA_CTX", context)
+        runner = AscendMoERunner.__new__(AscendMoERunner)
+        shared_experts_owner = next(
+            (cls for cls in type(runner).__mro__ if "shared_experts" in cls.__dict__),
+            AscendMoERunner,
+        )
+        monkeypatch.setattr(shared_experts_owner, "shared_experts", property(lambda _: None), raising=False)
+        seen = []
+        for method in (object(), object()):
+            layer = SimpleNamespace(
+                _moe_comm_methods={MoECommType.FUSED_MC2: method},
+                forward_impl=lambda _x, _router, seen=seen: seen.append(context.moe_comm_method),
+            )
+            runner.forward_impl(layer, torch.empty(2, 4), torch.empty(2, 8), None)
+            assert context.moe_comm_method is original
+        assert seen[0] is not seen[1]
+
+        with (
+            pytest.raises(RuntimeError, match="layer failure"),
+            moe_comm_method_module.bind_layer_moe_comm_method({MoECommType.FUSED_MC2: object()}),
+        ):
+            raise RuntimeError("layer failure")
+        assert context.moe_comm_method is original
+
     @pytest.mark.parametrize(
         "moe_comm_type, flash_comm_v1_enabled, expected",
         [

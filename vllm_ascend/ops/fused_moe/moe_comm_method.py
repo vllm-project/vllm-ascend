@@ -16,13 +16,21 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    CatccosLayerCapability,
+    apply_catccos,
+    catccos_backend_enabled,
+    validate_catccos_operands,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -43,6 +51,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
+from vllm_ascend.profiler.moe_profile import moe_profile_range
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
@@ -52,14 +61,41 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(
+    moe_config,
+    catccos_capability: CatccosLayerCapability | None = None,
+) -> dict[MoECommType, MoECommMethod]:
+    methods: dict[MoECommType, MoECommMethod] = {}
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        methods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        methods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        methods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
+            moe_config,
+            catccos_capability=catccos_capability,
+        )
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+    # Keep the existing global lookup for forward-context setup and non-0.23
+    # callers. The v0.23 runner binds its own layer's instance for execution.
+    _MoECommMethods.update(methods)
+    return methods
+
+
+@contextmanager
+def bind_layer_moe_comm_method(methods: dict[MoECommType, MoECommMethod] | None):
+    if methods is None:
+        yield
+        return
+    moe_comm_type = _EXTRA_CTX.moe_comm_type
+    if moe_comm_type not in methods:
+        raise RuntimeError(f"No MoE communication method for {moe_comm_type}")
+    previous_method = _EXTRA_CTX.moe_comm_method
+    _EXTRA_CTX.moe_comm_method = methods[moe_comm_type]
+    try:
+        yield
+    finally:
+        _EXTRA_CTX.moe_comm_method = previous_method
 
 
 def set_gmmswigluquant_method():
@@ -133,33 +169,40 @@ class MoECommMethod(ABC):
             torch.uint8,
         ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
-        moe_comm_method = _EXTRA_CTX.moe_comm_method
-        assert moe_comm_method is not None, "Missing communication context"
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        assert moe_comm_type is not None, "Missing communication type"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
-        routed_topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
-            routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
+        profile_backend = f"native_{moe_comm_type.name.lower()}"
+        hidden_states = fused_experts_input.hidden_states
+        topk_ids = fused_experts_input.topk_ids
+        with moe_profile_range(profile_backend, "pipeline_host_scope", hidden_states, topk_ids):
+            before_dispatch_evt = torch.npu.current_stream().record_event()
+            routed_topk_ids = topk_ids
+            if fused_experts_input.routing.log2phy is not None:
+                routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
-        token_dispatch_input = build_token_dispatch_input(
-            fused_experts_input=fused_experts_input,
-            topk_ids=routed_topk_ids,
-        )
-        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+            token_dispatch_input = build_token_dispatch_input(
+                fused_experts_input=fused_experts_input,
+                topk_ids=routed_topk_ids,
+            )
+            with moe_profile_range(profile_backend, "dispatch_enqueue", hidden_states, topk_ids):
+                token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
-        mlp_compute_input = build_mlp_compute_input(
-            fused_experts_input=fused_experts_input,
-            token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=self.use_fusion_ops,
-        )
+            mlp_compute_input = build_mlp_compute_input(
+                fused_experts_input=fused_experts_input,
+                token_dispatch_output=token_dispatch_output,
+                use_fusion_ops=self.use_fusion_ops,
+            )
 
-        mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+            with moe_profile_range(profile_backend, "mlp_enqueue", hidden_states, topk_ids):
+                mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
-        before_combine_evt = torch.npu.current_stream().record_event()
-        routed_out = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output,
-            combine_metadata=token_dispatch_output.combine_metadata,
-        )
+            before_combine_evt = torch.npu.current_stream().record_event()
+            with moe_profile_range(profile_backend, "combine_enqueue", hidden_states, topk_ids):
+                routed_out = self.token_dispatcher.token_combine(
+                    hidden_states=mlp_output,
+                    combine_metadata=token_dispatch_output.combine_metadata,
+                )
 
         return FusedExpertsResult(
             routed_out=routed_out,
@@ -267,9 +310,17 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
-    def __init__(self, moe_config):
+    def __init__(
+        self,
+        moe_config,
+        *,
+        catccos_capability: CatccosLayerCapability | None = None,
+    ):
+        self.catccos_capability = catccos_capability or CatccosLayerCapability(
+            False, "layer capability was not registered"
+        )
         super().__init__(moe_config)
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if get_ascend_config().enable_fused_mc2 == 1 and not catccos_backend_enabled():
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -294,6 +345,50 @@ class FusedMC2CommImpl(MoECommMethod):
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
+
+        if catccos_backend_enabled():
+            if not self.catccos_capability.supported:
+                raise RuntimeError(f"CatCCOS was selected for an unsupported layer: {self.catccos_capability.reason}")
+            routing = fused_experts_input.routing
+            if (
+                routing.log2phy is not None
+                or routing.global_redundant_expert_num
+                or routing.apply_router_weight_on_input
+                or fused_experts_input.swiglu_limit
+                or fused_experts_input.weights.w1_bias is not None
+                or fused_experts_input.weights.w2_bias is not None
+                or fused_experts_input.lora_context is not None
+            ):
+                raise RuntimeError("CatCCOS received unsupported routing or expert parameters")
+            weights = fused_experts_input.weights
+            if not isinstance(weights.w1, torch.Tensor) or not isinstance(weights.w2, torch.Tensor):
+                raise RuntimeError("CatCCOS requires packed expert weights as tensors")
+            if not isinstance(weights.w1_scale, torch.Tensor) or not isinstance(weights.w2_scale, torch.Tensor):
+                raise RuntimeError("CatCCOS requires MXFP8 weight scales")
+            validate_catccos_operands(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids,
+                fused_experts_input.topk_weights,
+                weights.w1,
+                weights.w1_scale,
+                weights.w2,
+                weights.w2_scale,
+                self.moe_config.ep_size,
+            )
+            out = apply_catccos(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids,
+                fused_experts_input.topk_weights,
+                weights.w1,
+                weights.w1_scale,
+                weights.w2,
+                weights.w2_scale,
+            )
+            logger.info_once("Executed CatCCOS through the formal FusedMC2 backend")
+            return FusedExpertsResult(
+                routed_out=out,
+                swiglu_limit=fused_experts_input.swiglu_limit,
+            )
 
         # Apply log2phy if needed
         topk_ids = fused_experts_input.topk_ids
