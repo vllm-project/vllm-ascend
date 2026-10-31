@@ -21,6 +21,26 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+### NoPE Prolog V3
+
+On A2/A3, eligible dynamic W8A8 checkpoints automatically fuse the NoPE SFA
+projections, normalization and INT8 KV-cache write with
+`torch_npu.npu_mla_prolog_v3`. This path requires
+a torch_npu/CANN build that supports `rope_dim=0` for this operator.
+The MLA down and query-up projections must be INT8; checkpoints that keep those
+projections in BF16 retain native preprocessing. A BF16 indexer retains its original query
+projection and normalization, whose cost remains part of the layer.
+Use BF16 activations and INT8 KV cache in the serving command:
+
+```bash
+--dtype bfloat16 --kv-cache-dtype int8
+```
+
+Selection applies to prefill, decode and MTP calls on eligible NoPE SFA layers.
+It requires D=256, Hckv=512 and Hcq=1536/2048. A5/MXFP8, C16, PCP, DCP and
+DSA-CP keep native preprocessing. Other incompatible configurations also retain
+the native path. No additional configuration switch is needed.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
