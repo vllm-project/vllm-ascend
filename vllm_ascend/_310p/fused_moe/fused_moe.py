@@ -30,6 +30,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
 from .moe_comm_method import AllGatherCommImpl310
+from .shared_experts import configure_shared_experts_310
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -186,13 +187,8 @@ class AscendMoERunner310(AscendMoERunner):
             # Keep the 310P gate weight in FP16 NZ format at load time.
             gate.precast_fp32_weight = False
 
-        ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
-        if ascend_shared_experts is not None:
-            ascend_shared_experts.multistream_overlap = False
-            # The parent may have selected the SP-multistream custom op before
-            # 310P disables the unsupported feature. Restore the upstream entry
-            # so its fake output contract matches the single-stream execution.
-            self._forward_entry = self._select_forward()
+        if self.ascend_shared_experts is not None:
+            configure_shared_experts_310(self.ascend_shared_experts)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, self.moe_config)] = AllGatherCommImpl310(self.moe_config)
 
     def _compute_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:

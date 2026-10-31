@@ -52,9 +52,10 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, shared_experts_calculation_stream
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -146,12 +147,21 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._num_rejected_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         # Keep prefill and prefix-cache hits out of FULL mixed graphs.
         self._force_eager_pc_batch = False
+        self._multistream_logits_initialized = False
         self._force_eager_spec_batch = False
         self._spec_dummy_capture = False
         # Populated in initialize_kv_cache; also set here so UT can call
         # ``_allocate_kv_cache_tensors`` without going through that path.
         self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
         self._attn_kv_storage_ptrs: set[int] = set()
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if self.ascend_config.multistream_overlap_shared_expert:
+            # MRv2 profiles and captures after load_model. Allocate the shared
+            # stream here so its resources are accounted for before profiling
+            # and no lazy stream creation is needed inside ACL graph capture.
+            shared_experts_calculation_stream()
 
     def _make_metadata_buffer(
         self,
@@ -1290,6 +1300,28 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         return block_tables, slot_mappings
 
+    def _synchronize_multistream_moe_before_logits(self) -> None:
+        if not self.ascend_config.multistream_overlap_shared_expert or self.parallel_config.tensor_parallel_size <= 1:
+            return
+        graph_manager = getattr(self, "cudagraph_manager", None)
+        if (
+            graph_manager is None
+            or not graph_manager.cudagraph_mode.has_full_cudagraphs()
+            or len(graph_manager.graphs) <= 1
+        ):
+            return
+        if self._multistream_logits_initialized:
+            return
+
+        # Drain outstanding multi-stream work once before the first real
+        # logits AllGather after multi-graph capture. On 310P, its lazy HCCL
+        # transport initialization can otherwise exhaust IPC notify resources.
+        # MoE already joins shared output on-device; a host fence per sampled
+        # token unnecessarily stalls steady-state forward/sampling overlap.
+        torch.npu.current_stream().synchronize()
+        shared_experts_calculation_stream().synchronize()
+        self._multistream_logits_initialized = True
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1298,10 +1330,11 @@ class NPUModelRunner310V2(NPUModelRunner):
     ):
         # TODO: Refactor 310P sampling to use Triton Dispatcher after vLLM RFC
         # #45133 lands.
-        if grammar_output is not None:
-            # TODO: Restore structured output support in the next 310P MRV2 iteration.
-            raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
+        self._synchronize_multistream_moe_before_logits()
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
+        invalid_drafts = None
+        if grammar_output is not None:
+            invalid_drafts = apply_grammar_bitmask(logits, input_batch, grammar_output)
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
@@ -1326,6 +1359,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits,
             input_batch,
             self.speculator.draft_logits,
+            invalid_drafts,
         )
         num_reqs = input_batch.num_reqs
         self._sampled_tokens_cpu = self.rejection_sampler.sampled_tokens_cpu[:num_reqs]

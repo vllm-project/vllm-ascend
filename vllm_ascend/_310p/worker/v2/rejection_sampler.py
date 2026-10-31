@@ -68,6 +68,7 @@ class RejectionSampler310V2(RejectionSampler):
         logits: torch.Tensor,
         input_batch: Ascend310PInputBatch,
         draft_logits: torch.Tensor | None,
+        invalid_drafts: np.ndarray | None = None,
     ) -> SamplerOutput:
         del draft_logits
         num_reqs = input_batch.num_reqs
@@ -88,6 +89,8 @@ class RejectionSampler310V2(RejectionSampler):
             assert input_batch.input_ids_cpu is not None
             assert input_batch.logits_indices_np is not None
             draft_sampled_cpu = input_batch.input_ids_cpu[torch.from_numpy(input_batch.logits_indices_np)]
+            if invalid_drafts is not None:
+                draft_sampled_cpu[torch.from_numpy(invalid_drafts)] = PLACEHOLDER_TOKEN_ID
             source_generators = getattr(self.sampler, "_source_generators", {})
             # Persistent InputBatch arrays; slice to this step's request count.
             cu_num_logits_np = input_batch.cu_num_logits_np[: num_reqs + 1]
@@ -139,6 +142,11 @@ class RejectionSampler310V2(RejectionSampler):
         bonus_rows = (cu_num_logits[1:] - 1).to(torch.int64)
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
+        if invalid_drafts is not None:
+            sampled_inputs.masked_fill_(
+                torch.from_numpy(invalid_drafts).to(device=logits.device, non_blocking=True),
+                PLACEHOLDER_TOKEN_ID,
+            )
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
         target_logits = logits.index_select(0, target_rows)
         bonus_token_ids = logits.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
