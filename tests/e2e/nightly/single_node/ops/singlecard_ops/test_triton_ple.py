@@ -9,15 +9,22 @@ import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.models.qwen4_exp import ple as ple_adapter
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
-from vllm_ascend.ops.triton_ple import ple_conv as ple_conv_npu
+from vllm_ascend.ops.triton_ple import ple_conv_prefill
 
 
-def test_model_dispatch_uses_upstream_decode_and_spec():
+def test_model_dispatch_uses_upstream_decode_and_spec(monkeypatch):
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()
     assert ple_layer.ple_conv is _ple_conv_ascend
+    calls = []
+    monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("prefill"))
+    monkeypatch.setattr(ple_adapter, "upstream_ple_conv", lambda *args, **kwargs: calls.append(kwargs["mode"]))
+    for mode in ("prefill", "decode", "spec"):
+        ple_layer.ple_conv(mode=mode)
+    assert calls == ["prefill", "decode", "spec"]
 
 
 def test_modes_and_token_mapping():
@@ -113,7 +120,7 @@ def test_prefill_one_request():
                             has_initial_states=torch.tensor([initialized], device="npu"),
                         )
                         upstream_ple_conv(**kwargs, residual=expected_output, conv_state=expected_state)
-                        ple_conv_npu(**kwargs, residual=actual_output, conv_state=actual_state)
+                        ple_conv_prefill(**kwargs, residual=actual_output, conv_state=actual_state)
                         torch.npu.synchronize()
                         exact = (expected_output == actual_output).float().mean().item()
                         max_abs = (expected_output.float() - actual_output.float()).abs().max().item()
@@ -152,7 +159,7 @@ def test_prefill_multiple_requests_across_token_chunks():
         expected, actual = residual.clone(), residual.clone()
         expected_state, actual_state = state.clone(), state.clone()
         upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
-        ple_conv_npu(**kwargs, residual=actual, conv_state=actual_state)
+        ple_conv_prefill(**kwargs, residual=actual, conv_state=actual_state)
         torch.npu.synchronize()
         assert torch.equal(expected, actual)
         assert torch.equal(expected_state, actual_state)

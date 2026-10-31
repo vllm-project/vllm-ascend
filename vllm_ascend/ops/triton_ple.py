@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Ascend-friendly Qwen PLE short convolution; upstream handles decode/spec."""
+"""Ascend-friendly Qwen PLE prefill short convolution."""
 
 from typing import Literal
 
 import torch
-from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -270,7 +269,7 @@ def _ple_conv_writeback_kernel(
         )
 
 
-def ple_conv(
+def ple_conv_prefill(
     inputs: torch.Tensor,
     residual: torch.Tensor,
     conv_state: torch.Tensor,
@@ -278,7 +277,7 @@ def ple_conv(
     state_indices: torch.Tensor,
     outer_residual: torch.Tensor | None,
     *,
-    mode: Literal["decode", "spec", "prefill"],
+    mode: Literal["prefill"],
     dilation: int,
     query_start_loc: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
@@ -289,57 +288,23 @@ def ple_conv(
     """Update state and write activated convolution into residual.
     A non-None outer_residual enables both fused residual additions.
     """
-    # The measured gain is for prefill. Keep the upstream path for decode/spec.
-    if mode != "prefill":
-        return upstream_ple_conv(
-            inputs,
-            residual,
-            conv_state,
-            conv_weights,
-            state_indices,
-            outer_residual,
-            mode=mode,
-            dilation=dilation,
-            query_start_loc=query_start_loc,
-            num_accepted_tokens=num_accepted_tokens,
-            has_initial_states=has_initial_states,
-            spec_query_len=spec_query_len,
-            token_indices=token_indices,
-        )
     BLOCK_C = PLE_BLOCK_C
-    kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C = inputs.shape
     K = conv_weights.shape[1]
     state_len = (K - 1) * dilation
-    state_width = state_len + kernel_spec_query_len - 1
     if token_indices is not None:
         T = token_indices.numel()
-    if conv_state.shape[1] != C or conv_state.shape[2] < state_width:
+    if conv_state.shape[1] != C or conv_state.shape[2] < state_len:
         raise ValueError(
-            f"conv_state must have shape [slots, channels, window], with channels={C} and window >= {state_width}"
+            f"conv_state must have shape [slots, channels, window], with channels={C} and window >= {state_len}"
         )
     state_bs, state_cs, state_ws = conv_state.stride()
 
-    if mode == "decode":
-        num_reqs = T
-        binary_search_iters = 1
-        has_initial_states_arg = has_initial_states is not None
-    elif mode == "spec":
-        if query_start_loc is None or num_accepted_tokens is None:
-            raise ValueError("query_start_loc and num_accepted_tokens are required for spec decode")
-        num_reqs = state_indices.numel()
-        binary_search_iters = max(num_reqs, 1).bit_length()
-        has_initial_states_arg = False
-    elif mode == "prefill":
-        if query_start_loc is None or has_initial_states is None:
-            raise ValueError("query_start_loc and has_initial_states are required for prefill")
-        num_reqs = state_indices.numel()
-        binary_search_iters = max(num_reqs, 1).bit_length()
-        has_initial_states_arg = True
-    else:
-        raise ValueError(f"Unsupported short-conv mode: {mode}")
+    if query_start_loc is None or has_initial_states is None:
+        raise ValueError("query_start_loc and has_initial_states are required for prefill")
+    num_reqs = state_indices.numel()
+    binary_search_iters = max(num_reqs, 1).bit_length()
 
-    num_warps = PLE_NUM_WARPS if mode == "prefill" else 8
     launch_pdl = current_platform.is_arch_support_pdl()
     # Pure-prefill indices can be a strided block-table column view.
     state_idx_stride = state_indices.stride(0)
@@ -370,36 +335,34 @@ def ple_conv(
         STATE_LEN=state_len,
         DILATION=dilation,
         KERNEL_SIZE=K,
-        SPEC_QUERY_LEN=kernel_spec_query_len,
-        MODE=mode,
-        HAS_INIT=has_initial_states_arg,
+        SPEC_QUERY_LEN=1,
+        MODE="prefill",
+        HAS_INIT=True,
         FUSE_RESIDUAL=outer_residual is not None,
         NULL_STATE_ID=NULL_BLOCK_ID,
         launch_pdl=launch_pdl,
-        num_warps=num_warps,
+        num_warps=PLE_NUM_WARPS,
     )
-    # conv state update is fused with the kernel above for decode
-    if mode != "decode":
-        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
-            inputs,
-            conv_state,
-            state_indices,
-            query_start_loc,
-            num_accepted_tokens,
-            has_initial_states,
-            token_indices if token_indices is not None else state_indices,
-            token_indices is not None,
-            state_idx_stride,
-            state_bs,
-            state_ws,
-            state_cs,
-            C=C,
-            BLOCK_C=BLOCK_C,
-            STATE_LEN=state_len,
-            SPEC_QUERY_LEN=kernel_spec_query_len,
-            STATE_WIDTH=state_width,
-            MODE=mode,
-            HAS_INIT=has_initial_states_arg,
-            NULL_STATE_ID=NULL_BLOCK_ID,
-            num_warps=num_warps,
-        )
+    _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
+        inputs,
+        conv_state,
+        state_indices,
+        query_start_loc,
+        num_accepted_tokens,
+        has_initial_states,
+        token_indices if token_indices is not None else state_indices,
+        token_indices is not None,
+        state_idx_stride,
+        state_bs,
+        state_ws,
+        state_cs,
+        C=C,
+        BLOCK_C=BLOCK_C,
+        STATE_LEN=state_len,
+        SPEC_QUERY_LEN=1,
+        STATE_WIDTH=state_len,
+        MODE="prefill",
+        HAS_INIT=True,
+        NULL_STATE_ID=NULL_BLOCK_ID,
+        num_warps=PLE_NUM_WARPS,
+    )
