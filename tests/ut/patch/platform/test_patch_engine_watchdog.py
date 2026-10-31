@@ -58,14 +58,8 @@ def _fake_engine(*, has_work, is_running, input_queue, block=True):
 def test_original_process_engine_step_is_pristine_upstream():
     """Stashed at import, before ``patch_watchdog_for_engine_core`` rebinds
     the class attribute, so it must be the genuine upstream method."""
-    assert (
-        _watchdog_patch._original_process_engine_step
-        is not _watchdog_patch._patched_process_engine_step
-    )
-    assert (
-        _watchdog_patch._original_process_engine_step.__qualname__
-        == "EngineCoreProc._process_engine_step"
-    )
+    assert _watchdog_patch._original_process_engine_step is not _watchdog_patch._patched_process_engine_step
+    assert _watchdog_patch._original_process_engine_step.__qualname__ == "EngineCoreProc._process_engine_step"
     src = inspect.getsource(_watchdog_patch._original_process_engine_step)
     assert "self.step_fn()" in src, (
         "upstream _process_engine_step no longer steps the engine via "
@@ -104,8 +98,7 @@ def test_patched_process_input_queue_is_upstream_copy_plus_disable():
         if line[:1] in "+-" and line[:3] not in ("+++", "---")
     ]
     assert delta == _EXPECTED_INPUT_QUEUE_DELTA, (
-        "patched _process_input_queue diverged from upstream beyond the "
-        "intended disable() wrap:\n" + "\n".join(delta)
+        "patched _process_input_queue diverged from upstream beyond the intended disable() wrap:\n" + "\n".join(delta)
     )
 
 
@@ -239,9 +232,7 @@ def test_patched_process_input_queue_nonblocking_get(monkeypatch):
 def test_patch_watchdog_for_engine_core_installs_and_starts(monkeypatch):
     # Register restore of everything the installer rebinds.
     monkeypatch.setattr(EngineCoreProc, "_process_engine_step", EngineCoreProc._process_engine_step)
-    monkeypatch.setattr(
-        EngineCoreProc, "_process_input_queue", EngineCoreProc._process_input_queue
-    )
+    monkeypatch.setattr(EngineCoreProc, "_process_input_queue", EngineCoreProc._process_input_queue)
     start_watch_dog = MagicMock()
     monkeypatch.setattr(_watchdog_patch, "start_watch_dog", start_watch_dog)
 
