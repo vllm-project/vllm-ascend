@@ -249,7 +249,7 @@ class TestSwapSearch(TestCase):
         rank_assignments = np.array([[0, 1], [2, 3]])
         rank_loads = np.array([12.0, 4.0])
         com_per_rank = np.zeros((2, 2), dtype=np.int64)
-        rev_expert_per_rank = defaultdict(set)
+        rev_expert_per_rank: dict = defaultdict(set)
         updated_weights = np.array([10.0, 2.0, 4.0, 0.0])
         rows, max_rank_load = policy.expert_exchange_between_ranks(
             rank_assignments, rank_loads, com_per_rank, rev_expert_per_rank, updated_weights
