@@ -20,6 +20,37 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 ### Generative Models
 
+=== "A2/A3"
+
+    <table>
+    <thead>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th rowspan="2">Model</th><th rowspan="2">Quantization</th><th rowspan="2">Model Runner</th>
+        <th colspan="4">Graph Mode</th>
+        <th colspan="2">Graph Fusion</th>
+        <th colspan="6">Parallel Feature</th>
+        <th colspan="4">MoE</th>
+        <th colspan="4">Speculative Decoding</th>
+        <th colspan="2">KV Cache Pool</th>
+        <th rowspan="2">Layerwise and Sparse KV Cache Offloading</th>
+        <th colspan="4">Fine-Grained Tensor Parallelism</th>
+        </tr>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th>PIECEWISE</th><th>FULL_DECODE_ONLY</th><th>FULL</th><th>FULL_AND_PIECEWISE</th>
+        <th>static_kernel</th><th>superkernel</th>
+        <th>CP</th><th>PP</th><th>TP</th><th>EP</th><th>DP</th><th>mlapo</th>
+        <th>EPLB</th><th>multistream moe</th><th>Expert Sharing DP</th><th>MoE Fusion Operator</th>
+        <th>MTP</th><th>eagle3</th><th>DSpark</th><th>DFlash</th>
+        <th>Mooncake</th><th>Memcache</th>
+        <th>oproj</th><th>embedding</th><th>mlp</th><th>lm_head</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td>DeepSeek-V4-Pro</td><td>W4A8C16</td><td>V2</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>🔵</td><td>🔵</td><td>PCP:✅<br
+        >DCP:❌<br>DSA-CP:🔵</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🔵</td><td>✅</td><td>🔵</td><td>✅</td><td>🔵</td><td>❌</td><td>5</td><td>❌</td><td>🔵</td><td>layerwise:🔵<br>non layerwise:✅<br>SSD:✅</td><td>❌</td><td>🔵</td><td>🔵</td><td>❌</td><td>🔵</td></tr>
+    </tbody>
+    </table>
+
 #### Core Supported Models
 
 === "950PR&950DT Products"
