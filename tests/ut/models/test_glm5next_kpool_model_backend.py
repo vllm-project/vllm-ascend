@@ -481,7 +481,9 @@ def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
     # Model the batch-dependent rounding observed in NPU head-weight GEMMs.
     with (
         patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected D2H")),
-        patch.object(backend_module.F, "linear", side_effect=lambda values, weight: linear(values, weight) + values.shape[0]),
+        patch.object(
+            backend_module.F, "linear", side_effect=lambda values, weight: linear(values, weight) + values.shape[0]
+        ),
     ):
         result = op.forward(hidden, query, hidden + 1, metadata, compute_topk=compute_topk)
     torch.testing.assert_close(op._key_pool.call_args.args[0], hidden + 1)

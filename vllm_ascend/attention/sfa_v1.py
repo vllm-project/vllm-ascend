@@ -2028,7 +2028,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 query_plan = (
                     getattr(indexer_attn_metadata, "query_plan", None)
                     # Subclasses may prepare resident KV or CP views inside sparse dispatch.
-                    if type(self) is AscendSFAImpl and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+                    if type(self) is AscendSFAImpl
+                    and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
                     else None
                 )
                 attn_output = None

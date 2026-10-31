@@ -116,7 +116,8 @@ def test_whole_full_visible_batch_needs_no_sparse_attention():
     )
     sparse = Mock(side_effect=AssertionError("unexpected sparse attention"))
     with patch(
-        "vllm_ascend.attention.kpool_dense_attention.torch_npu.npu_fused_infer_attention_score", return_value=(query + 2,)
+        "vllm_ascend.attention.kpool_dense_attention.torch_npu.npu_fused_infer_attention_score",
+        return_value=(query + 2,),
     ):
         output = execute_kpool_hybrid_attention(
             query,
