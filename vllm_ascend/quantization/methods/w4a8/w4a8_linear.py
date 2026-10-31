@@ -118,9 +118,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             return torch.empty(output_shape, dtype=output_dtype, device=quantized_x.device)
         # Use the per-channel A8W4 GMM interface for a single Linear group.
         # The current quant_matmul fake implementation assumes per-group A8W4 scales.
-        group_list = torch.full(
-            (1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device
-        )
+        group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
         output = torch_npu.npu_grouped_matmul(
             x=[quantized_x],
             weight=[layer.weight],

@@ -42,9 +42,11 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
             params = self.method.get_pergroup_param(16, 80, torch.bfloat16, "row")
         self.assertEqual(params["scale_bias"].shape, (80, 2))
         self.assertEqual(params["_input_dim"], 1)
-        with patch(MODULE + ".get_tensor_model_parallel_world_size", return_value=3):
-            with self.assertRaisesRegex(ValueError, "divide 16"):
-                self.method.get_pergroup_param(16, 80, torch.bfloat16, "row")
+        with (
+            patch(MODULE + ".get_tensor_model_parallel_world_size", return_value=3),
+            self.assertRaisesRegex(ValueError, "divide 16"),
+        ):
+            self.method.get_pergroup_param(16, 80, torch.bfloat16, "row")
 
     def test_nz_conversion_alignment_and_scale_bias_reduction(self):
         for input_size, output_size, use_nz in [(16, 64, True), (16, 80, False), (8, 64, False)]:
@@ -78,9 +80,11 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
 
     def test_empty_input_does_not_call_quantization_or_matmul(self):
         layer = SimpleNamespace(weight_scale=torch.ones(80))
-        with patch(MODULE + ".torch_npu.npu_dynamic_quant", create=True) as quant:
-            with patch(MODULE + ".torch_npu.npu_grouped_matmul", create=True) as matmul:
-                output = self.method.apply(layer, torch.empty(2, 0, 16, dtype=torch.bfloat16))
+        with (
+            patch(MODULE + ".torch_npu.npu_dynamic_quant", create=True) as quant,
+            patch(MODULE + ".torch_npu.npu_grouped_matmul", create=True) as matmul,
+        ):
+            output = self.method.apply(layer, torch.empty(2, 0, 16, dtype=torch.bfloat16))
         self.assertEqual(output.shape, (2, 0, 80))
         self.assertEqual(output.dtype, torch.bfloat16)
         quant.assert_not_called()
