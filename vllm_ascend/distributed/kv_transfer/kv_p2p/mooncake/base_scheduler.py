@@ -18,7 +18,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -27,6 +26,11 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.utils.prefill_boundary import (
+    needs_prefill_token_truncation,
+    truncate_request_for_prefill,
+    unique_group_specs,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -126,25 +130,11 @@ class MooncakeBaseConnectorScheduler:
 
     def _needs_prefill_token_truncation(self) -> bool:
         """Return whether Prefill must leave the last prompt token to Decode."""
-        hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        compress_ratios = getattr(hf_config, "compress_ratios", None)
-        uses_compressed_cache = isinstance(compress_ratios, (list, tuple, dict))
-        has_state_group = any(
-            isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
-        )
-        return uses_compressed_cache or has_state_group
+        return needs_prefill_token_truncation(self.vllm_config.model_config, self.group_unique_specs)
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
-
-        specs = []
-        for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
-            if layer_spec not in specs:
-                specs.append(layer_spec)
-        return specs
+        return unique_group_specs(group)
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return prompt blocks while retaining evicted-block padding.
@@ -193,26 +183,8 @@ class MooncakeBaseConnectorScheduler:
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """Drop the last P-side prompt token for stateful model transfer."""
-        params = request.kv_transfer_params
-        if (
-            params is None
-            or not self.need_truncate
-            or params.get("_p_side_truncated")
-            or request.num_prompt_tokens <= 1
-        ):
-            return
-
-        if request.prompt_token_ids is not None:
-            request.prompt_token_ids.pop()
-        elif request.prompt_embeds is not None:
-            request.prompt_embeds = request.prompt_embeds[:-1]
-        else:
-            return
-
-        request._all_token_ids.pop()
-        request.num_prompt_tokens -= 1
-        request.max_tokens = 1
-        params["_p_side_truncated"] = True
+        if self.need_truncate:
+            truncate_request_for_prefill(request)
 
     def on_new_request(self, request: "Request") -> None:
         # Truncate before local prefix-cache lookup so its hit count stays

@@ -409,6 +409,17 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
+        transfer = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            transfer is not None
+            and transfer.kv_connector == "LayerwisePoolConnector"
+            and not getattr(transfer, "kv_connector_module_path", None)
+        ):
+            # vLLM's graph-compatibility hook receives only extra_config.
+            # Derive the role before that hook runs: only P needs Python
+            # layer-write callbacks; D restores asynchronously before forward.
+            transfer.kv_connector_extra_config["_pool_pd_role"] = transfer.kv_role
+
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
         reduced_cg_cap = _get_reduced_cg_cap(vllm_config)

@@ -225,6 +225,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Stop store users before closing the backend's native resources."""
         try:
             if self.connector_scheduler is not None:
+                if isinstance(self.connector_scheduler, LayerwiseKVPoolScheduler):
+                    self.connector_scheduler.close_object_queries()
                 client = self.connector_scheduler.client
                 try:
                     if client is not None:
@@ -246,8 +248,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         metadata: dict[tuple[int, int], "KVConnectorHandshakeMetadata"],
     ) -> None:
-        """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
-        pass
+        if isinstance(self.connector_scheduler, LayerwiseKVPoolScheduler):
+            self.connector_scheduler.set_object_handshakes(metadata)
+
+    def set_xfer_handshake_metadata(self, metadata):
+        self.set_xfer_handshake_metadata_pp_aware(metadata)
+
+    def get_handshake_metadata(self):
+        return getattr(self.connector_worker, "_object_handshake", None)
+
+    def on_new_request(self, request):
+        if isinstance(self.connector_scheduler, LayerwiseKVPoolScheduler):
+            self.connector_scheduler.on_new_request(request)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
@@ -443,7 +455,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata(), layer_name)
 
     def wait_for_save(self):
         if not self.can_put:

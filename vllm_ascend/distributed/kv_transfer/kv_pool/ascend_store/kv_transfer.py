@@ -14,6 +14,11 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.copy_ranges import (
+    copy_gva_ranges,
+    range_transfer_batches,
+    split_transfer_packets,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
 )
@@ -160,32 +165,7 @@ class KVTransferThread(threading.Thread):
         sizes: np.ndarray,
         max_transfer_bytes: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if max_transfer_bytes <= 0:
-            return gvas, addrs, sizes
-
-        split_counts: np.ndarray = (sizes + max_transfer_bytes - 1) // max_transfer_bytes
-        total_splits = int(split_counts.sum())
-        if total_splits == sizes.shape[0]:
-            return gvas, addrs, sizes
-
-        split_indices: np.ndarray = np.arange(int(split_counts.max()), dtype=np.int64)
-        split_mask = split_indices[:, None] < split_counts[None, :]
-        entry_indices = np.broadcast_to(
-            np.arange(sizes.shape[0], dtype=np.int64),
-            split_mask.shape,
-        )[split_mask]
-        transfer_offsets = np.broadcast_to(
-            split_indices[:, None] * max_transfer_bytes,
-            split_mask.shape,
-        )[split_mask]
-
-        split_gvas = gvas[entry_indices] + transfer_offsets
-        split_addrs = addrs[entry_indices] + transfer_offsets
-        split_sizes = np.minimum(
-            max_transfer_bytes,
-            sizes[entry_indices] - transfer_offsets,
-        )
-        return split_gvas, split_addrs, split_sizes
+        return split_transfer_packets(gvas, addrs, sizes, max_transfer_bytes)
 
     def _batch_copy_with_limits(
         self,
@@ -215,30 +195,18 @@ class KVTransferThread(threading.Thread):
             max_transfer_addrs = len(gvas)
 
         assert self.m_store.store is not None
-        for start in range(0, len(gvas), max_transfer_addrs):
-            end = start + max_transfer_addrs
-            split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
-                gvas[start:end],
-                addrs[start:end],
-                sizes[start:end],
-                max_transfer_bytes,
-            )
-            logger.debug(
-                "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
-                dir_name,
-                split_gvas.tolist(),
-                split_sizes.tolist(),
-            )
-            res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
-                direction,
-            )
-            if res != 0:
-                logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
-                return res
-        return 0
+        result = copy_gva_ranges(
+            self.m_store.store.batch_copy,
+            gvas,
+            addrs,
+            sizes,
+            direction,
+            max_addresses=max_transfer_addrs,
+            max_packet_bytes=max_transfer_bytes,
+        )
+        if result != 0:
+            logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, result)
+        return result
 
     @staticmethod
     def _range_transfer_batches(
@@ -249,61 +217,9 @@ class KVTransferThread(threading.Thread):
         max_transfer_blocks: int,
         max_transfer_bytes: int,
     ) -> list[tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]]:
-        """Split backend range calls by key count and per-segment byte size."""
-        row_count = len(keys)
-        if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == row_count):
-            raise ValueError("Layerwise range metadata must contain one buffer/size/offset row per key")
-
-        # Default configuration (both limits unset) means one batch holding every
-        # key and no per-segment splitting, so every row passes through as-is
-        # unless it carries an empty or negative segment. Detect that case and
-        # hand back the caller's own lists: this runs once per key, per layer,
-        # per group, and rebuilding them element-wise was the receive thread's
-        # largest single block of exposed time.
-        if max_transfer_blocks <= 0 and max_transfer_bytes <= 0:
-            for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
-                if not (len(buffers) == len(sizes) == len(offsets)):
-                    raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
-                if sizes and min(sizes) >= 0 and 0 not in sizes:
-                    continue
-                break
-            else:
-                return [(keys, all_buffers, all_sizes, all_offsets)]
-
-        normalized_buffers: list[list[int]] = []
-        normalized_sizes: list[list[int]] = []
-        normalized_offsets: list[list[int]] = []
-        for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
-            if not (len(buffers) == len(sizes) == len(offsets)):
-                raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
-            split_buffers: list[int] = []
-            split_sizes: list[int] = []
-            split_offsets: list[int] = []
-            for buffer, size, offset in zip(buffers, sizes, offsets, strict=True):
-                if size < 0:
-                    raise ValueError(f"Layerwise range size must be non-negative, got {size}")
-                if size == 0:
-                    continue
-                packet_size = max_transfer_bytes if max_transfer_bytes > 0 else size
-                for packet_offset in range(0, size, packet_size):
-                    split_buffers.append(buffer + packet_offset)
-                    split_sizes.append(min(packet_size, size - packet_offset))
-                    split_offsets.append(offset + packet_offset)
-            normalized_buffers.append(split_buffers)
-            normalized_sizes.append(split_sizes)
-            normalized_offsets.append(split_offsets)
-
-        rows_per_batch = max_transfer_blocks if max_transfer_blocks > 0 else max(1, row_count)
-        return [
-            (
-                keys[start:end],
-                normalized_buffers[start:end],
-                normalized_sizes[start:end],
-                normalized_offsets[start:end],
-            )
-            for start in range(0, row_count, rows_per_batch)
-            for end in [min(start + rows_per_batch, row_count)]
-        ]
+        return range_transfer_batches(
+            keys, all_buffers, all_sizes, all_offsets, max_transfer_blocks, max_transfer_bytes
+        )
 
     def _set_os_thread_name(self) -> None:
         try:
@@ -323,6 +239,9 @@ class KVTransferThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None or self._stopping.is_set():
+                    cancel = getattr(request_data, "cancel_queued", None)
+                    if callable(cancel):
+                        cancel()
                     self.request_queue.task_done()
                     if request_data is None:
                         return
@@ -341,6 +260,26 @@ class KVTransferThread(threading.Thread):
                     type(e).__name__,
                     e,
                 )
+                # A failed sender must not leave borrowed-executor futures
+                # unresolved. No queued operation has started native I/O.
+                retained = []
+                while True:
+                    try:
+                        pending = self.request_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        cancel = getattr(pending, "cancel_queued", None)
+                        if callable(cancel):
+                            cancel()
+                        else:
+                            # Preserve legacy queued-request ownership. Only
+                            # borrowed-executor calls need terminal futures.
+                            retained.append(pending)
+                    finally:
+                        self.request_queue.task_done()
+                for pending in retained:
+                    self.request_queue.put(pending)
                 return
 
     def _handle_request(self, req_meta: Any):

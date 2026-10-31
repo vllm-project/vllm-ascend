@@ -246,6 +246,28 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert mamba_payload_size < descriptors[MAMBA].size
 
 
+@pytest.mark.parametrize("layerwise_store", [False, True])
+def test_glm5_next_v2_pooled_descriptors_are_not_layer_reuse_aliases(monkeypatch, layerwise_store):
+    config, _, plan = _make_plan()
+    config.additional_config = {}
+    if layerwise_store:
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True},
+        )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    raw_caches = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    # GLM's groups share page backing, including different spec types. Their
+    # zero layer stride does not imply that a rotating layer planner ran.
+    assert raw_caches[MAIN] is raw_caches[MAMBA]
+    assert raw_caches[INDEXER] is raw_caches[STATE]
+    assert raw_caches[MAIN].data_ptr() != raw_caches[INDEXER].data_ptr()
+    for descriptor in plan.kv_cache_tensors:
+        for name in get_kv_cache_tensor_layers(descriptor):
+            assert raw_caches[name].numel() == descriptor.size
+
+
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     config, _, plan = _make_plan(main_head_size=6)
     runner = _make_runner(config, main_cache_dims=(4, 2))

@@ -171,6 +171,8 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     both endpoints must agree on the page layout: raw transfers carry no
     metadata distinguishing component-major from token-fused FlashMLA pages.
     This helper identifies connector support, not cross-endpoint agreement.
+    LayerwisePoolConnector instead describes component strides explicitly and
+    plans compatible component-major/token-fused layouts on the reader.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
@@ -184,6 +186,7 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     return getattr(kv_transfer_config, "kv_connector", None) in {
         "MooncakeConnectorV2",
         "MooncakePullConnector",
+        "LayerwisePoolConnector",
     }
 
 

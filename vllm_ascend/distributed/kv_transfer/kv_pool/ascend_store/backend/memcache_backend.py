@@ -16,8 +16,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     BatchResultShapeError,
     get_scheduler_device_id,
     parse_qos_from_extra_config,
+    require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_codec import PoolKeyIdentity
 
 
 def _is_device_sdma() -> bool:
@@ -37,6 +39,7 @@ def _is_device_sdma() -> bool:
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
+MEMCACHE_UNMATCHED_KEY = -3102
 
 
 def _validate_device_ub_qos() -> None:
@@ -156,10 +159,7 @@ class MemcacheBackend(Backend):
         num_groups = len(grouped_block_size)
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
 
-        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
-            return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
-
-        return LayerwiseKeyBuilder(make_key, pp_size)
+        return PoolKeyIdentity("memcache-v1", model_name, num_groups, pp_size).bind()
 
     @classmethod
     def make_partial_key(
@@ -425,6 +425,24 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_add_lease(keys, lease_ttl_ms)
 
+    def absent_read_lease_keys(self, keys: list[str], results: list[int]) -> set[str]:
+        # MMC_UNMATCHED_KEY can originate in MetaService OR local tracker
+        # failure after a server acquisition. The code alone is insufficient.
+        return self._confirmed_missing_keys(keys, results)
+
+    def _confirmed_missing_keys(self, keys: list[str], results: list[int]) -> set[str]:
+        # Confirm that the object is absent before dropping this obligation;
+        # failed/ambiguous queries preserve it for the normal cleanup path.
+        missing = [key for key, code in zip(keys, results, strict=True) if code == MEMCACHE_UNMATCHED_KEY]
+        if not missing:
+            return set()
+        try:
+            states = require_aligned_batch_results("pool absent lease lookup", missing, self.exists(missing))
+        except Exception:
+            logger.exception("Cannot confirm missing pool read-lease objects")
+            return set()
+        return {key for key, state in zip(missing, states, strict=True) if state == 0}
+
     def batch_remove_lease(self, keys: list[str]) -> int:
         assert self.store is not None
         return self.store.batch_remove_lease(keys)
@@ -432,6 +450,31 @@ class MemcacheBackend(Backend):
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
         return self.store.batch_write_finish(keys, results)
+
+    def batch_revoke(self, keys: list[str]) -> list[int]:
+        """Delete drained private objects even after their write tracker expires."""
+        if not keys:
+            return []
+        assert self.store is not None
+        codes = require_aligned_batch_results("pool private object removal", keys, self.store.remove_batch(keys))
+        # A retry or eviction can have already removed the object. Only a
+        # confirmed missing key completes that cleanup obligation; transport
+        # failures, malformed results and existing objects remain failures.
+        missing = self._confirmed_missing_keys(keys, codes)
+        return [0 if key in missing else code for key, code in zip(keys, codes, strict=True)]
+
+    def batch_copy_gva(self, gvas: list[int], buffers: list[int], sizes: list[int], direction: int) -> int:
+        if direction not in (MmcDirect.COPY_L2G.value, MmcDirect.COPY_G2L.value):
+            raise ValueError("GVA copy requires an L2G or G2L direction")
+        if len(gvas) != len(buffers) or len(gvas) != len(sizes):
+            raise ValueError("GVA copy vectors must have equal lengths")
+        if not gvas:
+            return 0
+        if any(type(value) is not int or value <= 0 for values in (gvas, buffers, sizes) for value in values):
+            raise ValueError("GVA copy addresses and sizes must be positive integers")
+        self.ensure_initialized()
+        assert self.store is not None
+        return int(self.store.batch_copy(gvas, buffers, sizes, direction))
 
     def get(
         self,

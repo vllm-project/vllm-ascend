@@ -1419,10 +1419,13 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
 
 
 @pytest.mark.parametrize("remote_pcp", [False, True])
-def test_mamba_unequal_tp_slices_conv_projections_and_state(remote_pcp: bool) -> None:
+@pytest.mark.parametrize("mamba_type", [MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN])
+def test_mamba_unequal_tp_slices_conv_projections_and_state(
+    remote_pcp: bool, mamba_type: MambaAttentionBackendEnum
+) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
-        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        mamba_type=mamba_type,
     )
     thread = make_thread(
         tp_size=1,
@@ -1458,9 +1461,14 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state(remote_pcp: bool) ->
         length_list=lengths,
     )
 
-    assert src == [1104, 1136, 1168, 1116, 1148, 1180, 1124, 1156, 1188, 2096]
-    assert dst == [7096, 7112, 7128, 7104, 7120, 7136, 7108, 7124, 7140, 8064]
-    assert lengths == [8, 8, 8, 4, 4, 4, 4, 4, 4, 32]
+    if mamba_type == MambaAttentionBackendEnum.MAMBA2:
+        assert src == [1104, 1136, 1168, 1116, 1148, 1180, 1124, 1156, 1188, 2096]
+        assert dst == [7096, 7112, 7128, 7104, 7120, 7136, 7108, 7124, 7140, 8064]
+        assert lengths == [8, 8, 8, 4, 4, 4, 4, 4, 4, 32]
+    else:
+        assert src == [1100, 1132, 1164, 1108, 1140, 1172, 1120, 1152, 1184, 2096]
+        assert dst == [7096, 7112, 7128, 7100, 7116, 7132, 7104, 7120, 7136, 8064]
+        assert lengths == [4, 4, 4, 4, 4, 4, 8, 8, 8, 32]
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,8 @@ import functools
 import json
 import math
 import os
+import signal
+import threading
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
@@ -85,6 +87,28 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+@contextmanager
+def preserve_framework_signal_handlers():
+    """Keep framework shutdown handlers across third-party initialization.
+
+    Graph packages install Python handlers on import; native SDKs can replace
+    the C disposition without updating Python's table. Reapply both handlers
+    unconditionally so framework cleanup can drain work before finalization.
+    This does not unregister third-party atexit cleanup.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # Python signal registration (including graph package imports) is only
+        # allowed on the main thread. Native SDK callers must enforce that too.
+        yield
+        return
+    handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
 
 
 def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:

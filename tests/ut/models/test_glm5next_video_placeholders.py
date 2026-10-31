@@ -137,3 +137,33 @@ def test_image_prompt_update_is_unchanged(processor):
     grid = torch.tensor([1, 4, 4])
     updates = processor._get_prompt_updates({}, {}, {"image": [{"image_grid_thw": SimpleNamespace(data=grid)}]})
     assert next(update for update in updates if update.modality == "image").replacement(0) == [1] * 4
+
+
+@pytest.mark.parametrize("pixel_budget", [25088, 26656])
+def test_profile_frame_search_respects_temporally_aligned_pixel_budget(processor, pixel_budget):
+    info = processor.info
+    info.get_hf_config().vision_config = SimpleNamespace(patch_size=14, spatial_merge_size=2, temporal_patch_size=2)
+    info.ctx.get_merged_mm_kwargs = lambda _: {}
+    for media_processor in (info.get_hf_processor().image_processor, info.get_hf_processor().video_processor):
+        media_processor.min_image_tokens = 1
+        media_processor.max_image_tokens = pixel_budget // (2 * 28 * 28)
+    # The inherited search visits 600 frames, even with video disabled. Above
+    # 32 frames this budget cannot hold one spatial patch per temporal group.
+    frames = info.get_num_frames_with_most_features(512, {"image": 1, "video": 0})
+    padded_frames = frames + (-frames % 2)
+    assert 0 < padded_frames * 28 * 28 <= pixel_budget
+    size = info.get_image_size_with_most_features()
+    output = info.get_hf_processor().video_processor(
+        videos=[torch.zeros((frames, 3, size.height, size.width), dtype=torch.uint8)],
+        do_sample_frames=False,
+        return_tensors="pt",
+    )
+    # Compare the selected profiling geometry against the real pixel processor.
+    grid = output["video_grid_thw"][0]
+    _, estimated = info._get_vision_info(
+        image_width=size.width,
+        image_height=size.height,
+        num_frames=frames,
+        max_image_pixels=pixel_budget,
+    )
+    assert int(grid.prod()) // 4 == estimated

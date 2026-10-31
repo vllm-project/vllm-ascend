@@ -605,6 +605,7 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
                 self.device,
                 self.kernel_block_size,
                 num_heads=self.model_config.hf_text_config.num_attention_heads,
+                block_table_width=local_metadata.block_table.shape[1],
             )
         metadata.nope_metadata = self.nope_states[draft_index].prepare(local_metadata)
 

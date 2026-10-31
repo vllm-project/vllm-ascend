@@ -1,0 +1,10 @@
+{
+  "kv_connector": "LayerwisePoolConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "backend": "memcache",
+    "pool_namespace": "glm-pool-validation",
+    "lease_ttl_ms": 600000,
+    "retention_seconds": 300
+  }
+}

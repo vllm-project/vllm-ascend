@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_codec import PoolKeyIdentity
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -352,25 +353,19 @@ class MooncakeBackend(Backend):
             layout = mooncake_layerwise.hybrid_layout_id(
                 kv_cache_config, parallel.tensor_parallel_size, namespace=namespace
             )
-            block_sizes = tuple(grouped_block_size)
+            return PoolKeyIdentity(
+                "mooncake-hybrid-v1",
+                model_name,
+                len(grouped_block_size),
+                pp_size,
+                namespace=namespace,
+                layout_id=layout,
+                group_block_sizes=tuple(grouped_block_size),
+            ).bind()
 
-            def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
-                return mooncake_layerwise.hybrid_block_key(
-                    model_name,
-                    layout,
-                    group,
-                    block_sizes[group],
-                    block_hash,
-                    head,
-                    pp_rank=stage if pp_size > 1 else None,
-                )
-
-            return LayerwiseKeyBuilder(make_key, pp_size)
-
-        def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
-            return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
-
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size)
+        return PoolKeyIdentity(
+            "mooncake-block-v1", model_name, len(grouped_block_size), pp_size, namespace=namespace
+        ).bind()
 
     @classmethod
     def send_fence_backlog(cls) -> int:

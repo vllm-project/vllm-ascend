@@ -23,7 +23,6 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
-from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
@@ -34,7 +33,10 @@ from vllm.config.utils import Range
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY
+from vllm_ascend.utils import COMPILATION_PASS_KEY, preserve_framework_signal_handlers
+
+with preserve_framework_signal_handlers():
+    from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -239,7 +241,8 @@ def npugraph_ex_compile(
         nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
-        import torchair
+        with preserve_framework_signal_handlers():
+            import torchair
 
         torch.npu.set_compile_mode(jit_compile=False)
         config = torchair.CompilerConfig()

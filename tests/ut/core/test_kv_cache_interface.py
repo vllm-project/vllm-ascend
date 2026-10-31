@@ -133,7 +133,7 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
 def test_component_major_mla_pd_gate():
     assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
 
-    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector", "LayerwisePoolConnector"):
         config = SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
                 kv_connector=connector,

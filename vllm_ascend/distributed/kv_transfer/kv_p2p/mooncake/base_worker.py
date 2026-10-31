@@ -45,12 +45,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
 )
+from vllm_ascend.distributed.kv_transfer.utils.cache_layout import describe_shared_page
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
 )
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
-    tensor_storage_key,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (
@@ -200,63 +200,7 @@ class MooncakeBaseConnectorWorker:
         self,
         caches: tuple[torch.Tensor, ...],
     ) -> tuple[int, int, tuple[int, ...], int] | None:
-        """Describe views packed into one physical page allocation.
-
-        Sharing a storage alone is insufficient: conventional planar K/V
-        views can share one allocation while their first blocks are many pages
-        apart. A packed layout must place every view's first block inside one
-        common page stride and use the same physical block count and stride.
-        Their contiguous block spans must cover that entire stride.
-        """
-        if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
-            return None
-
-        tensor_num_blocks = {cache.shape[0] for cache in caches}
-        page_strides = {cache.stride(0) * cache.element_size() for cache in caches}
-        if len(tensor_num_blocks) != 1 or len(page_strides) != 1:
-            return None
-
-        num_tensor_blocks = next(iter(tensor_num_blocks))
-        page_stride = next(iter(page_strides))
-        if num_tensor_blocks <= 0 or page_stride <= 0 or num_tensor_blocks % self.num_blocks:
-            return None
-
-        page_base_addr = min(cache.data_ptr() for cache in caches)
-        block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
-        # Storage capacity does not prove that this layer owns a whole page:
-        # its views may occupy only a subregion of a larger shared allocation.
-        # Merge only internally contiguous blocks whose union covers the full
-        # stride. Overlapping aliases are allowed, but holes and padding are not.
-        if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
-            return None
-        block_ranges = sorted(
-            (cache.data_ptr() - page_base_addr, cache.data_ptr() - page_base_addr + block_len)
-            for cache, block_len in zip(caches, block_lens)
-        )
-        covered_end = 0
-        for start, end in block_ranges:
-            if start > covered_end or end > page_stride:
-                return None
-            covered_end = max(covered_end, end)
-        if covered_end != page_stride:
-            return None
-
-        storage = caches[0].untyped_storage()
-        storage_base_addr = storage.data_ptr()
-        storage_end_addr = storage_base_addr + storage.nbytes()
-        if page_base_addr < storage_base_addr or page_base_addr + num_tensor_blocks * page_stride > storage_end_addr:
-            return None
-
-        selected_cache = max(
-            zip(caches, block_lens),
-            key=lambda cache_and_len: cache_and_len[1],
-        )[0]
-        return (
-            page_base_addr,
-            page_stride,
-            tuple(selected_cache.shape[1:]),
-            num_tensor_blocks // self.num_blocks,
-        )
+        return describe_shared_page(caches, self.num_blocks)
 
     @staticmethod
     def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:

@@ -16,6 +16,76 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPMetadata
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
+@pytest.mark.parametrize("empty_axis", ["query", "input", "slots"])
+def test_nope_empty_rank_saves_existing_cache_and_indexer(monkeypatch, empty_axis):
+    main_cache = (torch.ones(1),)
+    indexer_cache = (torch.ones(1), torch.ones(1))
+    composed = (*main_cache, *indexer_cache)
+    impl = SimpleNamespace(
+        enable_sparse_sfa_turboquant=False,
+        qk_rope_head_dim=0,
+        _compose_sfa_kv_cache=lambda caches: composed if caches is main_cache else None,
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=0 if empty_axis == "query" else 1,
+        slot_mapping=torch.tensor([] if empty_axis == "slots" else [0]),
+    )
+    hidden = torch.ones(0 if empty_axis == "input" else 1, 4)
+    output = torch.ones(1, 4)
+    monkeypatch.setattr(
+        sparse_mla,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=sparse_mla.CUDAGraphMode.NONE),
+    )
+    with patch.object(sparse_mla, "maybe_save_kv_layer_to_connector") as save:
+        result = sparse_mla.AscendSFAImpl.forward(impl, "model.layers.3.attn", hidden, main_cache, metadata, output)
+    assert result is output
+    torch.testing.assert_close(output, torch.zeros_like(output))
+    save.assert_called_once()
+    assert save.call_args.args[0] == "model.layers.3.attn"
+    assert all(actual is expected for actual, expected in zip(save.call_args.args[1], composed, strict=True))
+
+
+@pytest.mark.parametrize("actual_tokens", [0, 1])
+def test_nope_pcp_empty_rank_joins_collectives_without_padding_real_queries(monkeypatch, actual_tokens):
+    class CollectiveEntry(Exception):
+        pass
+
+    hidden = torch.ones(4, 8)
+    metadata = SimpleNamespace(
+        uses_pcp_sharded_layout=True,
+        num_input_tokens=2,
+        num_actual_tokens=actual_tokens,
+        slot_mapping=torch.full((actual_tokens,), -1),
+        cos=None,
+        sin=None,
+    )
+
+    def enter_collectives(attn_metadata, num_input_tokens, hidden_states):
+        assert attn_metadata is metadata
+        expected_rows = actual_tokens or 2
+        assert num_input_tokens == expected_rows
+        assert hidden_states.shape == (expected_rows, 8)
+        raise CollectiveEntry
+
+    impl = SimpleNamespace(
+        enable_sparse_sfa_turboquant=False,
+        qk_rope_head_dim=0,
+        g_proj=None,
+        _compose_sfa_kv_cache=lambda caches: caches,
+        _get_sfa_kv_slot_mapping=lambda attn_metadata: attn_metadata.slot_mapping,
+        _get_indexer_attn_metadata=lambda: None,
+        _get_parallel_forward_context=enter_collectives,
+    )
+    monkeypatch.setattr(
+        sparse_mla,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=sparse_mla.CUDAGraphMode.NONE),
+    )
+    with pytest.raises(CollectiveEntry):
+        sparse_mla.AscendSFAImpl.forward(impl, "layer", hidden, (torch.ones(1),), metadata, torch.empty_like(hidden))
+
+
 def _builder(
     block_size, a5, monkeypatch, rope_dim=0, builder_cls=sfa.AscendSFAMetadataBuilder, tp_size=1, speculative=False
 ):
@@ -596,6 +666,25 @@ def test_build_smla_metadata_rejects_a_plan_of_the_wrong_size(monkeypatch):
 def _sinks_owner(builder):
     """The SparseMLAMetadataState that owns the persistent sinks."""
     return builder.nope_states[None]
+
+
+def test_hybrid_expanded_table_capacity_is_retained_without_reallocation(monkeypatch):
+    builder = _builder(128, True, monkeypatch)
+    builder.vllm_config.cache_config.block_size = 512
+    builder.vllm_config.model_config.max_model_len = 512
+    common = _common(128)
+    # The hybrid scheduler allocates a padded five-kernel-page slot, while
+    # max_model_len / the global block size suggests only four kernel pages.
+    common.block_table_tensor = torch.arange(10, dtype=torch.int32).reshape(2, 5)
+    first = builder.build(0, common)
+    state = builder.nope_states[None]
+    assert state.block_table_buffer.shape == (3, 5)
+    address = first.block_table.data_ptr()
+    torch.testing.assert_close(first.block_table, common.block_table_tensor)
+    common.block_table_tensor.add_(20)
+    second = builder.build(0, common)
+    assert second.block_table.data_ptr() == address
+    torch.testing.assert_close(second.block_table, common.block_table_tensor)
 
 
 def _stub_metadata_op(monkeypatch):

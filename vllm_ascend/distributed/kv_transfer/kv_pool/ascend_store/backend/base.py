@@ -88,6 +88,14 @@ class Backend(ABC):
         """Release backend resources after all store operations have stopped."""
         return None
 
+    def absent_read_lease_keys(self, keys: list[str], results: list[int]) -> set[str]:
+        """Confirm failed acquisitions with no remaining object to protect.
+
+        Called only with an aligned acquisition response. Unknown errors and
+        ambiguous RPC outcomes must retain their cleanup obligations.
+        """
+        return set()
+
     def ensure_initialized(self) -> None:
         """Initialize the store if this backend supports lazy initialization."""
         return None
@@ -165,6 +173,10 @@ class Backend(ABC):
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         raise NotImplementedError(f"{type(self).__name__} does not support batch_write_finish")
 
+    def batch_copy_gva(self, gvas: list[int], buffers: list[int], sizes: list[int], direction: int) -> int:
+        """Synchronously copy GVA ranges; return only after buffers are no longer in use."""
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_copy_gva")
+
     def validate_layerwise_support(self) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not support block-key layerwise transfer")
 
@@ -184,6 +196,11 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_commit")
 
     def batch_revoke(self, keys: list[str]) -> list[int]:
+        """Revoke caller-owned objects after their native writes have drained.
+
+        GVA writers use this only for expired, unpublished private attempts;
+        it is not permission to remove another writer's shared prefix object.
+        """
         raise NotImplementedError(f"{type(self).__name__} does not support batch_revoke")
 
     def batch_get_start(self, keys: list[str]) -> list[int]:

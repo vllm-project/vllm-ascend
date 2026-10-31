@@ -35,7 +35,7 @@ from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCap
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
+_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector", "LayerwisePoolConnector")
 _MEGA_MOE_SUPPORTED = None
 
 
@@ -96,7 +96,10 @@ class KVPPConfig:
                 name = connector.get("kv_connector")
                 if name not in _KVPP_SUPPORTED_CONNECTORS:
                     raise ValueError(f"KVPP does not support kv connector {name!r}.")
-                if name == "MooncakeConnectorV2" and connector.get("kv_role") == "kv_consumer":
+                if (
+                    name in ("MooncakeConnectorV2", "LayerwisePoolConnector")
+                    and connector.get("kv_role") == "kv_consumer"
+                ):
                     raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config

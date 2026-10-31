@@ -172,6 +172,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    requests = []
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -187,7 +188,12 @@ def _create_mock_backend_app():
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
+        requests.clear()
         return {"ok": True}
+
+    @app.get("/__requests__")
+    async def captured_requests():
+        return requests
 
     async def _gen_stream(item: ScriptItem):
         emitted = 0
@@ -204,6 +210,7 @@ def _create_mock_backend_app():
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
     async def handle(req: Request):
+        requests.append(await req.json())
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -324,6 +331,42 @@ def test_normal_stream(proxy_server):
     assert st == 200
     assert b"data: " in body
     assert b"[DONE]" in body
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("outcome", ["committed", "source_failed", "decode_failed"])
+def test_pool_handoff_is_forwarded_intact(proxy_server, stream, outcome):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pool_metadata import (
+        PoolObjectRef,
+        PoolObjectSlice,
+        PoolSourceProfile,
+        PoolTransferMetadata,
+    )
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_codec import PoolKeyIdentity
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.restore_planner import CacheSlice
+
+    profile = PoolSourceProfile("source", "engine", PoolKeyIdentity("memcache-v1", "model", 2, 2))
+    cache = CacheSlice("layer.7", "indexer", "int8-scale-v1", 0, 4, 0, 1, 8, 8, 32)
+    ref = PoolObjectRef("source", 1, "hash", 3, 1, 32, (PoolObjectSlice(cache, 0),))
+    transfer = PoolTransferMetadata("transfer", "attempt", "digest", 0, 4, "retention", (profile,), (ref,))
+    params = {"do_remote_prefill": outcome != "source_failed", "do_remote_decode": False}
+    if outcome != "source_failed":
+        params.update(pool_transfer=transfer.to_wire(), last_token_id=123)
+    _set_script(MOCK_PREFILL_PORT, [{"kind": "json", "status": 200, "body": {"kv_transfer_params": params}}])
+    if outcome == "decode_failed":
+        _set_script(MOCK_DECODE_PORT, [{"kind": "json", "status": 400, "body": {"error": "decode rejected"}}])
+    else:
+        _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "status": 200, "chunks": [_sse("ok"), DONE]}])
+    payload = _chat_req(stream=stream)
+    payload["kv_transfer_params"] = {"pool_transfer": {"attempt_id": "stale-client-value"}}
+    status, body = _post(proxy_server, payload, stream=stream)
+    assert status == (400 if outcome == "decode_failed" else 200)
+    assert (b"decode rejected" if outcome == "decode_failed" else b"ok") in body
+    received = httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__", timeout=5).json()
+    assert len(received) == 1
+    assert received[0]["kv_transfer_params"] == params
+    if outcome != "source_failed":
+        assert PoolTransferMetadata.from_wire(received[0]["kv_transfer_params"]["pool_transfer"]) == transfer
 
 
 def test_overlimit_nonstream(proxy_server):

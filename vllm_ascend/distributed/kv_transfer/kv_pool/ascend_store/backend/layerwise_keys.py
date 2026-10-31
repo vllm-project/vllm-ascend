@@ -5,6 +5,10 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_codec import PoolKeyIdentity
 
 
 @dataclass(frozen=True)
@@ -12,6 +16,7 @@ class LayerwiseKeyBuilder:
     # The backend binds model/layout identity; callers supply only coordinates.
     make_full_key: Callable[[int, str, int, int], str]
     pp_size: int
+    identity: "PoolKeyIdentity | None" = None
 
     def make_hit_check_keys(self, group_id: int, block_hash: str, num_ranks: int) -> list[str]:
         """Require every saving head on every stage, in stage-major order."""

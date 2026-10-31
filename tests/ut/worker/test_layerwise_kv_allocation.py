@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils
 
 
 @pytest.mark.parametrize("reuse", [False, True])
@@ -105,3 +106,48 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
     raw[main_names[1]][0].fill_(7)
     assert torch.all(raw[main_names[3]][0] == (7 if reuse else 0))
     assert torch.all(raw[main_names[0]][0] == 0)
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_v2_aliases_only_a_plan_that_was_rewritten(monkeypatch, reuse):
+    names = [f"model.layers.{i}.self_attn.attn" for i in range(4)]
+    spec = AscendMLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=12, dtype=torch.bfloat16)
+    layer_bytes = 3 * spec.page_size_bytes
+    plan = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * layer_bytes,
+                layers=names,
+                layer_stride=layer_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+    )
+    config = SimpleNamespace(
+        additional_config={},
+        model_config=SimpleNamespace(get_num_layers=lambda _: 4, hf_config=SimpleNamespace()),
+        parallel_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+                "layerwise_num_shared_buffers": 2 if reuse else 4,
+                "layerwise_independent_layers": [],
+            },
+        ),
+    )
+    apply_layerwise_kv_cache_plan(plan, config)
+    assert getattr(plan, "layerwise_reuse_applied", False) == reuse
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_: False)
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: True)
+    raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    assert (raw[names[0]] is raw[names[2]]) == reuse
+    assert (raw[names[1]] is raw[names[3]]) == reuse
+    assert raw[names[0]][0].data_ptr() != raw[names[1]][0].data_ptr()
+    raw[names[0]][0].fill_(7)
+    assert torch.all(raw[names[2]][0] == (7 if reuse else 0))

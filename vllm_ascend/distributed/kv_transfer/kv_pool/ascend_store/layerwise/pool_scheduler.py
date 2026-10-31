@@ -1,5 +1,8 @@
+import math
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -43,6 +46,10 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._object_workers = {}
+        self._object_inputs = {}
+        self._object_hits = {}
+        self._object_queries = None
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         if (
             self.use_layerwise
@@ -99,6 +106,8 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
                 ).has_layer_reuse
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+        if getattr(self, "_object_workers", None):
+            return self._lookup_object_prefix(request, num_computed_tokens)
         if not self.use_layerwise:
             return super()._lookup_external_hit_tokens(request, num_computed_tokens)
         prompt_token_len = len(request.prompt_token_ids)
@@ -119,6 +128,124 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         if token_len < self.cache_transfer_granularity:
             return None
         return self._get_store_lookup_hit_tokens(request, token_len, num_computed_tokens, include_layers=True)
+
+    def on_new_request(self, request):
+        from vllm_ascend.distributed.kv_transfer.utils.request_identity import pool_request_digest
+
+        self._object_inputs[request.request_id] = pool_request_digest(request)
+
+    def set_object_handshakes(self, metadata):
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pool_metadata import PoolWorkerHandshake
+
+        if not self.use_layerwise_transfer or not self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "shared_pool_objects", True
+        ):
+            return
+        workers = {}
+        for value in metadata.values():
+            if not isinstance(value, PoolWorkerHandshake) or value.worker_id in workers:
+                raise ValueError("Ordinary pool requires one shared-layout handshake per worker")
+            workers[value.worker_id] = value
+        parallel = self.vllm_config.parallel_config
+        expected = {
+            f"pp{pp}/pcp{pcp}/tp{tp}"
+            for pp in range(parallel.pipeline_parallel_size)
+            for pcp in range(parallel.prefill_context_parallel_size)
+            for tp in range(parallel.tensor_parallel_size)
+        }
+        if workers.keys() != expected:
+            raise ValueError("Ordinary pool handshake is missing a PP/PCP/TP worker")
+        sizes = {worker.profile.group_block_sizes for worker in workers.values()}
+        if len(sizes) != 1 or len(next(iter(sizes))) != len(self.original_block_size):
+            raise ValueError("Ordinary pool workers disagree on logical cache group block sizes")
+        self.grouped_block_size = list(next(iter(sizes)))
+        self._block_size = self.grouped_block_size[0]
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[group] for group in self.cacheable_group_ids))
+        self.cache_coordinator = self._build_cache_coordinator()
+        self._object_workers = workers
+
+    def _lookup_object_prefix(self, request, num_computed_tokens):
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pool_control import pool_control_request
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.prefix_lookup import lookup_pool_prefix
+
+        self._object_hits.pop(request.request_id, None)
+        if request.request_id not in self._object_inputs:
+            self.on_new_request(request)
+        step = self.lcm_block_size
+        end = (len(request.prompt_token_ids) - 1) // step * step
+        start = 0 if self.layerwise_offload else num_computed_tokens
+        if end <= start:
+            return 0
+        if self._object_queries is None:
+            self._object_queries = ThreadPoolExecutor(
+                max_workers=min(8, len(self._object_workers)), thread_name_prefix="pool-prefix-query"
+            )
+        data = {
+            "transfer_id": request.request_id,
+            "attempt_id": uuid4().hex,
+            "request_digest": self._object_inputs[request.request_id],
+            "token_start": start,
+            "token_end": end,
+            "group_hashes": [
+                [
+                    block_hash_to_str(value)
+                    for value in get_block_hashes(request.block_hashes, size, self.hash_block_size)
+                ]
+                for size in self.grouped_block_size
+            ],
+        }
+        try:
+            hit = lookup_pool_prefix(
+                self._object_workers.values(),
+                data,
+                self.cacheable_group_ids,
+                step,
+                self._object_queries,
+                pool_control_request,
+            )
+        except Exception:
+            logger.exception("Ordinary shared-object lookup failed: request=%s", request.request_id)
+            return 0
+        if hit is not None:
+            self._object_hits[request.request_id] = hit
+            return hit.token_end
+        return 0
+
+    def build_connector_meta(self, scheduler_output):
+        meta = super().build_connector_meta(scheduler_output)
+        for request in meta.requests:
+            request.pool_snapshot_id = uuid4().hex if request.can_save else None
+            request.pool_request_digest = self._object_inputs.get(request.req_id)
+            request.pool_group_hashes = tuple(
+                tuple(
+                    block_hash_to_str(value)
+                    for value in get_block_hashes(request.block_hashes, size, self.hash_block_size)
+                )
+                for size in self.grouped_block_size
+            )
+            hit = self._object_hits.get(request.req_id)
+            load = request.load_spec
+            request.pool_prefix = (
+                hit
+                if hit is not None
+                and load is not None
+                and not load.layerwise_previous_step
+                and load.kvpool_cached_tokens <= hit.token_end
+                else None
+            )
+        for request_id in scheduler_output.finished_req_ids:
+            self._object_inputs.pop(request_id, None)
+            self._object_hits.pop(request_id, None)
+        return meta
+
+    def close_object_queries(self):
+        if self._object_queries is not None:
+            self._object_queries.shutdown(wait=True)
+
+    def bind_gpu_block_pool(self, gpu_block_pool):
+        super().bind_gpu_block_pool(gpu_block_pool)
+        self.hash_block_size = gpu_block_pool.hash_block_size
+        self.cache_coordinator = self._build_cache_coordinator()
 
     def _get_layerwise_hit_tokens(
         self,

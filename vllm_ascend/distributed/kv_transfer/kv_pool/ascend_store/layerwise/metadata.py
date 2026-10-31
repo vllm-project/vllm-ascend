@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -13,6 +13,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     normalize_block_ids_by_group,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_writer import (
+        LayerwiseWriteCompletion,
+        LayerwiseWriteSession,
+    )
 
 
 @dataclass(order=True)
@@ -170,6 +176,10 @@ class LayerTransferTask:
     use_key_major_ranges: bool = False
     # Group-local completion differs from the physical model layer boundary.
     final_group_layer: bool = False
+    # Shared by tasks of this step only; a later step cannot replace the
+    # completeness plan while an earlier queue still holds these tasks.
+    write_completion: LayerwiseWriteCompletion | None = None
+    write_session: LayerwiseWriteSession | None = None
 
 
 @dataclass
@@ -178,6 +188,9 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    # Component-format reads run inside the same source-slot, compute-start
+    # and MultiConnector gates as legacy GVA reads.
+    object_load: Callable[[], bool] | None = None
 
 
 @dataclass(init=False)

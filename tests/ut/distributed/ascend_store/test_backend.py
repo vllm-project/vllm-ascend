@@ -1541,6 +1541,26 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 # MemcacheBackend (mocked store)
 # =========================================================================
 class TestMemcacheBackendMethods(unittest.TestCase):
+    def test_absent_read_lease_requires_confirmed_missing_object(self):
+        backend = MemcacheBackend.__new__(MemcacheBackend)
+        for states, expected in (
+            ([0], {"missing"}),
+            ([1], set()),
+            ([-1], set()),
+            ([True], set()),
+            (None, set()),
+            ([], set()),
+        ):
+            with self.subTest(states=states):
+                backend.exists = MagicMock(return_value=states)
+                self.assertEqual(backend.absent_read_lease_keys(["missing", "uncertain"], [-3102, -1]), expected)
+                backend.exists.assert_called_once_with(["missing"])
+        backend.exists = MagicMock(side_effect=TimeoutError("lookup timeout"))
+        self.assertEqual(backend.absent_read_lease_keys(["missing"], [-3102]), set())
+        backend.exists.reset_mock()
+        self.assertEqual(backend.absent_read_lease_keys(["unknown", "ok"], [-1, 0]), set())
+        backend.exists.assert_not_called()
+
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 
@@ -1730,6 +1750,25 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
         b.store.batch_write_finish.assert_called_once_with(["k1"], [0])
+
+    def test_private_revoke_preserves_uncertain_failures(self):
+        b = self._make_backend()
+        b.store.remove_batch.return_value = [0, -3102, -3000]
+        for states, expected in (([0], [0, 0, -3000]), ([1], [0, -3102, -3000]), ([], [0, -3102, -3000])):
+            with self.subTest(states=states):
+                b.exists = MagicMock(return_value=states)
+                self.assertEqual(b.batch_revoke(["removed", "missing", "uncertain"]), expected)
+                b.exists.assert_called_once_with(["missing"])
+        b.store.remove_batch.assert_called_with(["removed", "missing", "uncertain"])
+
+    def test_private_revoke_rejects_malformed_removal_response(self):
+        b = self._make_backend()
+        b.store.remove_batch.return_value = []
+        with self.assertRaisesRegex(RuntimeError, "pool private object removal"):
+            b.batch_revoke(["private"])
+        b.store.remove_batch.reset_mock()
+        self.assertEqual(b.batch_revoke([]), [])
+        b.store.remove_batch.assert_not_called()
 
     def test_get(self):
         b = self._make_backend()

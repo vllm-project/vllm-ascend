@@ -121,6 +121,15 @@ def test_detects_layerwise_store_configuration(composite, enabled):
     assert kvpp._uses_layerwise_store(transfer) is enabled
 
 
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "LayerwisePoolConnector"])
+def test_pd_connectors_keep_full_history_kvpp_prefetch(connector):
+    # Per-layer pool writes do not opt in to ordinary pooling's rotating HBM
+    # slots and layerwise loads. P's existing local history still needs KVPP
+    # broadcast/prefetch, exactly as it does with V2.
+    transfer = SimpleNamespace(kv_connector=connector, kv_connector_extra_config={})
+    assert kvpp._uses_layerwise_store(transfer) is False
+
+
 def test_prefetch_sequence_across_forwards(scheduler_device):
     events, compute, transfer = scheduler_device
     transport = Mock()

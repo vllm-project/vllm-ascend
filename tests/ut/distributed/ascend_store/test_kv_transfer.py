@@ -18,6 +18,7 @@
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -316,6 +317,47 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         thread.add_stored_request("r1")
         thread.request_queue.put([task])
         return thread, store, save_finished, task
+
+    def test_planned_gva_objects_require_every_layer_before_publication(self):
+        for missing_first in (False, True):
+            with self.subTest(missing_first=missing_first):
+                thread, store, _, first = self._make_sending_thread()
+                last = replace(first, layer_id=1, layer_idx_in_group=1)
+                first.write_finish_keys = []
+                thread.sync_save_events.append(MagicMock())
+                thread.prepare_write_step([[first], [last]])
+                if missing_first:
+                    with self.assertRaisesRegex(ValueError, "Required object layers"):
+                        thread._copy_gva_layers([last])
+                    # An incomplete shared prefix object must not be committed
+                    # or removed with WRITE_FAIL as a private PD attempt would.
+                    store.batch_write_finish.assert_not_called()
+                else:
+                    self.assertTrue(thread._copy_gva_layers([first]))
+                    store.batch_write_finish.assert_not_called()
+                    self.assertTrue(thread._copy_gva_layers([last]))
+                    store.batch_write_finish.assert_called_once_with(["k0"], [0])
+
+    def test_queued_gva_tasks_keep_their_own_step_completion_plan(self):
+        thread, store, _, first = self._make_sending_thread()
+        last = replace(first, layer_id=1, layer_idx_in_group=1)
+        first.write_finish_keys = []
+        thread.sync_save_events.append(MagicMock())
+        thread.prepare_write_step([[first], [last]])
+        self.assertTrue(thread._copy_gva_layers([first]))
+        next_first = replace(first, write_finish_keys=[])
+        next_last = replace(last, write_finish_keys=list(last.write_finish_keys))
+        thread.prepare_write_step([[next_first], [next_last]])
+        self.assertIsNot(first.write_completion, next_first.write_completion)
+        self.assertIs(first.write_session, last.write_session)
+        self.assertIsNot(first.write_session, next_first.write_session)
+        self.assertIs(first.write_session.completion, first.write_completion)
+        self.assertTrue(thread._copy_gva_layers([last]))
+        store.batch_write_finish.assert_called_once_with(["k0"], [0])
+        store.batch_write_finish.reset_mock()
+        with self.assertRaisesRegex(ValueError, "Required object layers"):
+            thread._copy_gva_layers([next_last])
+        store.batch_write_finish.assert_not_called()
 
     def test_write_finish_failure_completes_layer_and_reports_request(self):
         for missing_copy in (False, True):

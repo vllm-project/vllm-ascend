@@ -960,6 +960,12 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    # Immutable input identity and scheduler-derived group hash boundaries.
+    # Worker-local configuration must not reinterpret CP hash granularity.
+    pool_request_digest: str | None = None
+    pool_group_hashes: tuple[tuple[str, ...], ...] | None = None
+    pool_prefix: Any = None
+    pool_snapshot_id: str | None = None
 
     def __init__(
         self,
@@ -1001,6 +1007,10 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        pool_request_digest: str | None = None,
+        pool_group_hashes: tuple[tuple[str, ...], ...] | None = None,
+        pool_prefix: Any = None,
+        pool_snapshot_id: str | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1024,6 +1034,10 @@ class ReqMeta:
         self.original_block_size = original_block_size
         self.event_id = event_id
         self.store_job_id = store_job_id
+        self.pool_request_digest = pool_request_digest
+        self.pool_group_hashes = pool_group_hashes
+        self.pool_prefix = pool_prefix
+        self.pool_snapshot_id = pool_snapshot_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np

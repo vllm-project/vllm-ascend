@@ -251,7 +251,9 @@ class SparseMLAMetadataState:
     Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
+    def __init__(
+        self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None, *, block_table_width=0
+    ):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -264,7 +266,13 @@ class SparseMLAMetadataState:
         self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
-        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
+        # Hybrid groups may pad scheduler pages beyond the global cache block
+        # size. The runner's expanded table includes that physical capacity.
+        # Account for it when creating the state, before graph capture fixes
+        # the buffer address; prepare() must not reallocate during replay.
+        table_width = max(
+            cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor, block_table_width
+        )
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
         table_rows = max([vllm_config.scheduler_config.max_num_seqs + 1, *capture_sizes])
         self.block_table_buffer = torch.empty(table_rows, table_width, dtype=torch.int32, device=device)
@@ -742,7 +750,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
         if draft_index not in self.nope_states:
             self.nope_states[draft_index] = SparseMLAMetadataState(
-                self.kv_cache_spec, self.vllm_config, self.device, self.kernel_block_size
+                self.kv_cache_spec,
+                self.vllm_config,
+                self.device,
+                self.kernel_block_size,
+                block_table_width=metadata.block_table.shape[1],
             )
         self.nope_states[draft_index].prepare(metadata)
 
@@ -1908,7 +1920,19 @@ class AscendSFAImpl(MLAAttentionImpl):
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
                 num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
+            if num_tokens == 0 and getattr(attn_metadata, "uses_pcp_sharded_layout", False):
+                # Empty PCP ranks still join cache and O-projection collectives.
+                # Their query kernel is skipped by has_local_query below. Keep
+                # nonempty queries trimmed to the indexer's actual row count.
+                num_tokens = min(hidden_states.shape[0], attn_metadata.num_input_tokens)
             if num_tokens == 0:
+                # A PCP rank with no local query can still own cache from an
+                # earlier prefill chunk. Complete this layer's save callback
+                # so a final-chunk pool snapshot includes those existing rows.
+                # Include the indexer components just as on the compute path.
+                composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
+                assert composed_kv_cache is not None
+                maybe_save_kv_layer_to_connector(layer_name, list(composed_kv_cache))
                 return output.zero_()
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None

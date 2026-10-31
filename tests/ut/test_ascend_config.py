@@ -21,6 +21,7 @@ import subprocess
 import sys
 from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
@@ -2188,6 +2189,7 @@ class TestKVPPConfig(TestBase):
         from tests.ut.kvpp_utils import make_kvpp_config
 
         mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        pool_pd = {"kv_connector": "LayerwisePoolConnector", "kv_role": "kv_producer"}
         store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
 
         def multi(children):
@@ -2197,7 +2199,14 @@ class TestKVPPConfig(TestBase):
                 "kv_connector_extra_config": {"connectors": children},
             }
 
-        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+        for transfer in (
+            mooncake,
+            pool_pd,
+            store,
+            multi([mooncake, store]),
+            multi([store, mooncake]),
+            multi([pool_pd, store]),
+        ):
             with self.subTest(transfer=transfer):
                 config = make_kvpp_config()
                 config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
@@ -2207,6 +2216,8 @@ class TestKVPPConfig(TestBase):
         unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
         cases = (
             (consumer, "decode-only"),
+            ({**pool_pd, "kv_role": "kv_consumer"}, "decode-only"),
+            (multi([store, {**pool_pd, "kv_role": "kv_consumer"}]), "decode-only"),
             (multi([store, consumer]), "decode-only"),
             (unsupported, "MooncakeConnectorV1"),
             (multi([mooncake, unsupported]), "MooncakeConnectorV1"),
@@ -2279,11 +2290,12 @@ class TestKVPPConfig(TestBase):
         clear_ascend_config()
         self.addCleanup(clear_ascend_config)
         self.addCleanup(clear_enable_sp)
-        config = VllmConfig()
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
         config.parallel_config.tensor_parallel_size = 4
-        config.additional_config = {"enable_kvpp": True}
-        actual = init_ascend_config(config)
-        self.assertEqual(actual.kvpp_config.size, 4)
+        with TemporaryDirectory() as runtime_dir:
+            config.additional_config = {"enable_kvpp": True, "runtime_report_dir": runtime_dir}
+            actual = init_ascend_config(config)
+            self.assertEqual(actual.kvpp_config.size, 4)
 
 
 class TestEngramSharedMemoryDefaults(TestBase):

@@ -222,6 +222,7 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_scheduler = None
         metadata = {
             (0, 0): MagicMock(),
             (1, 0): MagicMock(),

@@ -110,6 +110,7 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_custom_op,
     enable_sp,
+    preserve_framework_signal_handlers,
     register_ascend_customop,
     register_ascend_fla_customop,
     register_device_print,
@@ -973,7 +974,15 @@ class NPUWorker(WorkerBase):
         else:
             empty_cache_context = nullcontext()
 
-        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
+        # Model constructors may import CANN operators, which in turn import
+        # graph packages and replace process termination handlers. Keep worker
+        # shutdown in charge of draining requests and transfer resources.
+        with (
+            context,
+            empty_cache_context,
+            set_current_vllm_config(self.vllm_config),
+            preserve_framework_signal_handlers(),
+        ):
             self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():

@@ -23,6 +23,16 @@ CLASS_NAME_ALIASES = {
 }
 
 
+def test_layerwise_pool_has_an_independent_factory_entry(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.layerwise_pool_connector import LayerwisePoolConnector
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    assert KVConnectorFactory.get_connector_class_by_name("LayerwisePoolConnector") is LayerwisePoolConnector
+    assert KVConnectorFactory.get_connector_class_by_name("MooncakeConnectorV2") is not LayerwisePoolConnector
+
+
 def test_connectors_with_mismatched_names_register_class_name_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

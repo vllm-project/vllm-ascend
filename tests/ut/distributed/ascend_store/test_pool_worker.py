@@ -246,6 +246,10 @@ class TestPCPPoolWorker(unittest.TestCase):
                         )
                     )
                 worker._transfer_threads_started = True
+                # This fixture checks legacy draft exclusion/reuse metadata;
+                # its backend and transfer threads are mocks. Common object
+                # I/O has real-pointer coverage in test_pool_object_adapter.
+                worker._extra_config["shared_pool_objects"] = False
                 worker.register_kv_caches(caches)
                 self.assertEqual(set(worker.kv_caches), set(target_names) if reuse else set(caches))
                 self.assertEqual(worker.group_num_layers, {0: 4 if reuse else 6})
@@ -1962,6 +1966,40 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 with self.subTest(deferred=deferred, has_load=has_load):
                     self._check_bound_layerwise_step(deferred, has_load)
 
+    def test_named_layer_save_rejects_wrong_layer_and_stale_step_before_touching_buffers(self):
+        worker = make_worker(self, use_layerwise=True, num_layers=2)
+        metadata = AscendConnectorMetadata(set())
+        worker.process_layer_data = MagicMock()
+        worker.prepare_layerwise_step(metadata)
+        worker.sync_save_events = [MagicMock(), MagicMock()]
+        worker.layer_save_finished_events = [threading.Event(), threading.Event()]
+        worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
+        worker._global_to_local_layer = {4: 0, 5: 1}
+        worker.layer_save_tasks = [[], []]
+        for stale_metadata, name, error in (
+            (metadata, "model.layers.5.self_attn", "expects layer 0"),
+            (metadata, "model.layers.6.self_attn", "maps to layer None"),
+            (AscendConnectorMetadata(set()), "model.layers.4.self_attn", "different bound step"),
+        ):
+            with self.subTest(name=name, error=error), self.assertRaisesRegex(ValueError, error):
+                worker.save_kv_layer(stale_metadata, name)
+        for event in worker.sync_save_events:
+            event.record.assert_not_called()
+        worker.kv_send_thread.add_request.assert_not_called()
+        self.assertEqual(worker.current_layer, 0)
+        worker.save_kv_layer(metadata, "model.layers.4.self_attn")
+        worker.sync_save_events[0].record.assert_called_once()
+        self.assertEqual(worker.current_layer, 1)
+
+    def test_scratch_draft_callback_does_not_advance_ordinary_pool_layer(self):
+        worker = make_worker(self, use_layerwise=True, num_layers=2)
+        worker.current_layer = 0
+        worker._dspark_draft_layer_names = {"draft.layers.0.self_attn"}
+        worker.sync_save_events = [MagicMock(), MagicMock()]
+        worker.save_kv_layer(AscendConnectorMetadata(set()), "draft.layers.0.self_attn")
+        self.assertEqual(worker.current_layer, 0)
+        worker.sync_save_events[0].record.assert_not_called()
+
     def _check_bound_layerwise_step(self, deferred, has_load):
         # Two main-model layers plus one physical MTP layer. Later draft
         # forwards must not submit the same physical layer again.
@@ -2097,6 +2135,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         self.assertEqual(first_task.write_finish_keys, [])
         self.assertEqual(last_task.write_finish_keys, ["k0"])
+        self.assertIs(first_task.write_completion, last_task.write_completion)
+        self.assertEqual(first_task.write_completion.layers, {"0": frozenset({"k0"}), "1": frozenset({"k0"})})
 
     def test_process_save_for_layer_batch_skip_no_save(self):
         worker = self._make_worker()
@@ -2772,6 +2812,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import MEMCACHE_SSD_HIT_GVA
 
         cases = (
+            (None, [0, 0], True),
+            ([202, True], [0, 0], True),
+            ([202, 1.5], [0, 0], True),
             ([-3102, 0], [0, 0], True),
             ([202, 0], [202, 0], True),
             ([0, MEMCACHE_SSD_HIT_GVA], [0, 0], True),
@@ -2815,6 +2858,15 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 ]
                 self.assertEqual(request.save_keys, expected_keys)
                 self.assertEqual(logger.error.called, has_failure)
+
+    def test_layerwise_range_allocation_deduplicates_without_owning_rollback(self):
+        worker = self._make_gva_worker()
+        worker.layerwise_max_transfer_blocks = 2
+        worker.m_store.batch_put_start.return_value = [0, -7]
+        self.assertEqual(worker._start_layerwise_put_keys(["a", "a", "b"], 64), [0, 0, -7])
+        worker.m_store.batch_put_start.assert_called_once_with(["a", "b"], [64, 64])
+        worker.m_store.batch_revoke.assert_not_called()
+        worker.m_store.batch_write_finish.assert_not_called()
 
     def test_partial_allocation_sentinels_are_filtered(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import MEMCACHE_SSD_HIT_GVA

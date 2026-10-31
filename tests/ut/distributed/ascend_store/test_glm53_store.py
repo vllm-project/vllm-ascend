@@ -294,7 +294,7 @@ class TestGLM53Store(unittest.TestCase):
                 pp_size=2,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
-                extra_config={"backend": "memcache"},
+                extra_config={"backend": "memcache", "shared_pool_objects": False},
             )
             worker.m_store.batch_alloc.side_effect = alloc
             worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -433,7 +433,7 @@ class TestGLM53Store(unittest.TestCase):
             use_layerwise=True,
             use_mla=True,
             num_layers=4,
-            extra_config={"backend": "memcache"},
+            extra_config={"backend": "memcache", "shared_pool_objects": False},
         )
         worker.register_kv_caches(make_glm53_caches(plan))
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]

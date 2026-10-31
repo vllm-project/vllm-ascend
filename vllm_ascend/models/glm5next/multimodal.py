@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.glm4_1v import (
+    _MAX_FRAMES_PER_VIDEO,
     Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
 )
@@ -661,6 +662,29 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
+
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        # The parent searches every frame count up to its profiling limit.
+        # GLM's strict resize rejects counts whose smallest aligned canvas
+        # already exceeds the pixel budget, including during image-only startup.
+        size = self.get_image_size_with_most_features()
+        config = self.get_hf_config().vision_config
+        processor = self.get_hf_processor().image_processor
+        factor = config.patch_size * config.spatial_merge_size * processor.patch_expand_factor
+        max_pixels = self._get_video_max_pixels()
+        max_frames = max_pixels // (factor * factor)
+        max_frames -= max_frames % config.temporal_patch_size
+        selected_frames, selected_tokens = 1, 0
+        for num_frames in range(1, min(max_frames, _MAX_FRAMES_PER_VIDEO) + 1):
+            _, tokens = self._get_vision_info(
+                image_width=size.width,
+                image_height=size.height,
+                num_frames=num_frames,
+                max_image_pixels=max_pixels,
+            )
+            if selected_tokens < tokens <= max_tokens:
+                selected_frames, selected_tokens = num_frames, tokens
+        return selected_frames
 
     def _get_video_second_idx_glm46v(
         self,

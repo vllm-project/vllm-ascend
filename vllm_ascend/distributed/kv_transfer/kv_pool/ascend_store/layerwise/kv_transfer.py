@@ -15,6 +15,7 @@ from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
+    BatchResultShapeError,
     require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
@@ -28,6 +29,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerRangeReqMeta,
     LayerTransferTask,
     SharedBlockData,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_writer import (
+    LayerwiseWriteCall,
+    LayerwiseWriteCompletion,
+    LayerwiseWriteSession,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
@@ -871,10 +877,40 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             builder = self.layer_batch_builder
         return builder.build_shared(task, is_save=True)
 
+    @staticmethod
+    def prepare_write_step(layer_tasks: list[list[LayerTransferTask]]) -> None:
+        """Bind object publication to this step's complete planned layer set."""
+        layers: dict[str, set[str]] = {}
+        tasks = [task for batch in layer_tasks for task in batch]
+        for task in tasks:
+            shared = task.shared_block_data
+            if shared is not None:
+                keys = shared.block_keys if task.use_key_major_ranges else shared.save_keys
+                if keys:
+                    layers.setdefault(str(task.layer_id), set()).update(keys)
+        completion = LayerwiseWriteCompletion(layers) if layers else None
+        session = LayerwiseWriteSession(completion)
+        for task in tasks:
+            task.write_completion = completion
+            task.write_session = session
+
     def add_revoke_request(self, keys: list[str]) -> None:
         deduplicated_keys = tuple(dict.fromkeys(keys))
         if deduplicated_keys:
-            self.add_request(_LayerRevokeTask(deduplicated_keys))
+            with self._request_submit_lock:
+                if self._stopping.is_set() or self._fatal_error is not None:
+                    raise RuntimeError("Cannot queue cleanup on a stopped or failed layer writer")
+                self.request_queue.put(_LayerRevokeTask(deduplicated_keys))
+
+    def cleanup_pending_puts(self) -> None:
+        """Retry owned range-session cleanup only after the writer has drained."""
+        if self.is_alive():
+            raise RuntimeError("Layer writer must stop before cleaning pending put sessions")
+        with self._put_started_keys_lock:
+            keys = list(self._put_started_keys)
+        if keys:
+            self.m_store.set_device()
+            self._revoke_range_keys(keys)
 
     def _remove_started_keys(self, keys: list[str]) -> None:
         with self._put_started_keys_lock:
@@ -886,16 +922,26 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             return
         try:
             results = require_aligned_batch_results("batch_revoke", keys, self.m_store.batch_revoke(keys))
-            if any(result != 0 for result in results):
-                logger.error("Layerwise backend revoke failed keys=%s results=%s", keys, results)
-        except Exception as exc:
-            logger.error("Layerwise backend revoke raised keys=%s error=%s", keys, exc)
-        finally:
-            self._remove_started_keys(keys)
+            cleaned = [key for key, result in zip(keys, results, strict=True) if result == 0]
+            self._remove_started_keys(cleaned)
             if self._session_tracker is not None:
-                self._session_tracker.revoke_put_keys(keys)
+                self._session_tracker.revoke_put_keys(cleaned)
+            if any(result != 0 for result in results):
+                raise RuntimeError(f"Layerwise backend revoke failed: {results}")
+        except Exception as exc:
+            # Keep ambiguous/failed sessions owned for shutdown retry. New
+            # writes must not reuse a session whose removal is unresolved.
+            self._fatal_error = exc
+            raise
 
-    def _handle_range_request(self, req_meta: LayerRangeReqMeta, final_group_layer: bool | None = None) -> None:
+    def _handle_range_request(
+        self,
+        req_meta: LayerRangeReqMeta,
+        final_group_layer: bool | None = None,
+        completion: LayerwiseWriteCompletion | None = None,
+        session: LayerwiseWriteSession | None = None,
+    ) -> None:
+        session = session or LayerwiseWriteSession(completion)
         layer_id = req_meta.layer_id
         if self._active_put_keys is None or layer_id == 0:
             self._active_put_keys = set(req_meta.keys)
@@ -903,26 +949,22 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         active_indices = [index for index, key in enumerate(req_meta.keys) if key in self._active_put_keys]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
-            self.sync_save_events[layer_id].synchronize()
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
-            results: list[int] = []
-            for keys, buffers, sizes, offsets in self._range_transfer_batches(
+            results = session.write_ranges(
+                str(layer_id),
                 active_keys,
+                self.sync_save_events[layer_id],
+                self.m_store.batch_copy_put,
                 active_buffers,
                 active_sizes,
                 active_offsets,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            ):
-                results.extend(
-                    require_aligned_batch_results(
-                        "batch_copy_put",
-                        keys,
-                        self.m_store.batch_copy_put(keys, buffers, sizes, offsets),
-                    )
-                )
+                max_keys=self.max_transfer_blocks,
+                max_packet_bytes=self.max_transfer_bytes,
+                stop_on_error=False,
+            )
+            assert results is not None
             _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
@@ -934,20 +976,18 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
         if active_keys:
             try:
-                commit_results = require_aligned_batch_results(
-                    "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
-                )
+                commit_results = session.publish(active_keys, self.m_store.batch_commit)
                 _emit_commit_debug_event(layer_id, len(active_keys), commit_results)
             except Exception:
                 self._revoke_range_keys(active_keys)
                 raise
-            failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
-            if failed_keys:
-                self._revoke_range_keys(failed_keys)
             committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
             if self._session_tracker is not None:
                 self._session_tracker.commit_put_keys(committed_keys)
-            self._remove_started_keys(active_keys)
+            self._remove_started_keys(committed_keys)
+            failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
+            if failed_keys:
+                self._revoke_range_keys(failed_keys)
         self._active_put_keys = None
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
@@ -964,7 +1004,12 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 req_meta.layer_id = layer_id
                 self._active_put_keys = self._group_put_keys.get(task.group_id)
                 try:
-                    self._handle_range_request(req_meta, task.final_group_layer or layer_id == self.final_layer_id)
+                    self._handle_range_request(
+                        req_meta,
+                        task.final_group_layer or layer_id == self.final_layer_id,
+                        task.write_completion,
+                        task.write_session,
+                    )
                 finally:
                     self._group_put_keys[task.group_id] = self._active_put_keys
                 for req_id in req_meta.req_ids:
@@ -988,6 +1033,12 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
     def _handle_request(  # type: ignore[override]
         self, request: list[LayerTransferTask] | _LayerRevokeTask
     ):
+        if isinstance(request, LayerwiseWriteCall):
+            try:
+                request.run()
+            finally:
+                self.request_queue.task_done()
+            return
         if isinstance(request, _LayerRevokeTask):
             try:
                 self._revoke_range_keys(list(request.keys))
@@ -1053,17 +1104,26 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
         if has_any_save:
-            self.sync_save_events[physical_layer].synchronize()
+            sessions = {task.write_session for task in transfer_tasks if task.write_session is not None}
+            completions = {task.write_completion for task in transfer_tasks if task.write_completion is not None}
+            if len(sessions) > 1 or len(completions) > 1:
+                raise ValueError("A layer save batch cannot mix write steps")
+            session = next(iter(sessions), None) or LayerwiseWriteSession(next(iter(completions), None))
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-            res = self._batch_copy_with_limits(
+            assert self.m_store.store is not None
+            res = session.write_gva(
+                str(physical_layer),
+                set(all_save_keys),
+                self.sync_save_events[physical_layer],
+                self.m_store.store.batch_copy,
                 gvas_array,
                 addr_array,
                 size_array,
-                0,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
+                max_addresses=self.max_transfer_blocks * self.num_addrs_per_block,
+                max_packet_bytes=self.max_transfer_bytes,
+                cancelled=self.save_disabled.is_set,
             )
             if res != 0:
                 return False
@@ -1075,6 +1135,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                     self.write_results[key] = self.write_results.get(key, 0) or res
             if write_finish_keys:
                 finish_keys = list(dict.fromkeys(write_finish_keys))
+                if session.completion is not None:
+                    session.completion.require_complete(set(finish_keys))
                 if any(self.write_results.pop(key, None) != 0 for key in finish_keys):
                     logger.error("Memcache publication lacks successful copies: keys=%s", finish_keys)
                     return False
@@ -1082,7 +1144,13 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 # remotely. Never compensate it with WRITE_FAIL (key removal).
                 for task in transfer_tasks:
                     task.write_finish_keys.clear()
-                finish_results = self.m_store.batch_write_finish(finish_keys, [0] * len(finish_keys))
+                try:
+                    finish_results = session.publish(
+                        finish_keys, lambda keys: self.m_store.batch_write_finish(keys, [0] * len(keys))
+                    )
+                except BatchResultShapeError:
+                    logger.exception("Memcache write publication returned malformed results: keys=%s", finish_keys)
+                    return False
                 if (
                     finish_results is None
                     or len(finish_results) != len(finish_keys)
@@ -1330,6 +1398,13 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
             return False
+
+        if data.object_load is not None:
+            if attention_start_gate is not None and not self._wait_for_event(attention_start_gate):
+                return False
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(layer_id)
+            return data.object_load()
 
         if len(transfer_tasks) == 0:
             if self.external_slot_release_waiter is not None:

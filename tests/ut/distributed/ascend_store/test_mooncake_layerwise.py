@@ -47,6 +47,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_writer import (
+    LayerwiseWriter,
+    LayerwiseSenderExecutor,
+    LayerWriteRange,
+)
 
 # isort: on
 
@@ -142,13 +147,87 @@ class TestMooncakeLayerBatchBuilder(unittest.TestCase):
 
 
 class TestMooncakeLayerSaveSession(unittest.TestCase):
-    def test_final_layer_commits_after_all_ranges(self):
+    def test_common_writer_runs_on_the_existing_sender_and_does_not_close_it(self):
+        sender, store, _, _ = self._make_sender([])
+        store.layerwise_data_plane = "gva"
+        store.batch_alloc.return_value = [10000]
+        store.batch_write_finish.return_value = [0]
+        threads = []
+
+        def copy(*args):
+            threads.append(threading.get_ident())
+            return 0
+
+        store.batch_copy_gva.side_effect = copy
+        sender.start()
+        self.assertTrue(sender.ready_event.wait(5))
+        queue = LayerwiseSenderExecutor(sender)
+        writer = LayerwiseWriter(store, lease_ttl_ms=10000, executor=queue)
+        try:
+            handle = writer.prepare(
+                {"object": 8},
+                {
+                    "l0": (LayerWriteRange("object", 1000, 0, 4),),
+                    "l1": (LayerWriteRange("object", 2000, 4, 4),),
+                },
+            )
+            writer.submit_layer(handle, "l0", MagicMock())
+            writer.submit_layer(handle, "l1", MagicMock())
+            writer.finish(handle).result(timeout=5)
+            writer.close()
+            self.assertEqual(threads, [sender.ident, sender.ident])
+            self.assertTrue(sender.is_alive())
+            self.assertEqual(queue.submit(lambda: 42).result(timeout=5), 42)
+        finally:
+            writer.close()
+            sender.stop()
+            sender.join(5)
+        self.assertFalse(sender.is_alive())
+
+    def test_stopped_sender_resolves_queued_writer_futures_before_cleanup(self):
+        sender, store, _, _ = self._make_sender([])
+        store.layerwise_data_plane = "gva"
+        entered, release = threading.Event(), threading.Event()
+
+        def allocate(*args):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("Test did not release allocation")
+            return [10000]
+
+        store.batch_alloc.side_effect = allocate
+        store.batch_write_finish.return_value = [0]
+        sender.start()
+        self.assertTrue(sender.ready_event.wait(5))
+        writer = LayerwiseWriter(store, lease_ttl_ms=10000, executor=LayerwiseSenderExecutor(sender))
+        try:
+            handle = writer.prepare({"object": 4}, {"l0": (LayerWriteRange("object", 1000, 0, 4),)})
+            self.assertTrue(entered.wait(5))
+            writer.submit_layer(handle, "l0", MagicMock())
+            sender.stop()
+            release.set()
+            sender.join(5)
+            self.assertFalse(sender.is_alive())
+            self.assertTrue(handle.copy_futures[-1].cancelled())
+            writer.close()
+            store.batch_copy_gva.assert_not_called()
+            store.batch_write_finish.assert_called_once_with(["object"], [-1])
+            self.assertFalse(writer._handles)
+        finally:
+            release.set()
+            sender.stop()
+            sender.join(5)
+            writer.close()
+
+    @staticmethod
+    def _make_sender(keys):
         store = MagicMock()
         # Range APIs may return the positive number of bytes moved on success.
-        store.batch_copy_put.return_value = [30]
-        store.batch_commit.return_value = [0]
+        store.batch_copy_put.side_effect = lambda keys, *_: [30] * len(keys)
+        store.batch_commit.side_effect = lambda keys: [0] * len(keys)
+        store.batch_revoke.side_effect = lambda keys: [0] * len(keys)
         tracker = LayerwiseSessionTracker()
-        tracker.register_put_keys("r1", [("key", 0)])
+        tracker.register_put_keys("r1", [(key, 0) for key in keys])
         save_finished = [threading.Event(), threading.Event()]
         builder = LayerBatchBuilder(make_token_database(), page_size_bytes=60, num_layers=2)
         thread = KVCacheStoreLayerSendingThread(
@@ -164,26 +243,34 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
             layer_save_finished_events=save_finished,
             sync_save_events=[MagicMock(), MagicMock()],
             group_builders=[builder],
-            put_started_keys={"key"},
+            put_started_keys=set(keys),
             session_tracker=tracker,
         )
-        request = ReqMeta("r1", block_ids=[2], block_hashes=[], is_last_chunk=True)
-        request.save_block_keys = ["key"]
+        request = ReqMeta("r1", block_ids=list(range(2, 2 + len(keys))), block_hashes=[], is_last_chunk=True)
+        request.save_block_keys = keys
 
+        tasks = []
         for layer_id in range(2):
             task = LayerTransferTask(
                 layer_id=layer_id,
                 layer_idx_in_group=layer_id,
-                block_ranges=[LayerBlockRange(request, 0, 1)],
+                block_ranges=[LayerBlockRange(request, 0, len(keys))],
                 shared_block_data=builder.build_shared(
                     LayerTransferTask(
                         layer_id=layer_id,
-                        block_ranges=[LayerBlockRange(request, 0, 1)],
+                        block_ranges=[LayerBlockRange(request, 0, len(keys))],
                         use_key_major_ranges=True,
                     )
                 ),
                 use_key_major_ranges=True,
             )
+            tasks.append(task)
+        thread.prepare_write_step([[task] for task in tasks])
+        return thread, store, tracker, tasks
+
+    def test_final_layer_commits_after_all_ranges(self):
+        thread, store, tracker, tasks = self._make_sender(["key"])
+        for task in tasks:
             thread.add_stored_request("r1")
             thread.request_queue.put([task])
             thread._handle_request([task])
@@ -191,6 +278,107 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
         self.assertEqual(store.batch_copy_put.call_count, 2)
         store.batch_commit.assert_called_once_with(["key"])
         self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0)])
+
+    def test_partial_copy_failure_only_commits_complete_successful_keys(self):
+        thread, store, tracker, tasks = self._make_sender(["good", "bad"])
+        store.batch_copy_put.side_effect = [[30, -1], [30]]
+        for task in tasks:
+            thread.add_stored_request("r1")
+            thread.request_queue.put([task])
+            thread._handle_request([task])
+        self.assertEqual(store.batch_copy_put.call_args_list[1].args[0], ["good"])
+        store.batch_revoke.assert_called_once_with(["bad"])
+        store.batch_commit.assert_called_once_with(["good"])
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [("good", 0)])
+        self.assertFalse(thread._put_started_keys)
+
+    def test_skipped_required_layer_revokes_started_objects_without_commit(self):
+        thread, store, tracker, tasks = self._make_sender(["key"])
+        last = tasks[-1]
+        thread.add_stored_request("r1")
+        thread.request_queue.put([last])
+        with self.assertRaisesRegex(ValueError, "Required object layers"):
+            thread._handle_request([last])
+        store.batch_commit.assert_not_called()
+        store.batch_revoke.assert_called_once_with(["key"])
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [])
+        self.assertFalse(thread._put_started_keys)
+        self.assertTrue(thread.layer_save_finished_events[-1].is_set())
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_partial_revoke_retains_only_failed_sessions_for_shutdown_retry(self):
+        thread, store, tracker, _ = self._make_sender(["good", "bad"])
+        store.batch_revoke.side_effect = lambda keys: [0 if key == "good" else -1 for key in keys]
+        with self.assertRaisesRegex(RuntimeError, "revoke failed"):
+            thread._revoke_range_keys(["good", "bad"])
+        self.assertEqual(thread._put_started_keys, {"bad"})
+        self.assertIsNotNone(thread._fatal_error)
+        with self.assertRaisesRegex(RuntimeError, "Cannot queue cleanup"):
+            thread.add_revoke_request(["bad"])
+        store.batch_revoke.side_effect = lambda keys: [0] * len(keys)
+        thread.cleanup_pending_puts()
+        self.assertEqual(store.batch_revoke.call_args.args[0], ["bad"])
+        self.assertFalse(thread._put_started_keys)
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [])
+
+    def test_unknown_revoke_results_preserve_all_ownership(self):
+        for response in (None, [], [True], RuntimeError("reply lost")):
+            with self.subTest(response=response):
+                thread, store, _, _ = self._make_sender(["key"])
+                store.batch_revoke.side_effect = response if isinstance(response, Exception) else None
+                store.batch_revoke.return_value = response
+                with self.assertRaises((RuntimeError, ValueError)):
+                    thread._revoke_range_keys(["key"])
+                self.assertEqual(thread._put_started_keys, {"key"})
+
+    def test_commit_success_is_not_revoked_when_sibling_cleanup_fails(self):
+        thread, store, tracker, tasks = self._make_sender(["good", "bad"])
+        store.batch_commit.side_effect = lambda keys: [0 if key == "good" else -1 for key in keys]
+        store.batch_revoke.side_effect = lambda keys: [-1] * len(keys)
+        for index, task in enumerate(tasks):
+            thread.add_stored_request("r1")
+            thread.request_queue.put([task])
+            if index == 0:
+                thread._handle_request([task])
+            else:
+                with self.assertRaisesRegex(RuntimeError, "revoke failed"):
+                    thread._handle_request([task])
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [("good", 0)])
+        self.assertEqual(thread._put_started_keys, {"bad"})
+        self.assertTrue(all(call.args[0] == ["bad"] for call in store.batch_revoke.call_args_list))
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_shutdown_keeps_backend_open_until_put_cleanup_succeeds(self):
+        thread, store, _, _ = self._make_sender(["key"])
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        worker._closed = False
+        worker.kv_send_thread, worker.kv_recv_thread = thread, None
+        worker._step_load_keys = set()
+        worker.m_store = store
+        store.batch_revoke.side_effect = [[-1], [0]]
+        with self.assertRaisesRegex(RuntimeError, "revoke failed"):
+            worker.shutdown()
+        store.close.assert_not_called()
+        self.assertFalse(worker._closed)
+        self.assertEqual(thread._put_started_keys, {"key"})
+        worker.shutdown()
+        store.close.assert_called_once()
+        self.assertTrue(worker._closed)
+
+    def test_shutdown_keeps_read_lease_ownership_until_release_succeeds(self):
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        worker._closed = False
+        worker.kv_send_thread = worker.kv_recv_thread = None
+        worker._step_load_keys = {"key"}
+        worker.m_store = MagicMock()
+        worker.m_store.batch_remove_lease.side_effect = [-1, 0]
+        with self.assertRaisesRegex(RuntimeError, "lease cleanup failed"):
+            worker.shutdown()
+        worker.m_store.close.assert_not_called()
+        self.assertEqual(worker._step_load_keys, {"key"})
+        worker.shutdown()
+        worker.m_store.close.assert_called_once()
+        self.assertFalse(worker._step_load_keys)
 
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):

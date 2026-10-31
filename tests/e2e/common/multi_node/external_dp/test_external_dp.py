@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -295,10 +295,35 @@ def test_external_dp() -> None:
                     target,
                     _format_benchmark_cases(config),
                 )
-                with _heartbeat(
-                    "Running AISBench",
-                    status_fn=lambda: format_http_status("proxy", proxy_server_health_url(config)),
+                with (
+                    _heartbeat(
+                        "Running AISBench",
+                        status_fn=lambda: format_http_status("proxy", proxy_server_health_url(config)),
+                    ),
+                    ExitStack() as checks,
                 ):
+                    if "pool_pd_transfer" in config.test_content:
+                        import httpx
+
+                        from tests.e2e.common.kv_pool.pool_pd import observe_transfers
+
+                        client = checks.enter_context(httpx.Client(timeout=30, trust_env=False))
+                        metrics = {
+                            role: [
+                                f"http://{rank.host}:{rank.port}/metrics"
+                                for rank in ranks
+                                if rank.role == role and not rank.is_headless
+                            ]
+                            for role in ("prefiller", "decoder")
+                        }
+                        checks.enter_context(
+                            observe_transfers(
+                                client,
+                                metrics["prefiller"],
+                                metrics["decoder"],
+                                log_root / "pool_pd_transfer.json",
+                            )
+                        )
                     results = run_aisbench_cases(
                         model=config.model,
                         port=config.routing.proxy_port,

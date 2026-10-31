@@ -437,6 +437,9 @@ def apply_layerwise_kv_cache_plan(
         if layer_name in excluded_layer_names:
             _merge_specs([NamedKVCacheSpec(layer_name, layer_specs[layer_name])])
     kv_cache_config.kv_cache_tensors = new_tensors
+    # A zero layer stride also appears in model-owned hybrid page layouts.
+    # Only descriptors rewritten here are aliases of a layer-reuse slot.
+    kv_cache_config.layerwise_reuse_applied = True
     logger.info(
         "Layerwise KV cache reuse merged %d descriptors into %d descriptors using %d buffer assignments.",
         len(old_tensors),

@@ -36,7 +36,7 @@ def test_default_does_not_change_native_cache_contract():
     assert not config.cache_config.use_kda_recoverssm
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector", "LayerwisePoolConnector"])
 def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector):
     config = make_config()
     if connector is not None:
@@ -66,8 +66,10 @@ def test_initialization_requires_speculative_decoding():
         (None, "kv_transfer_config", SimpleNamespace(kv_connector="AscendStoreConnector"), "requires Mooncake"),
     ],
 )
-def test_initialization_rejects_unsupported_execution(section, field, value, message):
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "LayerwisePoolConnector"])
+def test_initialization_rejects_unsupported_execution(section, field, value, message, connector):
     config = make_config()
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     setattr(getattr(config, section) if section else config, field, value)
     with pytest.raises(ValueError, match=message):
         validate_glm_recoverssm(config)

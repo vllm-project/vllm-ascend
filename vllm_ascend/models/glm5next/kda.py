@@ -671,7 +671,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
-            maybe_save_kv_layer_to_connector("", [])
+            maybe_save_kv_layer_to_connector(self.prefix, [])
             return
         q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
         metadata = attn_metadata_narrowed
@@ -710,13 +710,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
         if direct_output:
-            maybe_save_kv_layer_to_connector("", [])
+            maybe_save_kv_layer_to_connector(self.prefix, [])
             return
         if use_spec:
             core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
-        maybe_save_kv_layer_to_connector("", [])
+        maybe_save_kv_layer_to_connector(self.prefix, [])
 
 
 def glm5next_kda_forward(

@@ -3,6 +3,7 @@
 
 """Lock wire formats across the bound scheduler/worker key interface."""
 
+import json
 import unittest
 from copy import deepcopy
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_codec import PoolKeyIdentity
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
@@ -88,6 +90,13 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                             grouped_block_size=sizes,
                         )
                         namespace = mooncake_layerwise.layerwise_topology_namespace(config, cache)
+                        self.assertIsNotNone(builder.identity)
+                        rebound = PoolKeyIdentity.from_wire(json.loads(json.dumps(builder.identity.to_wire()))).bind()
+                        for source_group in range(num_groups):
+                            self.assertEqual(
+                                rebound.make_hit_check_keys(source_group, "hash", 2),
+                                builder.make_hit_check_keys(source_group, "hash", 2),
+                            )
                         layout = mooncake_layerwise.hybrid_layout_id(cache, 2, namespace=namespace)
                         for group in range(num_groups):
                             expected = []

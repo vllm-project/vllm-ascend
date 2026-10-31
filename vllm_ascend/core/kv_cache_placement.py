@@ -49,13 +49,18 @@ def build_layer_cache_bundles(
     cache_spec: dict[str, KVCacheSpec], draft_layers: set[str] | None = None
 ) -> dict[str, tuple[str, ...]]:
     draft_layers = draft_layers or set()
-    by_index: dict[int, list[str]] = defaultdict(list)
+    by_layer: dict[tuple[str, ...], list[str]] = defaultdict(list)
     for name in sorted(
         (name for name in cache_spec if name not in draft_layers),
         key=lambda name: (extract_layer_index(name), isinstance(cache_spec[name], AscendSFAIndexerCacheSpec), name),
     ):
-        by_index[extract_layer_index(name)].append(name)
-    bundles = {names[0]: tuple(names) for names in by_index.values()}
+        layer_index = extract_layer_index(name)
+        parts = name.split(".")
+        # The index is local to its module namespace. Target and draft can
+        # both have layers.0, but their completion boundaries are independent.
+        index_position = next(i for i, part in enumerate(parts) if part.isdecimal() and int(part) == layer_index)
+        by_layer[tuple(parts[: index_position + 1])].append(name)
+    bundles = {names[0]: tuple(names) for names in by_layer.values()}
     # Draft names may reuse target indices or have no numeric index at all.
     bundles.update({name: (name,) for name in sorted(draft_layers)})
     return bundles
