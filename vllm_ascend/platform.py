@@ -52,8 +52,8 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_c8_mxfp_kv_quant,
     is_moe_model,
-    model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
@@ -442,15 +442,18 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        # 310P installs patch_mamba_config_310 instead of patch_mamba_config.
+        # Keep it on the upstream/base alignment path so this change only
+        # affects the standard Mamba platforms.
         if (
-            vllm_config.model_config.use_mla
-            and vllm_config.cache_config.cache_dtype in ("int8", "fp8")
-            and model_uses_kpool_indexer(vllm_config.model_config)
+            get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH)
+            and getattr(vllm_config.model_config, "is_hybrid", False)
+            and not is_c8_mxfp_kv_quant(vllm_config)
         ):
             from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
 
-            # Reuse Ascend's packed C8 geometry, including scale bytes and
-            # compressed indexer alignment, after the backend selects its block size.
+            # Reapply contiguous alignment after the backend selects its block
+            # size, preserving the specialized page rules for sparse C8 caches.
             HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
             return
 
