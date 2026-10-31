@@ -49,6 +49,17 @@ OFFLOAD_STORE_PORT_BASE = 8500
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
+D2H_INVALID_GENERATION = -1
+D2H_INVALID_EPOCH = -1
+D2H_FAILED_EPOCH = -2
+D2H_PLAN_ACTIVE_ROW = 0
+D2H_PLAN_GENERATION_ROW = 1
+D2H_PLAN_SOURCE_SLOT_ROW = 2
+D2H_PLAN_DESTINATION_SLOT_ROW = 3
+D2H_PLAN_TARGET_PREFIX_ROW = 4
+D2H_PLAN_FIELD_COUNT = 5
+D2H_SOURCE_EVENT_COUNT = 2
+D2H_COPY_CHUNK_SIZE = 64
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
 FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT = 16
 FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT = 8
@@ -481,6 +492,10 @@ class SparseKVOffloadManager:
     No more scheduling logic: we reuse the original block_table/slot_mapping.
     """
 
+    # Class-level default keeps __new__-constructed instances (unit tests)
+    # on the legacy per-layer path unless __init__ enables the batch pipeline.
+    delayed_d2h = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -490,6 +505,7 @@ class SparseKVOffloadManager:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
+        self.delayed_d2h = getattr(sparse_kv_offload_config, "delayed_d2h", False)
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -550,6 +566,8 @@ class SparseKVOffloadManager:
         store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
         config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
+        if getattr(sparse_kv_offload_config, "delayed_d2h", False):
+            self._d2h_init_state()
         self.tp_group.barrier()
 
     def _warmup_external_lru_planner_threads(self) -> int:
@@ -767,6 +785,29 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
+        if self.delayed_d2h:
+            source_token_capacities = {
+                tensor.numel() * tensor.element_size() // token_bytes
+                for tensors, token_bytes in (
+                    (self.topk_buffers_k, self.token_size_bytes_k),
+                    (self.topk_buffers_v, self.token_size_bytes_v),
+                )
+                for tensor in tensors
+            }
+            if len(source_token_capacities) != 1:
+                raise RuntimeError(
+                    f"delayed D2H resident K/V buffers have inconsistent "
+                    f"token capacities: {sorted(source_token_capacities)}"
+                )
+            self.d2h_source_token_capacity = next(iter(source_token_capacities))
+            if self.tp_rank == 0:
+                host_block_capacities = {int(tensor.shape[0]) for tensor in (*self.k_caches_cpu, *self.v_caches_cpu)}
+                if host_block_capacities != {self.d2h_host_num_blocks}:
+                    raise RuntimeError(
+                        "delayed D2H host K/V block capacity does not match kv_cache_config: "
+                        f"actual={sorted(host_block_capacities)}, "
+                        f"configured={self.d2h_host_num_blocks}"
+                    )
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -795,6 +836,10 @@ class SparseKVOffloadManager:
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
+        # Base addresses of the device resident rows, shared by sparse_copy
+        # descriptor assembly and the delayed D2H pipeline.
+        self.addr_k_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_k]
+        self.addr_v_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_v]
         # Broadcast the shared host KV pool bases and shapes.
         self.gvas_k_bases: list[int] = []
         self.gvas_v_bases: list[int] = []
@@ -848,6 +893,9 @@ class SparseKVOffloadManager:
                 cpu_k_shape,
                 cpu_v_shape,
             )
+        if self.delayed_d2h:
+            self._allocate_d2h_descriptor_state(device)
+            self._allocate_d2h_execution_state()
         if self.use_fused_copy_sfa:
             self._bind_copy_sfa_bases()
 
@@ -1469,6 +1517,605 @@ class SparseKVOffloadManager:
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
         if self.use_fused_overlap and capturing and self.tp_rank == 0:
             torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
+
+
+    # ===== Delayed batch D2H (merged 2026-10-22) =====
+    @staticmethod
+    def _infer_host_kv_cache_group_id(kv_cache_config: KVCacheConfig) -> int:
+        host_group_ids = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
+            )
+            if any(getattr(spec, "store_on_host", False) for spec in specs):
+                host_group_ids.append(group_id)
+        if len(host_group_ids) != 1:
+            raise ValueError(
+                f"Sparse KV offload requires exactly one Host KV cache group, got group ids {host_group_ids}"
+            )
+        return host_group_ids[0]
+
+    def _d2h_init_state(self) -> None:
+        """Infer host-pool geometry and allocate the dormant D2H control state."""
+        self.d2h_host_kv_cache_group_id = self._infer_host_kv_cache_group_id(self.kv_cache_config)
+        self.d2h_host_num_blocks = self.kv_cache_config.num_blocks
+        self._allocate_d2h_planner_state()
+
+    def _allocate_d2h_planner_state(self) -> None:
+        """Allocate the dormant CPU control state for delayed D2H."""
+        capacity = (self.max_num_reqs + 2)
+        self.d2h_capacity = capacity
+        self.d2h_owner_generations_cpu = np.full(
+            capacity,
+            D2H_INVALID_GENERATION,
+            dtype=np.int64,
+        )
+        self.d2h_stable_prefixes_cpu = np.zeros(capacity, dtype=np.int64)
+        self.d2h_plan_host = torch.zeros(
+            (D2H_PLAN_FIELD_COUNT, capacity),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.d2h_inflight_active_host = self.d2h_plan_host[D2H_PLAN_ACTIVE_ROW]
+        self.d2h_inflight_generations_host = self.d2h_plan_host[D2H_PLAN_GENERATION_ROW]
+        self.d2h_inflight_source_slots_host = self.d2h_plan_host[D2H_PLAN_SOURCE_SLOT_ROW]
+        self.d2h_inflight_destination_slots_host = self.d2h_plan_host[D2H_PLAN_DESTINATION_SLOT_ROW]
+        self.d2h_inflight_target_prefixes_host = self.d2h_plan_host[D2H_PLAN_TARGET_PREFIX_ROW]
+        self.d2h_inflight_generations_host.fill_(D2H_INVALID_GENERATION)
+        self.d2h_inflight_active_cpu = self.d2h_inflight_active_host.numpy()
+        self.d2h_inflight_generations_cpu = self.d2h_inflight_generations_host.numpy()
+        self.d2h_inflight_source_slots_cpu = self.d2h_inflight_source_slots_host.numpy()
+        self.d2h_inflight_destination_slots_cpu = self.d2h_inflight_destination_slots_host.numpy()
+        self.d2h_inflight_target_prefixes_cpu = self.d2h_inflight_target_prefixes_host.numpy()
+        self.d2h_compact_source_slots_host = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.d2h_compact_destination_slots_host = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.d2h_compact_source_slots_cpu = self.d2h_compact_source_slots_host.numpy()
+        self.d2h_compact_destination_slots_cpu = self.d2h_compact_destination_slots_host.numpy()
+        self.d2h_inflight_active_count = 0
+        self.d2h_inflight_batch_active = False
+        self.d2h_inflight_launched = False
+        self.d2h_next_batch_epoch = 0
+        self.d2h_inflight_batch_epoch = D2H_INVALID_EPOCH
+
+    def _allocate_d2h_descriptor_state(self, device: torch.device) -> None:
+        """Allocate one fixed request plan and its all-layer descriptors."""
+        if self.tp_rank != 0:
+            return
+        capacity = self.d2h_capacity
+        self.d2h_plan_npu = torch.empty(
+            (D2H_PLAN_FIELD_COUNT, capacity),
+            dtype=torch.int64,
+            device=device,
+        )
+        self.d2h_plan_active_npu = self.d2h_plan_npu[D2H_PLAN_ACTIVE_ROW]
+        self.d2h_plan_generations_npu = self.d2h_plan_npu[D2H_PLAN_GENERATION_ROW]
+        self.d2h_plan_source_slots_npu = self.d2h_plan_npu[D2H_PLAN_SOURCE_SLOT_ROW]
+        self.d2h_plan_destination_slots_npu = self.d2h_plan_npu[D2H_PLAN_DESTINATION_SLOT_ROW]
+        self.d2h_plan_target_prefixes_npu = self.d2h_plan_npu[D2H_PLAN_TARGET_PREFIX_ROW]
+
+        max_descriptor_count = self.num_layers * 2 * capacity
+        self.d2h_source_ptrs_npu = torch.empty(max_descriptor_count, dtype=torch.int64, device=device)
+        self.d2h_destination_ptrs_npu = torch.empty(max_descriptor_count, dtype=torch.int64, device=device)
+        self.d2h_block_lengths_npu = torch.empty(max_descriptor_count, dtype=torch.int32, device=device)
+        self.d2h_address_offsets_npu = torch.empty(2 * capacity, dtype=torch.int64, device=device)
+        self.d2h_compact_source_slots_npu = torch.empty(capacity, dtype=torch.int64, device=device)
+        self.d2h_compact_destination_slots_npu = torch.empty(capacity, dtype=torch.int64, device=device)
+        self.d2h_descriptor_count = 0
+        self.d2h_descriptor_count_npu = torch.empty((1,), dtype=torch.int32, device=device)
+
+        source_bases = [[self.addr_k_bases[layer], self.addr_v_bases[layer]] for layer in range(self.num_layers)]
+        destination_bases = [[self.gvas_k_bases[layer], self.gvas_v_bases[layer]] for layer in range(self.num_layers)]
+        self.d2h_source_bases_npu = torch.tensor(source_bases, dtype=torch.int64, device=device).unsqueeze(-1)
+        self.d2h_destination_bases_npu = torch.tensor(
+            destination_bases,
+            dtype=torch.int64,
+            device=device,
+        ).unsqueeze(-1)
+        self.d2h_token_bytes_npu = torch.tensor(
+            [self.token_size_bytes_k, self.token_size_bytes_v],
+            dtype=torch.int64,
+            device=device,
+        ).view(1, 2, 1)
+        self.d2h_block_bytes_npu = torch.tensor(
+            [
+                self.block_size * self.token_size_bytes_k,
+                self.block_size * self.token_size_bytes_v,
+            ],
+            dtype=torch.int64,
+            device=device,
+        ).view(1, 2, 1)
+
+    def _allocate_d2h_execution_state(self) -> None:
+        """Allocate the minimal TP0 stream/event state for one D2H batch."""
+        if self.tp_rank != 0:
+            return
+        runtime = torch_npu.npu
+        self.d2h_stream = runtime.Stream()
+        self.d2h_source_ready_events = tuple(runtime.Event() for _ in range(D2H_SOURCE_EVENT_COUNT))
+        self.d2h_complete_event = runtime.Event()
+        self.d2h_source_epoch = 0
+        self.d2h_latest_source_event_slot: int | None = None
+
+    def record_d2h_source_ready(self) -> bool:
+        """Record the latest real compute frontier after its final KV writer."""
+        if self.tp_rank != 0:
+            return False
+        runtime = torch_npu.npu
+        if runtime.is_current_stream_capturing():
+            raise RuntimeError("delayed D2H source-ready cannot be recorded during graph capture")
+        slot = self.d2h_source_epoch % D2H_SOURCE_EVENT_COUNT
+        self.d2h_source_ready_events[slot].record(runtime.current_stream())
+        self.d2h_latest_source_event_slot = slot
+        self.d2h_source_epoch += 1
+        return True
+
+    def prepare_d2h_descriptors(self) -> int:
+        """Copy the frozen request plan and expand all-layer K/V addresses.
+
+        The caller will place this method on the dedicated D2H stream. It
+        deliberately does not launch ``sparse_copy``.
+        """
+        if self.tp_rank != 0:
+            raise RuntimeError("Only TP0 owns delayed D2H descriptors")
+        if not self.d2h_inflight_batch_active:
+            raise RuntimeError("delayed D2H has no inflight request plan to expand")
+
+        active_count = self.d2h_inflight_active_count
+        if active_count <= 0:
+            raise RuntimeError("delayed D2H inflight request plan has no active requests")
+        self.d2h_plan_npu.copy_(self.d2h_plan_host, non_blocking=True)
+        self.d2h_compact_source_slots_npu[:active_count].copy_(
+            self.d2h_compact_source_slots_host[:active_count],
+            non_blocking=True,
+        )
+        self.d2h_compact_destination_slots_npu[:active_count].copy_(
+            self.d2h_compact_destination_slots_host[:active_count],
+            non_blocking=True,
+        )
+
+        descriptor_count = self.num_layers * 2 * active_count
+        source_ptrs = self.d2h_source_ptrs_npu[:descriptor_count].view(self.num_layers, 2, active_count)
+        destination_ptrs = self.d2h_destination_ptrs_npu[:descriptor_count].view(
+            self.num_layers,
+            2,
+            active_count,
+        )
+        lengths = self.d2h_block_lengths_npu[:descriptor_count].view(self.num_layers, 2, active_count)
+        address_offsets = self.d2h_address_offsets_npu[: 2 * active_count].view(1, 2, active_count)
+
+        torch.mul(
+            self.d2h_compact_source_slots_npu[:active_count].view(1, 1, active_count),
+            self.d2h_token_bytes_npu,
+            out=address_offsets,
+        )
+        torch.add(
+            self.d2h_source_bases_npu,
+            address_offsets,
+            out=source_ptrs,
+        )
+        torch.mul(
+            self.d2h_compact_destination_slots_npu[:active_count].view(1, 1, active_count),
+            self.d2h_block_bytes_npu,
+            out=address_offsets,
+        )
+        torch.add(
+            self.d2h_destination_bases_npu,
+            address_offsets,
+            out=destination_ptrs,
+        )
+        lengths.copy_(self.d2h_block_bytes_npu)
+        self.d2h_descriptor_count = descriptor_count
+        return descriptor_count
+
+    def launch_d2h(self) -> bool:
+        """Asynchronously launch the frozen full-block batch on TP0."""
+        if not self.d2h_inflight_batch_active:
+            return False
+        if self.d2h_inflight_launched:
+            raise RuntimeError("delayed D2H inflight batch has already been launched")
+        runtime = torch_npu.npu
+        if runtime.is_current_stream_capturing():
+            raise RuntimeError("delayed D2H launch must remain outside graph capture")
+        if self.tp_rank != 0:
+            # Every rank owns the same frozen Host plan. Non-TP0 ranks mark
+            # that shared batch submitted but never issue the physical copy.
+            self.d2h_inflight_launched = True
+            return False
+        source_slot = self.d2h_latest_source_event_slot
+        if source_slot is None:
+            raise RuntimeError("delayed D2H has no source-ready compute frontier")
+        with runtime.stream(self.d2h_stream):
+            descriptor_count = self.prepare_d2h_descriptors()
+            self.d2h_stream.wait_event(self.d2h_source_ready_events[source_slot])
+            # TODO: use an asynchronous SDMA copy API after its descriptor and
+            # completion semantics are available; keep the existing MTE path
+            # for the first implementation.
+            try:
+                for start in range(0, descriptor_count, D2H_COPY_CHUNK_SIZE):
+                    end = min(start + D2H_COPY_CHUNK_SIZE, descriptor_count)
+                    self.d2h_descriptor_count_npu.fill_(end - start)
+                    result = offload.sparse_copy(
+                        self.d2h_source_ptrs_npu[start:end],
+                        self.d2h_destination_ptrs_npu[start:end],
+                        self.d2h_block_lengths_npu[start:end],
+                        self.d2h_descriptor_count_npu,
+                        self.d2h_source_ptrs_npu.device,
+                    )
+                    if result not in (None, 0):
+                        diagnostics = self._d2h_inflight_diagnostics()
+                        logger.error("delayed D2H sparse_copy returned result=%s: %s", result, diagnostics)
+                        raise RuntimeError(f"memfabric delayed D2H failed with result={result}; {diagnostics}")
+            except Exception:
+                logger.exception(
+                    "delayed D2H sparse_copy submission failed: %s",
+                    self._d2h_inflight_diagnostics(),
+                )
+                raise
+            self.d2h_complete_event.record(self.d2h_stream)
+        self.d2h_inflight_launched = True
+        return True
+
+    def _consume_d2h_completion(self) -> int:
+        """Advance matching owners and release the completed plan buffer."""
+        if not self.d2h_inflight_batch_active:
+            return 0
+        if not self.d2h_inflight_launched:
+            raise RuntimeError("delayed D2H cannot consume an unlaunched inflight batch")
+
+        active = self.d2h_inflight_active_cpu != 0
+        if not np.any(active):
+            raise RuntimeError("delayed D2H inflight batch has no active requests")
+        matching = active & (self.d2h_inflight_generations_cpu == self.d2h_owner_generations_cpu)
+        if np.any(matching):
+            expected = self.d2h_stable_prefixes_cpu[matching] + self.block_size
+            targets = self.d2h_inflight_target_prefixes_cpu[matching]
+            if np.any(targets != expected):
+                raise RuntimeError("delayed D2H completion target is not the next stable block boundary")
+            self.d2h_stable_prefixes_cpu[matching] = targets
+
+        self.d2h_inflight_active_cpu.fill(False)
+        self.d2h_inflight_generations_cpu.fill(D2H_INVALID_GENERATION)
+        self.d2h_inflight_source_slots_cpu.fill(0)
+        self.d2h_inflight_destination_slots_cpu.fill(0)
+        self.d2h_inflight_target_prefixes_cpu.fill(0)
+        self.d2h_inflight_active_count = 0
+        self.d2h_inflight_batch_active = False
+        self.d2h_inflight_launched = False
+        self.d2h_inflight_batch_epoch = D2H_INVALID_EPOCH
+        return int(np.count_nonzero(matching))
+
+    def retire_d2h_local(self) -> int:
+        """Wait for and consume one TP=1 delayed D2H batch."""
+        if self.tp_rank != 0:
+            raise RuntimeError("Local delayed D2H retire is TP0-only")
+        if self.tp_size != 1:
+            raise RuntimeError("TP>1 delayed D2H retire requires the completion collective")
+        if not self.d2h_inflight_batch_active:
+            return 0
+        if not self.d2h_inflight_launched:
+            raise RuntimeError("delayed D2H cannot retire an unlaunched inflight batch")
+        if torch_npu.npu.is_current_stream_capturing():
+            raise RuntimeError("delayed D2H retire must remain outside graph capture")
+
+        try:
+            self.d2h_complete_event.synchronize()
+        except Exception:
+            logger.exception(
+                "delayed D2H completion wait failed: %s",
+                self._d2h_inflight_diagnostics(),
+            )
+            raise
+        return self._consume_d2h_completion()
+
+    def retire_d2h(self) -> int:
+        """Retire one real batch after propagating TP0 D2H completion."""
+        if self.tp_size == 1:
+            return self.retire_d2h_local()
+        if not self.d2h_inflight_batch_active:
+            return 0
+        if not self.d2h_inflight_launched:
+            raise RuntimeError("delayed D2H cannot retire an unlaunched inflight batch")
+        runtime = torch_npu.npu
+        if runtime.is_current_stream_capturing():
+            raise RuntimeError("delayed D2H retire must remain outside graph capture")
+
+        batch_epoch = self.d2h_inflight_batch_epoch
+        if batch_epoch < 0:
+            raise RuntimeError("delayed D2H inflight batch has no valid epoch")
+
+        wait_error: Exception | None = None
+        completion_epoch = batch_epoch
+        if self.tp_rank == 0:
+            try:
+                self.d2h_complete_event.synchronize()
+            except Exception as exc:
+                wait_error = exc
+                completion_epoch = D2H_FAILED_EPOCH
+                logger.exception(
+                    "delayed D2H TP0 completion wait failed: %s",
+                    self._d2h_inflight_diagnostics(),
+                )
+
+        # Retire is already a Host-visible boundary. Broadcast the small Host
+        # epoch directly so completion validation adds no NPU->CPU ``item()``
+        # and no extra device stream dependency.
+        received_epoch = self.tp_group.broadcast_object(
+            completion_epoch if self.tp_rank == 0 else None,
+            src=0,
+        )
+        if received_epoch == D2H_FAILED_EPOCH:
+            raise RuntimeError(
+                f"TP0 failed while waiting for delayed D2H completion; {self._d2h_inflight_diagnostics()}"
+            ) from wait_error
+        if received_epoch != batch_epoch:
+            raise RuntimeError(
+                "delayed D2H completion epoch does not match the local inflight batch: "
+                f"received={received_epoch}, expected={batch_epoch}"
+            )
+        return self._consume_d2h_completion()
+
+    def initialize_d2h_slots(
+        self,
+        pool_slots: np.ndarray,
+        generations: np.ndarray,
+        stable_prefixes: np.ndarray,
+    ) -> None:
+        """Bind idle D2H pool slots to request generations.
+
+        Lifecycle integration must call this only after DMA using an older
+        owner of the same slot has completed.
+        """
+        slots = np.asarray(pool_slots, dtype=np.int64)
+        owners = np.asarray(generations, dtype=np.int64)
+        prefixes = np.asarray(stable_prefixes, dtype=np.int64)
+        if slots.ndim != 1 or owners.shape != slots.shape or prefixes.shape != slots.shape:
+            raise ValueError(
+                "delayed D2H slot/generation/stable-prefix vectors must be 1-D and equal")
+        if np.any((slots < 0) | (slots >= self.d2h_capacity)):
+            raise ValueError("delayed D2H pool slot is outside the configured capacity")
+        if np.unique(slots).size != slots.size:
+            raise ValueError("delayed D2H pool slots must be unique")
+        if np.any(owners < 0):
+            raise ValueError("delayed D2H owner generations must be non-negative")
+        if np.any(prefixes < 0) or np.any(prefixes % self.block_size != 0):
+            raise ValueError("delayed D2H stable prefixes must be non-negative and block aligned")
+        if np.any(self.d2h_inflight_active_cpu[slots]):
+            raise RuntimeError("delayed D2H pool slot cannot be rebound while its block is inflight")
+
+        self.d2h_owner_generations_cpu[slots] = owners
+        self.d2h_stable_prefixes_cpu[slots] = prefixes
+        self.d2h_inflight_generations_cpu[slots] = D2H_INVALID_GENERATION
+        self.d2h_inflight_source_slots_cpu[slots] = 0
+        self.d2h_inflight_destination_slots_cpu[slots] = 0
+        self.d2h_inflight_target_prefixes_cpu[slots] = 0
+
+    def d2h_slot_releasable(self, pool_slot: int) -> bool:
+        """Return whether terminal cleanup may release one request row."""
+        slot = int(pool_slot)
+        if slot < 0 or slot >= self.d2h_capacity:
+            raise ValueError("delayed D2H pool slot is outside the configured capacity")
+        return not bool(self.d2h_inflight_active_cpu[slot])
+
+    def release_d2h_slots(self, pool_slots: list[int]) -> None:
+        """Invalidate terminal request rows after their last D2H retires."""
+        slots = np.asarray(pool_slots, dtype=np.int64)
+        if slots.ndim != 1:
+            raise ValueError("delayed D2H release slots must be one-dimensional")
+        if slots.size == 0:
+            return
+        if np.any((slots < 0) | (slots >= self.d2h_capacity)):
+            raise ValueError("delayed D2H pool slot is outside the configured capacity")
+        if np.unique(slots).size != slots.size:
+            raise ValueError("delayed D2H release slots must be unique")
+        if np.any(self.d2h_inflight_active_cpu[slots]):
+            raise RuntimeError("delayed D2H pool slot cannot be released while inflight")
+
+        self.d2h_owner_generations_cpu[slots] = D2H_INVALID_GENERATION
+        self.d2h_stable_prefixes_cpu[slots] = 0
+        # The inflight fields share the pinned request-plan staging tensor.
+        # A batch for other requests may currently be copying that whole
+        # tensor to the D2H stream, so do not mutate it from terminal cleanup.
+        # The next planner clears every field before constructing a new plan.
+        if not self.d2h_inflight_batch_active:
+            self.d2h_inflight_generations_cpu[slots] = D2H_INVALID_GENERATION
+            self.d2h_inflight_source_slots_cpu[slots] = 0
+            self.d2h_inflight_destination_slots_cpu[slots] = 0
+            self.d2h_inflight_target_prefixes_cpu[slots] = 0
+
+    def plan_d2h_requests(
+        self,
+        num_computed_tokens: np.ndarray,
+        pool_slots: np.ndarray,
+        generations: np.ndarray,
+        block_table: np.ndarray,
+        active: np.ndarray,
+    ) -> int:
+        """Freeze one request-level full-block D2H batch on the CPU.
+
+        The input length is the existing, rejection-corrected
+        ``num_computed_tokens``. This method only freezes a plan; it does not
+        launch a copy or advance ``stable_prefix``.
+        """
+        if self.d2h_inflight_batch_active:
+            raise RuntimeError("delayed D2H must retire the current inflight batch before planning another")
+
+        computed = np.asarray(num_computed_tokens, dtype=np.int64)
+        slots = np.asarray(pool_slots, dtype=np.int64)
+        request_generations = np.asarray(generations, dtype=np.int64)
+        active_rows = np.asarray(active, dtype=np.bool_)
+        table = np.asarray(block_table)
+        row_count = computed.size
+        if (
+            computed.ndim != 1
+            or slots.shape != (row_count,)
+            or request_generations.shape != (row_count,)
+            or active_rows.shape != (row_count,)
+            or table.ndim != 2
+            or table.shape[0] < row_count
+        ):
+            raise ValueError("delayed D2H planner inputs have incompatible shapes")
+
+        self.d2h_inflight_active_cpu.fill(False)
+        self.d2h_inflight_generations_cpu.fill(D2H_INVALID_GENERATION)
+        self.d2h_inflight_source_slots_cpu.fill(0)
+        self.d2h_inflight_destination_slots_cpu.fill(0)
+        self.d2h_inflight_target_prefixes_cpu.fill(0)
+        self.d2h_inflight_active_count = 0
+
+        if not np.any(active_rows):
+            return 0
+        active_slots = slots[active_rows]
+        if np.any((active_slots < 0) | (active_slots >= self.d2h_capacity)):
+            raise ValueError("Active delayed D2H request has an invalid pool slot")
+        if np.unique(active_slots).size != active_slots.size:
+            raise ValueError("Active delayed D2H requests must not share a pool slot")
+        active_generations = request_generations[active_rows]
+        if np.any(active_generations < 0):
+            raise ValueError("Active delayed D2H request has an invalid generation")
+        owners = self.d2h_owner_generations_cpu[active_slots]
+        if np.any(active_generations != owners):
+            raise RuntimeError("Active delayed D2H request does not match the pool slot owner")
+
+        stable_prefixes = self.d2h_stable_prefixes_cpu[active_slots]
+        active_computed = computed[active_rows]
+        lag = active_computed - stable_prefixes
+        if np.any(lag < 0):
+            raise RuntimeError("delayed D2H stable prefix is ahead of num_computed_tokens")
+        if np.any(lag >= 2 * self.block_size):
+            raise RuntimeError("delayed D2H planner observed two unretired full blocks")
+
+        ready_in_active = lag >= self.block_size
+        if not np.any(ready_in_active):
+            return 0
+        ready_slots = active_slots[ready_in_active]
+        ready_generations = active_generations[ready_in_active]
+        ready_prefixes = stable_prefixes[ready_in_active]
+        ready_rows = np.flatnonzero(active_rows)[ready_in_active]
+        logical_blocks = ready_prefixes // self.block_size
+        if np.any(logical_blocks >= table.shape[1]):
+            raise RuntimeError("delayed D2H logical block is outside the request block table")
+        destination_slots = table[ready_rows, logical_blocks]
+        invalid_destinations = (destination_slots < 0) | (destination_slots >= self.d2h_host_num_blocks)
+        if np.any(invalid_destinations):
+            bad = np.flatnonzero(invalid_destinations)[:8]
+            entries = [
+                {
+                    "request_row": int(ready_rows[index]),
+                    "pool_slot": int(ready_slots[index]),
+                    "logical_block": int(logical_blocks[index]),
+                    "destination_slot": int(destination_slots[index]),
+                }
+                for index in bad
+            ]
+            raise RuntimeError(
+                "delayed D2H Host destination block is outside the allocated pool: "
+                f"host_group={self.d2h_host_kv_cache_group_id}, "
+                f"host_num_blocks={self.d2h_host_num_blocks}, entries={entries}"
+            )
+
+        request_stride = self.topk_buffer_size + 2 * self.block_size
+        source_slots = ready_slots * request_stride + self.topk_buffer_size + ready_prefixes % (2 * self.block_size)
+        invalid_sources = (source_slots < 0) | (source_slots + self.block_size > self.d2h_source_token_capacity)
+        if np.any(invalid_sources):
+            bad = np.flatnonzero(invalid_sources)[:8]
+            entries = [
+                {
+                    "request_row": int(ready_rows[index]),
+                    "pool_slot": int(ready_slots[index]),
+                    "source_slot": int(source_slots[index]),
+                    "source_end": int(source_slots[index] + self.block_size),
+                }
+                for index in bad
+            ]
+            raise RuntimeError(
+                "delayed D2H resident source block is outside the allocated buffer: "
+                f"source_token_capacity={self.d2h_source_token_capacity}, entries={entries}"
+            )
+        self.d2h_inflight_active_cpu[ready_slots] = True
+        self.d2h_inflight_generations_cpu[ready_slots] = ready_generations
+        self.d2h_inflight_source_slots_cpu[ready_slots] = source_slots
+        self.d2h_inflight_destination_slots_cpu[ready_slots] = destination_slots
+        self.d2h_inflight_target_prefixes_cpu[ready_slots] = ready_prefixes + self.block_size
+        ready_count = int(ready_slots.size)
+        self.d2h_compact_source_slots_cpu[:ready_count] = source_slots
+        self.d2h_compact_destination_slots_cpu[:ready_count] = destination_slots
+        self.d2h_inflight_active_count = ready_count
+        self.d2h_inflight_batch_epoch = self.d2h_next_batch_epoch
+        self.d2h_next_batch_epoch += 1
+        self.d2h_inflight_batch_active = True
+        return ready_count
+
+    def _d2h_inflight_diagnostics(self) -> str:
+        active_slots = np.flatnonzero(self.d2h_inflight_active_cpu)
+        entries = [
+            {
+                "pool_slot": int(pool_slot),
+                "generation": int(self.d2h_inflight_generations_cpu[pool_slot]),
+                "source_slot": int(self.d2h_inflight_source_slots_cpu[pool_slot]),
+                "destination_slot": int(self.d2h_inflight_destination_slots_cpu[pool_slot]),
+                "target_prefix": int(self.d2h_inflight_target_prefixes_cpu[pool_slot]),
+            }
+            for pool_slot in active_slots[:8]
+        ]
+        source_capacity = getattr(self, "d2h_source_token_capacity", 0)
+        host_num_blocks = getattr(self, "d2h_host_num_blocks", 0)
+        source_ranges = []
+        destination_ranges = []
+        source_over_48_bits = []
+        destination_over_48_bits = []
+        address_limit = 1 << 48
+        for layer_id, (source_k, source_v, destination_k, destination_v) in enumerate(
+            zip(self.addr_k_bases, self.addr_v_bases, self.gvas_k_bases, self.gvas_v_bases)
+        ):
+            source_k_end = source_k + source_capacity * self.token_size_bytes_k
+            source_v_end = source_v + source_capacity * self.token_size_bytes_v
+            destination_k_end = destination_k + host_num_blocks * self.block_size * self.token_size_bytes_k
+            destination_v_end = destination_v + host_num_blocks * self.block_size * self.token_size_bytes_v
+            source_ranges.append(
+                (
+                    layer_id,
+                    f"{source_k:#x}..{source_k_end:#x}",
+                    f"{source_v:#x}..{source_v_end:#x}",
+                )
+            )
+            destination_ranges.append(
+                (
+                    layer_id,
+                    f"{destination_k:#x}..{destination_k_end:#x}",
+                    f"{destination_v:#x}..{destination_v_end:#x}",
+                )
+            )
+            if min(source_k, source_v) < 0 or max(source_k_end, source_v_end) > address_limit:
+                source_over_48_bits.append(layer_id)
+            if min(destination_k, destination_v) < 0 or max(destination_k_end, destination_v_end) > address_limit:
+                destination_over_48_bits.append(layer_id)
+
+        def sample_ranges(ranges):
+            return ranges if len(ranges) <= 6 else ranges[:3] + [("...", "...", "...")] + ranges[-3:]
+
+        return (
+            f"epoch={self.d2h_inflight_batch_epoch}, "
+            f"host_group={getattr(self, 'd2h_host_kv_cache_group_id', 'unknown')}, "
+            f"host_num_blocks={host_num_blocks}, source_token_capacity={source_capacity}, "
+            f"active_count={active_slots.size}, entries={entries}, "
+            f"source_ranges={sample_ranges(source_ranges)}, "
+            f"destination_ranges={sample_ranges(destination_ranges)}, "
+            f"source_over_48_bits={source_over_48_bits}, "
+            f"destination_over_48_bits={destination_over_48_bits}"
+        )
+
 
 
 _SPARSE_KV_OFFLOAD_MANAGER: SparseKVOffloadManager | None = None

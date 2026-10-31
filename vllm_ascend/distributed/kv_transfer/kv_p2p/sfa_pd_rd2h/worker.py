@@ -163,6 +163,10 @@ class SFAPDRD2HConsumerWorker:
         # External req ids whose DONE signal arrived before request_map
         # was seeded (see get_finished). Retried every step until mapped.
         self._pending_done: set[str] = set()
+        self._d2h_pending_release_req_ids: set[str] = set()
+        # Tombstones of requests whose row was already released; resent
+        # d2h_releases must not resurrect their slot bindings.
+        self._d2h_released_req_ids: set[str] = set()
         # Keep rank-local terminal state (success or failure) until every TP
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
@@ -275,6 +279,10 @@ class SFAPDRD2HConsumerWorker:
                             dense=dense,
                             kv_tokens=int(getattr(req, "kv_tokens", 0) or 0),
                         )
+        for req_id, pool_slot in getattr(metadata, "d2h_releases", {}).items():
+            if req_id in getattr(self, "_d2h_released_req_ids", ()):
+                continue
+            self.copy_sfa_slots_by_req.setdefault(req_id, int(pool_slot))
 
     def save_kv_layer(
         self,
@@ -305,6 +313,7 @@ class SFAPDRD2HConsumerWorker:
             getattr(self, "_dspark_draft_blocks_by_req", {}).pop(ext_id, None)
             getattr(self, "copy_sfa_slots_by_req", {}).pop(req_id, None)
             getattr(self, "_copy_sfa_tail_by_req", {}).pop(ext_id, None)
+            getattr(self, "_d2h_pending_release_req_ids", set()).discard(req_id)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
@@ -336,7 +345,7 @@ class SFAPDRD2HConsumerWorker:
         if hasattr(self, "_mf_read_thread") and self._mf_read_thread is not None:
             local_done = self._mf_read_thread.get_and_clear_done()
             local_failed = self._mf_read_thread.get_and_clear_failed()
-        self._terminal_ext_ids.update(local_done | local_failed)
+            self._terminal_ext_ids.update(local_done | local_failed)
 
         local_terminal = set(self._terminal_ext_ids)
         receiver = getattr(self, "_dspark_context_receiver", None)
@@ -404,18 +413,58 @@ class SFAPDRD2HConsumerWorker:
         # request_map[ext_id] and discard _pending_done[ext_id] before the
         # resolution loop above, leaking any finished req whose DONE arrives in
         # the same step (unmappable -> stuck in _pending_done forever).
+        done_sending: set[str] = set()
         if receiver is not None:
             self._dspark_pending_recv.difference_update(done_recving)
             self._deferred_finished_req_ids.update(finished_req_ids or ())
             # Cancellation does not abort the remote reads. Keep their lookup
             # tables until the original target+draft join completes on every TP.
             ready_to_cleanup = self._deferred_finished_req_ids - self._dspark_pending_recv
-            if ready_to_cleanup:
-                self._cleanup_request_state(ready_to_cleanup)
         elif finished_req_ids:
-            self._cleanup_request_state(finished_req_ids)
+            ready_to_cleanup = set(finished_req_ids)
+        else:
+            ready_to_cleanup = set()
+        # __new__-style light construction (upstream unit tests) skips
+        # __init__; lazily materialize the delayed-release ledger.
+        d2h_pending = getattr(self, "_d2h_pending_release_req_ids", None)
+        if d2h_pending is None:
+            d2h_pending = self._d2h_pending_release_req_ids = set()
+        # Same light-construction tolerance for the manager handle itself.
+        offload_manager = getattr(self, "offload_manager", None)
+        if ready_to_cleanup:
+            if offload_manager is not None and getattr(offload_manager, "delayed_d2h", False):
+                # Request-owned Copy-SFA rows stay reserved until every delayed
+                # D2H batch referencing them has retired; only then may cleanup
+                # run and the scheduler get its finished_sending acknowledgement.
+                d2h_owned = {
+                    req_id
+                    for req_id in ready_to_cleanup
+                    if req_id in getattr(self, "copy_sfa_slots_by_req", {})
+                }
+                d2h_pending.update(d2h_owned)
+                self._cleanup_request_state(ready_to_cleanup - d2h_owned)
+            else:
+                self._cleanup_request_state(ready_to_cleanup)
+        if d2h_pending:
+            if offload_manager is None:
+                raise RuntimeError("delayed D2H row release requires the sparse KV offload manager")
+            releasable = {
+                req_id
+                for req_id in d2h_pending
+                if offload_manager.d2h_slot_releasable(self.copy_sfa_slots_by_req[req_id])
+            }
+            if releasable:
+                slots = [self.copy_sfa_slots_by_req[req_id] for req_id in sorted(releasable)]
+                offload_manager.release_d2h_slots(slots)
+                d2h_pending.difference_update(releasable)
+                self._cleanup_request_state(releasable)
+                d2h_released = getattr(self, "_d2h_released_req_ids", None)
+                if d2h_released is None:
+                    d2h_released = self._d2h_released_req_ids = set()
+                d2h_released.update(releasable)
+                done_sending.update(releasable)
 
-        return set(), done_recving
+        return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         result = self._invalid_block_ids

@@ -498,6 +498,7 @@ def test_small_chunks_rotate_across_tp_ranks():
 
 def _make_consumer_worker_for_completion_test():
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker._d2h_pending_release_req_ids = ()
     worker.tp_rank = 0
     worker.tp_size = 2
     worker.request_map = {"req-0": "req-0-internal"}
@@ -1513,6 +1514,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()
@@ -1563,6 +1565,7 @@ def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()

@@ -50,7 +50,7 @@ def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected
         patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
         patch(
             "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
-            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False)),
+            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False, delayed_d2h=False)),
         ),
     ):
         builder = AscendSFAKVOffloadMetadataBuilder(
