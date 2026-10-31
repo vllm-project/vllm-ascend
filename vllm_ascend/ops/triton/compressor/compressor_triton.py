@@ -644,6 +644,49 @@ def compressor_ref(
     return out_full
 
 
+@triton.jit
+def _publish_pcp_ring_kernel(
+    rows_ptr,
+    state_ptr,
+    metadata_ptr,
+    indices_ptr,
+    requests_ptr,
+    slots_ptr,
+    COUNT: tl.constexpr,
+    REQUESTS: tl.constexpr,
+    BLOCKS: tl.constexpr,
+    WIDTH: tl.constexpr,
+):
+    row = tl.program_id(0)
+    channels = tl.arange(0, WIDTH)
+    if row < COUNT:
+        request = tl.load(requests_ptr + row)
+        block = tl.load(metadata_ptr + 4 * REQUESTS + request).to(tl.int64)
+        used = tl.load(metadata_ptr + REQUESTS + request)
+        if (block > 0) & (block < BLOCKS) & (used > 0):
+            source = tl.load(indices_ptr + row).to(tl.int64)
+            slot = tl.load(slots_ptr + row)
+            values = tl.load(rows_ptr + source * WIDTH + channels)
+            tl.store(state_ptr + (block * 32 + slot) * WIDTH + channels, values)
+
+
+def publish_pcp_ring_rows(rows, state, metadata, indices, requests, slots, num_cores):
+    """Publish unique latest ring slots after all private compressor reads finish."""
+    if indices.numel():
+        _publish_pcp_ring_kernel[(indices.numel(),)](
+            rows,
+            state,
+            metadata,
+            indices,
+            requests,
+            slots,
+            COUNT=indices.numel(),
+            REQUESTS=metadata.shape[1],
+            BLOCKS=state.shape[0],
+            WIDTH=state.shape[-1],
+        )
+
+
 def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_query_len, num_cores):
     """Pool C2 into token-aligned BF16 rows, then update a private FP32 ring.
 
