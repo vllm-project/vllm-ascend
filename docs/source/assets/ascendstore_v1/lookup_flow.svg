@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 772" role="img" aria-labelledby="lookup_flow-title lookup_flow-desc">
+<title id="lookup_flow-title">Lookup · 从恢复证据到调度候选</title>
+<desc id="lookup_flow-desc">Scheduler 发起查询；Worker 形成恢复证据；采用候选并分配目标后生成 Load。</desc>
+<defs>
+<marker id="lookup_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="lookup_flow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}</style>
+</defs>
+<rect width="1120" height="772" fill="#fff"/>
+<text x="48" y="60" class="title">Lookup · 从恢复证据到调度候选</text>
+<text x="48" y="88" class="muted">Scheduler 发起查询；Worker 形成恢复证据；采用候选并分配目标后生成 Load。</text>
+<path d="M 348,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,296 V 320" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,392 V 416" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,488 V 512" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<path d="M 348,584 V 640" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#lookup_flow-arrow)"/>
+<g data-node="scheduler-query">
+<rect x="48" y="112" width="1024" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">vLLM 调度 → Connector Scheduler · 发起本次查询</text>
+<text x="64" y="163" class="muted">清除旧候选；无可查范围或本地已覆盖时返回，其余提交上限、hash、缓存组与本地前缀</text>
+</g>
+<g data-node="step-1">
+<rect x="48" y="224" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="251" class="name">01  Coordinator 选择逻辑查询块</text>
+<text x="64" y="275" class="muted">连续区间或稀疏候选，覆盖可能支持恢复的位置</text>
+</g>
+<g data-node="step-2">
+<rect x="48" y="320" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="347" class="name">02  建立唯一 Key 与必要路由</text>
+<text x="64" y="371" class="muted">无别名用偏移；有重复才建立显式索引</text>
+</g>
+<g data-node="step-3">
+<rect x="48" y="416" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="443" class="name">03  Backend exists → 合并逻辑可用性</text>
+<text x="64" y="467" class="muted">只查询新 Key，按既有路由合并各分区结果</text>
+</g>
+<g data-node="step-4">
+<rect x="48" y="512" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="539" class="name">04  求共同恢复终点与尾部 Key 边界</text>
+<text x="64" y="563" class="muted">本地可信前缀 + 外部存在性证据 → 本次恢复候选</text>
+</g>
+<g data-node="scheduler-adoption">
+<rect x="48" y="640" width="1024" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="667" class="name">vLLM 采用命中并确认分配 → Connector Scheduler 生成 Load</text>
+<text x="64" y="691" class="muted">从本地缓存边界生成实际 Load 范围；无新命中或未采用时不生成 Load</text>
+</g>
+<text x="48" y="208" class="muted">Worker · LookupService</text>
+<text x="696" y="251" class="name">恢复点搜索沿完整逻辑轴展开</text>
+<text x="696" y="277" class="muted">与本次 Store 保留策略分别选块</text>
+<text x="696" y="347" class="name">查询阶段只保留逻辑证据</text>
+<text x="696" y="373" class="muted">本地地址与传输 Batch 留给 Load</text>
+<text x="696" y="443" class="name">各分区对象共同决定可用性</text>
+<text x="696" y="469" class="muted">本地已确认前缀直接参与恢复计算</text>
+<text x="696" y="539" class="name">查询失败或无效应答回退未命中</text>
+<text x="696" y="565" class="muted">未命中按本地计算路径继续调度</text>
+<text x="48" y="748" class="muted">实线表示查询数据与调度交接；恢复候选在采用和分配前不触发传输。</text>
+</svg>

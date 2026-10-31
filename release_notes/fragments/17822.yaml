@@ -1,0 +1,4 @@
+pr: 17822
+entries:
+  - category: feature
+    text: Added the opt-in AscendStoreV1Connector for external KV cache reuse with shared Bulk and Layerwise transfer preparation.

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 928" role="img" aria-labelledby="load_flow-title load_flow-desc">
+<title id="load_flow-title">Load · 公共准备与不同消费时序</title>
+<desc id="load_flow-desc">先绑定唯一对象与全部目标，再执行传输；消费方式和失败类型决定后续路径。</desc>
+<defs>
+<marker id="load_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="load_flow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}</style>
+</defs>
+<rect width="1120" height="928" fill="#fff"/>
+<text x="48" y="60" class="title">Load · 公共准备与不同消费时序</text>
+<text x="48" y="88" class="muted">先绑定唯一对象与全部目标，再执行传输；消费方式和失败类型决定后续路径。</text>
+<path d="M 348,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,296 V 320" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,392 V 416" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 348,488 V 512" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 208,584 V 656" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 536,584 V 656" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<path d="M 624,584 V 608 Q 624,616 632,616 H 904 Q 912,616 912,624 V 656" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#load_flow-arrow)"/>
+<g data-node="scheduler-load">
+<rect x="48" y="112" width="1024" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">vLLM 分配确认 → Connector Scheduler 形成 Load 命令</text>
+<text x="64" y="163" class="muted">加载起点 = 本地缓存边界；终点 = 已采用恢复点；是否本轮计算由调度方式确定</text>
+</g>
+<g data-node="step-1">
+<rect x="48" y="224" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="251" class="name">01  选块，配对 hash / Block ID 并绑定 Key</text>
+<text x="64" y="275" class="muted">按恢复条件选块，保留分区、全部目标与请求归属</text>
+</g>
+<g data-node="step-2">
+<rect x="48" y="320" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="347" class="name">02  固定结果槽位，登记 LoadBatch</text>
+<text x="64" y="371" class="muted">pending 批次与请求登记 → Transfer 提交</text>
+</g>
+<g data-node="step-3">
+<rect x="48" y="416" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="443" class="name">03  准备 Backend 参数 / 成功对象计划</text>
+<text x="64" y="467" class="muted">Bulk：整对象；Layerwise：open 后投影成功目标</text>
+</g>
+<g data-node="step-4">
+<rect x="48" y="512" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="539" class="name">04  写入本地 KV，按目标槽位累计结果</text>
+<text x="64" y="563" class="muted">Bulk 整体传输；Layerwise 按层、Gate 与 Future 推进</text>
+</g>
+<g data-node="async-bulk">
+<rect x="48" y="656" width="320" height="200" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="683" class="name">请求级异步 Bulk</text>
+<text x="64" y="711" class="muted">该请求等待加载，不执行其 forward</text>
+<text x="64" y="737" class="muted">完成 / 失败结果 → vLLM Scheduler</text>
+<text x="64" y="763" class="muted">成功：后续调度 forward</text>
+<text x="64" y="789" class="muted">失败：按策略重算或终止</text>
+</g>
+<g data-node="sync-recoverable">
+<rect x="400" y="656" width="320" height="200" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="416" y="683" class="name">同步单组 · Bulk / Layerwise</text>
+<text x="416" y="711" class="muted">加载供本轮 forward 使用</text>
+<text x="416" y="737" class="muted">失败码：跳过本轮依赖它的保存</text>
+<text x="416" y="763" class="muted">本轮 forward 仍可能继续</text>
+<text x="416" y="789" class="muted">本步结果 → vLLM Scheduler</text>
+<text x="416" y="815" class="muted">后续 Step 重算，或按策略终止</text>
+</g>
+<g data-node="fatal">
+<rect x="752" y="656" width="320" height="200" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="768" y="683" class="name">同步多组失败 / 致命异常</text>
+<text x="768" y="711" class="muted">同步多组失败码：消费前停止</text>
+<text x="768" y="737" class="muted">各路径的契约错误或安全未知：上抛</text>
+<text x="768" y="763" class="muted">已提交操作继续安全收尾</text>
+<text x="768" y="789" class="muted">保留仍受访问的目标与资源</text>
+</g>
+<text x="48" y="208" class="muted">Worker · LoadService + 共用 Transfer</text>
+<text x="696" y="251" class="name">一个唯一对象保留全部目标</text>
+<text x="696" y="277" class="muted">同一 Key 可以写入多个本地 Block</text>
+<text x="696" y="347" class="name">登记后持续持有目标归属</text>
+<text x="696" y="373" class="muted">启动失败也进入收尾；空选集直接完成</text>
+<text x="696" y="443" class="name">只为入选 / 打开成功的目标展开</text>
+<text x="696" y="469" class="muted">open 结果投影到原槽位，不重新选块</text>
+<text x="696" y="539" class="name">写入完成与加载成功分别记录</text>
+<text x="696" y="565" class="muted">失败保留请求与原始 group / Block ID</text>
+<text x="48" y="904" class="muted">阶段表示数据依赖；Layerwise 与 forward 按层交叠，失败可在逐层消费时交接。</text>
+</svg>

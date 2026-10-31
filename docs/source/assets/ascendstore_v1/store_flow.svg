@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 984" role="img" aria-labelledby="store_flow-title store_flow-desc">
+<title id="store_flow-title">Store · 从调度许可到读源与发布</title>
+<desc id="store_flow-desc">Key 与来源只绑定一次；计算就绪控制读源，同步回退路径另行排除本轮失效来源。</desc>
+<defs>
+<marker id="store_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="store_flow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}</style>
+</defs>
+<rect width="1120" height="984" fill="#fff"/>
+<text x="48" y="60" class="title">Store · 从调度许可到读源与发布</text>
+<text x="48" y="88" class="muted">Key 与来源只绑定一次；计算就绪控制读源，同步回退路径另行排除本轮失效来源。</text>
+<path d="M 348,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,296 V 320" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,392 V 416" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,488 V 512" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,584 V 608" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,680 V 704" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<path d="M 704,392 H 684 Q 676,392 676,400 V 612 Q 676,620 668,620 H 648" fill="none" stroke="#2a9cbe" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#store_flow-link)"/>
+<path d="M 704,652 H 648" fill="none" stroke="#526a76" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#store_flow-arrow)"/>
+<path d="M 348,776 V 832" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#store_flow-arrow)"/>
+<g data-node="scheduler-store">
+<rect x="48" y="112" width="1024" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">vLLM 调度进度 → Connector Scheduler 规划保存命令</text>
+<text x="64" y="163" class="muted">阶段保存许可 · 本次范围 / checkpoint · 为需要额外保护的来源持有引用</text>
+</g>
+<g data-node="step-1">
+<rect x="48" y="224" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="251" class="name">01  登记 StoreBatch 与原始命令</text>
+<text x="64" y="275" class="muted">持有请求、Store job 与来源所有权；后台准备候选</text>
+</g>
+<g data-node="step-2">
+<rect x="48" y="320" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="347" class="name">02  选块与 writer，构造 Key 并去重</text>
+<text x="64" y="371" class="muted">先确定 writer；唯一 Key → 分区、Block ID、命令索引</text>
+</g>
+<g data-node="step-3">
+<rect x="48" y="416" width="600" height="72" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="443" class="name">03  按 Backend 要求查询 exists</text>
+<text x="64" y="467" class="muted">按已有 Key 与来源过滤；已存在对象直接进入结果交接</text>
+</g>
+<g data-node="step-4">
+<rect x="48" y="512" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="539" class="name">04  准备 Backend 参数 / 对象计划</text>
+<text x="64" y="563" class="muted">Bulk 批量地址；Layerwise open 成功后按层求值</text>
+</g>
+<g data-node="step-5">
+<rect x="48" y="608" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="635" class="name">05  从有效且就绪的来源读取 KV</text>
+<text x="64" y="659" class="muted">Bulk 整体传输；Layerwise 逐层累计复制与发布证据</text>
+</g>
+<g data-node="step-6">
+<rect x="48" y="704" width="600" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="731" class="name">06  形成存储结果与来源释放结果</text>
+<text x="64" y="755" class="muted">Bulk 归集结果；Layerwise 判断发布 / 撤销；独立确认停止读源</text>
+</g>
+<g data-node="sync-invalidation">
+<rect x="704" y="320" width="368" height="168" rx="6" fill="#fff" stroke="#2a9cbe" stroke-width="1.2"/>
+<text x="720" y="347" class="name">同步可回退路径 · 本轮保存失效</text>
+<text x="720" y="373" class="muted">Load 失败后，本轮 forward 仍可能执行</text>
+<text x="720" y="397" class="muted">排除本轮依赖失败前缀的 Store 来源</text>
+<text x="720" y="429" class="muted">失败结果 → vLLM Scheduler</text>
+<text x="720" y="453" class="muted">后续 Step 重算，或按策略终止</text>
+</g>
+<g data-node="model-ready">
+<rect x="704" y="584" width="368" height="112" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="720" y="611" class="name">ModelRunner · 来源就绪钩子</text>
+<text x="720" y="635" class="muted">待计算来源：Bulk 在 forward 后记录</text>
+<text x="720" y="659" class="muted">Layerwise：逐层钩子与 Gate 配合</text>
+<text x="720" y="683" class="muted">已就绪来源：begin_step 即可交接</text>
+</g>
+<g data-node="scheduler-release">
+<rect x="48" y="832" width="1024" height="88" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="859" class="name">Worker 释放回执 → Connector Scheduler 归还来源引用</text>
+<text x="64" y="883" class="muted">确认 Worker 停止读源后归还额外引用；对象存储是否成功由 Worker 独立记录</text>
+<text x="64" y="907" class="muted">Store 可跨步完成，结束本次 forward 或解除步骤元数据不会丢弃在途批次</text>
+</g>
+<text x="48" y="208" class="muted">Worker · StoreService + 共用 Transfer</text>
+<text x="696" y="251" class="name">来源保护覆盖准备与执行</text>
+<text x="696" y="277" class="muted">空选集同样登记并交接原始命令</text>
+<text x="696" y="539" class="name">参数准备与设备计算交叠</text>
+<text x="696" y="565" class="muted">准备地址期间尚未读取本地 KV</text>
+<text x="696" y="731" class="name">必要 writer 汇总完整对象证据</text>
+<text x="696" y="757" class="muted">空结果、失败与取消同样参与汇总</text>
+<text x="48" y="960" class="muted">实线：数据与结果；灰色虚线：源就绪；蓝色虚线：同步回退路径的来源失效。</text>
+</svg>

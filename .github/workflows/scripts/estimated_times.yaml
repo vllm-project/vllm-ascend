@@ -62,6 +62,10 @@ estimated_times:
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/rlhf/consistency/test_fa3_mixed_batches.py: 60
   tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30
+  # Initial routing estimate uses the selector's default; not a measured runtime.
+  tests/e2e/pull_request/one_card/test_ascendstore_v1.py: 600
+  # Initial scheduling estimate, not the execution timeout; includes correctness and four performance servers.
+  tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py: 3600
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
@@ -143,6 +147,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
+  # Initial routing estimate uses the selector's default; not a measured runtime or timeout.
+  tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py: 600
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
