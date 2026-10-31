@@ -308,9 +308,6 @@ msgstr "| `schedule_e2e_upstream_test.yaml` | - |"
 msgid "| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |"
 msgstr "| `schedule_lint_image_build.yaml` | `workflow_dispatch`、`push` |"
 
-msgid "| `schedule_main2main.yaml` | `workflow_dispatch` |"
-msgstr "| `schedule_main2main.yaml` | `workflow_dispatch` |"
-
 msgid "| `schedule_stale_manage.yaml` | `issue_comment` |"
 msgstr "| `schedule_stale_manage.yaml` | `issue_comment` |"
 
@@ -519,3 +516,6 @@ msgstr ""
 "- [ ] 适用的测试覆盖和验证结果已记录在 PR 中。\n"
 "- [ ] 必需的 CI 检查在合并前通过。\n"
 "- [ ] 尚未完成的 NPU 硬件或性能验证在合并前完成。"
+
+msgid "| `schedule_main2main.yaml` | - |"
+msgstr "| `schedule_main2main.yaml` | - |"
