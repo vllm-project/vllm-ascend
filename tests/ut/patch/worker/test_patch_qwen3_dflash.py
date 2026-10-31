@@ -26,14 +26,17 @@ class TestContextRopeReturn(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
         cls.precompute = staticmethod(namespace[function.name])
 
-    def _check_rope(self, inplace):
+    def _check_rope(self, inplace, returns_none=False):
         writes = []
         states = torch.arange(1, 7, dtype=torch.float32).reshape(3, 2)
         slots = torch.arange(3)
 
         def rotate(positions, query, key):
             torch.testing.assert_close(positions, slots.repeat(2))
-            return (query.neg_() if inplace else query.neg()), key.neg()
+            rotated_query = query.neg_() if inplace else query.neg()
+            if returns_none:
+                return None
+            return rotated_query, key.neg()
 
         def store(attn, keys, values, cache, mapping):
             writes.append((keys.clone(), values.clone(), mapping.clone()))
@@ -67,6 +70,9 @@ class TestContextRopeReturn(unittest.TestCase):
 
     def test_in_place_rope(self):
         self._check_rope(inplace=True)
+
+    def test_in_place_rope_returning_none(self):
+        self._check_rope(inplace=True, returns_none=True)
 
 
 if __name__ == "__main__":

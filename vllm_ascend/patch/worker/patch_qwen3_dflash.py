@@ -43,7 +43,9 @@ def precompute_and_store_context_kv(
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
     tmpv = all_k_flat.clone()
-    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    rope_output = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    if rope_output is not None:
+        all_k_flat = rope_output[0]
 
     if context_slot_mapping is None:
         return
