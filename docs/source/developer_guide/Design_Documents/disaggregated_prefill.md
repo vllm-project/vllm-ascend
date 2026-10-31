@@ -64,19 +64,28 @@ memory with SDMA instead and is the option to try when the interconnect is the
 bottleneck. It is experimental, and on an A2 single node only `sdma`
 initializes. Expect the two backends to reach the same bulk bandwidth there:
 the four TP ranks share one interconnect, so per-rank throughput does not
-scale with the number of ranks. In measurements on one A2 node the prefill
-instance's post-prefill request latency dropped while the per-transfer time and
-the decode-side queue time stayed flat; the connector itself is pull-only, so
-the mechanism is not attributed here.
+scale with the number of ranks. The measured gain is in the prefill instance's
+post-prefill request latency, not in bulk transfer bandwidth; the connector is
+pull-only, so the mechanism is not attributed here.
 
 MemFabric has not been validated on A3 or on 950PR&950DT Products.
 `device_urma`, the UB data path for 950PR&950DT, is accepted and passed through
 to the engine but has not been exercised here, and none of the numbers above
 carry over to A3 or 950 because their interconnect ceilings differ.
 
-`transfer_backend` is honoured by `MooncakeConnectorV1` only. The layerwise,
-hybrid and D2RH connectors and `MooncakeConnectorV2` raise if it selects
-anything other than `mooncake`.
+`transfer_backend="memfabric"` requires the connector's `kv_role` to be
+`kv_producer` or `kv_consumer`; `kv_both` has no Prefill/Decode mapping. It is
+not supported with `--enable-sleep-mode`, because the worker only
+unregisters and re-registers buffers through the Mooncake registry, and
+MemFabric has no counterpart yet.
+
+Of the Mooncake connectors, only `MooncakeConnectorV1` honours these keys. The
+layerwise, hybrid and D2RH connectors and `MooncakeConnectorV2` raise if
+`transfer_backend` selects anything other than `mooncake` or if
+`transfer_protocol` is not the default. `SfaRemoteD2HConnector` reads the same
+`transfer_backend` key with its own default (`memfabric`) and semantics. The
+MemFabric engine is process-wide, so when several connectors in one
+`MultiConnector` use it they must agree on `memfabric_transfer_protocol`.
 
 #### Mooncake Layerwise Connector
 
