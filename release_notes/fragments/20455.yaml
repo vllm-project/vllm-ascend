@@ -1,4 +1,0 @@
-pr: 20455
-entries:
-  - category: bugfix
-    text: Fixed a circular import that prevented spawned EPLB workers from starting.
