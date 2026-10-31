@@ -24,10 +24,10 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
-from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+from vllm_ascend.ops.torch_ple import ple_conv_torch
 from vllm_ascend.ops.triton_ple import ple_conv_prefill
 
 
@@ -35,7 +35,7 @@ def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **k
     if mode == "prefill":
         ple_conv_prefill(*args, **kwargs)
     else:
-        upstream_ple_conv(*args, mode=mode, **kwargs)
+        ple_conv_torch(*args, mode=mode, **kwargs)
 
 
 def _get_allow_internal_format() -> bool:
@@ -267,6 +267,10 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+
+    from .ple_embedding import AscendPLEHostEmbedding
+
+    upstream_ple_layer.Qwen4ExpPLEPinnedHostEmbedding = AscendPLEHostEmbedding
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

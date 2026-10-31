@@ -1841,6 +1841,22 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         # upstream ngram_embedding, which reads engram_config directly. Keep the
         # config flowing to upstream instead of clearing it; model/layer/device
         # validation is already patched in patch_engram_config.py.
+        if engram_config is not None and engram_config.cpu_offload:
+            parallel = vllm_config.parallel_config
+            if (
+                parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or engram_config.embedding_across_dp
+                or engram_config.dp_shared_memory
+                or engram_config.use_thp
+                or parallel.enable_elastic_ep
+                or parallel.use_ubatching
+            ):
+                raise ValueError(
+                    "Qwen PLE offload requires PCP=DCP=1 without shared tables, THP, elastic EP or ubatching"
+                )
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError("Qwen PLE offload requires model runner v2")
         return
     if engram_config is None:
         if (

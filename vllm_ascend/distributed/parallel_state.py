@@ -106,7 +106,10 @@ def init_ascend_model_parallel(
             group_name="etp",
         )
 
-    if engram_config is not None and global_pcp_size > 1:
+    if engram_config is not None and (
+        global_pcp_size > 1
+        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+    ):
         # Worker initialization defers the upstream DP-only group so the final
         # DP x PCP group is created once. Upstream owns its getter and teardown.
         assert vllm_parallel_state.get_engram_dp_group() is None

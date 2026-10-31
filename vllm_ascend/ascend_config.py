@@ -690,6 +690,9 @@ class AscendConfig:
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory
+            # Qwen PLE owns private host tables and rejects shared memory.
+            and getattr(vc.model_config, "architecture", None)
+            not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP")
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):

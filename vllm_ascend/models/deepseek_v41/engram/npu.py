@@ -168,6 +168,7 @@ class HostUvaBuffer:
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
+            self._registered = True
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
@@ -198,15 +199,18 @@ class HostUvaBuffer:
             return
         if self.ptrs is not None and self.ptrs.device.type == "npu":
             torch.npu.synchronize()
-        rc = self.lib.aclrtHostUnregister(self.pointer)
-        if rc:
-            raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
-        self.tensor = None
-        self.buffer = None
-        self.ptrs = None
+        if self._registered:
+            rc = self.lib.aclrtHostUnregister(self.pointer)
+            if rc:
+                raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+            self._registered = False
+        # A failed free must remain retryable without unregistering twice.
         rc = self.lib.aclrtFreeHost(self._allocation_pointer)
         if rc:
             raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
+        self.tensor = None
+        self.buffer = None
+        self.ptrs = None
         self.pointer = ctypes.c_void_p()
 
 
