@@ -272,6 +272,83 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
+=== "A5 series"
+
+    This configuration runs Prefill and Decode on one Atlas 850E node
+    (8 × Ascend 950DT). It uses DP8/TP1 with expert parallelism, an Engram table
+    shared between DP ranks, asynchronous scheduling, and `FULL_DECODE_ONLY`
+    ACL Graph. Speculative decoding is intentionally disabled (see below).
+
+    Set `MODEL_PATH` to the local checkpoint path.
+
+    ```shell
+    #!/usr/bin/env bash
+
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    # Required for DeepSeek-V4.1 on A5: MRv1 is rejected during config validation.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
+    export OMP_NUM_THREADS=8
+    export OMP_PROC_BIND=False
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port 8900 \
+        --served-model-name dsv41 \
+        --data-parallel-size 8 \
+        --tensor-parallel-size 1 \
+        --enable-expert-parallel \
+        --max-model-len 69632 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 32 \
+        --gpu-memory-utilization 0.85 \
+        --block-size 128 \
+        --quantization deepseek_v4_fp8 \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --api-server-count 1 \
+        --compilation-config '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,12,16,24,32]}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                "enable_npugraph_ex":true,
+                "enable_static_kernel":false
+            }
+        }'
+    ```
+
+    Key points that differ from the A3 configuration:
+
+    - `VLLM_USE_V2_MODEL_RUNNER=1` is mandatory on A5. With `0`, the engine stops
+      during config validation with
+      `DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1)`.
+    - `--quantization deepseek_v4_fp8` matches the native block-quantized
+      checkpoint (`weight_block_size=[32,32]`, `scale_fmt=ue8m0`,
+      `expert_dtype=fp4`). The `ascend` (ModelSlim W8A8) path used on A3 does not
+      apply to this checkpoint format.
+    - No `--speculative-config`: on this configuration, enabling DSpark
+      (5 draft tokens) roughly doubled per-token decode latency for 64K-context
+      requests while barely changing time-to-first-token, so it is left off by
+      default. Re-enable it for workloads where the acceptance rate is high.
+    - `--gpu-memory-utilization 0.85` leaves activation headroom for the
+      16384-token prefill chunk; with `0.9`, a 32768-token chunk hits NPU OOM.
+    - `--max-model-len 69632` covers 64K input + 1K output. Raise it if longer
+      contexts are required and memory allows.
+    - `--cudagraph_capture_sizes` is sized for up to 32 decode tokens per rank
+      (DP8 × 4 sequences); adjust it together with `--max-num-seqs`.
+
 ### 5.2 1P1D PD Disaggregated Deployment
 
 === "A3 series"
@@ -1860,6 +1937,12 @@ For common environment, installation, and parameter issues, refer to the
   DSpark draft model.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
+
+- On Ascend 950DT (A5), DeepSeek-V4.1-Flash currently supports only DP8/TP1:
+  TP>1 fails while reshaping block-quantized weight scales
+  ([#20398](https://github.com/vllm-project/vllm-ascend/issues/20398)), and PP>1 is
+  rejected because Engram requires `PP=DCP=1`. Parallelism beyond DP therefore
+  cannot be used for this model on A5 yet.
 
 ## 12 Bounded Replay Compatibility for vLLM 0.30.0
 
