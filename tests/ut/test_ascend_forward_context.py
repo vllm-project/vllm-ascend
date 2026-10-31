@@ -41,6 +41,7 @@ def _make_vllm_config(
     kv_connector: str | None = None,
     kv_role: str | None = None,
     recompute_scheduler_enable: bool = False,
+    use_sequence_parallel_moe: bool = False,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -55,6 +56,7 @@ def _make_vllm_config(
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
+        use_sequence_parallel_moe=use_sequence_parallel_moe,
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
@@ -532,6 +534,20 @@ def test_select_moe_comm_method_a5_unquantized_draft_four_cards_topk_ten(monkeyp
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
         == expected
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 1024, 4096])
+def test_select_moe_comm_method_a5_sp_unquantized_draft_uses_allgather(monkeypatch, num_tokens):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch, device_type=AscendDeviceType.A5, capacity=4096, ep_world_size=4, enable_fused_mc2=1
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    config = _make_vllm_config(world_size=4, tensor_parallel_size=2, top_k_experts=10, use_sequence_parallel_moe=True)
+    assert afc.select_moe_comm_method(num_tokens, config) == MoECommType.FUSED_MC2
+    assert (
+        afc.select_moe_comm_method(num_tokens, config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
+        == MoECommType.ALLGATHER
     )
 
 
