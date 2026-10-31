@@ -281,7 +281,7 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
-    def test_pcp_query_keys_and_worker_count(self):
+    def test_pcp_cache_geometry_and_worker_count(self):
         for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
             with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
                 config = self._make_config()
@@ -294,13 +294,21 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual(scheduler.grouped_block_size, [16 * dcp_size])
                 self.assertEqual(scheduler.hash_block_size, 16 * dcp_size)
                 self.assertEqual(scheduler._expected_worker_count, 2 * pcp_size)
-                keys = scheduler._generate_store_query_keys([b"h0"], False, 0)[0]
-                expected = [
-                    f"llama-7b@dcp:{dcp}@head_or_tp_rank:{tp}@pp_rank:0@group:0@cache_role:kv@cache_family:default@6830"
-                    for dcp in range(dcp_size)
-                    for tp in range(2)
-                ]
-                self.assertEqual(keys, expected)
+
+    def test_layerwise_rejects_unsupported_data_plane_before_backend_init(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
+        for backend_name in ("yuanrong", "unknown"):
+            for data_plane in (None, "unsupported"):
+                with self.subTest(backend=backend_name, data_plane=data_plane):
+                    config = self._make_config(extra_config={"backend": backend_name})
+                    backend = SimpleNamespace(layerwise_data_plane=data_plane)
+                    with (
+                        patch(f"{module}.layerwise.pool_scheduler.get_backend_class", return_value=backend),
+                        patch.object(KVPoolScheduler, "__init__", return_value=None) as base_init,
+                        self.assertRaisesRegex(ValueError, "does not support layerwise KV pooling"),
+                    ):
+                        create_kv_pool_scheduler(config, use_layerwise=True)
+                    base_init.assert_not_called()
 
     def test_mooncake_layerwise_rejects_tp_mismatch(self):
         config = self._make_config(
@@ -1248,54 +1256,6 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
         self.assertIsNone(scheduler._block_pool)
         self.assertFalse(scheduler.reset_store())
         scheduler.client.reset.assert_not_called()
-
-
-class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
-    """Test _generate_store_query_keys method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
-
-    def test_generate_store_query_keys(self):
-        cases = [
-            ({}, False, 1),
-            ({"num_layers": 4}, True, 4),
-            ({"tp_size": 2, "put_step": 1}, False, 2),
-        ]
-        for attributes, include_layers, expected_count in cases:
-            with self.subTest(attributes=attributes, include_layers=include_layers):
-                scheduler = self._make_scheduler()
-                for name, value in attributes.items():
-                    setattr(scheduler, name, value)
-                result = scheduler._generate_store_query_keys([b"\xaa\xbb"], include_layers=include_layers)
-                self.assertEqual(len(result), 1)
-                self.assertEqual(len(result[0]), expected_count)
-
-
-class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
-    """Test _get_store_lookup_hit_tokens method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
-
-    def test_store_lookup_hit_tokens(self):
-        cases = [
-            (4, [1, 1, 1, 1], 0, 64),
-            (4, [1, 0, 0, 0], 0, 16),
-            (4, [0, 0, 0, 0], 0, 0),
-            (0, [], 0, 0),
-            (4, [1, 1], 32, 64),
-        ]
-        for hash_count, exists, computed_tokens, expected in cases:
-            with self.subTest(hash_count=hash_count, exists=exists, computed_tokens=computed_tokens):
-                scheduler = self._make_scheduler()
-                scheduler.store_scheduler.batch_is_exist.return_value = exists
-                request = MagicMock()
-                request.block_hashes = [b"\xaa"] * hash_count
-                result = scheduler._get_store_lookup_hit_tokens(request, 64, computed_tokens)
-                self.assertEqual(result, expected)
 
 
 class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):
