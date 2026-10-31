@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,81 +11,77 @@ from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-def _runner(*, multistream=True, tp_size=4, full=True, graph_count=2):
+def _runner(*, multistream=True, tp_size=4, full=True, sizes=None):
     runner = object.__new__(NPUModelRunner310V2)
     runner.ascend_config = SimpleNamespace(multistream_overlap_shared_expert=multistream)
     runner.parallel_config = SimpleNamespace(tensor_parallel_size=tp_size)
-    runner.cudagraph_manager = SimpleNamespace(
+    runner.compilation_config = SimpleNamespace(
         cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: full),
-        graphs={i: object() for i in range(graph_count)},
+        cudagraph_capture_sizes=sizes,
     )
-    runner._multistream_logits_initialized = False
+    runner.model = MagicMock()
     return runner
 
 
-@pytest.mark.parametrize(
-    "options",
-    [dict(multistream=False), dict(tp_size=1), dict(full=False), dict(graph_count=0), dict(graph_count=1)],
-)
-def test_logits_sync_skips_unaffected_paths(options):
+@pytest.mark.parametrize("options", [dict(multistream=False), dict(tp_size=1), dict(full=False)])
+def test_logits_warmup_skips_unaffected_paths(options):
     runner = _runner(**options)
+    hidden = MagicMock(shape=(8, 16))
+    with patch.object(NPUModelRunner, "_dummy_sampler_run") as parent:
+        runner._dummy_sampler_run(hidden)
+    parent.assert_called_once_with(hidden)
+    runner.model.compute_logits.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sizes,profile_rows,expected",
+    [
+        ([4, 2, 2, 0, -1, 8, 16], 8, [1, 2, 4]),
+        ([2, 4], 8, [1, 2, 4]),
+        ([2], 8, [1, 2]),
+        (None, 8, [1]),
+        ([], 8, [1]),
+        ([1, 2], 1, []),
+    ],
+)
+def test_logits_warmup_profiles_unique_small_batches_after_parent(sizes, profile_rows, expected):
+    runner = _runner(sizes=sizes)
+    hidden = MagicMock(shape=(profile_rows, 16))
+    hidden.__getitem__.side_effect = lambda index: SimpleNamespace(rows=index.stop)
+    events = []
+    runner.model.compute_logits.side_effect = lambda batch: events.append(batch.rows)
     with (
-        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
-        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
+        patch.object(NPUModelRunner, "_dummy_sampler_run", side_effect=lambda x: events.append("parent")) as parent,
+        patch.object(model_runner_310p.torch.npu, "current_stream") as current,
+        patch.object(model_runner_310p, "shared_experts_calculation_stream") as shared,
     ):
-        runner._synchronize_multistream_moe_before_logits()
-    current_stream.assert_not_called()
-    shared_stream.assert_not_called()
-    assert not runner._multistream_logits_initialized
+        runner._dummy_sampler_run(hidden)
+    parent.assert_called_once_with(hidden)
+    assert events == ["parent", *expected]
+    assert [entry.args[0] for entry in hidden.__getitem__.call_args_list] == [slice(None, n) for n in expected]
+    current.assert_not_called()
+    shared.assert_not_called()
 
 
-@pytest.mark.parametrize("missing_attribute", [False, True])
-def test_logits_sync_skips_uninitialized_graph_manager(missing_attribute):
-    runner = _runner()
-    if missing_attribute:
-        del runner.cudagraph_manager
-    else:
-        runner.cudagraph_manager = None
+def test_logits_warmup_does_not_hide_parent_failure():
+    runner = _runner(sizes=[1, 2])
     with (
-        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
-        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
+        patch.object(NPUModelRunner, "_dummy_sampler_run", side_effect=RuntimeError("profile failure")),
+        pytest.raises(RuntimeError, match="profile failure"),
     ):
-        runner._synchronize_multistream_moe_before_logits()
-    current_stream.assert_not_called()
-    shared_stream.assert_not_called()
-    assert not runner._multistream_logits_initialized
+        runner._dummy_sampler_run(MagicMock(shape=(8, 16)))
+    runner.model.compute_logits.assert_not_called()
 
 
-def test_logits_sync_drains_both_streams_only_before_first_real_sample():
-    runner = _runner()
-    calls = MagicMock()
+def test_logits_warmup_does_not_hide_communication_failure():
+    runner = _runner(sizes=[1, 2])
+    runner.model.compute_logits.side_effect = RuntimeError("communication failure")
     with (
-        patch.object(model_runner_310p.torch.npu, "current_stream", return_value=calls.main),
-        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream", return_value=calls.shared),
+        patch.object(NPUModelRunner, "_dummy_sampler_run"),
+        pytest.raises(RuntimeError, match="communication failure"),
     ):
-        for _ in range(10):
-            runner._synchronize_multistream_moe_before_logits()
-    assert calls.mock_calls == [
-        call.main.synchronize(),
-        call.shared.synchronize(),
-    ]
-    assert runner._multistream_logits_initialized
-
-
-def test_logits_sync_failure_does_not_disable_protection():
-    runner = _runner()
-    with (
-        patch.object(model_runner_310p.torch.npu, "current_stream") as current_stream,
-        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared_stream,
-    ):
-        shared_stream.return_value.synchronize.side_effect = RuntimeError("stream failure")
-        with pytest.raises(RuntimeError, match="stream failure"):
-            runner._synchronize_multistream_moe_before_logits()
-        assert not runner._multistream_logits_initialized
-        shared_stream.return_value.synchronize.side_effect = None
-        runner._synchronize_multistream_moe_before_logits()
-        assert current_stream.return_value.synchronize.call_count == 2
-        assert shared_stream.return_value.synchronize.call_count == 2
+        runner._dummy_sampler_run(MagicMock(shape=(8, 16)))
+    assert runner.model.compute_logits.call_count == 1
 
 
 @pytest.mark.parametrize("multistream", [False, True])
@@ -102,19 +98,3 @@ def test_load_model_initializes_shared_stream_after_parent(multistream):
         runner.load_model(load_dummy_weights=True)
     load.assert_called_once_with(True)
     assert events == (["loaded", "stream"] if multistream else ["loaded"])
-
-
-def test_logits_sync_main_failure_is_retryable():
-    runner = _runner()
-    with (
-        patch.object(model_runner_310p.torch.npu, "current_stream") as main,
-        patch("vllm_ascend._310p.worker.v2.model_runner.shared_experts_calculation_stream") as shared,
-    ):
-        main.return_value.synchronize.side_effect = RuntimeError("main failure")
-        with pytest.raises(RuntimeError, match="main failure"):
-            runner._synchronize_multistream_moe_before_logits()
-        shared.assert_not_called()
-        assert not runner._multistream_logits_initialized
-        main.return_value.synchronize.side_effect = None
-        runner._synchronize_multistream_moe_before_logits()
-        assert runner._multistream_logits_initialized

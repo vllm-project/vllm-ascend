@@ -1,5 +1,0 @@
-pr: 20239
-entries:
-  - category: performance
-    hardware: [310P]
-    text: Enabled shared-expert multistream overlap on Ascend 310P using registered linear wrappers, with earlier activation and gate submission and one-time synchronization before MRV2 logits initialization.

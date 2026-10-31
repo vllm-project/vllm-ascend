@@ -146,7 +146,6 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._num_rejected_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         # Keep prefill and prefix-cache hits out of FULL mixed graphs.
         self._force_eager_pc_batch = False
-        self._multistream_logits_initialized = False
         self._force_eager_spec_batch = False
         self._spec_dummy_capture = False
         # Populated in initialize_kv_cache; also set here so UT can call
@@ -1299,27 +1298,23 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         return block_tables, slot_mappings
 
-    def _synchronize_multistream_moe_before_logits(self) -> None:
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        super()._dummy_sampler_run(hidden_states)
         if not self.ascend_config.multistream_overlap_shared_expert or self.parallel_config.tensor_parallel_size <= 1:
             return
-        graph_manager = getattr(self, "cudagraph_manager", None)
-        if (
-            graph_manager is None
-            or not graph_manager.cudagraph_mode.has_full_cudagraphs()
-            or len(graph_manager.graphs) <= 1
-        ):
-            return
-        if self._multistream_logits_initialized:
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             return
 
-        # Drain outstanding multi-stream work once before the first real
-        # logits AllGather after multi-graph capture. On 310P, its lazy HCCL
-        # transport initialization can otherwise exhaust IPC notify resources.
-        # MoE already joins shared output on-device; a host fence per sampled
-        # token unnecessarily stalls steady-state forward/sampling overlap.
-        torch.npu.current_stream().synchronize()
-        shared_experts_calculation_stream().synchronize()
-        self._multistream_logits_initialized = True
+        # The maximum-batch sampler profile above does not initialize the
+        # small-message HCCL transport used by decode logits AllGather. Do so
+        # before FULL graphs consume the limited 310P Event resources. Include
+        # batch 1 even if graph sizes start at 2: logits are not graph-padded.
+        # The enclosing profile_run already synchronizes before graph capture.
+        profile_rows = hidden_states.shape[0]
+        warmup_sizes = {1, *(self.compilation_config.cudagraph_capture_sizes or [])}
+        for num_rows in sorted(warmup_sizes):
+            if 0 < num_rows < profile_rows:
+                self.model.compute_logits(hidden_states[:num_rows])
 
     def sample(
         self,
@@ -1332,7 +1327,6 @@ class NPUModelRunner310V2(NPUModelRunner):
         if grammar_output is not None:
             # TODO: Restore structured output support in the next 310P MRV2 iteration.
             raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
-        self._synchronize_multistream_moe_before_logits()
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             sampler_output = self.sampler(logits, input_batch)
