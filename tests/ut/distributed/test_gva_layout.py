@@ -1,8 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from enum import IntEnum
+
 import pytest
 
 from vllm_ascend.distributed.gva import GvaRowPartition, GvaRowRange
+
+
+def test_row_range_normalizes_integral_values():
+    class RowValue(IntEnum):
+        ZERO = 0
+        ONE = 1
+
+    row_range = GvaRowRange(RowValue.ZERO, RowValue.ZERO, RowValue.ONE)
+    assert all(type(value) is int for value in (row_range.owner_rank, row_range.start, row_range.end))
 
 
 def test_balanced_partition_assigns_remainder_to_earlier_owners():

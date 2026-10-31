@@ -32,7 +32,6 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
-from vllm_ascend.distributed.memfabric import MEMFABRIC_API_OFFLOAD, global_memfabric_runtime_registry
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -550,24 +549,7 @@ class SparseKVOffloadManager:
         config.scene = offload.Scene.SHARED
         store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
         config.store_url = f"tcp://127.0.0.1:{store_port}"
-        self._memfabric_offload_claim = global_memfabric_runtime_registry.acquire(
-            MEMFABRIC_API_OFFLOAD,
-            "sparse_kv_offload",
-            (
-                config.device_id,
-                config.reserve_size,
-                config.alloc_size,
-                config.world_size,
-                config.rank_id,
-                config.store_url,
-                str(config.scene),
-            ),
-        )
-        init_result = offload.initialize(config)
-        if init_result != 0:
-            # Keep the claim: a failed native init may have partially changed
-            # process-global state, and no second client should retry it here.
-            raise RuntimeError(f"Sparse KV offload offload.initialize failed with result={init_result}")
+        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
     def _warmup_external_lru_planner_threads(self) -> int:
