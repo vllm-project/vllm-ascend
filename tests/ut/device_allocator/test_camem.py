@@ -48,7 +48,7 @@ class TestCaMem(PytestBase):
 
     @pytest.fixture
     def _npu_camem_allocator(self, monkeypatch):
-        if not torch.npu.is_available() or camem_module.python_create_and_map is None:
+        if torch.npu.is_available() is not True or camem_module.python_create_and_map is None:
             pytest.skip("requires an Ascend NPU and the CaMem extension")
 
         torch.npu.set_device(0)
@@ -130,6 +130,42 @@ class TestCaMem(PytestBase):
         CaMemAllocator._shutdown_singleton()
 
         allocator.release_pools.assert_called_once_with()
+
+    def test_shutdown_unmaps_live_allocations_and_drops_backups(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        awake = MagicMock(is_asleep=False, handle=(0, 4096, 1, 2), cpu_backup_tensor=None)
+        asleep = MagicMock(is_asleep=True, handle=(0, 8192, 3, 4), cpu_backup_tensor=MagicMock())
+        monkeypatch.setattr(allocator, "pointer_to_data", {1: awake, 3: asleep})
+        unmap = MagicMock()
+        monkeypatch.setattr(allocator, "_unmap_or_fail", unmap)
+        release = MagicMock()
+        monkeypatch.setattr(allocator, "release_pools", release)
+
+        allocator.shutdown()
+        allocator.shutdown()
+
+        unmap.assert_called_once_with(awake.handle)
+        assert awake.is_asleep and asleep.is_asleep
+        assert awake.cpu_backup_tensor is None and asleep.cpu_backup_tensor is None
+        assert release.call_count == 2
+
+    def test_shutdown_reclaims_physical_memory_with_live_tensor(self, _npu_camem_allocator):
+        allocator = _npu_camem_allocator
+        with allocator.use_memory_pool("weights"):
+            tensor = torch.ones(64 << 20, dtype=torch.uint8, device="npu")
+        torch.npu.synchronize()
+        pointer = tensor.data_ptr()
+        assert allocator.pointer_to_data
+        before = torch.npu.mem_get_info()[0]
+        allocator.shutdown()
+        assert torch.npu.mem_get_info()[0] - before >= tensor.nbytes
+        assert tensor.data_ptr() == pointer  # metadata only; never read unmapped storage
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+        allocator.shutdown()
+        del tensor
+        gc.collect()
+        torch.npu.empty_cache()
+        assert not allocator.pointer_to_data
 
     def test_discard_tags(self, _npu_camem_allocator):
         allocator = _npu_camem_allocator
@@ -243,7 +279,7 @@ class TestCaMem(PytestBase):
         assert data.cpu_backup_tensor is None
 
     @patch("vllm_ascend.device_allocator.camem.unmap_and_release")
-    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    @patch("vllm_ascend.device_allocator.camem.memcpy", return_value=0)
     def test_sleep_offload_and_discard(self, mock_memcpy, mock_unmap):
         allocator = CaMemAllocator.get_instance()
 
@@ -278,7 +314,7 @@ class TestCaMem(PytestBase):
         assert mock_memcpy.called
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
-    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    @patch("vllm_ascend.device_allocator.camem.memcpy", return_value=0)
     def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
         allocator = CaMemAllocator.get_instance()
 
@@ -318,3 +354,80 @@ class TestCaMem(PytestBase):
 
         usage = allocator.get_current_usage()
         assert usage == 300
+
+    def test_wake_uses_npu_cache_api(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "pointer_to_data", {})
+        with (
+            patch.object(torch.npu, "empty_cache") as npu_empty_cache,
+            patch.object(torch.accelerator, "empty_cache", side_effect=RuntimeError("not a DeviceAllocator")),
+        ):
+            allocator.wake_up()
+        npu_empty_cache.assert_called_once_with()
+
+    def test_aclgraph_pool_reuses_pool_and_restores_tag(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "allocator_and_pools", {})
+        monkeypatch.setattr(allocator, "current_tag", "weights")
+        pool = MagicMock()
+        pool.id = (0, 7)
+        with (
+            patch.object(camem_module, "get_pluggable_allocator") as create_allocator,
+            patch.object(torch.npu.memory, "MemPool", return_value=pool) as create_pool,
+            patch.object(torch.npu.memory, "use_mem_pool") as enter_pool,
+        ):
+            with allocator.aclgraph_pool() as first:
+                assert first == pool.id
+                assert allocator.current_tag == camem_module.ACL_GRAPH_TAG
+            assert allocator.current_tag == "weights"
+            with pytest.raises(RuntimeError, match="capture failed"), allocator.aclgraph_pool() as second:
+                assert second == first
+                raise RuntimeError("capture failed")
+            assert allocator.current_tag == "weights"
+            assert create_allocator.call_count == create_pool.call_count == 1
+            enter_pool.assert_not_called()
+
+    def test_failed_unmap_does_not_mark_allocation_asleep(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "_unmap_failed", False)
+        data = AllocationData((0, 16, 1000, 0), "scratch")
+        monkeypatch.setattr(allocator, "pointer_to_data", {1000: data})
+        with (
+            patch.object(camem_module, "unmap_and_release", side_effect=RuntimeError("unmap failed")),
+            pytest.raises(RuntimeError, match="unmap failed"),
+        ):
+            allocator.sleep(offload_tags=())
+        assert not data.is_asleep
+        with pytest.raises(RuntimeError, match="mapping state is unknown"):
+            allocator.wake_up()
+
+    def test_failed_restore_keeps_backup_for_retry(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        backup = torch.zeros(16, dtype=torch.uint8)
+        data = AllocationData((0, 16, 1000, 0), "weights", cpu_backup_tensor=backup, is_asleep=True)
+        monkeypatch.setattr(allocator, "pointer_to_data", {1000: data})
+        with (
+            patch.object(camem_module, "create_and_map"),
+            patch.object(camem_module, "unmap_and_release") as unmap,
+            patch.object(camem_module, "memcpy", return_value=507000),
+        ):
+            with pytest.raises(RuntimeError, match="host-to-device restore failed"):
+                allocator.wake_up(tags=["weights"])
+            unmap.assert_called_once_with(data.handle)
+        assert data.is_asleep
+        assert data.cpu_backup_tensor is backup
+
+    def test_failed_backup_does_not_unmap(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        data = AllocationData((0, 16, 1000, 0), "weights")
+        monkeypatch.setattr(allocator, "pointer_to_data", {1000: data})
+        with (
+            patch.object(camem_module.torch, "empty", return_value=torch.zeros(16, dtype=torch.uint8)),
+            patch.object(camem_module, "unmap_and_release") as unmap,
+            patch.object(camem_module, "memcpy", return_value=507000),
+        ):
+            with pytest.raises(RuntimeError, match="device-to-host backup failed"):
+                allocator.sleep(offload_tags=("weights",))
+            unmap.assert_not_called()
+        assert not data.is_asleep
+        assert data.cpu_backup_tensor is None
