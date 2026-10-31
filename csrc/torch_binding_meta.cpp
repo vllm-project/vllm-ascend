@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "mla_preprocess/mla_preprocess_validation.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -95,6 +96,45 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         cos.has_value() == sin.has_value(),
         "mla_preprocess requires cos and sin to both be tensors or both be None.");
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
+}
+
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess_with_kv_offload(
+    const at::Tensor &hiddenState,
+    const at::Tensor &wdqkv,
+    const c10::optional<at::Tensor> &descale0,
+    const at::Tensor &gamma1,
+    const c10::optional<at::Tensor> &beta1,
+    const at::Tensor &wuq,
+    const c10::optional<at::Tensor> &descale1,
+    const at::Tensor &gamma2,
+    const c10::optional<at::Tensor> &cos,
+    const c10::optional<at::Tensor> &sin,
+    const at::Tensor &wuk,
+    const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0,
+    const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1,
+    const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1,
+    const c10::optional<at::Tensor> &ctkv_scale,
+    const c10::optional<at::Tensor> &q_nope_scale,
+    c10::optional<c10::string_view> quant_mode,
+    at::Tensor &q_out0,
+    at::Tensor &q_out1,
+    at::Tensor &inner_out,
+    at::Tensor &current_k,
+    at::Tensor &current_rope,
+    const c10::optional<at::Tensor> &writeback_slots,
+    int64_t writeback_k_base,
+    int64_t writeback_rope_base,
+    int64_t writeback_capacity
+    )
+{
+    CheckDirectMlapo(hiddenState, gamma1, cos, sin, wuk, quant_mode,
+                     q_out0, q_out1, inner_out, current_k, current_rope);
+    CheckDirectMlapoWriteback(hiddenState, current_k, current_rope, writeback_slots, writeback_k_base,
+                              writeback_rope_base, writeback_capacity);
+    return {q_out0, q_out1, inner_out, current_k, current_rope};
 }
 
 #endif
@@ -1858,6 +1898,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    ops.impl("mla_preprocess_with_kv_offload", &vllm_ascend::meta::mla_preprocess_with_kv_offload);
 #endif
     // grouped_matmul_swiglu_quant_weight_nz meta implementation
     ops.impl("grouped_matmul_swiglu_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
