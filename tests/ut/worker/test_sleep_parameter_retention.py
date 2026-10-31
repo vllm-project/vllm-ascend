@@ -10,6 +10,8 @@ import torch
 
 @pytest.fixture
 def worker(monkeypatch):
+    from vllm_ascend.device_allocator import sleep_runtime
+    from vllm_ascend.device_allocator.sleep_mode_backend import AscendLegacySleepModeBackend
     from vllm_ascend.worker import worker as worker_module
 
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
@@ -35,6 +37,9 @@ def worker(monkeypatch):
             rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
         ),
     )
+    monkeypatch.setattr(sleep_runtime, "get_ascend_config", worker_module.get_ascend_config)
+    worker.sleep_mode_backend = AscendLegacySleepModeBackend()
+    worker.sleep_mode_backend.bind_runtime(sleep_runtime.AscendSleepRuntime(worker))
     return worker
 
 
@@ -177,3 +182,20 @@ def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
 
         assert torch.equal(model.weight, torch.full_like(model.weight, value))
         assert worker._sleep_saved_parameters == {}
+
+
+def test_worker_shutdown_closes_backend_once(worker, monkeypatch):
+    from vllm_ascend.worker import worker as worker_module
+
+    backend = MagicMock()
+    worker.sleep_mode_backend = backend
+    worker.profiler = None
+    worker.weight_transfer_engine = None
+    shutdown = MagicMock()
+    worker.model_runner.shutdown = shutdown
+    monkeypatch.setattr(worker_module, "ensure_kv_transfer_shutdown", MagicMock())
+    monkeypatch.setattr(worker_module, "ensure_ec_transfer_shutdown", MagicMock())
+    worker.shutdown()
+    worker.shutdown()
+    backend.close.assert_called_once()
+    shutdown.assert_called_once()

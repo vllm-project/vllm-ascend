@@ -17,6 +17,8 @@ from vllm.v1.kv_cache_interface import (
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.device_allocator.sleep_mode_backend import AscendLegacySleepModeBackend
+from vllm_ascend.device_allocator.sleep_runtime import AscendSleepRuntime
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
@@ -68,14 +70,30 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     )
 
 
+def bind_sleep_backend(worker):
+    worker.sleep_mode_backend = AscendLegacySleepModeBackend()
+    worker.sleep_mode_backend.bind_runtime(AscendSleepRuntime(worker))
+    worker._sleep_saved_parameters = {}
+
+
 class TestNPUWorker(TestBase):
     def setUp(self):
         """Setup test environment"""
+        from vllm_ascend.worker import worker as worker_module
+
+        self.enterContext(
+            patch(
+                "vllm_ascend.device_allocator.sleep_runtime.get_ascend_config",
+                side_effect=lambda: worker_module.get_ascend_config(),
+            )
+        )
         # Create configuration mocks
         self.cache_config_mock = MagicMock(spec=CacheConfig)
         self.cache_config_mock.cache_dtype = "auto"
 
         self.model_config_mock = MagicMock(spec=ModelConfig)
+        self.model_config_mock.sleep_mode_backend = "ascend_legacy"
+        self.model_config_mock.enable_sleep_mode = False
         self.model_config_mock.dtype = torch.float16
         self.model_config_mock.trust_remote_code = False
 
@@ -618,7 +636,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_sleep_uses_rl_extra_cleanup(
         self, mock_get_config, mock_allocator_class, mock_mem_get_info, mock_synchronize_device
@@ -634,6 +652,7 @@ class TestNPUWorker(TestBase):
         worker.model_runner.model.named_buffers.return_value = []
         worker.sleep_wakeup_manager = MagicMock()
 
+        bind_sleep_backend(worker)
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
@@ -644,7 +663,7 @@ class TestNPUWorker(TestBase):
         self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
@@ -677,6 +696,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
             worker.sleep_wakeup_manager = MagicMock()
+            bind_sleep_backend(worker)
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
@@ -691,7 +711,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         from vllm_ascend.worker.worker import NPUWorker
@@ -711,6 +731,7 @@ class TestNPUWorker(TestBase):
         worker.model_runner = SimpleNamespace(model=MagicMock())
         worker._sleep_saved_buffers = {}
 
+        bind_sleep_backend(worker)
         worker.wake_up(tags=["kv_cache"])
 
         mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
@@ -761,7 +782,7 @@ class TestNPUWorker(TestBase):
         return model
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_does_not_transpose_moe_weights(
         self, mock_get_config, mock_allocator_class, mock_synchronize_device
@@ -798,6 +819,7 @@ class TestNPUWorker(TestBase):
         worker._sleep_saved_buffers = {}
         worker._sleep_saved_parameters = {}
 
+        bind_sleep_backend(worker)
         worker.wake_up(tags=["weights"])
 
         for model, (w13_loader, w2_loader) in zip((target_model, draft_model), weight_loaders):
