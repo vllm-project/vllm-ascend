@@ -86,7 +86,7 @@ from vllm_ascend.core.kv_cache_placement import (
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
-from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.cpu_binding import bind_worker_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -1075,15 +1075,7 @@ class NPUWorker(WorkerBase):
         # are already registered here; process-wide migration must not revisit
         # their pinned backing, which may also be shared across NUMA nodes.
         if get_ascend_config().enable_cpu_binding:
-            engram_config = getattr(self.vllm_config, "engram_config", None)
-            try:
-                bind_cpus(
-                    self.local_rank,
-                    npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
-                    migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
-                )
-            except Exception as e:
-                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
+            bind_worker_cpus(self.vllm_config, self.local_rank)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
