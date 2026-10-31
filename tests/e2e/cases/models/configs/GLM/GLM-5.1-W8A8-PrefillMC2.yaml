@@ -6,6 +6,7 @@ test_cases:
   - name: "GLM-5.1-W8A8-PrefillMC2"
     model: "Eco-Tech/GLM-5.1-w8a8"  #need update
     envs:
+      LOCAL_WORLD_SIZE: "16"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
@@ -47,7 +48,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
       - "--additional_config"
-      - '{"enable_prefill_mc2": true,"enable_mlapo":true}'
+      - '{"enable_prefill_mc2": true, "enable_mlapo": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true}}'
       - "--reasoning-parser"
       - "glm45"
       - "--tool-call-parser"
