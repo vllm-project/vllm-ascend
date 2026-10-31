@@ -1,0 +1,6 @@
+pr: 19962
+entries:
+  - category: bugfix
+    text: >-
+      Submit MRV2 computed-token host snapshots after speculative proposals,
+      preserving exact CPU length synchronization and deferred PP refreshes.
