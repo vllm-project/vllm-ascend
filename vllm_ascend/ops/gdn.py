@@ -28,6 +28,7 @@ from fla_npu.ops.ascendc import (
 from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
@@ -41,7 +42,9 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
@@ -294,6 +297,49 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return cls._probe_fused_chunk()
 
     @staticmethod
+    def _fused_chunk_applicable(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> bool:
+        """Shape/dtype constraints of ``torch_npu.npu_chunk_gated_delta_rule``.
+
+        The operator only supports bf16 inputs with Dk == Dv == 128,
+        Nk <= 64, Nv <= 64 and Nv being a multiple of Nk (see the CANN
+        interface document). Anything else keeps the Triton/FLA fallback.
+        """
+        dk = query.shape[-1]
+        nk = query.shape[-2]
+        dv = value.shape[-1]
+        nv = value.shape[-2]
+        return (
+            query.dtype == torch.bfloat16
+            and key.dtype == torch.bfloat16
+            and value.dtype == torch.bfloat16
+            and dk == 128
+            and dv == 128
+            and nk <= 64
+            and nv <= 64
+            and nk > 0
+            and nv % nk == 0
+        )
+
+    @classmethod
+    def _use_fused_chunk(cls, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> bool:
+        """Whether prefill should use the fused aclnn chunk GDN operator.
+
+        Only A2/A3 are supported by ``torch_npu.npu_chunk_gated_delta_rule``.
+        The availability probe additionally performs a real smoke call because
+        some CANN builds lack a usable kernel even though the Python interface
+        exists.
+        """
+        if get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            return False
+        if query.device.type == "cpu":
+            return False
+        if get_pcp_group().world_size != 1:
+            return False
+        if not cls._fused_chunk_applicable(query, key, value):
+            return False
+        return cls._probe_fused_chunk()
+
+    @staticmethod
     def _chunk_gated_delta_rule_fused(
         q: torch.Tensor,
         k: torch.Tensor,
@@ -301,27 +347,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         g: torch.Tensor,
         beta: torch.Tensor,
         initial_state: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        actual_seq_lengths: torch.Tensor,
+        non_empty_indices: torch.Tensor | None,
         scale: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
 
-        Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
-        (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
-        The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
-        or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
-        and the raw ``g`` is passed through.
+        Drop-in replacement for the FLA/Triton ``chunk_gated_delta_rule``
+        pipeline (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd +
+        ...). The fused CANN operator expects TND layout and does NOT apply q/k
+        L2 norm or the chunk-local cumsum of ``g`` internally, so q/k are
+        normalized here and the raw ``g`` is passed through.
 
         Args:
             q, k: ``[1, T, Nk, Dk]``   v: ``[1, T, Nv, Dv]``
             g, beta: ``[1, T, Nv]``    g is fp32 (<=0), beta is (0, 1).
             initial_state: ``[N, Nv, Dv, Dk]`` — same layout as ``ssm_state``,
                 no transpose required.
-            cu_seqlens: cumulative prefill query start locations ``[N+1]``.
+            actual_seq_lengths: per-sequence prefill lengths ``[N]`` (int32).
+            non_empty_indices: optional indices of non-empty sequences. The
+                operator requires ``L_i > 0`` so zero-length segments are
+                dropped and the caller scatters the result back.
             scale: query scaling factor (``Dk ** -0.5``).
 
         Returns:
-            o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
+            o: ``[1, T, Nv, Dv]`` and final_state: ``[N', Nv, Dv, Dk]`` where
+            ``N'`` is the number of supplied (non-empty) sequences.
         """
         # TND layout: drop the leading batch dim (batch size is always 1 here).
         q = l2norm_fwd(q.contiguous()).squeeze(0).contiguous()  # [T, Nk, Dk]
@@ -332,11 +383,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # The fused op only supports a bfloat16 initial_state, while ssm_state may
         # be float32 (the recurrent path keeps fp32 state). Cast to bf16 here.
-        initial_state = initial_state.to(torch.bfloat16).contiguous()
-
-        # actual_seq_lengths is per-batch sequence length [N] (per the interface
-        # doc), derived from the cumulative query_start_loc.
-        actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
+        initial_state = initial_state.to(torch.bfloat16)
+        actual_seq_lengths = actual_seq_lengths.to(torch.int32)
+        if non_empty_indices is not None:
+            initial_state = initial_state.index_select(0, non_empty_indices)
+            actual_seq_lengths = actual_seq_lengths.index_select(0, non_empty_indices)
+        initial_state = initial_state.contiguous()
 
         o, final_state = torch_npu.npu_chunk_gated_delta_rule(
             q,
@@ -788,23 +840,64 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Gate on the model dtype so fp16 models (e.g. ColQwen3.5) fall back
             # to the Triton pipeline instead of hitting an aclnn dtype error.
             supports_fused_dtype = query_non_spec.dtype == torch.bfloat16
+            # A2/A3 use the fused CANN chunk operator; other devices keep the
+            # FLA NPU kernel (A5) and the Triton pipeline as fallbacks.
+            use_fused_chunk = AscendGatedDeltaNetAttention._use_fused_chunk(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
+            )
             use_fla_gdn_prefill = (
-                supports_fused_dtype
+                not use_fused_chunk
+                and supports_fused_dtype
                 and get_pcp_group().world_size == 1
                 and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
-            # The built-in fused operator is NPU-only. Keep CPU/unit-test
-            # dispatch on the Triton-compatible path even when its availability
-            # probe was cached globally.
-            use_fused_chunk = (
-                fla_gdn_prefill_op is None
-                and supports_fused_dtype
-                and query_non_spec.device.type != "cpu"
-                and AscendGatedDeltaNetAttention._probe_fused_chunk()
-                and get_pcp_group().world_size == 1
-            )
-            if fla_gdn_prefill_op is not None:
+            if use_fused_chunk:
+                # Gather only the selected rows. Generic advanced indexing first
+                # materializes the complete cache when ssm_state has a padded
+                # batch stride under the hybrid KV-cache manager.
+                initial_state_full = gather_ssm_states(
+                    ssm_state,
+                    prefill_state_indices,
+                    prefill_has_initial_state,
+                    output_dtype=torch.bfloat16,
+                )
+                prefill_metadata = attn_metadata.non_spec_prefill_metadata
+                assert prefill_metadata is not None
+                actual_seq_lengths = prefill_metadata.actual_seq_lengths
+                if actual_seq_lengths is None:
+                    # Compatibility with hand-built metadata in unit tests.
+                    actual_seq_lengths = torch.diff(prefill_query_start_loc).to(torch.int32)
+                non_empty_indices = prefill_metadata.non_empty_indices
+                logger.info_once(
+                    "GDN prefill uses torch_npu.npu_chunk_gated_delta_rule (A2/A3 fused path).",
+                )
+                core_attn_out_non_spec, last_recurrent_state = (
+                    AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state_full,
+                        actual_seq_lengths=actual_seq_lengths,
+                        non_empty_indices=non_empty_indices,
+                        scale=key_non_spec.shape[-1] ** -0.5,
+                    )
+                )
+                if non_empty_indices is not None:
+                    # Zero-length segments keep their gathered (possibly zero)
+                    # state; only the non-empty rows advance.
+                    initial_state_full.index_copy_(0, non_empty_indices, last_recurrent_state)
+                    last_recurrent_state = initial_state_full
+                scatter_ssm_states_(
+                    ssm_state,
+                    prefill_state_indices,
+                    last_recurrent_state.to(ssm_state.dtype).contiguous(),
+                )
+            elif fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
                     prefill_state_indices,
@@ -825,33 +918,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state,
                     prefill_state_indices,
                     last_recurrent_state.to(ssm_state.dtype).contiguous(),
-                )
-            elif use_fused_chunk:
-                # Gather only the selected rows. Generic advanced indexing first
-                # materializes the complete cache when ssm_state has a padded
-                # batch stride under the hybrid KV-cache manager.
-                initial_state = gather_ssm_states(
-                    ssm_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                    output_dtype=torch.bfloat16,
-                )
-                core_attn_out_non_spec, last_recurrent_state = (
-                    AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
-                        q=query_non_spec,
-                        k=key_non_spec,
-                        v=value_non_spec,
-                        g=g_non_spec,
-                        beta=beta_non_spec,
-                        initial_state=initial_state,
-                        cu_seqlens=prefill_query_start_loc,
-                        scale=key_non_spec.shape[-1] ** -0.5,
-                    )
-                )
-                scatter_ssm_states_(
-                    ssm_state,
-                    prefill_state_indices,
-                    last_recurrent_state,
                 )
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()

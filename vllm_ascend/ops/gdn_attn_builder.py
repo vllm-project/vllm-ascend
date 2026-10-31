@@ -152,6 +152,13 @@ class GDNSpecCausalConv1dMetadata:
 class GDNPrefillMetadata:
     causal_conv1d: GDNCausalConv1dMetadata
     chunk: GDNChunkedPrefillMetadata
+    # Per-sequence prefill lengths (B,) used by the fused
+    # ``torch_npu.npu_chunk_gated_delta_rule`` path.
+    actual_seq_lengths: torch.Tensor | None = None
+    # Indices of the non-empty prefill sequences. Zero-length segments must be
+    # skipped because the fused operator requires L_i > 0 and its output is
+    # compacted over the sequences it is given.
+    non_empty_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -475,6 +482,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata: GDNAttentionMetadata,
         chunk_metadata: GDNChunkedPrefillMetadata | None,
         non_spec_cache_indices: torch.Tensor | None,
+        prefill_actual_seq_lengths: torch.Tensor | None = None,
+        prefill_non_empty_indices: torch.Tensor | None = None,
     ) -> GDNAttentionMetadata:
         attn_metadata.non_spec_prefill_metadata = None
         if not self._USE_COMMON_KERNEL_METADATA or attn_metadata.num_prefills <= 0:
@@ -486,6 +495,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected attn_metadata.prefill_query_start_loc for Ascend GDN non-spec prefill path.")
         if chunk_metadata is None:
             raise RuntimeError("Expected chunk metadata for Ascend GDN non-spec prefill path.")
+        if prefill_actual_seq_lengths is None:
+            raise RuntimeError("Expected prefill actual_seq_lengths for Ascend GDN non-spec prefill path.")
 
         initial_state_mode = attn_metadata.has_initial_state
         if non_spec_cache_indices is None:
@@ -500,6 +511,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 initial_state_mode=initial_state_mode,
             ),
             chunk=chunk_metadata,
+            actual_seq_lengths=prefill_actual_seq_lengths,
+            non_empty_indices=prefill_non_empty_indices,
         )
         return attn_metadata
 
@@ -929,6 +942,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
         non_spec_chunked_prefill_metadata: GDNChunkedPrefillMetadata | None = None
+        prefill_actual_seq_lengths: torch.Tensor | None = None
+        prefill_non_empty_indices: torch.Tensor | None = None
         if num_prefills > 0:
             if spec_sequence_masks is None and num_decodes > 0:
                 assert non_spec_query_start_loc is not None
@@ -943,6 +958,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_state_indices = non_spec_state_indices_tensor
 
             assert prefill_query_start_loc_cpu is not None
+            # Per-sequence prefill lengths consumed by the fused GDN prefill
+            # operator. The cumulative offsets can contain repeated values when
+            # a request contributes no prefill tokens; those zero-length
+            # segments are filtered out below.
+            prefill_actual_seq_lengths = torch.diff(prefill_query_start_loc).to(torch.int32)
+            if bool(torch.any(prefill_query_start_loc_cpu[1:] == prefill_query_start_loc_cpu[:-1])):
+                prefill_non_empty_indices = torch.nonzero(
+                    prefill_actual_seq_lengths,
+                    as_tuple=False,
+                ).squeeze(-1)
             if self._USE_COMMON_KERNEL_METADATA:
                 non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
                     self,
@@ -1010,7 +1035,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_conv1d_cache_indices = attn_metadata.non_spec_state_indices_tensor
         # Attach once, using the final graph-stable Tensor references.
         self._attach_non_spec_prefill_metadata(
-            attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
+            attn_metadata,
+            non_spec_chunked_prefill_metadata,
+            non_spec_conv1d_cache_indices,
+            prefill_actual_seq_lengths,
+            prefill_non_empty_indices,
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
