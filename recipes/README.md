@@ -115,8 +115,8 @@ dispatch only confirms that the event was accepted, not that a build passed.
 Push runs link to [recipes.vllm.ai](https://recipes.vllm.ai); close events do
 not advertise a preview URL.
 
-The independent `Recipes Preview Comment` workflow posts one preview-link
-comment on open PRs targeting `main` that have the `recipe` label and change
+When enabled, the independent `Recipes Preview Comment` workflow posts one
+preview-link comment on open PRs targeting `main` that have the `recipe` label and change
 `recipes/**`, including fork PRs. It reuses the fixed preview URL above and the
 existing GitHub Actions bot, updates the same comment with the current PR
 commit after a push, and skips unchanged comments on reruns. Removing the label,
@@ -152,14 +152,27 @@ remain the responsibility of the recipes repository.
 Comments use only the repository's `GITHUB_TOKEN` with `pull-requests: write`;
 they do not need App credentials or `RECIPES_PREVIEW_ENABLED`. The workflow
 reads PR metadata and file names without checking out or executing PR code.
-Maintainers can stop comment updates through **Actions → Recipes Preview
-Comment → Disable workflow**, independently of preview dispatch.
+Comment automation is disabled by default. In `vllm-project/vllm-ascend`, a
+maintainer must create `RECIPES_PREVIEW_COMMENT_ENABLED=true` under **Settings →
+Secrets and variables → Actions → Variables** to enable it. This is a
+non-sensitive **repository Actions variable**, not a secret, environment-level
+variable, or vLLM runtime setting. Both the selector and writer jobs require it
+for every entry point, including manual backfills. It is independent of
+`RECIPES_PREVIEW_ENABLED`, which controls cross-repository dispatch.
+
+Set `RECIPES_PREVIEW_COMMENT_ENABLED=false` to stop new comment
+operations, including deactivation after label removal or PR closure. Existing
+comments remain unchanged while disabled. The switch does not guarantee
+cancellation of queued or running jobs; cancel those runs separately for an
+immediate stop. Maintainers can also use **Actions → Recipes Preview Comment →
+Disable workflow**. These controls do not change recipes-side builds or dispatch.
 The recipes scheduled scanner still requires the `recipe` label to discover
 PRs when dispatch is disabled. Maintainers should add it to older recipe PRs
 that predate the labeler rule.
 
-After the comment workflow is merged into `main`, maintainers can backfill an
-existing PR through **Actions → Recipes Preview Comment → Run workflow**.
+After the comment workflow is merged into `main` and its comment variable is
+enabled, maintainers can backfill an existing PR through **Actions → Recipes
+Preview Comment → Run workflow**.
 Select `main` and enter the `pr_number`, or use:
 
 ```bash
@@ -172,7 +185,7 @@ build or change labels. Manual runs from branches other than `main` are skipped.
 
 ### Administrator setup and activation
 
-This workflow follows [vLLM PR #63259](https://github.com/vllm-project/vllm/pull/63259).
+The dispatch workflow follows [vLLM PR #63259](https://github.com/vllm-project/vllm/pull/63259).
 It is disabled until the repository Actions variable `RECIPES_PREVIEW_ENABLED`
 is set to `true`. Leave it unset or `false` during setup: the original recipes
 receiver ignores `source` and would interpret an Ascend PR number as a vLLM PR.
