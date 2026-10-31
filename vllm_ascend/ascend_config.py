@@ -45,12 +45,12 @@ def is_megamoe_supported_by_config(vllm_config) -> bool:
 
     # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
     # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
-    # range [1024, 3072] and a multiple of 512. This constraint may be removed
-    # in CANN 9.2.0
+    # range [512, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0.
     moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
     if moe_intermediate_size is None:
         return False
-    return moe_intermediate_size >= 1024 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
+    return moe_intermediate_size >= 512 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
 
 
 class AscendConfig:
