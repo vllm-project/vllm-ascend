@@ -62,7 +62,7 @@ def _topk_log_softmax_kernel(
 
     logits = tl.load(row_ptr + topk_ids, mask=k_mask)
     logits = logits.to(tl.float32)
-    o = logits - lse - max_val
+    o = logits - max_val - lse
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
