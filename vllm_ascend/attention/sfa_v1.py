@@ -47,7 +47,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
 )
@@ -91,6 +91,7 @@ SMLA_DEFAULT_SINK_VALUE = 1.0
 # (key_quant_mode=value_quant_mode=3, 386-byte KV slot), not a separate operator.
 TQ_QUANT_MODE = 3
 TQ_TILE_SIZE = 128
+SFA_NOPE_PROLOG_SUPPORTED_DIMS = ((256, 512, 1536), (256, 512, 2048))
 
 
 def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
@@ -1022,11 +1023,16 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)
+        if self.qk_rope_head_dim == 0 and act_dtype != torch.bfloat16:
+            reasons.append("NoPE PROLOG_V3 requires bfloat16 activations.")
         if reasons:
             for msg in reasons:
                 logger.warning_once(msg)
             return False
         if pp_type is PreprocessType.PROLOG_V3:
+            self._nope_native_indexer_query = (
+                self.qk_rope_head_dim == 0 and self.has_indexer and not hasattr(self.indexer.wq_b, "weight_scale")
+            )
             self._process_weights_for_fused_prolog_v3()
         else:
             self._process_weights_for_fused_mlapo(act_dtype)
@@ -1035,7 +1041,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _get_fused_type_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
         reasons = []
         if self.qk_rope_head_dim == 0:
-            reasons.append("NoPE SFA currently uses native preprocessing; fused NoPE contracts are not enabled.")
+            reasons.extend(self._get_nope_prolog_unsupported_reasons(pp_type))
         if self.kv_a_layernorm is None or self.q_a_layernorm is None:
             reasons.append("Fused preprocessing requires q_a_layernorm and kv_a_layernorm.")
         if self.fused_qkv_a_proj is None:
@@ -1049,7 +1055,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # unquantized indexer, including layers that later toggle skip_topk.
             if self.has_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
-                if not hasattr(wq_b, "weight_scale"):
+                if not hasattr(wq_b, "weight_scale") and not (self.qk_rope_head_dim == 0 and wq_b is not None):
                     reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
@@ -1063,6 +1069,23 @@ class AscendSFAImpl(MLAAttentionImpl):
             elif self.enable_sparse_sfa_c8:
                 reasons.append("MLAPO does not support sparse C8; use PROLOG_V3 instead.")
 
+        return reasons
+
+    def _get_nope_prolog_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
+        if pp_type != PreprocessType.PROLOG_V3:
+            return ["NoPE fused preprocessing requires PROLOG_V3."]
+        reasons = []
+        if not get_current_hardware_profile().supports(HardwareCapability.SFA_NOPE_PROLOG_V3):
+            reasons.append("NoPE PROLOG_V3 requires A2/A3 hardware.")
+        if type(self._get_layer_quant_method(self.fused_qkv_a_proj)) is not AscendW8A8DynamicLinearMethod:
+            reasons.append("NoPE PROLOG_V3 requires dynamic W8A8 projections.")
+        if not self.enable_sparse_sfa_c8 or self.c8_cache_dtype != torch.int8:
+            reasons.append("NoPE PROLOG_V3 requires --kv-cache-dtype int8.")
+        if (self.qk_nope_head_dim, self.kv_lora_rank, self.q_lora_rank) not in SFA_NOPE_PROLOG_SUPPORTED_DIMS:
+            reasons.append("NoPE PROLOG_V3 requires D=256, Hckv=512 and Hcq=1536/2048.")
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size != 1 or parallel_config.decode_context_parallel_size != 1:
+            reasons.append("NoPE PROLOG_V3 does not support PCP/DCP.")
         return reasons
 
     def _process_weights_for_fused_prolog_v3(self) -> None:
@@ -1111,7 +1134,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Same reasoning as kv_b_proj: once the fused projections are consumed by
         # PROLOG_V3 they are pure load sources, but discarding their storage
         # breaks the next layerwise reload, so RL keeps them.
-        if self.is_kv_consumer and not self.rl_weight_update_enabled:
+        if (
+            self.is_kv_consumer
+            and not self.rl_weight_update_enabled
+            and not getattr(self, "_nope_native_indexer_query", False)
+        ):
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()
@@ -1349,8 +1376,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
         slot_mapping: torch.Tensor,
         *,
         attn_metadata: M | None = None,
@@ -1360,6 +1387,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
+        if self.qk_rope_head_dim == 0:
+            slot_mapping = slot_mapping[: hidden_states.shape[0]]
         assert slot_mapping.numel() == hidden_states.shape[0], (
             "SFA Prolog V3 requires one cache index per input token, "
             f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
@@ -1379,7 +1408,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
             rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
             rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
-            query_norm_flag=self.has_indexer,
+            query_norm_flag=self.has_indexer and not getattr(self, "_nope_native_indexer_query", False),
             qc_qr_scale=1.0,
             kc_scale=1.0,
             cache_mode="PA_BSND",
@@ -1397,8 +1426,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             kr_cache = self.sfa_qsfa_kr_cache_dummy
         else:
             kr_cache = kv_cache[1]
-        rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
-        rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+        if self.qk_rope_head_dim == 0:
+            assert attn_metadata is not None
+            kv_cache_nope = _view_cache_as_operator_pages(kv_cache_nope, attn_metadata.block_size)
+            rope_cos_ = rope_sin_ = self.sfa_qsfa_kr_cache_dummy
+        else:
+            assert cos is not None and sin is not None
+            rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
+            rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
         # The caller forwards the per-step cached int64 slots, so the .to()
         # below is a no-op in production; kept for direct-call safety.
         cache_index = slot_mapping.view(-1).to(torch.int64)
@@ -1450,9 +1485,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         num_h = self.local_num_heads
         ql_nope = ql_nope.view(-1, num_h, self.kv_lora_rank)
-        q_pe = q_pe.view(-1, num_h, self.qk_rope_head_dim)
+        q_pe = q_pe.view(hidden_states.shape[0], num_h, self.qk_rope_head_dim)
 
-        if self.has_indexer:
+        if getattr(self, "_nope_native_indexer_query", False):
+            # KPool consumes the original BF16 query; Prolog's INT8 query would change its top-k inputs.
+            assert self.fused_qkv_a_proj is not None
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c = self.q_a_layernorm(qkv_lora[..., : self.q_lora_rank])
+        elif self.has_indexer:
             if q_c is None:
                 raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
             q_c = q_c.view(-1, self.q_lora_rank)
