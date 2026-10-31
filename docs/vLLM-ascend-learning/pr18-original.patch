@@ -1,0 +1,1400 @@
+diff --git a/docs/source/user_guide/configuration/additional_config.md b/docs/source/user_guide/configuration/additional_config.md
+index 5c0be1f69..7444f7d01 100644
+--- a/docs/source/user_guide/configuration/additional_config.md
++++ b/docs/source/user_guide/configuration/additional_config.md
+@@ -66,7 +66,7 @@ The following table lists additional configuration options available in vLLM Asc
+ | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
+ | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
+ | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
+-| `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
++| `mega_moe_max_tokens`               | int  | `65536` | Token capacity for fused MoE operators. A3 passes it to `dispatch_ffn_combine` or uses it as CANN MegaMoE's receive capacity. A5 treats it as a global token ceiling and allocates a symmetric buffer for `min(mega_moe_max_tokens // expert_parallel_size, execution_tokens_per_rank)` tokens per rank. Workspace memory scales linearly with the allocated capacity. |
+ | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
+ | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
+ | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
+diff --git a/vllm_ascend/_310p/model_runner_310p.py b/vllm_ascend/_310p/model_runner_310p.py
+index 634d8beb5..45fc50d34 100644
+--- a/vllm_ascend/_310p/model_runner_310p.py
++++ b/vllm_ascend/_310p/model_runner_310p.py
+@@ -154,6 +154,7 @@ class NPUModelRunner310(NPUModelRunner):
+         force_has_lora: bool | None = None,
+         force_num_active_loras: int | None = None,
+         num_encoder_reqs: int = 0,
++        is_dummy_run: bool = False,
+     ):
+         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+ 
+@@ -190,6 +191,7 @@ class NPUModelRunner310(NPUModelRunner):
+             force_has_lora=force_has_lora,
+             force_num_active_loras=force_num_active_loras,
+             num_encoder_reqs=num_encoder_reqs,
++            is_dummy_run=is_dummy_run,
+         )
+ 
+     def _build_attention_metadata(self, *args: Any, **kwargs: Any):
+diff --git a/vllm_ascend/ascend_config.py b/vllm_ascend/ascend_config.py
+index 406cfaeff..d3fe16c19 100644
+--- a/vllm_ascend/ascend_config.py
++++ b/vllm_ascend/ascend_config.py
+@@ -33,6 +33,29 @@ if TYPE_CHECKING:
+ _MEGA_MOE_SUPPORTED = None
+ 
+ 
++def compute_mega_moe_buffer_tokens_per_rank(
++    mega_moe_max_tokens: int,
++    execution_tokens_per_rank: int,
++    expert_parallel_size: int,
++) -> int:
++    """Compute the per-rank token capacity for the A5 MegaMoE buffer."""
++    if execution_tokens_per_rank <= 0:
++        raise ValueError(f"execution_tokens_per_rank must be positive, got {execution_tokens_per_rank}")
++    if expert_parallel_size <= 0:
++        raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
++
++    configured_tokens_per_rank = mega_moe_max_tokens // expert_parallel_size
++    buffer_tokens_per_rank = min(configured_tokens_per_rank, execution_tokens_per_rank)
++    if buffer_tokens_per_rank <= 0:
++        raise ValueError(
++            "MegaMoE per-rank token capacity must be positive: "
++            f"mega_moe_max_tokens={mega_moe_max_tokens}, "
++            f"execution_tokens_per_rank={execution_tokens_per_rank}, "
++            f"expert_parallel_size={expert_parallel_size}."
++        )
++    return buffer_tokens_per_rank
++
++
+ def is_mega_moe_supported() -> bool:
+     """Whether the megamoe op is available at runtime.
+ 
+@@ -400,9 +423,9 @@ class AscendConfig:
+     draft_window_size: int | None = None
+     mix_placement: bool = False
+     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
+-    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+-    # The same value is passed as dispatch_ffn_combine's max_output_size
+-    # and CANN MegaMoe buffer's max_recv_token_num.
++    # Global token ceiling for dispatch_ffn_combine. A5 MegaMoE derives its
++    # per-rank symmetric-buffer capacity from this ceiling and the current
++    # process's MC2 execution capacity.
+     # This is a reference value: if the actual per-rank received token
+     # count exceeds it, tokens may be truncated, causing precision
+     # degradation. Do not set it too large because workspace memory scales
+diff --git a/vllm_ascend/ascend_forward_context.py b/vllm_ascend/ascend_forward_context.py
+index 4f2d2b219..aa3b5fbf4 100644
+--- a/vllm_ascend/ascend_forward_context.py
++++ b/vllm_ascend/ascend_forward_context.py
+@@ -11,7 +11,12 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
+ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+ from vllm.logger import logger
+ 
+-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
++from vllm_ascend.ascend_config import (
++    compute_mega_moe_buffer_tokens_per_rank,
++    get_ascend_config,
++    is_mega_moe_supported,
++)
++from vllm_ascend.quantization.quant_type import QuantType
+ from vllm_ascend.utils import (
+     AscendDeviceType,
+     get_ascend_device_type,
+@@ -144,6 +149,7 @@ def set_ascend_forward_context(
+         moe_comm_type = select_moe_comm_method(
+             max_num_tokens,
+             vllm_config,
++            model_instance=model_instance,
+         )
+ 
+         forward_context.moe_comm_type = moe_comm_type
+@@ -261,6 +267,33 @@ def get_mc2_tokens_capacity():
+     return _mc2_tokens_capacity
+ 
+ 
++def get_a5_mega_moe_buffer_tokens_per_rank(
++    vllm_config: VllmConfig,
++    mc2_tokens_capacity: int | None = None,
++) -> int:
++    """Resolve the A5 MegaMoE capacity for the current PD role."""
++    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
++    kv_role = getattr(kv_transfer_config, "kv_role", None)
++    is_kv_producer = bool(getattr(kv_transfer_config, "is_kv_producer", False))
++    if kv_role in ("kv_producer", "kv_both") or (kv_role is None and is_kv_producer):
++        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
++    else:
++        if mc2_tokens_capacity is None:
++            mc2_tokens_capacity = get_mc2_tokens_capacity()
++        if mc2_tokens_capacity is None:
++            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
++        execution_tokens_per_rank = mc2_tokens_capacity
++
++    ascend_config = get_ascend_config()
++    expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
++    buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
++        ascend_config.mega_moe_max_tokens,
++        execution_tokens_per_rank,
++        expert_parallel_size,
++    )
++    return buffer_tokens_per_rank
++
++
+ def set_mc2_mask(vllm_config, device):
+     global _reserved_mc2_mask
+     if _reserved_mc2_mask is not None:
+@@ -316,6 +349,9 @@ def _select_a5_moe_comm_method(
+     num_tokens: int,
+     vllm_config: VllmConfig,
+     mc2_tokens_capacity: int,
++    quant_type: QuantType | None,
++    activation: str | None,
++    group_size: int | None,
+ ) -> MoECommType:
+     num_experts_per_tok = getattr(
+         vllm_config.model_config.hf_text_config,
+@@ -323,6 +359,27 @@ def _select_a5_moe_comm_method(
+         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+     )
+     world_size = vllm_config.parallel_config.world_size_across_dp
++    ascend_config = get_ascend_config()
++    eplb_config = ascend_config.eplb_config
++    buffer_tokens_per_rank = (
++        get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
++        if ascend_config.enable_fused_mc2 == 1
++        else 0
++    )
++    normalized_activation = None if activation is None else activation.lower().removeprefix("moeactivation.")
++    use_mega_moe = (
++        ascend_config.enable_fused_mc2 == 1
++        and world_size > 1
++        and num_tokens <= buffer_tokens_per_rank
++        and quant_type in _A5_MEGA_MOE_QUANT_TYPES
++        and normalized_activation in (None, "silu", "swiglu")
++        and group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
++        and not eplb_config.dynamic_eplb
++        and eplb_config.num_redundant_experts == 0
++        and not ascend_config.mix_placement
++    )
++    if use_mega_moe:
++        return MoECommType.FUSED_MC2
+     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
+         return MoECommType.MC2
+     if world_size <= num_experts_per_tok:
+@@ -330,7 +387,67 @@ def _select_a5_moe_comm_method(
+     return MoECommType.ALLTOALL
+ 
+ 
+-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
++_A5_MEGA_MOE_QUANT_TYPES = {
++    QuantType.W4A8MXFP,
++}
++_A5_MEGA_MOE_GROUP_SIZE = 32
++_A5_MOE_QUANT_TYPES_BY_CONFIG_ID: dict[int, QuantType] = {}
++
++
++def cache_a5_moe_quant_type(
++    vllm_config: VllmConfig | None,
++    quant_type: QuantType,
++) -> None:
++    if vllm_config is None:
++        return
++    _A5_MOE_QUANT_TYPES_BY_CONFIG_ID[id(vllm_config)] = quant_type
++
++
++def _get_a5_moe_quant_type(
++    vllm_config: VllmConfig,
++    model_instance: torch.nn.Module | None,
++) -> QuantType | None:
++    if model_instance is not None:
++        modules = model_instance.modules() if callable(getattr(model_instance, "modules", None)) else ()
++        for module in modules:
++            if not hasattr(module, "moe_config"):
++                continue
++            quant_type = getattr(module, "quant_type", None)
++            if isinstance(quant_type, QuantType) and quant_type != QuantType.NONE:
++                return quant_type
++    return _A5_MOE_QUANT_TYPES_BY_CONFIG_ID.get(id(vllm_config))
++
++
++def _get_a5_moe_activation(
++    vllm_config: VllmConfig,
++    model_instance: torch.nn.Module | None,
++) -> str | None:
++    if model_instance is not None:
++        modules = model_instance.modules() if callable(getattr(model_instance, "modules", None)) else ()
++        for module in modules:
++            if not hasattr(module, "moe_config"):
++                continue
++            activation = getattr(module, "activation", None)
++            if isinstance(activation, str):
++                return activation
++            if isinstance(activation, Enum):
++                return activation.name
++    hf_text_config = vllm_config.model_config.hf_text_config
++    return getattr(hf_text_config, "hidden_act", getattr(hf_text_config, "hidden_activation", None))
++
++
++def _get_a5_moe_group_size(vllm_config: VllmConfig) -> int | None:
++    quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
++    if isinstance(quant_description, dict):
++        return quant_description.get("group_size")
++    return getattr(quant_description, "group_size", None)
++
++
++def select_moe_comm_method(
++    num_tokens: int,
++    vllm_config: VllmConfig,
++    model_instance: torch.nn.Module | None = None,
++) -> MoECommType | None:
+     """Select the MoE communication method according to parallel settings,
+     device generation, and token count.
+ 
+@@ -342,14 +459,15 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
+        group size is small enough; otherwise use MC2 within capacity or
+        all-to-all.
+     5. On 310P, always use all-gather.
+-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
+-       and the EP size is large enough; otherwise use all-gather when
+-       EP size is smaller than num of topK experts or all-to-all.
++    6. On A5 with expert parallel, use MegaMoE for supported MXFP layouts
++       within its symmetric-buffer capacity; otherwise use MC2, all-gather,
++       or all-to-all according to the existing token and EP constraints.
+ 
+     Args:
+         num_tokens (int): The number of tokens in the current batch.
+         vllm_config (VllmConfig): Runtime configuration for the model.
+-        is_draft_model (bool): Whether the model runs in MTP mode.
++        model_instance (torch.nn.Module | None): Model instance used to
++            resolve the A5 routed-expert quantization and activation.
+ 
+     Raises:
+         ValueError: If the soc version is unsupported.
+@@ -380,7 +498,14 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
+             vllm_config,
+         )
+     elif soc_version == AscendDeviceType.A5:
+-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
++        moe_comm_type = _select_a5_moe_comm_method(
++            num_tokens,
++            vllm_config,
++            mc2_tokens_capacity,
++            _get_a5_moe_quant_type(vllm_config, model_instance),
++            _get_a5_moe_activation(vllm_config, model_instance),
++            _get_a5_moe_group_size(vllm_config),
++        )
+     elif soc_version == AscendDeviceType._310P:
+         moe_comm_type = MoECommType.ALLGATHER
+ 
+diff --git a/vllm_ascend/device/device_op.py b/vllm_ascend/device/device_op.py
+index 4c9083868..1d29e5984 100644
+--- a/vllm_ascend/device/device_op.py
++++ b/vllm_ascend/device/device_op.py
+@@ -1022,13 +1022,28 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
+                 output_dtype=torch.bfloat16,
+             )[0]
+             # DSV4 need swiglu_limit input
+-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
++            import custom_ops
++            import cann_ops_transformer
++            import cann_ops_nn
++
++            # Legacy CANN operator call kept for reference:
++            # out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
++            #     hidden_states,
++            #     topk_weight=None,
++            #     group_index=None,
++            #     dst_type=torch.float8_e4m3fn,
++            #     quant_mode=2,
++            #     clamp_value=swiglu_limit,
++            # )
++            swiglu_limit_args = {}
++            if swiglu_limit is not None:
++                swiglu_limit_args["clamp_limit"] = swiglu_limit
++            out, out_scale, _ = torch.ops.cann_ops_nn.swiglu_group_quant(
+                 hidden_states,
+-                topk_weight=None,
+-                group_index=None,
+                 dst_type=torch.float8_e4m3fn,
+-                quant_mode=2,
+-                clamp_value=swiglu_limit,
++                round_scale=True,
++                quant_mode=1,
++                **swiglu_limit_args,
+             )
+         elif mxfp_quant_dtype == QuantType.W4A16MXFP:
+             hidden_states = torch_npu.npu_grouped_matmul(
+diff --git a/vllm_ascend/distributed/parallel_state.py b/vllm_ascend/distributed/parallel_state.py
+index 5f3d7272d..a240295ae 100644
+--- a/vllm_ascend/distributed/parallel_state.py
++++ b/vllm_ascend/distributed/parallel_state.py
+@@ -3,8 +3,10 @@ from vllm.config import ParallelConfig, get_current_vllm_config
+ from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+ 
+ from vllm_ascend.ascend_config import get_ascend_config
++from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+ 
+-# Currently, mc2 op need their own group coordinator.
++# MegaMoE and MC2 operators need dedicated group coordinators.
++_MEGA_MOE: GroupCoordinator | None = None
+ _MC2: GroupCoordinator | None = None
+ 
+ # Module specific tensor parallel groups
+@@ -18,6 +20,16 @@ _P_TP: GroupCoordinator | None = None
+ _DYNAMIC_EPLB: GroupCoordinator | None = None
+ 
+ 
++def _initialize_mega_moe_communicator(group: GroupCoordinator) -> None:
++    """Eagerly initialize the HCCL communicator required by SymmBuffer."""
++    device_group = group.device_group
++    rank_in_group = torch.distributed.get_rank(group=device_group)
++    backend = device_group._get_backend(torch.device("npu"))
++    group_name = backend.get_hccl_comm_name(rank_in_group)
++    if not group_name:
++        raise RuntimeError("Failed to initialize the MegaMoE HCCL communicator")
++
++
+ def init_ascend_model_parallel(
+     parallel_config: ParallelConfig,
+ ):
+@@ -83,8 +95,16 @@ def init_ascend_model_parallel(
+     )
+     group_ranks = [x.tolist() for x in group_ranks]
+ 
+-    global _MC2
++    global _MC2, _MEGA_MOE
+     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
++    if get_ascend_device_type() == AscendDeviceType.A5 and get_ascend_config().enable_fused_mc2 == 1:
++        _MEGA_MOE = init_model_parallel_group(
++            group_ranks,
++            get_world_group().local_rank,
++            backend,
++            group_name="mega_moe",
++        )
++        _initialize_mega_moe_communicator(_MEGA_MOE)
+ 
+     if get_ascend_config().eplb_config.dynamic_eplb:
+         global _DYNAMIC_EPLB
+@@ -143,6 +163,11 @@ def get_mc2_group() -> GroupCoordinator:
+     return _MC2
+ 
+ 
++def get_mega_moe_group() -> GroupCoordinator:
++    assert _MEGA_MOE is not None, "MegaMoE group is not initialized"
++    return _MEGA_MOE
++
++
+ def get_mlp_tp_group() -> GroupCoordinator:
+     assert _MLP_TP is not None, "mlp group is not initialized"
+     return _MLP_TP
+@@ -174,6 +199,11 @@ def get_dynamic_eplb_group() -> GroupCoordinator:
+ 
+ 
+ def destroy_ascend_model_parallel():
++    global _MEGA_MOE
++    if _MEGA_MOE:
++        _MEGA_MOE.destroy()
++    _MEGA_MOE = None
++
+     global _MC2
+     if _MC2:
+         _MC2.destroy()
+diff --git a/vllm_ascend/models/deepseek_v4/model.py b/vllm_ascend/models/deepseek_v4/model.py
+index 08b4010e3..be051dd56 100644
+--- a/vllm_ascend/models/deepseek_v4/model.py
++++ b/vllm_ascend/models/deepseek_v4/model.py
+@@ -377,7 +377,6 @@ class DeepseekV4MoE(nn.Module):
+         input_ids: torch.Tensor | None = None,
+         hidden_states_fp32: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+-        return hidden_states #TODO wangtao
+         if self.gate.tid2eid is not None and input_ids is None:
+             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+ 
+diff --git a/vllm_ascend/ops/fused_moe/mega_moe.py b/vllm_ascend/ops/fused_moe/mega_moe.py
+new file mode 100644
+index 000000000..3990bc5d6
+--- /dev/null
++++ b/vllm_ascend/ops/fused_moe/mega_moe.py
+@@ -0,0 +1,322 @@
++#
++# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
++# This file is a part of the vllm-ascend project.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++from vllm.config import get_current_vllm_config
++from vllm.model_executor.layers.fused_moe import FusedMoEConfig
++
++from vllm_ascend.ascend_forward_context import get_a5_mega_moe_buffer_tokens_per_rank
++from vllm_ascend.distributed.parallel_state import get_mega_moe_group
++from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
++from vllm_ascend.quantization.quant_type import QuantType
++
++_MEGA_MOE_SUPPORTED_QUANTS = {
++    QuantType.W4A8MXFP,
++}
++_FP4_PACK_FACTOR = 2
++_MXFP_SCALE_BLOCK_SIZE = 64
++_MXFP_SCALE_MULTIPLIER = 2
++_TORCH_FLOAT8_E8M0FNU_DTYPE = getattr(torch, "float8_e8m0fnu", None)
++
++
++def _as_tensor_list(tensor_or_list: torch.Tensor | list[torch.Tensor] | None, name: str) -> list[torch.Tensor]:
++    if tensor_or_list is None:
++        raise ValueError(f"{name} is required for A5 MegaMoE.")
++    if isinstance(tensor_or_list, list):
++        if not tensor_or_list:
++            raise ValueError(f"{name} cannot be an empty list for A5 MegaMoE.")
++        return tensor_or_list
++    return [tensor_or_list]
++
++
++def _view_mxfp_scales_as_e8m0(scales: list[torch.Tensor], name: str) -> list[torch.Tensor]:
++    if _TORCH_FLOAT8_E8M0FNU_DTYPE is None:
++        raise RuntimeError("A5 MegaMoE requires torch.float8_e8m0fnu to reinterpret MXFP weight scales.")
++
++    normalized_scales: list[torch.Tensor] = []
++    for idx, scale in enumerate(scales):
++        if scale.dtype == _TORCH_FLOAT8_E8M0FNU_DTYPE:
++            normalized_scales.append(scale)
++        elif scale.dtype == torch.uint8:
++            normalized_scales.append(scale.view(_TORCH_FLOAT8_E8M0FNU_DTYPE))
++        else:
++            raise RuntimeError(
++                f"A5 MegaMoE requires {name}[{idx}] to be FLOAT8_E8M0 weight scale, "
++                f"got dtype={scale.dtype}, shape={tuple(scale.shape)}."
++            )
++    return normalized_scales
++
++
++def _get_mega_moe_ops():
++    try:
++        from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe, mega_moe
++    except ImportError as exc:
++        raise RuntimeError(
++            "A5 MegaMoE requires cann_ops_transformer.ops. Install a package "
++            "that provides mega_moe and get_symm_buffer_for_mega_moe."
++        ) from exc
++    return get_symm_buffer_for_mega_moe, mega_moe
++
++
++@dataclass(frozen=True, slots=True)
++class _MegaMoEBufferKey:
++    num_experts: int
++    buffer_tokens_per_rank: int
++    top_k: int
++    hidden_size: int
++    intermediate_hidden: int
++    dispatch_quant_mode: int
++    dispatch_quant_out_dtype: torch.dtype
++
++
++@dataclass(frozen=True, slots=True)
++class _MegaMoESymmetricBufferState:
++    key: _MegaMoEBufferKey
++    buffer: Any
++
++
++_MEGA_MOE_BUFFER_STATE_ATTR = "_mega_moe_symmetric_buffer_state"
++
++
++class MegaMoEBackend:
++    """A5 MegaMoE wrapper for the logical FUSED_MC2 MoE path."""
++
++    def __init__(self, moe_config: FusedMoEConfig):
++        self.moe_config = moe_config
++
++    @staticmethod
++    def _validate_stacked_mxfp_layout(
++        fused_experts_input: MoEFusedExpertsInput,
++        w1: list[torch.Tensor],
++        w2: list[torch.Tensor],
++        w1_scale: list[torch.Tensor],
++        w2_scale: list[torch.Tensor],
++    ) -> int:
++        tensors = {
++            "w1": w1,
++            "w2": w2,
++            "w1_scale": w1_scale,
++            "w2_scale": w2_scale,
++        }
++        for name, values in tensors.items():
++            if len(values) != 1:
++                raise ValueError(
++                    f"A5 MegaMoE requires {name} to contain one stacked tensor, got {len(values)} tensors."
++                )
++            if not values[0].is_contiguous():
++                raise ValueError(
++                    f"A5 MegaMoE requires contiguous {name}, got shape={tuple(values[0].shape)} "
++                    f"and stride={values[0].stride()}."
++                )
++
++        weight1 = w1[0]
++        weight2 = w2[0]
++        scale1 = w1_scale[0]
++        scale2 = w2_scale[0]
++        if weight1.ndim != 3 or weight2.ndim != 3:
++            raise ValueError(
++                "A5 MegaMoE expects stacked 3D expert weights, "
++                f"got w1={tuple(weight1.shape)} and w2={tuple(weight2.shape)}."
++            )
++        if scale1.ndim != 4 or scale2.ndim != 4:
++            raise ValueError(
++                "A5 MegaMoE expects stacked 4D MXFP scales, "
++                f"got w1_scale={tuple(scale1.shape)} and w2_scale={tuple(scale2.shape)}."
++            )
++
++        hidden_size = int(fused_experts_input.hidden_states.shape[-1])
++        pack_factor = _FP4_PACK_FACTOR
++        projected_hidden = int(weight1.shape[1])
++        if projected_hidden % 2 != 0:
++            raise ValueError(f"A5 MegaMoE expects w1.shape[1] to be even, got {projected_hidden}.")
++        intermediate_hidden = projected_hidden // 2
++        if hidden_size % pack_factor != 0 or intermediate_hidden % pack_factor != 0:
++            raise ValueError(
++                "A5 MegaMoE FP4 dimensions must be divisible by the packing factor: "
++                f"hidden_size={hidden_size}, intermediate_hidden={intermediate_hidden}, "
++                f"pack_factor={pack_factor}."
++            )
++
++        expected_shapes = {
++            "w1": (weight1.shape[0], projected_hidden, hidden_size // pack_factor),
++            "w2": (weight1.shape[0], hidden_size, intermediate_hidden // pack_factor),
++            "w1_scale": (
++                weight1.shape[0],
++                projected_hidden,
++                (hidden_size + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
++                _MXFP_SCALE_MULTIPLIER,
++            ),
++            "w2_scale": (
++                weight1.shape[0],
++                hidden_size,
++                (intermediate_hidden + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
++                _MXFP_SCALE_MULTIPLIER,
++            ),
++        }
++        actual_shapes = {
++            "w1": tuple(weight1.shape),
++            "w2": tuple(weight2.shape),
++            "w1_scale": tuple(scale1.shape),
++            "w2_scale": tuple(scale2.shape),
++        }
++        if actual_shapes != expected_shapes:
++            raise ValueError(
++                "A5 MegaMoE received an incompatible stacked MXFP layout: "
++                f"actual={actual_shapes}, expected={expected_shapes}."
++            )
++        return intermediate_hidden
++
++    def _make_buffer_key(
++        self,
++        fused_experts_input: MoEFusedExpertsInput,
++        intermediate_hidden: int,
++        *,
++        buffer_tokens_per_rank: int,
++    ) -> _MegaMoEBufferKey:
++        if fused_experts_input.hidden_states.shape[0] > buffer_tokens_per_rank:
++            raise ValueError(
++                "A5 MegaMoE input exceeds the symmetric buffer token capacity: "
++                f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
++                f"mega_moe_buffer_tokens_per_rank={buffer_tokens_per_rank}."
++            )
++        act_dtype = torch.float8_e4m3fn
++        if fused_experts_input.quant.mxfp is not None and fused_experts_input.quant.mxfp.act_quant_type is not None:
++            act_dtype = fused_experts_input.quant.mxfp.act_quant_type
++        return _MegaMoEBufferKey(
++            num_experts=self.moe_config.num_experts,
++            buffer_tokens_per_rank=buffer_tokens_per_rank,
++            top_k=self.moe_config.experts_per_token,
++            hidden_size=int(fused_experts_input.hidden_states.shape[-1]),
++            intermediate_hidden=intermediate_hidden,
++            dispatch_quant_mode=4,
++            dispatch_quant_out_dtype=act_dtype,
++        )
++
++    def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, intermediate_hidden: int):
++        vllm_config = get_current_vllm_config()
++        if vllm_config is None:
++            raise RuntimeError("A5 MegaMoE requires a current vLLM configuration.")
++        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(vllm_config)
++        key = self._make_buffer_key(
++            fused_experts_input,
++            intermediate_hidden,
++            buffer_tokens_per_rank=buffer_tokens_per_rank,
++        )
++        mega_moe_group = get_mega_moe_group()
++        state: _MegaMoESymmetricBufferState | None = getattr(
++            mega_moe_group,
++            _MEGA_MOE_BUFFER_STATE_ATTR,
++            None,
++        )
++        if state is not None:
++            if state.key != key:
++                raise RuntimeError(
++                    "A5 MegaMoE symmetric buffer is process-wide and cannot be replaced during inference: "
++                    f"initialized={state.key}, requested={key}."
++                )
++            return state.buffer
++
++        get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
++        buffer = get_symm_buffer_for_mega_moe(
++            mega_moe_group.device_group,
++            num_experts=key.num_experts,
++            num_max_tokens_per_rank=key.buffer_tokens_per_rank,
++            num_topk=key.top_k,
++            hidden=key.hidden_size,
++            intermediate_hidden=key.intermediate_hidden,
++            dispatch_quant_mode=key.dispatch_quant_mode,
++            dispatch_quant_out_dtype=key.dispatch_quant_out_dtype,
++        )
++        setattr(
++            mega_moe_group,
++            _MEGA_MOE_BUFFER_STATE_ATTR,
++            _MegaMoESymmetricBufferState(key=key, buffer=buffer),
++        )
++        return buffer
++
++    @staticmethod
++    def _normalize_activation(activation: Any) -> str:
++        activation_name = activation if isinstance(activation, str) else getattr(activation, "name", str(activation))
++        activation_lower = activation_name.lower().removeprefix("moeactivation.")
++        if activation_lower in ("silu", "swiglu"):
++            return "swiglu"
++        raise ValueError(
++            f"A5 MegaMoE does not support activation={activation!r} without changing its semantics. "
++            "Only SILU/SwiGLU is currently supported."
++        )
++
++    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput) -> tuple[torch.Tensor, torch.Tensor | None]:
++        if fused_experts_input.quant.quant_type not in _MEGA_MOE_SUPPORTED_QUANTS:
++            raise RuntimeError(
++                f"A5 MegaMoE only supports MXFP MoE quantization, got {fused_experts_input.quant.quant_type}."
++            )
++        if not fused_experts_input.quant.is_mxfp:
++            raise RuntimeError("A5 MegaMoE requires MXFP quant parameters.")
++        if fused_experts_input.dynamic_eplb:
++            raise RuntimeError("A5 MegaMoE does not support dynamic EPLB expert weight lists.")
++        if fused_experts_input.routing.global_redundant_expert_num:
++            raise RuntimeError("A5 MegaMoE does not support redundant physical experts.")
++
++        w1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
++        w2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
++        w1_scale = _view_mxfp_scales_as_e8m0(
++            _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale"),
++            "w1_scale",
++        )
++        w2_scale = _view_mxfp_scales_as_e8m0(
++            _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale"),
++            "w2_scale",
++        )
++        intermediate_hidden = self._validate_stacked_mxfp_layout(
++            fused_experts_input,
++            w1,
++            w2,
++            w1_scale,
++            w2_scale,
++        )
++        activation = self._normalize_activation(fused_experts_input.activation)
++        swiglu_limit = self.moe_config.swiglu_limit
++        activation_clamp = None if swiglu_limit is None or swiglu_limit <= 0 else float(swiglu_limit)
++        mxfp = fused_experts_input.quant.mxfp
++        weight_type = None if mxfp is None else mxfp.weight_quant_type
++
++        _, mega_moe = _get_mega_moe_ops()
++        mega_moe_kwargs = {
++            "x": fused_experts_input.hidden_states,
++            "topk_ids": fused_experts_input.topk_ids.to(torch.int32),
++            "topk_weights": fused_experts_input.topk_weights,
++            "l1_weights": w1,
++            "l1_weights_sf": w1_scale,
++            "l2_weights": w2,
++            "l2_weights_sf": w2_scale,
++            "sym_buffer": self._get_sym_buffer(fused_experts_input, intermediate_hidden),
++            "activation": activation,
++            "activation_clamp": activation_clamp,
++        }
++        if weight_type is not None:
++            mega_moe_kwargs["weight1_type"] = weight_type
++            mega_moe_kwargs["weight2_type"] = weight_type
++
++        output, expert_tokens = mega_moe(**mega_moe_kwargs)
++        return output, expert_tokens
++
++
++__all__ = ["MegaMoEBackend"]
+diff --git a/vllm_ascend/ops/fused_moe/moe_comm_method.py b/vllm_ascend/ops/fused_moe/moe_comm_method.py
+index cac278191..13d9ac953 100644
+--- a/vllm_ascend/ops/fused_moe/moe_comm_method.py
++++ b/vllm_ascend/ops/fused_moe/moe_comm_method.py
+@@ -30,12 +30,14 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
+ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
+ from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
++from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
+ from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+ from vllm_ascend.ops.fused_moe.prepare_finalize import (
+     PrepareAndFinalize,
+     PrepareAndFinalizeWithAll2All,
+     PrepareAndFinalizeWithAllGather,
+     PrepareAndFinalizeWithMC2,
++    PrepareAndFinalizeWithMegaMoE,
+ )
+ from vllm_ascend.ops.fused_moe.token_dispatcher import (
+     MoETokenDispatcher,
+@@ -44,6 +46,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
+     TokenDispatcherWithMC2,
+ )
+ from vllm_ascend.quantization.quant_type import QuantType
++from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+ 
+ _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+ 
+@@ -247,6 +250,14 @@ class AlltoAllCommImpl(MoECommMethod):
+         return PrepareAndFinalizeWithAll2All(self.moe_config)
+ 
+ 
++class _MegaMoEBypassTokenDispatcher(MoETokenDispatcher[None]):
++    def token_dispatch(self, token_dispatch_input):
++        raise RuntimeError("A5 MegaMoE bypasses token_dispatch; use MegaMoEBackend.fused_experts instead.")
++
++    def token_combine(self, hidden_states, combine_metadata, bias=None):
++        raise RuntimeError("A5 MegaMoE bypasses token_combine; use MegaMoEBackend.fused_experts instead.")
++
++
+ class FusedMC2CommImpl(MoECommMethod):
+     """This implementation is for the scenarios listed below:
+     1. `enable_expert_parallel=True`.
+@@ -259,11 +270,13 @@ class FusedMC2CommImpl(MoECommMethod):
+ 
+     def __init__(self, moe_config):
+         super().__init__(moe_config)
++        self._is_a5_backend = get_ascend_device_type() == AscendDeviceType.A5
++        self._mega_moe_backend = MegaMoEBackend(moe_config) if self._is_a5_backend else None
+         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
++        if self.enable_fused_mc2 == 1 and not self._is_a5_backend and is_mega_moe_supported():
+             self.mega_moe_symm_buffer = None
+             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+-        if self.enable_fused_mc2 == 1:
++        if self.enable_fused_mc2 == 1 and not self._is_a5_backend:
+             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
+         else:
+             self.expert_token_nums = None
+@@ -276,9 +289,13 @@ class FusedMC2CommImpl(MoECommMethod):
+         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
+ 
+     def _get_token_dispatcher(self):
++        if get_ascend_device_type() == AscendDeviceType.A5:
++            return _MegaMoEBypassTokenDispatcher()
+         return TokenDispatcherWithMC2()
+ 
+     def _get_prepare_finalize(self):
++        if get_ascend_device_type() == AscendDeviceType.A5:
++            return PrepareAndFinalizeWithMegaMoE(self.moe_config)
+         return PrepareAndFinalizeWithMC2(self.moe_config)
+ 
+     def _init_mega_moe_symm_buffer(
+@@ -449,6 +466,14 @@ class FusedMC2CommImpl(MoECommMethod):
+         self,
+         fused_experts_input: MoEFusedExpertsInput,
+     ):
++        if self._is_a5_backend:
++            assert self._mega_moe_backend is not None
++            out, expert_tokens = self._mega_moe_backend.fused_experts(fused_experts_input)
++            return FusedExpertsResult(
++                routed_out=out,
++                expert_tokens=expert_tokens,
++            )
++
+         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
+             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
+         )
+diff --git a/vllm_ascend/ops/fused_moe/prepare_finalize.py b/vllm_ascend/ops/fused_moe/prepare_finalize.py
+index f72fcaf2d..b1014b11b 100644
+--- a/vllm_ascend/ops/fused_moe/prepare_finalize.py
++++ b/vllm_ascend/ops/fused_moe/prepare_finalize.py
+@@ -20,6 +20,7 @@ import torch
+ import torch.distributed as dist
+ import torch.nn as nn
+ import torch_npu
++from vllm.config import get_current_vllm_config
+ from vllm.distributed.parallel_state import (
+     get_dp_group,
+     get_pcp_group,
+@@ -29,7 +30,7 @@ from vllm.distributed.parallel_state import (
+ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+ from vllm.model_executor.models.utils import sequence_parallel_chunk
+ 
+-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
++from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_a5_mega_moe_buffer_tokens_per_rank
+ from vllm_ascend.lora.fused_moe import prepare_lora_indices
+ from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+ from vllm_ascend.quantization.quant_type import QuantType
+@@ -347,6 +348,69 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
+         return input_ids
+ 
+ 
++class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
++    """Keep each rank's local batch size while aligning A5 collective inputs."""
++
++    def prepare(
++        self,
++        hidden_states: torch.Tensor,
++        router_logits: torch.Tensor,
++        replace_allreduce: bool = False,
++        quant_type=QuantType.NONE,
++    ) -> MoEPrepareOutput:
++        self.num_tokens = hidden_states.shape[0]
++        vllm_config = get_current_vllm_config()
++        if vllm_config is None:
++            raise RuntimeError("A5 MegaMoE requires a current vLLM configuration.")
++        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(vllm_config)
++        max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
++        if max_tokens_across_dp is None:
++            max_tokens_across_dp = self.num_tokens
++        if max_tokens_across_dp < self.num_tokens:
++            raise ValueError(
++                "MegaMoE synchronized token count cannot be smaller than the local token count: "
++                f"max_across_dp={max_tokens_across_dp}, local={self.num_tokens}."
++            )
++        if max_tokens_across_dp > buffer_tokens_per_rank:
++            raise ValueError(
++                "MegaMoE input exceeds the symmetric buffer token capacity: "
++                f"capacity={buffer_tokens_per_rank}, max_across_dp={max_tokens_across_dp}, "
++                f"local={self.num_tokens}."
++            )
++
++        self.padded_num_tokens = max_tokens_across_dp
++        pad_size = self.padded_num_tokens - self.num_tokens
++        if pad_size > 0:
++            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
++            router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
++        self._mega_moe_input_prepared = True
++
++        return MoEPrepareOutput(
++            hidden_states=hidden_states,
++            router_logits=router_logits,
++            mc2_mask=None,
++            padded_hidden_states_shape=hidden_states.shape,
++            pertoken_scale=None,
++        )
++
++    def pad_and_split_input_ids(self, input_ids):
++        if not getattr(self, "_mega_moe_input_prepared", False):
++            return input_ids
++        pad_size = self.padded_num_tokens - self.num_tokens
++        if pad_size > 0:
++            input_ids = nn.functional.pad(input_ids, (0, pad_size))
++        return input_ids
++
++    def finalize(
++        self,
++        hidden_states: torch.Tensor,
++        reduce_results: bool,
++        padded_hidden_states_shape: torch.Size | None = None,
++    ) -> torch.Tensor:
++        self._mega_moe_input_prepared = False
++        return hidden_states[: self.num_tokens]
++
++
+ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
+     """
+     MoE communication strategy using All-Gather + Reduce-Scatter on EP group.
+diff --git a/vllm_ascend/ops/fused_moe/routed_experts.py b/vllm_ascend/ops/fused_moe/routed_experts.py
+index d51827a15..027a8c702 100644
+--- a/vllm_ascend/ops/fused_moe/routed_experts.py
++++ b/vllm_ascend/ops/fused_moe/routed_experts.py
+@@ -30,7 +30,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
+ from vllm.model_executor.utils import replace_parameter
+ 
+ from vllm_ascend.ascend_config import get_ascend_config
+-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
++from vllm_ascend.ascend_forward_context import (
++    _EXTRA_CTX,
++    MoECommType,
++    cache_a5_moe_quant_type,
++    use_cann_megamoe,
++)
+ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+ from vllm_ascend.lora.fused_moe import sync_lora_context
+@@ -252,6 +257,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
+         if not self._use_v2_model_runner:
+             self.init_eplb(n_shared_experts)
+         self.return_with_event = False
++        if self.quant_type != QuantType.NONE:
++            cache_a5_moe_quant_type(
++                vllm_config,
++                self.quant_type,
++            )
+ 
+     def get_expert_weights(self) -> Iterable[torch.Tensor]:
+         try:
+diff --git a/vllm_ascend/ops/fused_moe/router/fused_topk_router.py b/vllm_ascend/ops/fused_moe/router/fused_topk_router.py
+index 33885a227..9bfc0a9bd 100644
+--- a/vllm_ascend/ops/fused_moe/router/fused_topk_router.py
++++ b/vllm_ascend/ops/fused_moe/router/fused_topk_router.py
+@@ -26,6 +26,75 @@ from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTo
+ 
+ DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
+ DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
++_VISION_GATING_OP_NAME = "npu_moe_gating_top_k"
++_VISION_GATING_REQUIRED_ARGUMENTS = frozenset(("image_bias", "image_token_mask"))
++
++
++def _npu_moe_gating_vision_op() -> Callable | None:
++    """Return the optional fused op only when its schema supports vision routing."""
++    op = getattr(torch.ops._C_ascend, _VISION_GATING_OP_NAME, None)
++    if op is None:
++        return None
++
++    schemas_by_overload = getattr(op, "_schemas", None) or {}
++    schemas = list(schemas_by_overload.values())
++    schema = getattr(op, "_schema", None)
++    if schema is not None:
++        schemas.append(schema)
++    default_overload = getattr(op, "default", None)
++    default_schema = getattr(default_overload, "_schema", None)
++    if default_schema is not None:
++        schemas.append(default_schema)
++
++    for candidate in schemas:
++        argument_names = {argument.name for argument in candidate.arguments}
++        if argument_names >= _VISION_GATING_REQUIRED_ARGUMENTS:
++            return op
++    return None
++
++
++def select_deepseek_v4_vision_experts_with_fusion_op(
++    vision_gating_op: Callable,
++    router_logits: torch.Tensor,
++    input_ids: torch.Tensor,
++    tid2eid: torch.Tensor | None,
++    bias_vl: torch.Tensor,
++    text_bias: torch.Tensor | None,
++    top_k: int,
++    renormalize: bool,
++    k_group: int,
++    group_count: int,
++    routed_scaling_factor: float = 1.0,
++    eps: float = 1e-20,
++    image_sentinel_lo: int = DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Select DeepSeek V4 vision experts with the optional fused operator."""
++    image_hi = image_sentinel_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
++    image_token_mask = (input_ids >= image_sentinel_lo) & (input_ids < image_hi)
++    topk_weights, topk_ids, _ = vision_gating_op(
++        router_logits,
++        k=top_k,
++        bias=text_bias,
++        input_ids=input_ids,
++        tid2eid=tid2eid,
++        image_bias=bias_vl,
++        image_token_mask=image_token_mask,
++        k_group=k_group,
++        group_count=group_count,
++        routed_scaling_factor=1.0,
++        eps=eps,
++        group_select_mode=1,
++        renorm=0,
++        norm_type=2,
++        out_flag=False,
++    )
++    if renormalize:
++        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
++            torch.finfo(topk_weights.dtype).tiny
++        )
++    if routed_scaling_factor != 1.0:
++        topk_weights = topk_weights * routed_scaling_factor
++    return topk_weights, topk_ids
+ 
+ 
+ def select_deepseek_v4_vision_experts(
+@@ -57,7 +126,9 @@ def select_deepseek_v4_vision_experts(
+         topk_ids = torch.where(image_mask.unsqueeze(-1), dynamic_ids, text_ids)
+     topk_weights = scores.gather(1, topk_ids)
+     if renormalize:
+-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(topk_weights.dtype).tiny)
++        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
++            torch.finfo(topk_weights.dtype).tiny
++        )
+     if routed_scaling_factor != 1.0:
+         topk_weights = topk_weights * routed_scaling_factor
+     return topk_weights, topk_ids
+@@ -104,6 +175,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
+         self.tid2eid = tid2eid
+         self.bias_vl = bias_vl
+         self.image_sentinel_lo = image_sentinel_lo
++        self.vision_gating_op = _npu_moe_gating_vision_op() if bias_vl is not None else None
+ 
+     def is_fused_supported(
+         self,
+@@ -145,9 +217,11 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
+         if self.scoring_func == "sqrtsoftplus":
+             if self.tid2eid is not None or self.bias_vl is not None:
+                 if input_ids is None:
+-                    raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
++                    raise ValueError(
++                        "DeepSeek V4 hash MoE routing requires input_ids; vision routing requires it as well."
++                    )
+                 input_ids = input_ids.to(torch.int64)
+-                tid2eid_ones = self.tid2eid.to(torch.int32)
++                tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
+                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
+                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
+                     input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
+@@ -159,22 +233,54 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
+                     # ids. Apply the identical TP chunk only when communication
+                     # has not already aligned ids with local router rows.
+                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
++                input_ids = torch.where(input_ids == -1, 0, input_ids)
++            else:
++                input_ids = None
++                tid2eid_ones = None
+             bias_vl = self.bias_vl
+             if bias_vl is not None and bias_vl.dtype != router_logits.dtype:
+                 bias_vl = bias_vl.to(router_logits.dtype)
+             text_bias = self.e_score_correction_bias
+             if text_bias is not None and text_bias.dtype != router_logits.dtype:
+                 text_bias = text_bias.to(router_logits.dtype)
+-            else:
+-                input_ids = None
+-                tid2eid_ones = None
++            if bias_vl is not None:
++                assert input_ids is not None
++                if self.vision_gating_op is not None:
++                    topk_weights, topk_ids = select_deepseek_v4_vision_experts_with_fusion_op(
++                        vision_gating_op=self.vision_gating_op,
++                        router_logits=router_logits,
++                        input_ids=input_ids,
++                        tid2eid=tid2eid_ones,
++                        bias_vl=bias_vl,
++                        text_bias=text_bias,
++                        top_k=self.top_k,
++                        renormalize=self.renormalize,
++                        k_group=topk_group,
++                        group_count=num_expert_group,
++                        routed_scaling_factor=self.routed_scaling_factor,
++                        image_sentinel_lo=self.image_sentinel_lo,
++                    )
++                else:
++                    topk_weights, topk_ids = select_deepseek_v4_vision_experts(
++                        router_logits=router_logits,
++                        input_ids=input_ids,
++                        tid2eid=tid2eid_ones,
++                        bias_vl=bias_vl,
++                        text_bias=text_bias,
++                        top_k=self.top_k,
++                        renormalize=self.renormalize,
++                        routed_scaling_factor=self.routed_scaling_factor,
++                        image_sentinel_lo=self.image_sentinel_lo,
++                    )
++                return topk_weights.to(torch.float32), topk_ids.to(
++                    torch.int32 if indices_type is None else indices_type
++                )
+             topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+                 x=router_logits,
+                 k=self.top_k,
+                 bias=text_bias,
+                 input_ids=input_ids,
+                 tid2eid=tid2eid_ones,
+-                bias_vl=bias_vl,
+                 k_group=topk_group,
+                 group_count=num_expert_group,
+                 routed_scaling_factor=self.routed_scaling_factor,
+@@ -185,8 +291,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
+                 renorm=0,
+                 norm_type=2,
+                 out_flag=False,
+-                image_sentinel_lo=self.image_sentinel_lo,
+-                image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
+             )
+             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
+         norm_type = 0 if self.scoring_func == "softmax" else 1
+diff --git a/vllm_ascend/ops/fused_moe/shared_experts.py b/vllm_ascend/ops/fused_moe/shared_experts.py
+index 3dfc78d8f..42c6a494d 100644
+--- a/vllm_ascend/ops/fused_moe/shared_experts.py
++++ b/vllm_ascend/ops/fused_moe/shared_experts.py
+@@ -378,13 +378,28 @@ class AscendSharedExperts:
+                         dst_type=SITU_MX_DST_TYPE_E4M3FN,
+                     )
+                 else:
+-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
++                    import custom_ops
++                    import cann_ops_transformer
++                    import cann_ops_nn
++
++                    # Legacy CANN operator call kept for reference:
++                    # quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
++                    #     hidden_states,
++                    #     topk_weight=None,
++                    #     group_index=None,
++                    #     dst_type=torch.float8_e4m3fn,
++                    #     quant_mode=2,
++                    #     clamp_value=self.swiglu_limit,
++                    # )
++                    swiglu_limit_args = {}
++                    if self.swiglu_limit is not None:
++                        swiglu_limit_args["clamp_limit"] = self.swiglu_limit
++                    quantized_x, swiglu_out_scale, _ = torch.ops.cann_ops_nn.swiglu_group_quant(
+                         hidden_states,
+-                        topk_weight=None,
+-                        group_index=None,
+                         dst_type=torch.float8_e4m3fn,
+-                        quant_mode=2,
+-                        clamp_value=self.swiglu_limit,
++                        round_scale=True,
++                        quant_mode=1,
++                        **swiglu_limit_args,
+                     )
+                 maybe_wait_event(down_projection_ready)
+                 shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+diff --git a/vllm_ascend/patch/worker/patch_distributed.py b/vllm_ascend/patch/worker/patch_distributed.py
+index f5dd4d403..d379d12e8 100644
+--- a/vllm_ascend/patch/worker/patch_distributed.py
++++ b/vllm_ascend/patch/worker/patch_distributed.py
+@@ -38,7 +38,7 @@ def _normalize_backend(backend: str | Backend) -> str:
+ 
+ def _resolve_reuse_domain(group_name: str) -> str:
+     group_base_name = group_name.split(":")[0]
+-    if "eplb" in group_base_name or group_base_name == "mc2":
++    if "eplb" in group_base_name or group_base_name in ("mc2", "mega_moe"):
+         return group_base_name
+     return "shared"
+ 
+diff --git a/vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py b/vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py
+index d9883efd3..d692e2c4a 100644
+--- a/vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py
++++ b/vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py
+@@ -23,10 +23,10 @@ import torch_npu
+ from vllm.config import get_current_vllm_config
+ 
+ from vllm_ascend.ascend_config import get_ascend_config
+-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
++from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+-from vllm_ascend.utils import FP8_METHOD
++from vllm_ascend.utils import FP8_METHOD, AscendDeviceType, get_ascend_device_type
+ 
+ from ..base import (
+     AscendLinearScheme,
+@@ -156,14 +156,29 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
+         if x.dtype not in [torch.float8_e4m3fn]:
+             topk_weights = topk_weights.to(x.dtype)
+ 
++        if (
++            not self.dynamic_eplb
++            and _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
++            and get_ascend_device_type() == AscendDeviceType.A5
++        ):
++            w1 = layer.w13_weight.transpose(1, 2)
++            w2 = layer.w2_weight.transpose(1, 2)
++            w1_scale = layer.w13_weight_scale.transpose(1, 2)
++            w2_scale = layer.w2_weight_scale.transpose(1, 2)
++        else:
++            w1 = layer.w13_weight
++            w2 = layer.w2_weight
++            w1_scale = layer.w13_weight_scale
++            w2_scale = layer.w2_weight_scale
++
+         moe_comm_method = _EXTRA_CTX.moe_comm_method
+         return moe_comm_method.fused_experts(
+             fused_experts_input=build_fused_experts_input(
+                 hidden_states=x,
+                 topk_weights=topk_weights,
+                 topk_ids=topk_ids,
+-                w1=layer.w13_weight,
+-                w2=layer.w2_weight,
++                w1=w1,
++                w2=w2,
+                 quant_type=self.quant_type,
+                 dynamic_eplb=self.dynamic_eplb,
+                 expert_map=layer.ascend_expert_map,
+@@ -177,8 +192,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
+                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
+-                w1_scale=layer.w13_weight_scale,
+-                w2_scale=layer.w2_weight_scale,
++                w1_scale=w1_scale,
++                w2_scale=w2_scale,
+             )
+         )
+ 
+diff --git a/vllm_ascend/utils.py b/vllm_ascend/utils.py
+index 42a2a3324..ae3ae7fed 100644
+--- a/vllm_ascend/utils.py
++++ b/vllm_ascend/utils.py
+@@ -1086,6 +1086,7 @@ def _compute_potential_max_tokens(vllm_config) -> int:
+ # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
+ # neither path recomputes it.
+ _potential_max_tokens: int | None = None
++_MIN_NONEMPTY_MOE_BATCH_TOKENS = 1
+ 
+ 
+ def set_potential_max_tokens(vllm_config) -> None:
+@@ -1107,11 +1108,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
+ 
+     Skipping is applicable for all dense models and for moe models only on ranks
+     that act as KV consumers. We skip the DP all-reduce when either:
+-    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
++    - MegaMoE cannot be selected and both prefill and decode use regular MC2, or
+     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
+ 
+     Skipping means each rank may have a different number of tokens, so MC2 needs
+-    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
++    a non-zero global_bs and must NOT receive mc2_mask. MegaMoE requires
+     uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
+ 
+     Returns False when hierarchy comm is enabled because hierarchy requires
+@@ -1144,17 +1145,25 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
+     if use_cann_megamoe(vllm_config):
+         return False
+ 
+-    def needs_mc2(n: int) -> bool:
+-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
++    def get_comm_method(n: int):
++        return select_moe_comm_method(n, vllm_config)
+ 
+     scheduler_config = vllm_config.scheduler_config
++    if get_comm_method(_MIN_NONEMPTY_MOE_BATCH_TOKENS) == MoECommType.FUSED_MC2:
++        return False
++
+     # potential_max_tokens is read from the set/get global (computed once in init).
+     # if mc2 is used in decode max potential tokens case, we can skip allreduce in decode only case.
+-    decode_can_skip = needs_mc2(get_potential_max_tokens())
++    decode_comm_method = get_comm_method(get_potential_max_tokens())
+     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+     # if mc2 is used in prefill max potential tokens case and prefill and decode have the same cudagraph mode,
+     # we can skip allreduce in chunked prefill case.
+-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
++    prefill_comm_method = get_comm_method(scheduler_config.max_num_batched_tokens)
++    if MoECommType.FUSED_MC2 in {decode_comm_method, prefill_comm_method}:
++        return False
++
++    decode_can_skip = decode_comm_method == MoECommType.MC2
++    prefill_must_use_mc2 = prefill_comm_method == MoECommType.MC2
+     uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
+     chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
+     return decode_can_skip and (chunked_prefill_can_skip or ascend_config.scheduler_config.recompute_scheduler_enable)
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index a4f5e186f..39c3a5944 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -247,6 +247,10 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
+ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+ 
+ SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
++DP_METADATA_NUM_TOKENS = 0
++DP_METADATA_CUDAGRAPH_MODE = 1
++DP_METADATA_HAS_REAL_WORK = 2
++DP_METADATA_FIELD_COUNT = 3
+ 
+ 
+ @dataclass
+@@ -740,6 +744,7 @@ class NPUModelRunner(GPUModelRunner):
+         is_draft_model: bool = False,
+         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+         allow_dp_padding: bool = False,
++        is_dummy_run: bool = False,
+     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
+         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
+         # our case, we still need to sync the other two flags as well. So we need to
+@@ -754,15 +759,35 @@ class NPUModelRunner(GPUModelRunner):
+             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
+             return num_tokens, num_tokens_after_padding, cudagraph_mode
+ 
+-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
+-        packed_tensor[0][self.dp_rank] = num_tokens
+-        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
++        packed_tensor = torch.zeros(DP_METADATA_FIELD_COUNT, self.dp_size, device="cpu", dtype=torch.int32)
++        packed_tensor[DP_METADATA_NUM_TOKENS][self.dp_rank] = num_tokens
++        packed_tensor[DP_METADATA_CUDAGRAPH_MODE][self.dp_rank] = cudagraph_mode.value
++        packed_tensor[DP_METADATA_HAS_REAL_WORK][self.dp_rank] = not is_dummy_run
+         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
+ 
+         # Unpack the results
+-        num_tokens_across_dp = packed_tensor[0, :]
+-        max_tokens_across_dp = int(num_tokens_across_dp.max().item())
+-        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
++        num_tokens_across_dp = packed_tensor[DP_METADATA_NUM_TOKENS, :]
++        active_dp_mask = packed_tensor[DP_METADATA_HAS_REAL_WORK, :].bool()
++        if not active_dp_mask.any():
++            active_dp_mask = torch.ones_like(active_dp_mask)
++
++        max_tokens_across_dp = int(num_tokens_across_dp[active_dp_mask].max().item())
++        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor, active_dp_mask))
++
++        # Dummy ranks enter the same collective shape and graph chosen by ranks
++        # with real work without inflating the real ranks' batch size.
++        num_tokens_across_dp[~active_dp_mask] = max_tokens_across_dp
++        if logger.isEnabledFor(logging.DEBUG):
++            logger.debug(
++                "DP metadata synchronized: rank=%d role=%s local_tokens=%d "
++                "active_mask=%s synced_tokens=%s aclgraph_mode=%s",
++                self.dp_rank,
++                "dummy" if is_dummy_run else "active",
++                num_tokens,
++                active_dp_mask.tolist(),
++                num_tokens_across_dp.tolist(),
++                synced_cudagraph_mode.name,
++            )
+ 
+         # Create a tensor for num_tokens_after_padding
+         if allow_dp_padding or is_draft_model:
+@@ -3094,6 +3119,7 @@ class NPUModelRunner(GPUModelRunner):
+         force_has_lora: bool | None = None,
+         force_num_active_loras: int | None = None,
+         num_encoder_reqs: int = 0,
++        is_dummy_run: bool = False,
+     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
+         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+         # A stateful P/D handoff can use a uniform decode graph even at
+@@ -3149,6 +3175,7 @@ class NPUModelRunner(GPUModelRunner):
+                                   or enable_sp(self.vllm_config)
+                                   or oproj_tp_enable()
+                                   or embedding_tp_enable()),
++                is_dummy_run=is_dummy_run,
+             )
+ 
+             # Extract DP padding if there is any
+@@ -3681,6 +3708,7 @@ class NPUModelRunner(GPUModelRunner):
+             # LoRA state when determining the batch descriptor for capture
+             force_has_lora=num_active_loras > 0,
+             force_num_active_loras=num_active_loras,
++            is_dummy_run=True,
+         )
+         if self.use_dcp:
+             self.dcp_manager.init_batch_info(
+@@ -5642,13 +5670,16 @@ class NPUModelRunner(GPUModelRunner):
+         )
+ 
+ 
+-def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
++def _post_process_cudagraph_mode(tensor: torch.Tensor, active_dp_mask: torch.Tensor | None = None) -> int:
+     """
+     Synchronize cudagraph_mode across DP ranks by taking the minimum.
+     If any rank has NONE (0), all ranks use NONE.
+     This ensures all ranks send consistent values (all padded or all unpadded).
+     """
+-    return int(tensor[1, :].min().item())
++    cudagraph_modes = tensor[DP_METADATA_CUDAGRAPH_MODE, :]
++    if active_dp_mask is not None:
++        cudagraph_modes = cudagraph_modes[active_dp_mask]
++    return int(cudagraph_modes.min().item())
+ 
+ 
+ def _get_gpu_model_runner_module_name(model_runner) -> str:
