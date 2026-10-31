@@ -145,12 +145,14 @@ class AscendPCPManager(PCPManager):
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
             # Global draft input rows overwritten while the rank-local draft
             # prefill inputs are staged; restore_draft_prefill copies them back.
-            self._draft_input_ids_stash = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
-            self._draft_positions_stash = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-            self._draft_is_padding_stash = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
+            # Each active stash slice is copied in full before it is read.
+            self._draft_input_ids_stash = torch.empty(max_num_tokens, dtype=torch.int32, device=device)
+            self._draft_positions_stash = torch.empty(max_num_tokens, dtype=torch.int64, device=device)
+            self._draft_is_padding_stash = torch.empty(max_num_tokens, dtype=torch.bool, device=device)
             # Restore indices cover the global graph extent, which can exceed
             # the scheduled tokens that upstream assigns to rank segments.
-            self._hidden_restore_idx_buffer = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+            # _pad_hidden_restore_idx writes both scheduled and padding rows.
+            self._hidden_restore_idx_buffer = torch.empty(max_num_tokens, dtype=torch.int64, device=device)
 
     def set_runner_state(
         self,
