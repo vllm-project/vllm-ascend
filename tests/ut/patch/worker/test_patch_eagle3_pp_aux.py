@@ -22,7 +22,7 @@ from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3Model
-from vllm_ascend.patch.worker import patch_eagle3_pp_aux as eagle3_pp_aux
+from vllm_ascend.patch.worker.patch_v1 import patch_eagle3_pp_aux as eagle3_pp_aux
 
 
 class _FakePPGroup:

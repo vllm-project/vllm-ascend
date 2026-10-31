@@ -53,7 +53,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp, normalize_deepseek_v41_config
+from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 
@@ -607,10 +607,7 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
                 break
             else:
                 if "attn_sink" in name:
-                    if enable_dsa_cp():
-                        narrow = loaded_weight
-                    else:
-                        narrow = loaded_weight[head_start:head_end]
+                    narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
                         params_dict[name].copy_(narrow)
                     loaded_params.add(name)
