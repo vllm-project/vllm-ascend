@@ -28,6 +28,7 @@ import pytest
 import torch
 
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    _sort_valid_gbsa_prefix,
     minimax_m3_sparse_attn,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
@@ -169,6 +170,22 @@ def test_prepared_gbsa_counts_match_a5_indexer(query_len, kv_dtype):
     expected = _decode_gbsa_block_counts(seq_lens, query_len, 1, 16, table.shape[-1])
     torch.testing.assert_close(counts, expected, rtol=0, atol=0)
     torch.testing.assert_close((indices >= 0).sum(-1).to(torch.int32), expected, rtol=0, atol=0)
+    ordered, ordered_counts = a5_index_decode(
+        query,
+        cache,
+        table,
+        seq_lens,
+        65537,
+        16,
+        0,
+        1,
+        1,
+        query_len,
+        sm_scale=128**-0.5,
+        sort_indices=True,
+    )
+    torch.testing.assert_close(ordered, _sort_valid_gbsa_prefix(indices, counts), rtol=0, atol=0)
+    torch.testing.assert_close(ordered_counts, counts, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("query_len", [1, 4])
@@ -229,6 +246,7 @@ def test_decode_gbsa_prepared_metadata_replay(query_len, kv_dtype, capture, monk
                 select_num_idx=counts,
                 cu_seqlens_q=prefix,
                 gbsa_metadata_cache=cache if reuse else None,
+                indices_are_sorted=reuse,
             )
 
     graph = None

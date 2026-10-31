@@ -2,3 +2,8 @@ pr: 18426
 entries:
   - category: bugfix
     text: Prevented invalid KV-page tails from affecting MiniMax-M3 GBSA attention by normalizing valid selected blocks in decode and the GBSA prefill fallback.
+
+  - category: performance
+    text: Fuse GBSA block ordering into MiniMax-M3 AscendC and A5 Triton decode TopK postprocessing to avoid per-layer normalization kernels while preserving preallocated output buffers.
+    model: MiniMax-M3
+    hardware: [A2, A3, A5]

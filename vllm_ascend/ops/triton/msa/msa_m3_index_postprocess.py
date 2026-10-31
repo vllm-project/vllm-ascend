@@ -10,6 +10,10 @@ from vllm.triton_utils import tl, triton
 _SPARSE_BLOCK_SIZE = 128
 _SCORE_ALIGNMENT = 16
 _PREPARE_TILE = 256
+_SORTED_POSTPROCESS_ROWS = 4
+_SORTED_POSTPROCESS_TILE = 32
+_SORTED_POSTPROCESS_TOPK = 16
+_FP32_EXACT_INDEX_LIMIT = 1 << 24
 
 
 @triton.jit
@@ -80,6 +84,7 @@ def _ascendc_decode_topk_postprocess_kernel(
     TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     TILE: tl.constexpr,
+    SORT_INDICES: tl.constexpr,
 ):
     query = tl.program_id(0)
     head = tl.program_id(1)
@@ -93,13 +98,59 @@ def _ascendc_decode_topk_postprocess_kernel(
         other=-1,
     )
     valid = (slots < TOPK) & (raw >= 0) & (raw < visible_blocks)
-    tl.store(
-        indices_ptr + head * stride_ih + query * stride_iq + slots * stride_ik,
-        tl.where(valid, raw, -1).to(tl.int32),
-        mask=slots < TOPK,
-    )
     count = tl.sum(valid.to(tl.int32), axis=0)
     tl.store(counts_ptr + head * stride_ch + query * stride_cq, count)
+    if SORT_INDICES:
+        keys = tl.where(valid, raw.to(tl.int32).to(tl.float32), 16777216.0)
+        if TILE > 1:
+            keys = tl.extra.cann.extension.sort(keys[None, :], dim=1, descending=False).reshape((TILE,))
+        selected = tl.where(keys == 16777216.0, -1, keys).to(tl.int32)
+    else:
+        selected = tl.where(valid, raw, -1).to(tl.int32)
+    tl.store(
+        indices_ptr + head * stride_ih + query * stride_iq + slots * stride_ik,
+        selected,
+        mask=slots < TOPK,
+    )
+
+
+
+
+@triton.jit
+def _ascendc_decode_topk_sorted_batched_kernel(
+    raw_ptr,
+    indices_ptr,
+    counts_ptr,
+    context_ptr,
+    tokens,
+    logical_blocks,
+    decode_query_len,
+    TOPK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    ROWS: tl.constexpr,
+    TILE: tl.constexpr,
+    SENTINEL: tl.constexpr,
+):
+    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    head = tl.program_id(1)
+    cols = tl.arange(0, TILE)
+    context = tl.load(
+        context_ptr + rows // decode_query_len, rows < tokens, other=0
+    ).to(tl.int32)
+    visible_blocks = tl.maximum(
+        (context + rows % decode_query_len + BLOCK_SIZE) // BLOCK_SIZE, 0
+    )
+    visible_blocks = tl.minimum(visible_blocks, logical_blocks)
+    offsets = (head * tokens + rows[:, None]) * TOPK + cols[None, :]
+    mask = (rows[:, None] < tokens) & (cols[None, :] < TOPK)
+    raw = tl.load(raw_ptr + offsets, mask, other=-1).to(tl.int32)
+    valid = (cols[None, :] < TOPK) & (raw >= 0) & (raw < visible_blocks[:, None])
+    counts = tl.sum(valid.to(tl.int32), axis=1)
+    tl.store(counts_ptr + head * tokens + rows, counts, rows < tokens)
+    keys = tl.where(valid, raw.to(tl.float32), SENTINEL)
+    ordered = tl.extra.cann.extension.sort(keys, dim=1, descending=False)
+    selected = tl.where(ordered == SENTINEL, -1, ordered).to(tl.int32)
+    tl.store(indices_ptr + offsets, selected, mask)
 
 
 def index_decode_topk_fused(
@@ -110,6 +161,8 @@ def index_decode_topk_fused(
     logical_block_count: int,
     init_blocks: int = 0,
     local_blocks: int = 0,
+    *,
+    sort_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return int32 block IDs and valid counts for A2/A3 decode."""
     if score.ndim != 3 or score.dtype != torch.float32:
@@ -124,6 +177,9 @@ def index_decode_topk_fused(
         raise ValueError("Invalid logical block count or TopK")
     if init_blocks < 0 or local_blocks < 0:
         raise ValueError("Forced block counts must be non-negative")
+
+    if sort_indices and logical_block_count > _FP32_EXACT_INDEX_LIMIT:
+        raise ValueError("FP32 block sorting requires exactly representable block IDs")
 
     heads, tokens, width = score.shape
     if heads == 0 or tokens == 0:
@@ -173,6 +229,27 @@ def index_decode_topk_fused(
         dtype=torch.int32,
         device=score.device,
     )
+    if sort_indices:
+        raw_indices = raw_indices.contiguous()
+        context_lens = context_lens.contiguous()
+    if sort_indices and topk == _SORTED_POSTPROCESS_TOPK:
+        _ascendc_decode_topk_sorted_batched_kernel[
+            (triton.cdiv(tokens, _SORTED_POSTPROCESS_ROWS), heads)
+        ](
+            raw_indices,
+            indices,
+            counts,
+            context_lens,
+            tokens,
+            logical_block_count,
+            decode_query_len,
+            TOPK=topk,
+            BLOCK_SIZE=_SPARSE_BLOCK_SIZE,
+            ROWS=_SORTED_POSTPROCESS_ROWS,
+            TILE=_SORTED_POSTPROCESS_TILE,
+            SENTINEL=float(_FP32_EXACT_INDEX_LIMIT),
+        )
+        return indices, counts
     _ascendc_decode_topk_postprocess_kernel[(tokens, heads)](
         raw_indices,
         indices,
@@ -186,6 +263,7 @@ def index_decode_topk_fused(
         decode_query_len,
         TOPK=topk,
         BLOCK_SIZE=_SPARSE_BLOCK_SIZE,
-        TILE=triton.next_power_of_2(topk),
+        TILE=max(32, triton.next_power_of_2(topk)) if sort_indices else triton.next_power_of_2(topk),
+        SORT_INDICES=sort_indices,
     )
     return indices, counts

@@ -288,12 +288,16 @@ def _run_generic_block_sparse_attention(
     max_query_len: int = -1,
     dequant_scale: torch.Tensor | None = None,
     gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
+    indices_are_sorted: bool = False,
 ) -> torch.Tensor:
     """Run MiniMax-M3 sparse attention through CANN Ops GBSA."""
     del dequant_scale
     select_num_idx = select_num_idx.to(dtype=torch.int32).contiguous()
-    # Normalize the selected order for correct partial-page masking in GBSA.
-    topk_idx = _sort_valid_gbsa_prefix(topk_idx, select_num_idx)
+    if indices_are_sorted:
+        if topk_idx.dtype != torch.int32 or not topk_idx.is_contiguous():
+            raise ValueError("Pre-sorted GBSA indices must be contiguous int32")
+    else:
+        topk_idx = _sort_valid_gbsa_prefix(topk_idx, select_num_idx)
     block_table = block_table.to(dtype=torch.int32).contiguous()
     cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int64).contiguous()
     seq_lens = seq_lens.to(dtype=torch.int32).contiguous()
@@ -503,6 +507,7 @@ def minimax_m3_index_decode(
     init_blocks: int,
     local_blocks: int,
     decode_query_len: int,
+    sort_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute AscendC decode scores and fuse their TopK helpers."""
     score = _minimax_m3_index_score(
@@ -522,6 +527,7 @@ def minimax_m3_index_decode(
         block_table.shape[-1],
         init_blocks=init_blocks,
         local_blocks=local_blocks,
+        sort_indices=sort_indices,
     )
 
 
@@ -701,6 +707,7 @@ def minimax_m3_sparse_attn_decode(
     dequant_scale: torch.Tensor | None = None,
     cu_seqlens_q: torch.Tensor | None = None,
     gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
+    indices_are_sorted: bool = False,
 ) -> None:
     """Run sparse decode through CANN Ops generic block sparse attention."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
@@ -733,5 +740,6 @@ def minimax_m3_sparse_attn_decode(
         max_query_len=decode_query_len,
         dequant_scale=dequant_scale,
         gbsa_metadata_cache=gbsa_metadata_cache,
+        indices_are_sorted=indices_are_sorted,
     )
     output.copy_(out)

@@ -509,6 +509,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     init_blocks=self.init_blocks,
                     local_blocks=self.local_blocks,
                     decode_query_len=d.decode_query_len,
+                    sort_indices=True,
                 )
             else:
                 decode_topk, decode_select_num_idx = minimax_m3_index_decode(
@@ -523,6 +524,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     self.num_kv_heads,
                     d.decode_query_len,
                     sm_scale=self.scale,
+                    sort_indices=True,
                 )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -1040,6 +1042,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 dequant_scale=self._dequant_scale,
                 cu_seqlens_q=d.cu_seqlens_q,
                 gbsa_metadata_cache=d.gbsa_metadata_cache,
+                indices_are_sorted=True,
             )
 
         if main_md.num_prefills > 0:

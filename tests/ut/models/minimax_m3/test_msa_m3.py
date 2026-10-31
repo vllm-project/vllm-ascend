@@ -359,6 +359,113 @@ def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
     assert "return topk_idx, select_num_idx" in decode_source
 
 
+@pytest.mark.parametrize("sorted_output", [False, True])
+@pytest.mark.parametrize("provided_output", [False, True])
+def test_a5_decode_postprocess_dispatch_preserves_output_buffer(sorted_output, provided_output) -> None:
+    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+
+    query_len, heads, topk, requests = 4, 2, 16, 3
+    tokens = requests * query_len
+    query = torch.zeros(tokens, heads, 128, dtype=torch.bfloat16)
+    cache = torch.zeros(8, 128, 128, dtype=torch.bfloat16)
+    table = torch.zeros(requests, 8, dtype=torch.int32)
+    lengths = torch.tensor([129, 257, 0], dtype=torch.int32)
+    output = torch.full((heads, tokens + 4, topk), -99, dtype=torch.int32) if provided_output else None
+    score_kernel, legacy_post, sorted_post = MagicMock(), MagicMock(), MagicMock()
+
+    def populate_scores(*args, **kwargs):
+        scores = args[2]
+        scores.copy_(torch.arange(scores.shape[-1], dtype=torch.float32))
+
+    score_kernel.__getitem__.return_value.side_effect = populate_scores
+    with (
+        patch.object(a5_ops, "_decode_qk_score_kernel", score_kernel),
+        patch.object(a5_ops, "_index_topk_postprocess_kernel", legacy_post),
+        patch.object(a5_ops, "_index_topk_sorted_postprocess_kernel", sorted_post),
+        patch.object(a5_ops, "_decode_qk_score_target_programs", return_value=32),
+    ):
+        indices, counts = a5_ops.minimax_m3_index_decode(
+            query,
+            cache,
+            table,
+            lengths,
+            1024,
+            topk,
+            0,
+            1,
+            heads,
+            query_len,
+            out=output,
+            sort_indices=sorted_output,
+        )
+    assert indices.shape == (heads, tokens, topk)
+    assert counts.shape == (heads, tokens)
+    assert indices.dtype == counts.dtype == torch.int32
+    if output is not None:
+        assert indices.data_ptr() == output.data_ptr()
+        assert indices.stride() == output.stride()
+        assert torch.all(output[:, tokens:] == -99)
+    if sorted_output:
+        legacy_post.__getitem__.assert_not_called()
+        sorted_post.__getitem__.assert_called_once_with((3, heads))
+        launch = sorted_post.__getitem__.return_value.call_args
+        assert launch.args[1] is indices
+        assert launch.args[10:13] == indices.stride()
+        assert launch.kwargs["ROWS"] == 4
+        assert launch.kwargs["TILE"] == 32
+    else:
+        sorted_post.__getitem__.assert_not_called()
+        legacy_post.__getitem__.assert_called_once_with((tokens, heads))
+
+
+def test_a5_sorted_decode_empty_batch_skips_kernels() -> None:
+    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+
+    with patch.object(a5_ops, "_decode_qk_score_kernel") as score:
+        indices, counts = a5_ops.minimax_m3_index_decode(
+            torch.empty(0, 1, 128),
+            torch.empty(1, 128, 128),
+            torch.empty(0, 1, dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            128,
+            16,
+            0,
+            1,
+            1,
+            1,
+            sort_indices=True,
+        )
+    score.__getitem__.assert_not_called()
+    assert indices.shape == (1, 0, 16)
+    assert counts.shape == (1, 0)
+
+
+@pytest.mark.parametrize("invalid", ["dtype", "capacity", "fp32_range"])
+def test_a5_sorted_decode_rejects_invalid_buffers_before_launch(invalid) -> None:
+    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+
+    output = torch.empty(1, 1, 16, dtype=torch.int64 if invalid == "dtype" else torch.int32)
+    if invalid == "capacity":
+        output = output[:, :0]
+    maximum = ((1 << 24) + 1) * 128 if invalid == "fp32_range" else 128
+    with patch.object(a5_ops, "_decode_qk_score_kernel") as score, pytest.raises(ValueError):
+        a5_ops.minimax_m3_index_decode(
+            torch.empty(1, 1, 128),
+            torch.empty(1, 128, 128),
+            torch.zeros(1, 1, dtype=torch.int32),
+            torch.ones(1, dtype=torch.int32),
+            maximum,
+            16,
+            0,
+            1,
+            1,
+            1,
+            out=output,
+            sort_indices=True,
+        )
+    score.__getitem__.assert_not_called()
+
+
 def test_a3_decode_topk_uses_fused_prepare_and_postprocess() -> None:
     source_path = Path(msa_m3_index_postprocess.__file__)
     source = source_path.read_text(encoding="utf-8")
@@ -799,7 +906,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
         impl.num_kv_heads,
         decode.decode_query_len,
     )
-    assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
+    assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale, "sort_indices": True}
 
 
 def test_a3_indexer_forward_receives_fused_select_counts() -> None:
@@ -1359,6 +1466,7 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
         block_table.shape[-1],
         init_blocks=1,
         local_blocks=1,
+        sort_indices=False,
     )
 
 
@@ -1430,6 +1538,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
     assert mock_sparse_attn_decode.call_args.kwargs["cu_seqlens_q"] is metadata.decode.cu_seqlens_q
+    assert mock_sparse_attn_decode.call_args.kwargs["indices_are_sorted"] is True
     assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
     assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
@@ -2454,3 +2563,29 @@ def test_sparse_schedule_ignores_prefill_and_token_only_padding(
     assert metadata_op.call_args.kwargs["cu_seqlens_q"].shape == (3,)
     expected = _decode_gbsa_block_counts(common.seq_lens[:2], query_len, 2, 16, common.block_table_tensor.shape[-1])
     torch.testing.assert_close(metadata_op.call_args.args[1], expected, rtol=0, atol=0)
+
+
+def test_sparse_decode_presorted_indices_bypass_normalization(mock_gbsa_ops, monkeypatch) -> None:
+    _, attention_op = mock_gbsa_ops
+    indices = torch.tensor([[[0, 1, -1]] * 4] * 2, dtype=torch.int32)
+    counts = torch.full((2, 4), 2, dtype=torch.int32)
+    q = torch.zeros((4, 2, 128), dtype=torch.bfloat16)
+    attention_op.return_value = (torch.empty_like(q), torch.empty(0))
+    kv = torch.zeros((2, 2, 128, 2, 128), dtype=torch.bfloat16)
+    normalize = MagicMock(side_effect=AssertionError("Sorted producer output must not be sorted twice"))
+    monkeypatch.setattr(msa_m3_npu_module, "_sort_valid_gbsa_prefix", normalize)
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv,
+        indices,
+        torch.zeros((4, 2), dtype=torch.int32),
+        torch.full((4,), 256, dtype=torch.int32),
+        2,
+        0.1,
+        torch.empty_like(q),
+        1,
+        select_num_idx=counts,
+        indices_are_sorted=True,
+    )
+    normalize.assert_not_called()
+    assert attention_op.call_args.args[3] is indices
