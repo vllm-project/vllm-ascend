@@ -38,6 +38,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
 from vllm_ascend.ops.fused_moe.catccos_adapter import (
     catccos_backend_enabled,
     prepare_catccos_weights,
@@ -820,13 +821,8 @@ else:
                     hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                     # Execute activation concurrently with gmm2.
                     maybe_wait_event(fused_moe_evts.before_gmm2)
-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                        hidden_states,
-                        topk_weight=None,
-                        group_index=None,
-                        dst_type=torch.float8_e4m3fn,
-                        quant_mode=2,
-                        clamp_value=fused_moe_evts.swiglu_limit,
+                    quantized_x, swiglu_out_scale = swiglu_clamp_and_mxfp8_quant(
+                        hidden_states, fused_moe_evts.swiglu_limit
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.

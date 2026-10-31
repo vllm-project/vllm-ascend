@@ -189,8 +189,7 @@ class AscendConfig:
             "catccos_local_mem_size", ascend_envs.VLLM_ASCEND_CATCCOS_MEM
         )
         self.catccos_min_tokens = additional_config.get("catccos_min_tokens", ascend_envs.VLLM_ASCEND_CATCCOS_MINM)
-        # Kernel capacity; A5 production routing also requires the batch to fit
-        # native MC2, so this value cannot opt in to replacing ALLGATHER/ALLTOALL.
+        # Maximum per-rank token count accepted by the CatCCOS kernel.
         self.catccos_max_tokens_per_rank = additional_config.get("catccos_max_tokens_per_rank", 512)
         self.catccos_sync_after_launch = additional_config.get(
             "catccos_sync_after_launch",

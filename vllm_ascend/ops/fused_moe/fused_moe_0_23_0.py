@@ -23,6 +23,7 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
 from vllm_ascend.ops.fused_moe.catccos_adapter import (
     catccos_backend_enabled,
     evaluate_catccos_layer,
@@ -721,14 +722,7 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                    hidden_states,
-                    topk_weight=None,
-                    group_index=None,
-                    dst_type=torch.float8_e4m3fn,
-                    quant_mode=2,
-                    clamp_value=fused_moe_evts.swiglu_limit,
-                )
+                quantized_x, swiglu_out_scale = swiglu_clamp_and_mxfp8_quant(hidden_states, fused_moe_evts.swiglu_limit)
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
