@@ -115,6 +115,34 @@ dispatch only confirms that the event was accepted, not that a build passed.
 Push runs link to [recipes.vllm.ai](https://recipes.vllm.ai); close events do
 not advertise a preview URL.
 
+The independent `Recipes Preview Comment` workflow posts one preview-link
+comment on open PRs targeting `main` that change `recipes/**`, including fork
+PRs. It reuses the fixed preview URL above and the existing GitHub Actions bot,
+updates the same comment with the current PR commit after a push, and skips
+unchanged comments on reruns. Closing or merging a PR, removing all recipe
+changes, or changing its base away from `main` updates an existing comment to
+an inactive status; reopening or restoring eligible changes restores the link.
+The comment does not confirm deployment success, cleanup, or publication.
+
+Comments use only the repository's `GITHUB_TOKEN` with `pull-requests: write`;
+they do not need App credentials or `RECIPES_PREVIEW_ENABLED`. The workflow
+reads PR metadata and file names without checking out or executing PR code.
+The recipes scheduled scanner still requires the `recipe` label to discover
+PRs when dispatch is disabled. Maintainers should add it to older recipe PRs
+that predate the labeler rule.
+
+After the comment workflow is merged into `main`, maintainers can backfill an
+existing PR through **Actions → Recipes Preview Comment → Run workflow**.
+Select `main` and enter the `pr_number`, or use:
+
+```bash
+gh workflow run recipes-preview-comment.yml \
+  --repo vllm-project/vllm-ascend --ref main -f pr_number=20096
+```
+
+Backfill creates or refreshes the same comment; it does not trigger a preview
+build or change labels. Manual runs from branches other than `main` are skipped.
+
 ### Administrator setup and activation
 
 This workflow follows [vLLM PR #63259](https://github.com/vllm-project/vllm/pull/63259).
