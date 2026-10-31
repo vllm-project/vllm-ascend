@@ -337,10 +337,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         keeps its own ``num_tokens`` window. Returns ``[num_tokens, n_hash_cols,
         dim]`` bf16 with the heads back in checkpoint order.
         """
-        # The kernel walks ids as [token, columns] with a unit inner stride, and
-        # `gathered` is a slice of a [tokens, layers, columns] buffer.
-        gathered = gathered.contiguous()
-        # lookup writes every allocated head, including zeroes for invalid IDs.
+        # The kernel walks ids as [token, columns] with a unit inner stride, so
+        # the per-layer slice of the [tokens, layers, columns] hash buffer needs
+        # no copy. It writes every row (invalid ids store zeroes), so
+        # uninitialized output storage is safe.
         out = torch.empty(
             (gathered.shape[0], self.part_n_hash_cols, self.dim),
             dtype=torch.bfloat16,
