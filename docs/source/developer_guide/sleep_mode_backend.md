@@ -121,3 +121,8 @@ preserve the handlers present on entry. This applies to both backend choices
 and normal initialization, so a graph SDK import cannot swallow the caller's
 shutdown request. Restoration uses public Python signal APIs on the main thread;
 it does not replace SDK functions or remove their atexit finalizers.
+
+If Python reports a preexisting handler as `None`, it was installed outside
+Python and cannot be restored through `signal.signal`. That handler is not
+guessed or reinstalled; preservation only covers Python-visible handlers,
+including `SIG_DFL` and `SIG_IGN`.
