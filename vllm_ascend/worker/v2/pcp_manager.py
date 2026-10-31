@@ -150,7 +150,7 @@ class AscendPCPManager(PCPManager):
     # vLLM includes #52162, which shards decode requests upstream.
     def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
         """Sharded decodes have a single owner, so none of them is replicated."""
-        self.shard_decode_requests = self.shard_decode_requests and self.is_decode_sharded
+        self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
         replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
         if self.is_decode_sharded:
             replicated &= np.asarray(is_prefilling, dtype=np.bool_)
