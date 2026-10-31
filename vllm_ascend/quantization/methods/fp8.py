@@ -106,18 +106,24 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         return param_dict
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.uint8),
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data.view(torch.uint8),
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
+        from vllm_ascend.ops.fused_moe.catccos_adapter import catccos_backend_enabled
+
+        if catccos_backend_enabled():
+            layer.w13_weight.data = layer.w13_weight.data.view(torch.uint8)
+            layer.w2_weight.data = layer.w2_weight.data.view(torch.uint8)
+        else:
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data.view(torch.uint8),
+                29,
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data.view(torch.uint8),
+                29,
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
         g, n, k = layer.w13_weight_scale.shape

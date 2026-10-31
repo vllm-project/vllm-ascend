@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
@@ -75,17 +77,20 @@ def evaluate_catccos_layer(
     if not library_exists:
         return _unsupported(f"CatCCOS extension does not exist: {library_path}")
 
+    quant_scheme = getattr(quant_method, "quant_method", None)
+    if quant_scheme is not None and hasattr(quant_scheme, "quant_type"):
+        quant_method = quant_scheme
     quant_type = getattr(quant_method, "quant_type", QuantType.NONE)
-    if quant_type != QuantType.NONE or getattr(quant_method, "quant_method", None) is not None:
-        return _unsupported("CatCCOS requires an unquantized checkpoint")
+    if quant_type not in (QuantType.NONE, QuantType.W4A8MXFP):
+        return _unsupported(f"CatCCOS does not support quantization type {quant_type}")
     if getattr(quant_method, "dynamic_eplb", False):
         return _unsupported("CatCCOS does not support dynamic EPLB")
-    if n_shared_experts:
-        return _unsupported("CatCCOS does not support shared experts")
+    if n_shared_experts not in (0, 1):
+        return _unsupported("CatCCOS supports at most one separately-computed shared expert")
     if expert_map_path or mix_placement or log2phy is not None:
         return _unsupported("CatCCOS requires the default contiguous expert placement")
-    if swiglu_limit:
-        return _unsupported("CatCCOS does not support a nonzero swiglu_limit")
+    if not math.isfinite(swiglu_limit) or swiglu_limit < 0:
+        return _unsupported(f"CatCCOS requires a finite, nonnegative swiglu_limit, got {swiglu_limit}")
     if apply_router_weight_on_input:
         return _unsupported("CatCCOS requires router weights on the combined output")
     if has_bias:
@@ -94,8 +99,6 @@ def evaluate_catccos_layer(
         return _unsupported("CatCCOS does not support zero experts")
     if is_sequence_parallel:
         return _unsupported("CatCCOS does not support sequence parallelism")
-    if dp_size != 1:
-        return _unsupported("CatCCOS currently requires DP size 1")
     if pcp_size != 1:
         return _unsupported("CatCCOS currently requires PCP size 1")
     if speculative_model:
@@ -155,13 +158,32 @@ def initialize_catccos() -> None:
             return
         config = get_ascend_config()
         load_catccos_library(config.catccos_library_path)
-        group.barrier()
-        status = torch.ops.catccos.init(
+        distributed_rank = torch.distributed.get_rank()
+        device_id = torch.npu.current_device()
+        logger.info(
+            "Initializing CatCCOS SHMEM: EP rank=%d/%d, distributed rank=%d, NPU=%d, "
+            "ASCEND_RT_VISIBLE_DEVICES=%s, store=%s",
             rank,
             world_size,
-            config.catccos_local_mem_size,
+            distributed_rank,
+            device_id,
+            os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "<unset>"),
             config.catccos_store_url,
         )
+        group.barrier()
+        try:
+            status = torch.ops.catccos.init(
+                rank,
+                world_size,
+                config.catccos_local_mem_size,
+                config.catccos_store_url,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"CatCCOS SHMEM init failed for EP rank {rank}/{world_size}, "
+                f"distributed rank {distributed_rank}, NPU {device_id}, "
+                f"store {config.catccos_store_url}: {exc}"
+            ) from exc
         if status != 0:
             raise RuntimeError(f"CatCCOS initialization failed for EP rank {rank}/{world_size}: {status}")
         _INITIALIZED_GROUP = group_key
@@ -188,14 +210,30 @@ def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def validate_catccos_weight_shapes(
     w1: torch.Tensor,
     w2: torch.Tensor,
+    *,
+    weight_format: str = "mxfp8",
 ) -> None:
     if w1.ndim != 3 or w2.ndim != 3:
         raise ValueError(f"CatCCOS requires 3-D weights, got {w1.shape} and {w2.shape}")
-    experts, merged_intermediate, hidden = w1.shape
-    if w2.shape[:2] != (experts, hidden):
-        raise ValueError(f"CatCCOS weight shapes do not match: w1={w1.shape}, w2={w2.shape}")
-    if merged_intermediate != 2 * w2.shape[2]:
-        raise ValueError(f"CatCCOS gate/up and down-projection dimensions do not match: w1={w1.shape}, w2={w2.shape}")
+    if weight_format == "mxfp8":
+        experts, merged_intermediate, hidden = w1.shape
+        if w2.shape[:2] != (experts, hidden):
+            raise ValueError(f"CatCCOS weight shapes do not match: w1={w1.shape}, w2={w2.shape}")
+        if merged_intermediate != 2 * w2.shape[2]:
+            raise ValueError(
+                f"CatCCOS gate/up and down-projection dimensions do not match: w1={w1.shape}, w2={w2.shape}"
+            )
+    elif weight_format == "mxfp4":
+        experts, packed_hidden, merged_intermediate = w1.shape
+        if w2.shape[0] != experts or w2.shape[2] != packed_hidden * 2:
+            raise ValueError(f"CatCCOS MXFP4 weight shapes do not match: w1={w1.shape}, w2={w2.shape}")
+        if merged_intermediate != 4 * w2.shape[1]:
+            raise ValueError(
+                f"CatCCOS MXFP4 gate/up and down-projection dimensions do not match: w1={w1.shape}, w2={w2.shape}"
+            )
+        hidden = packed_hidden * 2
+    else:
+        raise ValueError(f"Unknown CatCCOS weight format: {weight_format}")
     if hidden % 256 or merged_intermediate % 512:
         raise ValueError("CatCCOS requires hidden % 256 == 0 and merged intermediate % 512 == 0")
 
@@ -209,10 +247,15 @@ def validate_catccos_operands(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     ep_size: int,
+    *,
+    weight_format: str | None = None,
 ) -> None:
     """Check the C++ binding contract without reading device tensor values."""
-    validate_catccos_weight_shapes(w1, w2)
-    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] != w1.shape[2] or x.dtype != torch.bfloat16:
+    if weight_format is None:
+        weight_format = "mxfp4" if w1.dtype == torch.uint8 else "mxfp8"
+    validate_catccos_weight_shapes(w1, w2, weight_format=weight_format)
+    hidden_size = w1.shape[2] if weight_format == "mxfp8" else w1.shape[1] * 2
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] != hidden_size or x.dtype != torch.bfloat16:
         raise ValueError("CatCCOS requires nonempty BF16 x with the expert hidden size")
     if expert_idx.ndim != 2 or expert_idx.shape[0] != x.shape[0] or expert_idx.shape[1] == 0:
         raise ValueError("CatCCOS expert_idx must have shape [M, topK] with topK > 0")
@@ -222,16 +265,32 @@ def validate_catccos_operands(
         raise ValueError("CatCCOS gate_weight must be floating point with shape [M, topK]")
     if w1.shape[0] * ep_size < expert_idx.shape[1]:
         raise ValueError("CatCCOS topK exceeds the total expert count")
-    scale_k = ((w1.shape[2] + 31) // 32 + 1) // 2 * 2
-    scale_k2 = ((w2.shape[2] + 31) // 32 + 1) // 2 * 2
-    if w1_scale.shape != (w1.shape[0], w1.shape[1], scale_k):
-        raise ValueError("CatCCOS w1_scale has an invalid MXFP8 shape")
-    if w2_scale.shape != (w2.shape[0], w2.shape[1], scale_k2):
-        raise ValueError("CatCCOS w2_scale has an invalid MXFP8 shape")
-    if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
-        raise ValueError("CatCCOS expert weights must be MXFP8 E4M3")
-    if w1_scale.dtype != torch.float8_e8m0fnu or w2_scale.dtype != torch.float8_e8m0fnu:
-        raise ValueError("CatCCOS expert scales must be MXFP8 E8M0")
+    if weight_format == "mxfp8":
+        scale_k = ((w1.shape[2] + 31) // 32 + 1) // 2 * 2
+        scale_k2 = ((w2.shape[2] + 31) // 32 + 1) // 2 * 2
+        if w1_scale.shape != (w1.shape[0], w1.shape[1], scale_k):
+            raise ValueError("CatCCOS w1_scale has an invalid MXFP8 shape")
+        if w2_scale.shape != (w2.shape[0], w2.shape[1], scale_k2):
+            raise ValueError("CatCCOS w2_scale has an invalid MXFP8 shape")
+        if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
+            raise ValueError("CatCCOS MXFP8 expert weights must use E4M3")
+    else:
+        hidden = w1.shape[1] * 2
+        merged_intermediate = w1.shape[2]
+        intermediate = merged_intermediate // 2
+        expected_w1_scale = (w1.shape[0], (hidden + 63) // 64, merged_intermediate, 2)
+        expected_w2_scale = (w2.shape[0], (intermediate + 63) // 64, hidden, 2)
+        if w1_scale.shape != expected_w1_scale:
+            raise ValueError(f"CatCCOS MXFP4 w1_scale must have shape {expected_w1_scale}, got {w1_scale.shape}")
+        if w2_scale.shape != expected_w2_scale:
+            raise ValueError(f"CatCCOS MXFP4 w2_scale must have shape {expected_w2_scale}, got {w2_scale.shape}")
+        if w1.dtype != torch.uint8 or w2.dtype != torch.uint8:
+            raise ValueError("CatCCOS MXFP4 expert weights must be packed uint8 tensors")
+    if w1_scale.dtype not in (torch.float8_e8m0fnu, torch.uint8) or w2_scale.dtype not in (
+        torch.float8_e8m0fnu,
+        torch.uint8,
+    ):
+        raise ValueError("CatCCOS expert scales must use E8M0 storage")
     if any(t.device != x.device for t in (expert_idx, gate_weight, w1, w1_scale, w2, w2_scale)):
         raise ValueError("CatCCOS operands must be on the same device")
 
@@ -276,6 +335,7 @@ def apply_catccos(
     w1_scale: torch.Tensor,
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
+    swiglu_limit: float = 0.0,
 ) -> torch.Tensor:
     with moe_profile_range("catccos", "adapter_host_scope", hidden_states, topk_ids):
         initialize_catccos()
@@ -284,6 +344,14 @@ def apply_catccos(
             expert_idx = topk_ids.to(torch.int32).contiguous()
             gate_weight = topk_weights.to(torch.float32).contiguous()
         with moe_profile_range("catccos", "kernel_enqueue", hidden_states, topk_ids):
+            logger.debug(
+                "CatCCOS enqueue: EP rank=%d, M=%d, H=%d, topK=%d, local_experts=%d",
+                _INITIALIZED_GROUP[0] if _INITIALIZED_GROUP is not None else -1,
+                x.shape[0],
+                x.shape[1],
+                expert_idx.shape[1],
+                w1.shape[0],
+            )
             output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
                 x,
                 expert_idx,
@@ -292,6 +360,7 @@ def apply_catccos(
                 w1_scale,
                 w2,
                 w2_scale,
+                swiglu_limit,
             )
         if get_ascend_config().catccos_sync_after_launch:
             with moe_profile_range("catccos", "post_sync_host_wait", hidden_states, topk_ids):

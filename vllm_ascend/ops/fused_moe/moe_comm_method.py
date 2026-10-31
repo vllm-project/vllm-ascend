@@ -350,11 +350,13 @@ class FusedMC2CommImpl(MoECommMethod):
             if not self.catccos_capability.supported:
                 raise RuntimeError(f"CatCCOS was selected for an unsupported layer: {self.catccos_capability.reason}")
             routing = fused_experts_input.routing
+            quant_type = fused_experts_input.quant.quant_type
+            if quant_type not in (QuantType.NONE, QuantType.W4A8MXFP):
+                raise RuntimeError(f"CatCCOS does not support quantization type {quant_type}")
             if (
                 routing.log2phy is not None
                 or routing.global_redundant_expert_num
                 or routing.apply_router_weight_on_input
-                or fused_experts_input.swiglu_limit
                 or fused_experts_input.weights.w1_bias is not None
                 or fused_experts_input.weights.w2_bias is not None
                 or fused_experts_input.lora_context is not None
@@ -364,7 +366,8 @@ class FusedMC2CommImpl(MoECommMethod):
             if not isinstance(weights.w1, torch.Tensor) or not isinstance(weights.w2, torch.Tensor):
                 raise RuntimeError("CatCCOS requires packed expert weights as tensors")
             if not isinstance(weights.w1_scale, torch.Tensor) or not isinstance(weights.w2_scale, torch.Tensor):
-                raise RuntimeError("CatCCOS requires MXFP8 weight scales")
+                raise RuntimeError("CatCCOS requires tensor expert scales")
+            weight_format = "mxfp4" if quant_type == QuantType.W4A8MXFP else "mxfp8"
             validate_catccos_operands(
                 fused_experts_input.hidden_states,
                 fused_experts_input.topk_ids,
@@ -374,6 +377,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 weights.w2,
                 weights.w2_scale,
                 self.moe_config.ep_size,
+                weight_format=weight_format,
             )
             out = apply_catccos(
                 fused_experts_input.hidden_states,
@@ -383,6 +387,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 weights.w1_scale,
                 weights.w2,
                 weights.w2_scale,
+                swiglu_limit=fused_experts_input.swiglu_limit,
             )
             logger.info_once("Executed CatCCOS through the formal FusedMC2 backend")
             return FusedExpertsResult(

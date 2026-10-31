@@ -21,12 +21,13 @@ class TestCatccosAsyncContract(TestCase):
                 events = []
                 output = object()
                 tensor = Mock()
+                tensor.shape = (1, 4096)
                 tensor.contiguous.return_value = tensor
                 tensor.to.return_value = tensor
 
                 def launch(*args, events=events, tensor=tensor, output=output):
                     events.append("launch")
-                    self.assertEqual(args, (tensor,) * 7)
+                    self.assertEqual(args, (tensor,) * 7 + (10.0,))
                     return output
 
                 torch = SimpleNamespace(
@@ -38,6 +39,8 @@ class TestCatccosAsyncContract(TestCase):
                 )
                 namespace = {
                     "torch": torch,
+                    "logger": Mock(),
+                    "_INITIALIZED_GROUP": (0, 4),
                     "initialize_catccos": lambda events=events: events.append("init"),
                     "moe_profile_range": lambda *args: nullcontext(),
                     "get_ascend_config": lambda sync_enabled=sync_enabled: SimpleNamespace(
@@ -45,7 +48,7 @@ class TestCatccosAsyncContract(TestCase):
                     ),
                 }
                 exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
-                self.assertIs(namespace["apply_catccos"](*([tensor] * 7)), output)
+                self.assertIs(namespace["apply_catccos"](*([tensor] * 7), swiglu_limit=10.0), output)
                 self.assertEqual(events, ["init", "launch", "sync"] if sync_enabled else ["init", "launch"])
 
 

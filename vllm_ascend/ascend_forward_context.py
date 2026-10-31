@@ -318,13 +318,9 @@ def _select_a5_moe_comm_method(
     if _catccos_backend_enabled() and not is_draft_model:
         min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
         catccos_capacity = get_catccos_tokens_capacity()
-        # CatCCOS replaces native MC2 only. Larger batches retain A5's native
-        # ALLGATHER/ALLTOALL selection even if the CatCCOS kernel can accept them.
-        if (
-            catccos_capacity is not None
-            and min_tokens <= num_tokens <= min(catccos_capacity, mc2_tokens_capacity)
-            and world_size > 1
-        ):
+        # CatCCOS has an independent per-rank capacity and can handle prefill
+        # batches larger than native MC2's fixed limit.
+        if catccos_capacity is not None and min_tokens <= num_tokens <= catccos_capacity and world_size > 1:
             return MoECommType.FUSED_MC2
         if num_tokens < min_tokens:
             logger.info_once(
