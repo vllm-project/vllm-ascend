@@ -90,7 +90,7 @@ def _mock_client_socket(mock_socket, recv_return=None, recv_side_effect=None, ca
     else:
         mock_socket_instance.recv.return_value = recv_return
     if capture_send is not None:
-        mock_socket_instance.send.side_effect = lambda data: capture_send.append(json.loads(data.decode()))
+        mock_socket_instance.sendall.side_effect = lambda data: capture_send.append(json.loads(data.decode()))
     mock_socket_instance.getsockname.return_value = ("127.0.0.1", 12346)
     mock_socket_instance.__enter__.return_value = mock_socket_instance
     mock_socket_instance.__exit__.return_value = None
@@ -791,6 +791,51 @@ def test_server_start(server_config):
 
         # Check if the start() method is called.
         handler_thread_instance.start.assert_called_once()
+
+
+# Fake client socket whose send() only accepts a few bytes per call.
+class FakeShortWriteSocket:
+    def __init__(self, chunk_size=7):
+        self.chunk_size = chunk_size
+        self.received = bytearray()
+
+    def send(self, payload):
+        count = min(self.chunk_size, len(payload))
+        self.received.extend(payload[:count])
+        return count
+
+    def sendall(self, payload):
+        while payload:
+            payload = payload[self.send(payload) :]
+
+    def close(self):
+        pass
+
+
+def test_elastic_client_send_str_sends_complete_payload():
+    client = ElasticClient.__new__(ElasticClient)
+    client.s = FakeShortWriteSocket()
+    payload = "模型路径/mock-path " * 8
+    client.send_str(payload)
+    assert bytes(client.s.received) == payload.encode("utf-8")
+
+
+def test_elastic_client_send_str_without_socket_raises():
+    client = ElasticClient.__new__(ElasticClient)
+    client.s = None
+    with pytest.raises(RuntimeError, match="Socket was not created"):
+        client.send_str("message")
+
+
+@pytest.mark.parametrize("error", [OSError("broken pipe"), TimeoutError("timed out")])
+def test_elastic_client_send_str_send_failure_propagates(error):
+    sock = MagicMock()
+    sock.send.side_effect = error
+    sock.sendall.side_effect = error
+    client = ElasticClient.__new__(ElasticClient)
+    client.s = sock
+    with pytest.raises(type(error)):
+        client.send_str("message")
 
 
 if __name__ == "__main__":

@@ -202,7 +202,7 @@ class ElasticClient:
         """
         if self.s is None:
             raise RuntimeError("Socket was not created correctly.")
-        self.s.send(data_str.encode("utf-8"))
+        self.s.sendall(data_str.encode("utf-8"))
 
     def recv_json(self) -> dict:
         """Receive one JSON object over the socket connection."""
