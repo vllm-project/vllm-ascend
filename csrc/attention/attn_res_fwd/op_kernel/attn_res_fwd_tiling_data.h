@@ -42,6 +42,11 @@ struct alignas(8) AttnResFwdTilingData {
     float outputNormEps;
     uint32_t elemsPerToken;    // 2*blockCount；false 时可写 0
     uint32_t cacheOutputNorm;  // Fused inference: one BF16 weight row per core.
+    // Cooperative inference: residual rows and optional H slices for scores.
+    uint32_t outputSplits;
+    uint32_t scoreSplits;
+    uint32_t cooperativeTileElems;
+    uint32_t residentGroup;    // Reserved for tiling layout compatibility; always zero.
 };
 #pragma pack(pop)
 } // namespace AttnResFwd

@@ -1,11 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "aclnn_attn_res_fwd.h"
+#include <limits>
+#include "../../attn_res_fwd_validation.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_executor.h"
 #include "opdev/tensor_view_utils.h"
 using namespace op;
+namespace {
+bool HasContiguousView(const aclTensor *tensor)
+{
+    const auto &shape = tensor->GetViewShape();
+    const auto &strides = tensor->GetViewStrides();
+    uint64_t expected = 1;
+    for (size_t dim = shape.GetDimNum(); dim > 0; --dim) {
+        const int64_t size = shape.GetDim(dim - 1);
+        if (size < 0) return false;
+        if (size == 0) return true;
+        if (size > 1 && (strides[dim - 1] < 0 || static_cast<uint64_t>(strides[dim - 1]) != expected)) {
+            return false;
+        }
+        if (expected > std::numeric_limits<int64_t>::max() / static_cast<uint64_t>(size)) return false;
+        expected *= static_cast<uint64_t>(size);
+    }
+    return true;
+}
+} // namespace
 namespace l0op {
 OP_TYPE_REGISTER(AttnResFwd);
 
@@ -42,13 +63,51 @@ extern "C" aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
                mix, fuseAdd, optimizePrefill),
         DFX_OUT(output, prefixOut, materialized));
     if (!prefix || !blocks || !proj || !norm || !addend || !outputNorm ||
-        !output || !prefixOut || !materialized || eps <= 0) return ACLNN_ERR_PARAM_INVALID;
+        !output || !prefixOut || !materialized || !workspaceSize || !executor ||
+        !AttnResFwd::IsValidNormEpsilon(eps) || !AttnResFwd::IsValidNormEpsilon(outputNormEps, true)) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    const aclTensor *tensors[] = {prefix, blocks, proj, norm, addend, outputNorm,
+                                   output, prefixOut, materialized};
+    for (const auto *tensor : tensors) {
+        if (tensor->GetDataType() != DataType::DT_BF16) {
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+    }
+    const auto &prefixShape = prefix->GetViewShape();
+    const auto &bankShape = blocks->GetViewShape();
+    const auto &projShape = proj->GetViewShape();
+    const auto &normShape = norm->GetViewShape();
+    if (prefixShape.GetDimNum() != 2 || bankShape.GetDimNum() != 3 ||
+        bankShape.GetDim(0) != prefixShape.GetDim(0) || bankShape.GetDim(2) != prefixShape.GetDim(1) ||
+        projShape.GetDimNum() != 2 || projShape.GetDim(0) != 1 || projShape.GetDim(1) != prefixShape.GetDim(1) ||
+        normShape.GetDimNum() != 1 || normShape.GetDim(0) != prefixShape.GetDim(1)) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    const auto samePrefixShape = [&prefixShape](const aclTensor *tensor) {
+        const auto &shape = tensor->GetViewShape();
+        return shape.GetDimNum() == 2 && shape.GetDim(0) == prefixShape.GetDim(0) &&
+            shape.GetDim(1) == prefixShape.GetDim(1);
+    };
+    const auto &outputNormShape = outputNorm->GetViewShape();
+    if (!samePrefixShape(output) || !samePrefixShape(prefixOut) || !samePrefixShape(materialized) ||
+        (fuseAdd && !samePrefixShape(addend)) ||
+        (outputNormEps > 0 && (outputNormShape.GetDimNum() != 1 ||
+                              outputNormShape.GetDim(0) != prefixShape.GetDim(1)))) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    const auto &bankStrides = blocks->GetViewStrides();
+    if (!AttnResFwd::IsValidBankExtent(prefixShape.GetDim(0), bankShape.GetDim(1), prefixShape.GetDim(1),
+                                      validBlocks, blockTokenStride, blockWriteIdx) ||
+        bankStrides[2] != 1 || bankStrides[1] != prefixShape.GetDim(1) || bankStrides[0] != blockTokenStride ||
+        !HasContiguousView(prefix) || !HasContiguousView(proj) || !HasContiguousView(norm) ||
+        !HasContiguousView(output) || !HasContiguousView(prefixOut) || !HasContiguousView(materialized) ||
+        (fuseAdd && !HasContiguousView(addend)) || (outputNormEps > 0 && !HasContiguousView(outputNorm))) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     // Match the existing AttnRes ACLNN entry: external tensors carry their
     // logical dimensions in the view shape. This is host metadata only.
-    for (const aclTensor *tensor : {prefix, blocks, proj, norm, addend, outputNorm,
-                                   static_cast<const aclTensor *>(output),
-                                   static_cast<const aclTensor *>(prefixOut),
-                                   static_cast<const aclTensor *>(materialized)}) {
+    for (const auto *tensor : tensors) {
         tensor->SetOriginalShape(tensor->GetViewShape());
     }
     auto exec = CREATE_EXECUTOR();
