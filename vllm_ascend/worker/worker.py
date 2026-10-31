@@ -849,6 +849,19 @@ class NPUWorker(WorkerBase):
                 group_pages += layer_spec.page_size_bytes
                 sum_pages += layer_spec.page_size_bytes
             bytes_per_block = max(bytes_per_block, group_pages)
+        from vllm_ascend.patch.platform.patch_per_group_pools import is_window_capped_hybrid
+
+        if is_window_capped_hybrid(self.vllm_config, kv_cache_groups):
+            logger.info(
+                "Window-capped per-group KV pools enabled for %d groups: "
+                "skipping the per-layer budget scaling (%d bytes/block over %d "
+                "total page bytes); sliding groups hold window-sized pools and "
+                "the full group receives the freed budget.",
+                len(kv_cache_groups),
+                bytes_per_block,
+                sum_pages,
+            )
+            return available_memory
         if bytes_per_block > 0 and sum_pages > bytes_per_block:
             scale = bytes_per_block / sum_pages
             logger.info(
