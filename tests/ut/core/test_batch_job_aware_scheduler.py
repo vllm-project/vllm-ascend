@@ -637,6 +637,48 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.queue.prepend_requests(mock_queue)
         self.assertEqual(len(self.queue), 3)
 
+    def test_remove_peeked_request_selects_remaining_request(self):
+        first = self._make_request("r1#job_name[job1]#")
+        second = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(first)
+        self.queue.add_request(second)
+        self.assertIs(self.queue.peek_request(), first)
+
+        self.queue.remove_request(first)
+
+        self.assertEqual(len(self.queue), 1)
+        self.assertIs(self.queue.peek_request(), second)
+        self.assertIs(self.queue.pop_request(), second)
+        self.assertEqual(len(self.queue), 0)
+
+    def test_remove_requests_clears_peeked_request_when_queue_becomes_empty(self):
+        request = self._make_request("r1#job_name[job1]#")
+        self.queue.add_request(request)
+        self.assertIs(self.queue.peek_request(), request)
+
+        self.queue.remove_requests([request])
+
+        self.assertEqual(len(self.queue), 0)
+        with self.assertRaises(IndexError):
+            self.queue.peek_request()
+        with self.assertRaises(IndexError):
+            self.queue.pop_request()
+
+    def test_remove_other_request_preserves_peeked_candidate(self):
+        first = self._make_request("r1#job_name[job1]#")
+        second = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(first)
+        self.queue.add_request(second)
+        self.assertIs(self.queue.peek_request(), first)
+
+        self.queue.remove_request(second)
+
+        # Admission may change after peeking; keep the surviving candidate pinned.
+        with patch.object(self.queue, "_find_admittable", return_value=None):
+            self.assertIs(self.queue.peek_request(), first)
+            self.assertIs(self.queue.pop_request(), first)
+        self.assertEqual(len(self.queue), 0)
+
     def test_peek_request_returns_admittable(self):
         req = self._make_request("r1#job_name[job1]#", num_prompt_tokens=50)
         self.queue.add_request(req)
