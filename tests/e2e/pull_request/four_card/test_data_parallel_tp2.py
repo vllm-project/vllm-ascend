@@ -153,20 +153,15 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             hidden.add_(1 + rank // 2 * EPLB_ROWS)
             logits = torch.zeros((EPLB_ROWS, EPLB_LOGICAL_EXPERTS), device=device)
             padding = torch.ones(EPLB_ROWS, dtype=torch.bool, device=device)
-            logical_ids = torch.ones((EPLB_ROWS * 2, 1), dtype=torch.int32, device=device)
+            # Distinct experts expose mask row errors in the load counts; swap
+            # the first pair so both replica choices are exercised.
+            logical_experts = torch.arange(EPLB_ROWS * 2)
+            logical_experts[:2] = logical_experts[:2].flip(0)
+            logical_ids = logical_experts.to(device=device, dtype=torch.int32)[:, None]
             weights = torch.ones_like(logical_ids, dtype=torch.float32)
             num_tokens = torch.tensor(EPLB_ROWS, device=device)
             state.num_unpadded_tokens_tensors = [num_tokens]
             state.allgather_source_is_padding = padding
-            gather_mask = prepare.all_gather_eplb_mask
-            mask = None
-
-            def capture_mask(source_mask):
-                nonlocal mask
-                mask = gather_mask(source_mask)
-                return mask
-
-            prepare.all_gather_eplb_mask = capture_mask
 
             def forward():
                 prepared = prepare.prepare(hidden, logits)
@@ -187,12 +182,10 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                     dispatched.group_list_type,
                     topk_ids=physical,
                     num_source_tokens=EPLB_ROWS,
-                    is_sequence_parallel=False,
-                    prepare_finalize=prepare,
+                    all_gather_mask=prepare.all_gather_eplb_mask,
                 )
-                assert mask is not None
                 owners = ((physical >= start) & (physical < start + EPLB_LOCAL_EXPERTS)).to(torch.int32)
-                return output, owners, physical, mask, prepared.hidden_states
+                return output, owners, physical, prepared.hidden_states
 
             # Compile kernels and initialize HCCL before capture.
             forward()
@@ -214,7 +207,7 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                     result = forward()
                 else:
                     graph.replay()
-                output, owners, physical, mask, gathered = result
+                output, owners, physical, gathered = result
                 torch.distributed.all_reduce(output, group=get_ep_group().device_group)
                 torch.distributed.all_reduce(owners, group=get_ep_group().device_group)
                 torch.testing.assert_close(output, gathered)
@@ -222,10 +215,12 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                 expected_mask = torch.tensor(
                     [row < valid_rows[dp] and eligible[dp] for dp in range(2) for row in range(EPLB_ROWS)]
                 )
-                torch.testing.assert_close(mask.cpu(), expected_mask)
                 assert state.allgather_record_tensor.item() == int(expected_mask.any())
-                slots = torch.where(placement == 1)[0]
-                expected_physical = slots[(torch.arange(EPLB_ROWS * 2) + 1) % slots.numel()][:, None]
+                expected_physical = torch.empty_like(logical_experts)
+                for row, logical in enumerate(logical_experts.tolist()):
+                    slots = torch.where(placement == logical)[0]
+                    expected_physical[row] = slots[(row + logical) % slots.numel()]
+                expected_physical = expected_physical[:, None]
                 torch.testing.assert_close(physical.cpu().long(), expected_physical)
                 expected_load = torch.bincount(expected_physical[expected_mask].flatten(), minlength=physical_count)
                 torch.distributed.all_reduce(loads, group=get_ep_group().device_group)
