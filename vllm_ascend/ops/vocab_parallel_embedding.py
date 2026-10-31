@@ -18,6 +18,7 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from math import lcm
 
 import torch
 import torch.distributed as dist
@@ -135,19 +136,49 @@ def _resolve_vocab_parallel_plan(
 
     if is_lm_head and lmhead_tp_enable():
         group = get_lmhead_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # Compose with standard TP when both are active: shard the vocabulary
+        # over the combined TP x lmhead-TP grid (TP outer, fine-grained inner),
+        # matching the PCP_X_TP linearization. The all-to-all reconstructs the
+        # fine-grained inner shards first (each TP rank ends up with its own
+        # [tp_rank * V/T, (tp_rank + 1) * V/T) span); the TP all-gather in
+        # AscendLogitsProcessor._get_logits_lmheadtp then appends the outer
+        # spans in TP-rank order, so the group-order concatenation equals the
+        # full vocabulary order.
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
+            shard_rank,
+            shard_world_size,
         )
 
     if is_token_embedding and embedding_tp_enable():
         group = get_embed_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # Compose with standard TP the same way the LM head does (TP outer,
+        # fine-grained inner): each rank looks up only its combined slice of
+        # the table, the reduce-scatter restores the token rows with just the
+        # local TP column's contribution, and the output_reduce_group hook in
+        # _forward_with_token_exchange then all-reduces the remaining columns'
+        # contributions over TP — the same exchange contract PCP_X_TP already
+        # runs for its embedding path.
+        output_reduce_group = None
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
+            output_reduce_group = tp_group
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
+            shard_rank,
+            shard_world_size,
             token_exchange_group=group,
+            output_reduce_group=output_reduce_group,
         )
 
     tp_group = get_tp_group()
@@ -202,7 +233,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
 
         self.num_embeddings = num_embeddings
-        self.padding_size = padding_size
+        # The padded vocabulary must divide evenly across the full shard count
+        # (finegrained x standard TP when composed); raising the padding
+        # granularity to its lcm keeps exotic products (e.g. 96) loadable
+        # instead of tripping the divide() assert below.
+        self.padding_size = lcm(padding_size, self.tp_size)
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size, self.padding_size)
@@ -565,6 +600,14 @@ class AscendLogitsProcessor(LogitsProcessor):
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        # With standard TP composed in (see _resolve_vocab_parallel_plan), the
+        # all-to-all reconstructed only this TP rank's vocabulary span; gather
+        # the remaining spans over the TP group to rebuild full-vocab logits.
+        # The all-to-all runs first so this collective carries the local token
+        # rows, not the whole fine-grained group's.
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            logits = tp_group.all_gather(logits, dim=-1)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
