@@ -1588,7 +1588,13 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.has_indexer = True
         self.impl.skip_indexer_pre_process = False
-        self.impl.indexer = SimpleNamespace(wq_b=SimpleNamespace(weight_scale=torch.ones(1)))
+        self.impl.indexer = SimpleNamespace(
+            wq_b=SimpleNamespace(
+                weight_scale=torch.ones(1),
+                input_size=self.impl.q_lora_rank,
+                quant_method=SimpleNamespace(quant_method=AscendW8A8DynamicLinearMethod()),
+            )
+        )
         self.impl.enable_sparse_sfa_turboquant = False
         self.impl.enable_sparse_sfa_c8 = True
         self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.PROLOG_V3)

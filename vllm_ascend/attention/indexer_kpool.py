@@ -23,12 +23,14 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.attention.prolog_query import mxfp8_query_scale_width, prolog_query_unsupported_reasons
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.utils import _round_up, enable_dsa_cp
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
@@ -562,6 +564,67 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError(f"GLM KPool cache {layer.prefix!r} is not bound to a tensor.")
         return cache
 
+    def _project_query(
+        self,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        num_tokens: int,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Consume normalized queries using the query linear's own scheme.
+
+        Quantized inputs use a framework contract: [T, K] data with either
+        FP32 per-token INT8 scales or E8M0 MXFP8 scales grouped by 32. MX
+        scales may be [T, pairs * 2] or [T, pairs, 2]. The Prolog adapter is
+        responsible for normalizing any operator-specific output layout.
+        """
+        if not isinstance(q_c, tuple):
+            return self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
+
+        # Lazy imports keep cache-metadata imports independent of the heavy
+        # quantization registration path and its model/operator dependencies.
+        from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+        if len(q_c) != 2 or not all(isinstance(value, torch.Tensor) for value in q_c):
+            raise TypeError("KPool quantized q_c requires a (data, scale) tensor pair.")
+        quantized, scale = q_c
+        if (
+            quantized.ndim != 2
+            or quantized.shape[1] != self.q_lora_rank
+            or num_tokens < 0
+            or quantized.shape[0] < num_tokens
+            or scale.ndim == 0
+            or scale.shape[0] != quantized.shape[0]
+        ):
+            raise ValueError("KPool q_c data and scales must have matching token rows covering the query input.")
+        if scale.device != quantized.device:
+            raise ValueError("KPool q_c data and scales must be on the same device.")
+
+        reasons = prolog_query_unsupported_reasons(self.wq_b, self.q_lora_rank)
+        if reasons:
+            raise ValueError("KPool query configuration is unsupported: " + "; ".join(reasons))
+        scheme = getattr(getattr(self.wq_b, "quant_method", None), "quant_method", None)
+        if type(scheme) is AscendW8A8DynamicLinearMethod:
+            if quantized.dtype != torch.int8 or scale.dtype != torch.float32:
+                raise TypeError("KPool W8A8_DYNAMIC requires INT8 q_c and FP32 per-token scales.")
+            if scale.ndim not in (1, 2) or (scale.ndim == 2 and scale.shape[1] != 1):
+                raise ValueError("KPool INT8 q_c scales must have shape [T] or [T, 1].")
+            scale = scale[:num_tokens].reshape(num_tokens)
+        elif type(scheme) is AscendW8A8MXFP8DynamicLinearMethod:
+            if quantized.dtype != torch.float8_e4m3fn or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+                raise TypeError("KPool W8A8_MXFP8 requires E4M3FN q_c and E8M0 scale storage.")
+            scale_pairs = mxfp8_query_scale_width(self.q_lora_rank) // 2
+            if tuple(scale.shape[1:]) not in ((scale_pairs * 2,), (scale_pairs, 2)):
+                raise ValueError(
+                    "KPool MXFP8 q_c scales must cover K in E8M0 pairs, shaped [T, pairs * 2] or [T, pairs, 2]."
+                )
+            scale = scale[:num_tokens].reshape(num_tokens, scale_pairs, 2)
+        else:
+            raise TypeError("KPool quantized q_c requires a matching W8A8_DYNAMIC or W8A8_MXFP8 query linear.")
+
+        prepared = PreparedLinearInput(quantized[:num_tokens], scale, output_dtype)
+        return self.wq_b(prepared)[0].view(num_tokens, self.n_head, self.head_dim)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -591,9 +654,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         q_values = None
         weights = None
         if compute_topk:
-            if isinstance(q_c, tuple):
-                raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
-            q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
+            q_values = self._project_query(q_c, num_tokens, hidden.dtype)
             weights = F.linear(hidden.float(), self._head_weight_f32).to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
