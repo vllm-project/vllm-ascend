@@ -123,6 +123,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.structured_outputs import grammar_invalid_drafts
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
     C8KVBlockZeroer,
@@ -1086,6 +1087,7 @@ class NPUModelRunner(GPUModelRunner):
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
+        invalid_drafts = None
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1094,6 +1096,11 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_drafts = grammar_invalid_drafts(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                getattr(grammar_output, "num_acceptable_drafts", None),
             )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
@@ -1108,6 +1115,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_drafts,
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
