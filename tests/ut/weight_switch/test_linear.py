@@ -405,7 +405,7 @@ class TestEnableWeightSwitch(unittest.TestCase):
 
     def test_pool_reuses_buffers_across_calls(self):
         layer = self._layer()
-        pool = {}
+        pool: dict = {}
         first = self._method().enable_weight_switch(layer, self._config(), pool=pool, pool_key_prefix="k")
         self.assertEqual(len(pool), 1)
         second = self._method().enable_weight_switch(layer, self._config(), pool=pool, pool_key_prefix="k")
