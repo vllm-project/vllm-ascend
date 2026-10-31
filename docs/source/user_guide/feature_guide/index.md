@@ -28,6 +28,7 @@ layer_sharding
 speculative_decoding
 context_parallel
 weight_prefetch
+qwen35_weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment

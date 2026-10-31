@@ -3747,6 +3747,13 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def reload_weights(self, *args, **kwargs) -> None:
+        if self.ascend_config.qwen35_weight_prefetch.enabled:
+            raise RuntimeError(
+                "Qwen3.5 weight prefetch captures weight addresses. Restart with prefetch disabled before reloading."
+            )
+        return super().reload_weights(*args, **kwargs)
+
     def load_model(self) -> None:
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -3848,6 +3855,11 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
+
+        if self.ascend_config.qwen35_weight_prefetch.enabled:
+            from vllm_ascend.ops.weight_prefetch_qwen35 import bind_qwen35_weight_prefetch
+
+            bind_qwen35_weight_prefetch(self.model, self.vllm_config, self.ascend_config.qwen35_weight_prefetch)
 
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
