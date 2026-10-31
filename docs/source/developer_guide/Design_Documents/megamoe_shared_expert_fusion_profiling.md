@@ -6,8 +6,8 @@
 - 关键配置：`--enforce-eager`、`enable_dsa_cp=false`、`enable_flashcomm1=false`、`enable_shared_expert_dp=true`
 - 采集方式：`--profiler-config '{"profiler":"torch","torch_profiler_dir":...}'` 挂载 `/start_profile`、`/stop_profile`；warmup 一次后 start_profile → 相同长 prompt（6360 字符，md5 `8eb787c6a8355baa2184f7f0b2914d31`）curl → stop_profile，msprof 导出 `op_summary`
 - 对照组：
-  - **fc=2**：`enable_fused_mc2=2`（MegaMoe，仅路由专家，共享专家走独立路径）
-  - **fc=3**：`enable_fused_mc2=3`（共享专家融合进 MegaMoe 算子）
+    - **fc=2**：`enable_fused_mc2=2`（MegaMoe，仅路由专家，共享专家走独立路径）
+    - **fc=3**：`enable_fused_mc2=3`（共享专家融合进 MegaMoe 算子）
 
 ## 1. 总体指标（rank0 设备侧）
 

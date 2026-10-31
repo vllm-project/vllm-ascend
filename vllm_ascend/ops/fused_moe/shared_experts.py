@@ -38,11 +38,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
 )
-from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -301,11 +301,11 @@ class AscendSharedExperts:
             return ("silu", params)
         if isinstance(act_fn, SiluAndMul):
             return ("silu", {"alpha": 1.0, "beta": 0.0})
-        # vLLM's SwigluOAIAndMul hardcodes (up + 1); model-private look-alikes
+        # vLLM's SwigluOAIAndMul hardcodes (up + 1); model-private look-alike
         # (e.g. MiniMaxM3SwiGLUOAI) carry alpha/beta/limit as attributes.
         if isinstance(act_fn, SwigluOAIAndMul) or (hasattr(act_fn, "alpha") and hasattr(act_fn, "limit")):
             params = {
-                "alpha": act_fn.alpha,
+                "alpha": getattr(act_fn, "alpha", 1.0),
                 "beta": getattr(act_fn, "beta", 1.0),
             }
             limit = getattr(act_fn, "limit", None)
@@ -403,7 +403,10 @@ class AscendSharedExperts:
         try:
             # Aclnn-only firmware cannot clone tensors that carry a FRACTAL_NZ
             # internal format, so force the ND view before the transpose +
-            # contiguous materialization (2 == ACL_FORMAT_ND).
+            # contiguous materialization (2 == ACL_FORMAT_ND). Internal-format
+            # insertion is disabled so the following .contiguous() cannot
+            # silently re-introduce FRACTAL_NZ.
+            torch.npu.config.allow_internal_format = False
             weight = torch_npu.npu_format_cast(linear.weight.data, 2)
             weight = weight.transpose(0, 1).contiguous()
             scale = linear.weight_scale.data.transpose(0, 1).contiguous()
@@ -458,9 +461,7 @@ class AscendSharedExperts:
         # dtype ints the MegaMoe wrapper accepts, matching
         # _get_cann_mega_moe_quant_settings.
         shared_quant_type = QuantType.W4A4MXFP if self._megamoe_shared_packed_fp4 else QuantType.W8A8MXFP
-        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(
-            shared_quant_type
-        )
+        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(shared_quant_type)
         self.moe_layer.ascend_megamoe_shared_quant_out_dtype = shared_quant_out_dtype
         self.moe_layer.ascend_megamoe_shared_weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
