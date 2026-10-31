@@ -54,6 +54,23 @@ def set_dummy_tensor(tensor: torch.Tensor) -> None:
     _DUMMY_TENSOR = tensor
 
 
+def is_dummy_tensor(tensor: torch.Tensor) -> bool:
+    """Check whether ``tensor`` is the :data:`_DUMMY_TENSOR` placeholder.
+
+    A tensor is considered dummy when it is either the exact placeholder object (same :meth:`data_ptr`) or an empty
+    tensor (``numel() == 0``). The two conditions cover both the default ``torch.empty(0)`` placeholder and any
+    non-empty placeholder (e.g. ``torch.empty(1, ...)``) rebound via :func:`set_dummy_tensor`, so callers do not need
+    to know which shape the placeholder currently has.
+
+    Args:
+        tensor (torch.Tensor): The tensor to test.
+
+    Returns:
+        bool: True if ``tensor`` is the dummy placeholder (by identity or by being empty).
+    """
+    return tensor.numel() == 0 or tensor.data_ptr() == _DUMMY_TENSOR.data_ptr()
+
+
 class _TensorRepr:
     """
     A simple class to provide a string representation of a tensor or an iterable of tensors.
