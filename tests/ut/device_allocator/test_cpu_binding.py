@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 import subprocess
 import unittest
 from collections import defaultdict
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock, call, mock_open, patch
 import vllm_ascend.cpu_binding as cpu_binding_module
 from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -1315,6 +1317,32 @@ class TestBindingSwitch(unittest.TestCase):
 
         mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
         mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
+
+
+class TestBindNpuIdResolution(unittest.TestCase):
+    """CPU binding resolves the host physical NPU ID from the runtime device.
+
+    Internal DP workers see per-process renumbered devices, so ordinal
+    arithmetic on the device-control env returns the process-local ordinal
+    and every DP group would select the same CPU/NUMA/IRQ pool. The worker
+    therefore binds by the CANN-resolved physical ID of the currently
+    bound device instead.
+    """
+
+    @patch("vllm_ascend.platform.torch")
+    @patch("vllm_ascend.platform.import_module")
+    @patch("vllm_ascend.platform.bootstrap_custom_op_env")
+    def test_runtime_resolution_pierces_renumbered_visibility(self, _mock_bootstrap, _mock_import, mock_torch):
+        # A worker whose NPUs are renumbered to "0,1" inside the process,
+        # while the CANN runtime reports the bound device's host physical
+        # ID as 5.
+        mock_torch.ops._C_ascend.get_physical_device_id.return_value = 5
+
+        with patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}):
+            # Ordinal arithmetic returns the process-local ordinal ...
+            self.assertEqual(NPUPlatform.device_id_to_physical_device_id(0), 0)
+            # ... while the CANN runtime resolves the host physical ID.
+            self.assertEqual(NPUPlatform.visible_device_id_to_physical_device_id(0), 5)
 
 
 if __name__ == "__main__":
