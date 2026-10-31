@@ -33,6 +33,7 @@ from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
@@ -90,6 +91,13 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.device_allocator.sleep_mode_backend import (
+    AscendLegacySleepModeBackend,
+    guard_sleep_execution,
+    normalize_sleep_mode_backend,
+)
+from vllm_ascend.device_allocator.sleep_runtime import AscendSleepRuntime
+from vllm_ascend.device_allocator.sleep_signals import preserve_worker_signal_handlers
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -227,6 +235,14 @@ class NPUWorker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
+        self.sleep_mode_backend: AscendLegacySleepModeBackend | None = None
+        if self.model_config.enable_sleep_mode:
+            normalize_sleep_mode_backend(self.model_config)
+            backend = SleepModeBackendFactory.create_backend(self.model_config)
+            if not isinstance(backend, AscendLegacySleepModeBackend):
+                raise TypeError("Expected a worker-bound Ascend sleep backend")
+            backend.bind_runtime(AscendSleepRuntime(self))
+            self.sleep_mode_backend = backend
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -317,75 +333,17 @@ class NPUWorker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
-        self.synchronize_device()
-        free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Level-1 only offloads the weights pool. Persistent metadata such as
-        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
-        # stays resident and does not need a CPU backup.
-        if level == 1:
-            self._sleep_saved_buffers = {}
-            self._sleep_saved_parameters = {}
-        else:
-            model = self.model_runner.model
-            # Level-2 discards the weights pool; retain parameters the sender omits.
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
-
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
-        if cleanup_enabled:
-            self.sleep_wakeup_manager.sleep()
-        self.synchronize_device()
-
-        allocator = CaMemAllocator.get_instance()
-        global_te.unregister_buffer()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.npu.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
-        used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
-
-        logger.info(
-            "Sleep mode (level=%s) freed %.2f GiB memory, %.2f GiB memory is still in use.",
-            level,
-            freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes,
-        )
+        if self.sleep_mode_backend is None:
+            raise RuntimeError("Sleep mode is not enabled")
+        self.sleep_mode_backend.suspend(level)
 
     def disconnect_kv_transfer_peers(self) -> None:
         global_te.disconnect_all_peers()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        nz_mode = get_ascend_config().weight_nz_mode
-        if nz_mode:
-            raise ValueError(
-                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
-                "or enable additional_config.rl_config (enabled: true) which disables NZ "
-                "automatically."
-            )
-        allocator = CaMemAllocator.get_instance()
-        allocator.wake_up(tags=tags)
-        if tags is None or "kv_cache" in tags:
-            global_te.reregister_buffer()
-
-        # Do not access or consume saved weights when only the KV pool wakes.
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        # Restore the buffers after level 2 sleep
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
-
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
-        if cleanup_enabled:
-            self.sleep_wakeup_manager.wakeup(tags)
-        self.synchronize_device()
+        if self.sleep_mode_backend is None:
+            raise RuntimeError("Sleep mode is not enabled")
+        self.sleep_mode_backend.resume(tags)
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -452,6 +410,11 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        if getattr(self, "_sleep_backend_shutdown_started", False):
+            return
+        self._sleep_backend_shutdown_started = True
+        if backend := getattr(self, "sleep_mode_backend", None):
+            backend.close()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -582,6 +545,7 @@ class NPUWorker(WorkerBase):
 
         return device
 
+    @preserve_worker_signal_handlers()
     def init_device(self):
         # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
@@ -661,6 +625,7 @@ class NPUWorker(WorkerBase):
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
     @torch.inference_mode()
+    @preserve_worker_signal_handlers()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
@@ -874,6 +839,7 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @guard_sleep_execution
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -945,6 +911,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @guard_sleep_execution
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
@@ -954,6 +921,7 @@ class NPUWorker(WorkerBase):
         )
         return output
 
+    @preserve_worker_signal_handlers()
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -991,6 +959,7 @@ class NPUWorker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+    @preserve_worker_signal_handlers()
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
