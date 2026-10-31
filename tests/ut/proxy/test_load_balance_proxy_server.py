@@ -51,7 +51,7 @@ def _encode_items(items: list[dict]) -> list[dict]:
     return out
 
 
-def _sse(content: str = "hi", stop_reason: str | None = None) -> bytes:
+def _sse(content: str = "hi", stop_reason: str | int | None = None) -> bytes:
     obj = {
         "id": "x",
         "choices": [
@@ -102,18 +102,19 @@ def _post(
     payload: dict,
     stream: bool = False,
     timeout: float = 30,
+    api: str = "/v1/chat/completions",
 ) -> tuple[int, bytes]:
     with httpx.Client(timeout=timeout) as c:
         if stream:
             with c.stream(
                 "POST",
-                f"{proxy_url}/v1/chat/completions",
+                f"{proxy_url}{api}",
                 json=payload,
                 headers={"Content-Type": "application/json"},
             ) as r:
                 return r.status_code, b"".join(r.iter_bytes())
         r = c.post(
-            f"{proxy_url}/v1/chat/completions",
+            f"{proxy_url}{api}",
             json=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -172,6 +173,11 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    received: list[dict[str, Any]] = []
+
+    @app.get("/__requests__")
+    async def requests():
+        return received
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -184,6 +190,7 @@ def _create_mock_backend_app():
 
     @app.post("/__set_script__")
     async def set_script(req: Request):
+        received.clear()
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
@@ -204,6 +211,7 @@ def _create_mock_backend_app():
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
     async def handle(req: Request):
+        received.append(await req.json())
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -237,8 +245,11 @@ if __name__ == "__main__" and "--mock-backend" in sys.argv:
 # Pytest fixture: start mock backends + proxy
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
-def proxy_server():
+def proxy_server(request):
     """Start mock backends + proxy as subprocesses, yield proxy URL, teardown."""
+    script = PROXY_SCRIPT
+    if getattr(request, "param", "standard") == "layerwise":
+        script = script.with_name("load_balance_proxy_layerwise_server_example.py")
     test_file = str(Path(__file__).resolve())
     procs = []
 
@@ -273,7 +284,7 @@ def proxy_server():
             subprocess.Popen(
                 [
                     sys.executable,
-                    str(PROXY_SCRIPT),
+                    str(script),
                     "--host",
                     "127.0.0.1",
                     "--port",
@@ -440,14 +451,23 @@ def test_healthcheck(proxy_server):
 
 
 def test_recompute(proxy_server):
-    """Recompute (stop_reason=recomputed) retries and returns normal content."""
+    """Explicit recomputation errors retry and return normal content."""
     _set_script(
         MOCK_DECODE_PORT,
         [
             {
                 "kind": "stream",
                 "status": 200,
-                "chunks": [_sse("gen", stop_reason="recomputed")],
+                "chunks": [
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "error": {"type": "RecomputeRequiredError", "code": 500},
+                            "partial_response": json.loads(_sse("gen", stop_reason=-1)[6:]),
+                        }
+                    ).encode()
+                    + b"\n\n"
+                ],
             },
             {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]},
         ],
@@ -550,3 +570,97 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+@pytest.mark.parametrize("proxy_server", ["standard", "layerwise"], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("fragmented", [False, True])
+@pytest.mark.parametrize("chat", [False, True])
+def test_recompute_error_continues_with_conflicting_user_stop(proxy_server, stream, fragmented, chat):
+    """A configured user stop must not disable explicit error continuation."""
+    next_attempts = []
+    for user_stop in (None, "recomputed"):
+        partial: dict[str, Any] = {
+            "choices": [{"index": 0, "stop_reason": -1, "delta" if stream else "message": {"content": "partial"}}],
+            "usage": {"completion_tokens": 2},
+        }
+        if not chat:
+            partial["choices"][0] = {"index": 0, "stop_reason": -1, "text": "partial"}
+        terminal = {
+            "error": {"type": "RecomputeRequiredError", "code": 500, "message": "interrupted"},
+            "partial_response": partial,
+        }
+        if stream:
+            body = b"data: " + json.dumps(terminal).encode() + b"\n\n" + DONE
+            chunks = [body[:13], body[13:37], body[37:]] if fragmented else [body]
+            first = {"kind": "stream", "status": 200, "chunks": chunks}
+            final = {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]}
+        else:
+            first = {"kind": "json", "status": 500, "body": terminal}
+            final = {
+                "kind": "json",
+                "status": 200,
+                "body": {
+                    "choices": [{"index": 0, "message": {"content": "done"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1},
+                },
+            }
+        if not chat:
+            done = {
+                "choices": [{"index": 0, "text": "done", "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 1},
+            }
+            if stream:
+                final["chunks"] = [b"data: " + json.dumps(done).encode() + b"\n\n", DONE]
+            else:
+                final["body"] = done
+        _set_script(MOCK_DECODE_PORT, [first, final])
+        payload = _chat_req(stream=stream)
+        payload["stop"] = user_stop
+        if not chat:
+            payload.pop("messages")
+            payload["prompt"] = "hi"
+        status, result = _post(
+            proxy_server, payload, stream=stream, api="/v1/chat/completions" if chat else "/v1/completions"
+        )
+        assert status == 200
+        assert b"done" in result and b"RecomputeRequiredError" not in result
+        if stream:
+            assert result.count(b"[DONE]") == 1
+        else:
+            choice = json.loads(result)["choices"][0]
+            assert (choice["message"]["content"] if chat else choice["text"]) == "partialdone"
+        sent = httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+        assert len(sent) == 2
+        next_attempts.append((sent[1]["messages" if chat else "prompt"], sent[1]["max_tokens"]))
+    assert next_attempts[0] == next_attempts[1]
+    assert "partial" in str(next_attempts[1][0])
+
+
+@pytest.mark.parametrize("proxy_server", ["standard", "layerwise"], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("chat", [False, True])
+def test_user_stop_recomputed_does_not_retry(proxy_server, stream, chat):
+    choice: dict[str, Any] = {"index": 0, "finish_reason": "stop", "stop_reason": "recomputed"}
+    if chat:
+        choice["delta" if stream else "message"] = {"content": "finished"}
+    else:
+        choice["text"] = "finished"
+    terminal = {"choices": [choice], "usage": {"completion_tokens": 1}}
+    first = (
+        {"kind": "stream", "status": 200, "chunks": [b"data: " + json.dumps(terminal).encode() + b"\n\n", DONE]}
+        if stream
+        else {"kind": "json", "status": 200, "body": terminal}
+    )
+    _set_script(MOCK_DECODE_PORT, [first])
+    payload = _chat_req(stream=stream)
+    payload["stop"] = "recomputed"
+    if not chat:
+        payload.pop("messages")
+        payload["prompt"] = "hi"
+    status, result = _post(
+        proxy_server, payload, stream=stream, api="/v1/chat/completions" if chat else "/v1/completions"
+    )
+    assert status == 200 and b"finished" in result
+    assert b"RecomputeRequiredError" not in result
+    assert len(httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()) == 1

@@ -1,0 +1,4 @@
+pr: 19973
+entries:
+  - category: bugfix
+    text: Report Ascend PD recomputation interruptions as structured API errors while preserving continuation in both Python proxy examples. Deploy the scheduler, serving patch, and proxies as a matched version; the previous string-based continuation protocol is no longer accepted.

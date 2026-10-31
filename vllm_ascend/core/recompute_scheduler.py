@@ -46,6 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
+from vllm_ascend.core.recompute_protocol import RECOMPUTE_STOP_REASON
 from vllm_ascend.utils import get_ascend_config
 
 
@@ -1047,7 +1048,7 @@ class RecomputeScheduler(Scheduler):
                     request_id=req_info.request_id,
                     new_token_ids=[],
                     finish_reason=FinishReason.STOP,
-                    stop_reason="recomputed",
+                    stop_reason=RECOMPUTE_STOP_REASON,
                 )
             )
         for client_index, recomputed_outputs in recomputed_by_client.items():

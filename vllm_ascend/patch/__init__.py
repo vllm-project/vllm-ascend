@@ -1836,3 +1836,13 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_recompute_response.py **
+# Targets: OpenAIServingChat/OpenAIServingCompletion response and stream methods.
+# Why: Ascend RecomputeScheduler emits a reserved negative stop reason for proxy continuation.
+# How: Convert terminal responses to ErrorResponse while retaining partial_response;
+#      the paired PD proxies consume that payload with their existing retry path.
+# Scope: API response behavior, installed by the existing global platform loader.
+# Related: vllm-project/router#394, #397. The control signal is Ascend-specific.
+# Removal: remove when Ascend no longer exposes its recomputation control signal
+#          as an ordinary API completion, or an equivalent serving hook is available.
