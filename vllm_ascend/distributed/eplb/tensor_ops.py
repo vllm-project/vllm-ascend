@@ -8,6 +8,29 @@ import torch
 EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS = 1024
 
 
+def make_allgather_mask(
+    num_tokens: int,
+    num_unpadded_tokens: torch.Tensor,
+    record_enabled: torch.Tensor,
+    *,
+    is_padding: torch.Tensor | None = None,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+) -> torch.Tensor:
+    """Describe valid source rows before the same gather/unpad as MoE inputs."""
+    start = tp_rank * num_tokens
+    if is_padding is None:
+        rows = torch.arange(start, start + num_tokens, device=num_unpadded_tokens.device)
+        valid = rows < num_unpadded_tokens
+    elif is_padding.numel() == num_tokens:
+        valid = ~is_padding
+    else:
+        padding = max(0, num_tokens * tp_size - is_padding.numel())
+        padded = torch.nn.functional.pad(is_padding[: num_tokens * tp_size], (0, padding), value=True)
+        valid = ~padded[start : start + num_tokens]
+    return valid & record_enabled.to(torch.bool)
+
+
 def build_expert_replica_routing_table(
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,

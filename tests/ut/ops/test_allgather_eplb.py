@@ -10,6 +10,7 @@ import torch
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe import eplb as eplb_ops
 from vllm_ascend.ops.fused_moe import routed_experts as routed_module
@@ -180,15 +181,38 @@ def test_source_mask_is_unused_outside_a5_allgather(monkeypatch, device, comm):
     )
     prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
     layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    token_mask = layer._make_eplb_token_mask(2, state, prepare)
-    assert token_mask is None
-    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
-    state.record_load(
-        torch.tensor([2, 3]),
-        1,
-        topk_ids=torch.empty(0, 1, dtype=torch.int32),
-        token_mask=token_mask,
+    layer.router = SimpleNamespace(eplb_state=state)
+    layer._use_v2_model_runner = True
+    layer.enable_npugraph_ex_static_kernel = False
+    layer.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    layer._select_experts = lambda **kwargs: (torch.ones(2, 1), torch.zeros(2, 1, dtype=torch.int32))
+    object.__setattr__(
+        layer,
+        "quant_method",
+        SimpleNamespace(
+            apply=lambda **kwargs: FusedExpertsResult(
+                routed_out=kwargs["x"], expert_tokens=torch.tensor([2, 3]), group_list_type=1
+            )
+        ),
     )
+    layer.dynamic_eplb = False
+    layer.return_with_event = False
+    comm_method = SimpleNamespace(
+        prepare_finalize=prepare,
+        prepare=lambda **kwargs: SimpleNamespace(
+            hidden_states=kwargs["hidden_states"],
+            router_logits=kwargs["router_logits"],
+            mc2_mask=None,
+            padded_hidden_states_shape=None,
+            pertoken_scale=None,
+        ),
+        finalize=lambda **kwargs: kwargs["hidden_states"],
+    )
+    monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(routed_module, "get_moe_comm_method", lambda *_: comm_method)
+    monkeypatch.setattr(routed_module, "_EXTRA_CTX", SimpleNamespace(in_profile_run=False, moe_comm_type=comm))
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(2, 2), router_logits=torch.ones(2, 2))
     assert state.expert_load_view.tolist() == [2, 3]
     prepare.all_gather_eplb_mask.assert_not_called()
 
@@ -207,13 +231,10 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     context = SimpleNamespace(
         is_padding=None if padding_source == "unpadded_count" else torch.tensor([False, True, True, False])
     )
-    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    layer.moe_config = SimpleNamespace(is_sequence_parallel=sequence_parallel)
-    monkeypatch.setattr(routed_module, "use_allgather_eplb", lambda enabled: enabled)
-    monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
-    monkeypatch.setattr(routed_module, "dbo_current_ubatch_id", lambda: 1)
-    monkeypatch.setattr(routed_module, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(routed_module, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 1)
+    monkeypatch.setattr(state_module, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(state_module, "get_tensor_model_parallel_rank", lambda: 1)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
     prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
     prepare.all_gather_eplb_mask.side_effect = lambda mask: mask
@@ -227,12 +248,13 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     }[sequence_parallel, padding_source]
 
     def record():
-        token_mask = layer._make_eplb_token_mask(2, state, prepare)
         state.record_load(
             torch.tensor([2]),
             1,
             topk_ids=torch.zeros(2, 1, dtype=torch.int32),
-            token_mask=token_mask,
+            num_source_tokens=2,
+            is_sequence_parallel=sequence_parallel,
+            all_gather_mask=prepare.all_gather_eplb_mask,
         )
 
     record()
@@ -325,7 +347,7 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
     )
     monkeypatch.setattr(routed_module, "get_moe_comm_method", lambda *_: comm)
     monkeypatch.setattr(routed_module, "use_allgather_eplb", lambda enabled: enabled)
-    monkeypatch.setattr(routed_module, "make_allgather_mask", source_mask)
+    monkeypatch.setattr(state_module._eplb_ops, "make_allgather_mask", source_mask)
     monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))

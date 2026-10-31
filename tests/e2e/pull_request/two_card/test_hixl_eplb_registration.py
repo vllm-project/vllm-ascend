@@ -55,6 +55,7 @@ def test_eplb_imports_in_fresh_process(first_module, tmp_path):
             from vllm_ascend.ops.fused_moe import eplb
             assert eplb.build_expert_replica_routing_table is tensor_ops.build_expert_replica_routing_table
             assert eplb.count_allgather_tokens is tensor_ops.count_allgather_tokens
+            assert eplb.make_allgather_mask is tensor_ops.make_allgather_mask
             assert hasattr(torch.ops.vllm, "ascend_eplb_map_to_physical")
             assert hasattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens")
 

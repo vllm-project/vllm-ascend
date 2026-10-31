@@ -6,7 +6,7 @@
 import inspect
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
@@ -19,8 +19,14 @@ from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    in_the_same_node_as,
+)
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb import tensor_ops as _eplb_ops
@@ -106,11 +112,27 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         group_list_type: int,
         *,
         topk_ids: torch.Tensor,
-        token_mask: torch.Tensor | None = None,
+        num_source_tokens: int,
+        is_sequence_parallel: bool = False,
+        all_gather_mask: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
-        """Record MRV2 load using an optional mask aligned to the routed rows."""
+        """Record MRV2 load, constructing and gathering source eligibility when needed."""
         local_load = None
-        if token_mask is not None:
+        if all_gather_mask is not None:
+            assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
+            num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+            is_padding = self.allgather_source_is_padding
+            if is_padding is None:
+                is_padding = getattr(get_forward_context(), "is_padding", None)
+            token_mask = _eplb_ops.make_allgather_mask(
+                num_source_tokens,
+                num_unpadded_tokens,
+                self.should_record_tensor,
+                is_padding=is_padding,
+                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+            )
+            token_mask = all_gather_mask(token_mask)
             local_load = _eplb_ops.count_allgather_tokens(
                 topk_ids, token_mask, self.local_expert_start, self.local_expert_count
             )
