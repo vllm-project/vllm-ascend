@@ -28,6 +28,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.pcp_manager = None
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
@@ -47,16 +48,15 @@ def make_speculator():
     return spec
 
 
-def test_dspark_sync_matches_global_draft_requests(monkeypatch):
-    """DSpark drafts the global batch; the target sync covers its requests."""
+def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
+    """Without PCP partitioning, target sync covers the draft requests."""
     spec = make_speculator()
     spec.max_num_reqs = 4
     spec.max_num_tokens = 20
     batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
-    # Upstream dispatches the target before PCP partitioning, so its sync
-    # carries the global request count.
+    # Without PCP, both models use the same request layout.
     target_sync = DPSyncState(num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4)
 
     def parent_propose(self, *args, **kwargs):
