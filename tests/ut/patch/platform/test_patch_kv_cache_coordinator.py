@@ -109,10 +109,12 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    retention_interval: int | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
+    kv_cache_config.prefix_cache_retention_interval = retention_interval
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -125,12 +127,19 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=MAMBA_SPEC.block_size,
     )
 
 
 # ---------------------------------------------------------------------------
 # Fix ①: eagle fallback must not flag mamba groups
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 3072])
+def test_retention_uses_resolved_kv_cache_config(monkeypatch, retention_interval):
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=retention_interval)
+    assert coordinator.retention_interval == retention_interval
 
 
 def test_eagle_fallback_flags_only_full_attention_group(monkeypatch):

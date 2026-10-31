@@ -209,12 +209,21 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.parallel_config.world_size = 1
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
+    config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
     config.model_config.hf_text_config = MagicMock(spec=[])
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_retention_uses_resolved_cache_config(retention_interval):
+    config = make_config()
+    config.cache_config.prefix_cache_retention_interval = retention_interval
+    scheduler = create_kv_pool_scheduler(config, use_layerwise=False)
+    assert scheduler.retention_interval == retention_interval
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])

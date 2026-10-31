@@ -1,0 +1,6 @@
+pr: 20356
+entries:
+  - category: bugfix
+    text: >-
+      Fixed prefix-cache retention settings being silently ignored by the
+      Ascend hybrid cache coordinator, AscendStore, and GLM-Next cache planner.

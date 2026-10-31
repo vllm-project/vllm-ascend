@@ -80,6 +80,7 @@ def make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=None,
         ),
     )
 
@@ -127,9 +128,11 @@ def register_cache_specs():
     register_all_kvcache_specs(None)
 
 
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
 @pytest.mark.parametrize("pool", [4, 16])
-def test_groups_share_block_ids_and_pack_two_page_classes(pool):
+def test_groups_share_block_ids_and_pack_two_page_classes(pool, retention_interval):
     config = make_config()
+    config.cache_config.prefix_cache_retention_interval = retention_interval
     specs = make_specs(pool)
     groups = get_glm5_next_kv_cache_groups(config, dict(reversed(list(specs.items()))))
     layout = _get_glm5_next_cache_layout(groups)
@@ -144,6 +147,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     bytes_per_block = layout.main_page_size + layout.small_page_size
     budget = 20 * bytes_per_block
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    assert plan.prefix_cache_retention_interval == retention_interval
     assert plan.num_blocks == 20
     assert len(plan.kv_cache_tensors) == 2
     assert all(isinstance(tensor, KVCacheTensor) for tensor in plan.kv_cache_tensors)
