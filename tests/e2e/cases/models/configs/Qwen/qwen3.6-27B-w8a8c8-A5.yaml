@@ -1,0 +1,65 @@
+#混部
+test_cases:
+  - name: "Qwen3.6-27B-w8a8c8-mxfp8"
+    model: "Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8"
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      LD_LIBRARY_PATH: "/usr/lib64"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      SERVER_PORT: 8078
+    server_cmd:
+        -  --host
+        - "0.0.0.0"
+        - --port
+        - $SERVER_PORT
+        - --data-parallel-size
+        - "1"
+        - --tensor-parallel-size
+        - "1"
+        - --kv-cache-dtype
+        - "mxfp8"
+        - --max-model-len
+        - "153600"
+        - --max-num-batched-tokens
+        - "16384"
+        - --max-num-seqs
+        - "10"
+        - --enable-prefix-caching
+        - --gpu-memory-utilization
+        - "0.90"
+        - --compilation-config
+        - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - --speculative-config
+        - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+        - --trust-remote-code
+        - --async-scheduling
+        - --api_server_count
+        - "1"
+        - --quantization
+        - "ascend"
+        - --allowed-local-media-path
+        - "/"
+        - --mm-processor-cache-gb
+        - "0"
+        - --mm-encoder-tp-mode
+        - "data"
+        - --mm-processor-cache-type
+        - "shm"
+        - --additional-config
+        - '{"enable_cpu_binding":true}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: GSM8K_prefix90_in131072_Qwen3_6_27B_w8a8c8_mxfp8
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
+        request_rate: 0
+        baseline: 1
+        threshold: 0.95
+

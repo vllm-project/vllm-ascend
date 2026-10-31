@@ -1,0 +1,194 @@
+test_name: "Qwen3_5_397B_A5_PD_Performance_Test_01"
+model: "/mnt/share/w00804037/weights/Qwen3.5-397B-A17B-FA-W8A8C8"
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 8000
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 8000
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_VERSION: "0.11.0"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  HCCL_BUFFSIZE: "1024"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_V1: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "0"
+  VLLM_USE_FASTOKENS: "1"
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_TORCH_PROFILER_DIR: "/mnt/share/l00951447/profiling/qwen35_decoder_W8A8C8_fused_mc2_2_sp_share_expert_dp_GDN_b091"
+  VLLM_TORCH_PROFILER_WITH_STACK: "0"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  ASCEND_BUFFER_POOL: "0:0"
+
+env_decode: &env_decode
+  <<: *env_common
+  VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "133120"
+      - --max-num-batched-tokens
+      - "20480"
+      - --max-num-seqs
+      - "64"
+      - --enforce-eager
+      - --trust-remote-code
+      - --allowed-local-media-path
+      - "/"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --quantization
+      - "ascend"
+      - --kv-cache-dtype
+      - "mxfp8"
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "qwen3_coder"
+      - --reasoning-parser
+      - "qwen3"
+      - --speculative-config
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+      - --additional-config
+      - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false},"weight_nz_mode":1,"mega_moe_max_tokens":65535,"enable_cpu_binding":true,"enable_fused_mc2":2,"enable_prefill_mc2":false,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"scheduler_config":{"recompute_scheduler_enable":false}}'
+      - --profiler-config
+      - '{"profiler":"torch","torch_profiler_dir":"/mnt/share/l00951447/profiling/qwen35_decoder_W8A8C8_fused_mc2_2_sp_share_expert_dp_GDN_b091","torch_profiler_with_stack":false}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":2,"tp_size":4}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "133120"
+      - --max-num-batched-tokens
+      - "300"
+      - --max-num-seqs
+      - "100"
+      - --trust-remote-code
+      - --allowed-local-media-path
+      - "/"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --quantization
+      - "ascend"
+      - --kv-cache-dtype
+      - "mxfp8"
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "qwen3_coder"
+      - --reasoning-parser
+      - "qwen3"
+      - --speculative-config
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"weight_nz_mode":1,"mega_moe_max_tokens":65536,"enable_cpu_binding":true,"enable_fused_mc2":2,"enable_prefill_mc2":false,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"scheduler_config":{"recompute_scheduler_enable":true}}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"56010","engine_id":"2","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":2,"tp_size":4}}}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: #131072 prefix 90
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 810
+    max_out_len: 1024
+    batch_size: 54
+    request_rate: 0
+    baseline: 1
+    threshold: 0.95

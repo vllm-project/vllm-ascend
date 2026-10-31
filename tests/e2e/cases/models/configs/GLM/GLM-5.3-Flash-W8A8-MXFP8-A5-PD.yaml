@@ -1,0 +1,159 @@
+test_name: "GLM-5.3-Flash-w8a8-mxfp8-A5-PD"
+model: "Eco-Tech/GLM-5.3-w8a8c8"
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 8000
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 8000
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "3072"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1024"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --kv-cache-dtype
+      - "fp8"
+      - --max-num-seqs
+      - "32"
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "24576"
+      - --trust-remote-code
+      - --quantization
+      - "ascend"
+      - --tool-call-parser
+      - "glm47"
+      - --no-enable-auto-tool-choice
+      - --allowed-local-media-path
+      - /mnt/share/s00899273/mmmu_pro/MMMU_Pro_options10_images
+      - --reasoning-parser
+      - "glm47"
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.9"
+      - --compilation-config
+      - '{"cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512]}'
+      - --speculative-config
+      - '{"num_speculative_tokens":3,"method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_dsa_cp":true,"enable_fused_mc2":0,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"30100","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":8,"tp_size":1}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --kv-cache-dtype
+      - "fp8"
+      - --allowed-local-media-path
+      - "/"
+      - --max-num-seqs
+      - "40"
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "160"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.95"
+      - --enable-prefix-caching
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"num_speculative_tokens":3,"method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":"True","ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true}}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"30800","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":8,"tp_size":1}}}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: GSM8K_prefix100_in1047000_GLM_5_3-Flash_w8a8_mxfp8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 1
+    threshold: 0.95

@@ -626,7 +626,12 @@
             "vllm-ascend/Qwen3.5-397B-A17B-w4a8",
             "vllm-ascend/qwen36-35ba3b-2d-weights-poken-lora",
             "vllm-ascend/qwen36-35ba3b-moe-all-linear-poken-lora",
-            "deepseek-ai/DeepSeek-V4-Flash-0731"
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8",
+            "Eco-Tech/GLM-5.3-w8a8c8",
+            "Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8",
+            "Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp"
         ],
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
@@ -704,6 +709,11 @@
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen_prefix",
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen",
       "vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8",
-      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8"
+      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8",
+      "GSM8K_prefix100_in1047400_DeepSeek-V4-Flash-0731",
+      "GSM8K_prefix100_in1047500_DeepSeek-V4_1_Flash_1017",
+      "GSM8K_prefix100_in1047000_GLM_5_3-Flash_w8a8_mxfp8",
+      "GSM8K_prefix90_in131072_Qwen3_6_27B_w8a8c8_mxfp8",
+      "GSM8K_prefix0_in10240_Qwen3_6_35B_w4a8_mxfp"
     ]
 }
