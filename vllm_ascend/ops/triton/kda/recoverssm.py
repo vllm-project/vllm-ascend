@@ -19,6 +19,13 @@ from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2
+# Conservative UB budgets in BV x BK FP32 matrix equivalents. Boundary recovery
+# includes final/boundary accumulators and merge temporaries; these estimates
+# are not compiler-reported live-buffer counts.
+RECOVERSSM_COMMIT_UB_MATRICES = 2
+RECOVERSSM_BOUNDARY_COMMIT_UB_MATRICES = 6
+# Reserve tile rows for FP32 vectors and other temporary workspace.
+RECOVERSSM_COMMIT_UB_HEADROOM_ROWS = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
@@ -342,6 +349,8 @@ def _prepare_commit_plan_kernel(
     block_table_ptr,
     num_computed_ptr,
     commit_lens_ptr,
+    state_commit_lens_ptr,
+    boundary_commit_lens_ptr,
     final_state_indices_ptr,
     boundary_state_indices_ptr,
     boundary_recovery_lens_ptr,
@@ -393,6 +402,11 @@ def _prepare_commit_plan_kernel(
         ).to(tl.int64)
     valid = (source_state_idx > null_block_id) & (commit_len > 0)
     tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
+    has_boundary = (boundary_state_idx > null_block_id) & (boundary_recovery_len > 0)
+    # Predicate once per request, rather than reading several metadata arrays in
+    # every head/value program merely to discover that it has no work.
+    tl.store(state_commit_lens_ptr + spec_idx, tl.where(valid & ~has_boundary, commit_len, 0))
+    tl.store(boundary_commit_lens_ptr + spec_idx, tl.where(valid & has_boundary, commit_len, 0))
     tl.store(
         final_state_indices_ptr + spec_idx,
         tl.where(valid, final_state_idx, null_block_id),
@@ -600,7 +614,7 @@ def _accumulate_kda_commit_step(
     return final_decay, final_correction, boundary_decay, boundary_correction
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_layers"])
 def _commit_kda_state_kernel(
     state_ref_ptr,
     state_base_addrs_ptr,
@@ -635,6 +649,7 @@ def _commit_kda_state_kernel(
     stride_dt_bias_head,
     stride_dt_bias_dim,
     stride_state_indices,
+    num_layers,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -645,19 +660,25 @@ def _commit_kda_state_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_COMMIT: tl.constexpr,
 ):
-    pid_v = tl.program_id(0)
-    pid_b = tl.program_id(1)
+    # Explicit one-dimensional indexing gives the same request-major order
+    # across Ascend Triton backends with different 3-D grid flattening orders.
+    pid = tl.program_id(0)
+    value_tiles = tl.cdiv(V, BV)
+    pid_v = pid % value_tiles
+    pid_lh = pid // value_tiles
+    layer_head_tiles = num_layers * NUM_HEADS
+    pid_b = pid_lh // layer_head_tiles
+    pid_lh %= layer_head_tiles
     # Walk accepted records backwards, composing decay-weighted rank-one
     # updates before combining them with the unchanged initial checkpoint.
-    pid_lh = tl.program_id(2)
     pid_l = pid_lh // NUM_HEADS
     pid_h = pid_lh % NUM_HEADS
 
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    if source_state_idx <= null_block_id:
-        return
     commit_len = tl.load(commit_lens_ptr + pid_b)
     if commit_len == 0:
+        return
+    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
+    if source_state_idx <= null_block_id:
         return
     final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
     boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
@@ -800,7 +821,7 @@ def _kda_l2_normalize_heads(vector):
     return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_layers"])
 def _commit_kda_state_grouped_kernel(
     state_ref_ptr,
     state_base_addrs_ptr,
@@ -835,6 +856,7 @@ def _commit_kda_state_grouped_kernel(
     stride_dt_bias_head,
     stride_dt_bias_dim,
     stride_state_indices,
+    num_layers,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -845,28 +867,33 @@ def _commit_kda_state_grouped_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     BH: tl.constexpr = 2,
 ):
-    # Commit two independent heads per program with BV64, matching the
-    # state-element count of a single-head BV128 tile.
-    tl.static_assert(not ALIGN_MODE)
+    # Commit two independent heads per program.
     tl.static_assert(K == 128)
     tl.static_assert(V == 128)
     tl.static_assert(BK == 128)
-    tl.static_assert(BV == 64)
-    pid_v = tl.program_id(0)
-    pid_b = tl.program_id(1)
-    pid_lh = tl.program_id(2)
+    tl.static_assert(BV <= 64)
+    pid = tl.program_id(0)
+    value_tiles = tl.cdiv(V, BV)
+    pid_v = pid % value_tiles
+    pid_lh = pid // value_tiles
+    layer_head_tiles = num_layers * (NUM_HEADS // BH)
+    pid_b = pid_lh // layer_head_tiles
+    pid_lh %= layer_head_tiles
     tl.static_assert(NUM_HEADS % BH == 0)
     pid_l = pid_lh // (NUM_HEADS // BH)
     pid_h = pid_lh % (NUM_HEADS // BH) * BH + tl.arange(0, BH)
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    if source_state_idx <= null_block_id:
-        return
     commit_len = tl.load(commit_lens_ptr + pid_b)
     if commit_len == 0:
+        return
+    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
+    if source_state_idx <= null_block_id:
         return
     final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
     if final_state_idx <= null_block_id:
         return
+    if ALIGN_MODE:
+        boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
+        boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
     state_base_addr = tl.load(state_base_addrs_ptr + pid_l)
     state_block_stride = tl.load(state_block_strides_ptr + pid_l)
     state_ptr = state_base_addr.to(tl.pointer_type(state_ref_ptr.dtype.element_ty))
@@ -915,6 +942,9 @@ def _commit_kda_state_grouped_kernel(
     ).to(tl.float32)
     final_decay = tl.full([BH, BK], 1.0, tl.float32)
     final_correction = tl.zeros([BH, BV, BK], tl.float32)
+    if ALIGN_MODE:
+        boundary_decay = tl.full([BH, BK], 1.0, tl.float32)
+        boundary_correction = tl.zeros([BH, BV, BK], tl.float32)
     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
         if reverse_offset < commit_len:
             token_offset = commit_len - reverse_offset - 1
@@ -942,8 +972,28 @@ def _commit_kda_state_grouped_kernel(
             weighted_k = normalized_k * final_decay
             final_correction = tl.fma(correction[:, :, None], weighted_k[:, None, :], final_correction)
             final_decay *= decay
+            if ALIGN_MODE:
+                before_boundary = token_offset < boundary_recovery_len
+                boundary_k = normalized_k * boundary_decay
+                boundary_correction = tl.where(
+                    before_boundary,
+                    tl.fma(correction[:, :, None], boundary_k[:, None, :], boundary_correction),
+                    boundary_correction,
+                )
+                boundary_decay *= tl.where(before_boundary, decay, 1.0)
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
     state = initial_state * final_decay[:, None, :] + final_correction
+    if ALIGN_MODE:
+        if boundary_state_idx > null_block_id:
+            boundary_ptrs = (
+                state_ptr
+                + boundary_state_idx * state_block_stride
+                + pid_h[:, None, None] * stride_state_head
+                + offs_v[None, :, None] * stride_state_v
+                + offs_k[None, None, :] * stride_state_k
+            )
+            boundary_state = initial_state * boundary_decay[:, None, :] + boundary_correction
+            tl.store(boundary_ptrs, boundary_state, mask=mask_state)
     final_ptrs = (
         state_ptr
         + final_state_idx * state_block_stride
@@ -1124,6 +1174,8 @@ class KDARecoverSSMCommitContext:
     kg_cache_base_addrs: torch.Tensor
     kg_cache_block_strides: torch.Tensor
     commit_lens: torch.Tensor
+    state_commit_lens: torch.Tensor
+    boundary_commit_lens: torch.Tensor
     final_state_indices: torch.Tensor
     boundary_state_indices: torch.Tensor
     boundary_recovery_lens: torch.Tensor
@@ -1259,6 +1311,8 @@ class KDARecoverSSMCommitContext:
             kg_cache_base_addrs=_base_addrs(kg_caches),
             kg_cache_block_strides=_block_strides(kg_caches),
             commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
+            state_commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
+            boundary_commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             final_state_indices=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             boundary_state_indices=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             boundary_recovery_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
@@ -1329,6 +1383,8 @@ class KDARecoverSSMCommitContext:
             block_table,
             num_computed_tokens,
             self.commit_lens,
+            self.state_commit_lens,
+            self.boundary_commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
@@ -1370,16 +1426,18 @@ class KDARecoverSSMCommitContext:
         )
 
         state_ref = self.checkpoints[0]
+        correction_ref = self.correction_caches[0]
+        assert correction_ref.dtype == torch.float32
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
+        matrix_element_size = correction_ref.element_size()
         is_a5 = is_950()
-        # Group two adjacent heads in one program to reconstruct and commit their states.
+        align_mode = block_table is not None
+        # Most aligned decode steps do not cross a cache-block boundary. Recover
+        # them without boundary matrices; only crossing requests use the full path.
+        # Both kernels select requests on-device, without synchronizing graph replay.
         grouped_commit = (
-            is_a5
-            and block_table is None
-            and state_ref.dtype == torch.float32
-            and key_dim == value_dim == 128
-            and num_heads in (32, 64)
+            is_a5 and state_ref.dtype == torch.float32 and key_dim == value_dim == 128 and num_heads in (32, 64)
         )
         value_tile = RECOVERSSM_VALUE_TILE
         if grouped_commit:
@@ -1387,24 +1445,25 @@ class KDARecoverSSMCommitContext:
             commit_kernel = _commit_kda_state_grouped_kernel
             commit_options = {}
         else:
-            if is_a5 and block_table is None:
+            if is_a5:
                 value_tile *= 2
             # Runtime iteration keeps accumulator/merge matrices independent of window length.
-            matrix_buffers = 6 if block_table is not None else 2
-            bytes_per_row = matrix_buffers * block_k * torch.float32.itemsize
-            # Reserve two rows' worth for FP32 vector temporaries.
-            max_rows = max(1, get_ub_size_bytes() // bytes_per_row - 2)
+            bytes_per_row = RECOVERSSM_COMMIT_UB_MATRICES * block_k * matrix_element_size
+            # Reserve FP32 vector/temporary workspace in addition to matrices.
+            max_rows = max(1, get_ub_size_bytes() // bytes_per_row - RECOVERSSM_COMMIT_UB_HEADROOM_ROWS)
             value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))
             head_groups = num_heads
             commit_kernel = _commit_kda_state_kernel
             commit_options = {"UNROLL_COMMIT": is_a5}
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
-        grid = (triton.cdiv(value_dim, block_v), batch, num_layers * head_groups)
-        commit_kernel[grid](
+        # Explicit flat indexing keeps request rows outermost on both 3.2/3.6
+        # backends, balancing mixed boundary requests without a new static flag.
+        grid = (triton.cdiv(value_dim, block_v) * num_layers * head_groups * batch,)
+        commit_prefix_args = (
             state_ref,
             self.state_base_addrs,
             self.state_block_strides,
-            self.correction_caches[0],
+            correction_ref,
             self.correction_cache_base_addrs,
             self.correction_cache_block_strides,
             self.kg_caches[0],
@@ -1413,7 +1472,8 @@ class KDARecoverSSMCommitContext:
             self.A_log,
             self.dt_bias,
             state_indices,
-            self.commit_lens,
+        )
+        commit_suffix_args = (
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
@@ -1422,9 +1482,9 @@ class KDARecoverSSMCommitContext:
             state_ref.stride(1),
             state_ref.stride(2),
             state_ref.stride(3),
-            self.correction_caches[0].stride(1),
-            self.correction_caches[0].stride(2),
-            self.correction_caches[0].stride(3),
+            correction_ref.stride(1),
+            correction_ref.stride(2),
+            correction_ref.stride(3),
             self.kg_caches[0].stride(1),
             self.kg_caches[0].stride(2),
             self.kg_caches[0].stride(3),
@@ -1434,18 +1494,44 @@ class KDARecoverSSMCommitContext:
             self.dt_bias.stride(1),
             self.dt_bias.stride(2),
             state_indices.stride(0),
+            num_layers,
+        )
+        commit_meta = dict(
             K=key_dim,
             V=value_dim,
             BK=block_k,
             BV=block_v,
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
-            ALIGN_MODE=block_table is not None,
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=4,
             num_stages=2,
+        )
+        commit_kernel[grid](
+            *commit_prefix_args,
+            self.state_commit_lens if align_mode else self.commit_lens,
+            *commit_suffix_args,
+            **commit_meta,
+            ALIGN_MODE=False,
             **commit_options,
         )
+        if align_mode:
+            # Boundary snapshots need six matrices per head.
+            bytes_per_row = RECOVERSSM_BOUNDARY_COMMIT_UB_MATRICES * block_k * matrix_element_size
+            if grouped_commit:
+                bytes_per_row *= RECOVERSSM_COMMIT_HEAD_TILE
+            max_rows = max(1, get_ub_size_bytes() // bytes_per_row - RECOVERSSM_COMMIT_UB_HEADROOM_ROWS)
+            boundary_tile = min(RECOVERSSM_VALUE_TILE, 1 << (max_rows.bit_length() - 1))
+            boundary_block_v = min(triton.next_power_of_2(value_dim), boundary_tile)
+            boundary_meta = {**commit_meta, "BV": boundary_block_v}
+            commit_kernel[(triton.cdiv(value_dim, boundary_block_v) * num_layers * head_groups * batch,)](
+                *commit_prefix_args,
+                self.boundary_commit_lens,
+                *commit_suffix_args,
+                **boundary_meta,
+                ALIGN_MODE=True,
+                **commit_options,
+            )
 
 
 __all__ = ["KDARecoverSSMCommitContext", "kda_recoverssm_verify"]
