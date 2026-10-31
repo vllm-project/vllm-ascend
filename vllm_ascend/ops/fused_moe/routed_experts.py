@@ -737,6 +737,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 is_draft_model=True,
                 draft_moe_quant_type=self.quant_type,
             )
+        _EXTRA_CTX.moe_comm_type = comm_type
         moe_comm_method = get_moe_comm_method(comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None

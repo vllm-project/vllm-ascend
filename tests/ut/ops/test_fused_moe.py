@@ -1104,6 +1104,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     else:
         assert result is finalized
     get_moe_comm_method.assert_called_once_with(expected_comm_type, routed_experts.moe_config)
+    assert routed_experts_module._EXTRA_CTX.moe_comm_type == expected_comm_type
     if mega_moe and quant_type == QuantType.NONE and a5_support:
         select_moe_comm_method.assert_called_once_with(
             num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE
