@@ -102,6 +102,7 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
 
     speculator = _speculator(
         attn_architecture=architecture,
+        use_dcp=False,
         num_query_per_req=8,
         arange_np=np.arange(5, dtype=np.int32),
         input_buffers=SimpleNamespace(positions=object()),

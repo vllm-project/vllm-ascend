@@ -198,7 +198,12 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         expected_is_prefilling = [False] * padded
         assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
-        expected = [31 + width, 128] + [0] * (padded - 2)
+        if architecture == "MLA":
+            # Prepared DSpark lengths already include the query block and
+            # rejection correction; CPU and device DCP views must agree.
+            expected = device_lengths[:padded].clamp(max=spec.max_model_len).tolist()
+        else:
+            expected = [31 + width, 128] + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected
         assert torch.equal(common.dcp_local_seq_lens_cpu, _local(expected))
         assert common.is_prefilling.tolist() == [False] * padded
@@ -379,9 +384,13 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    expected = (
-        device_lengths[:padded].tolist() if architecture == "MLA" and not use_dcp else [34, 128] + [0] * (padded - 2)
-    )
+    if architecture == "MLA":
+        expected_lengths = device_lengths[:padded]
+        if use_dcp:
+            expected_lengths = expected_lengths.clamp(max=spec.max_model_len)
+        expected = expected_lengths.tolist()
+    else:
+        expected = [34, 128] + [0] * (padded - 2)
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))

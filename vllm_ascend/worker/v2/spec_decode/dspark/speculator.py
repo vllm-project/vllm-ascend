@@ -349,7 +349,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
-        seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
+        if self.attn_architecture == "MLA" and self.use_dcp:
+            # prepare_dflash_inputs has already corrected rejected tokens and
+            # included this draft query block. The target CPU upper bound
+            # would expose unwritten KV slots if the draft width were added.
+            # This hook runs before forward/FULL graph replay, outside capture.
+            seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
+            seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
+            seq_lens_cpu.clamp_(max=self.max_model_len)
+            is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        else:
+            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
