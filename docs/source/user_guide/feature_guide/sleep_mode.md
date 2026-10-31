@@ -60,7 +60,7 @@ During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE 
 
 !!! note
 
-    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `rl_config.sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
+    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. By default, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. The experimental graph restoration option below can avoid this recapture for eligible graphs. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
 
 For level 2 sleep, wakeup can be split into two phases:
 
@@ -71,6 +71,89 @@ llm.wake_up(tags=["kv_cache"])
 ```
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
+
+## Experimental A5 MRV2 graph restoration
+
+On shutdown, the reuse worker retires its graphs and explicitly releases managed
+physical allocations before Python finalization. Late tensor owners retain only
+virtual allocation records until their normal free callbacks run. Shutdown is
+terminal: inference and wake-up require a new worker afterward.
+
+Worker initialization and compilation preserve the caller's SIGTERM/SIGINT
+handlers across lazy backend imports. Some torch-npu backend versions replace
+these handlers at import time, preventing the default single-card EngineCore
+from entering its shutdown protocol. Backend atexit cleanup remains registered.
+
+Resource teardown and request draining have separate deadlines. On the tested
+A5 environment, device finalization took longer than the default best-effort
+process exit window, with graph reuse both enabled and disabled. Offline
+validation sets the existing vLLM `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=35`
+before starting the engine and explicitly waits up to 45 seconds with
+`llm.llm_engine.engine_core.shutdown(timeout=45)` on the pinned vLLM revision.
+This internal engine-client call is a validation cleanup step, not a new public
+API. Record actual exit times and process exit codes; extending a deadline
+alone does not establish successful cleanup. Use the serving application's
+supported shutdown lifecycle in production.
+
+Set `additional_config.rl_config.sleep_mode_graph_reuse=True` to enable this
+experimental path. It defaults to `False` and requires `enable_sleep_mode=True`,
+`rl_config.enabled=True`, and `rl_config.sleep_mode_extra_cleanup=True`.
+Select Model Runner V2 with `VLLM_USE_V2_MODEL_RUNNER=1` before starting the engine.
+
+The initial support boundary is A5, Model Runner V2, unquantized BF16 Qwen2,
+Qwen3, or Qwen3 MoE with ordinary Ascend attention, `FULL_DECODE_ONLY`, and fixed
+capture sizes drawn from `[1, 2, 4, 8]`. Tensor parallelism is limited to one or
+two ranks, with expert parallelism disabled. MLA, multimodal models, speculative
+decoding, LoRA, PP/CP/DP, weight offload, transfer connectors, dynamic EPLB, and
+super kernels use recapture. Other attention backends and model families also
+use recapture; the decision log includes the reason.
+
+```python
+llm = LLM(
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    dtype="bfloat16",
+    enable_sleep_mode=True,
+    compilation_config={
+        "mode": 3,
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [1, 2, 4, 8],
+    },
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "sleep_mode_extra_cleanup": True,
+            "sleep_mode_graph_reuse": True,
+        },
+    },
+)
+```
+
+Eligible captures use a dedicated CaMem pool. Sleep copies the complete managed
+graph pool to pinned CPU memory and unmaps its physical memory, preserving the
+virtual addresses. The graph objects, bound events, and business HCCL groups
+remain alive. Consequently, sleep retains communication and other unmanaged
+memory, and uses additional CPU memory for the graph backup. This is a latency
+and memory tradeoff; it does not release all graph or communication resources.
+
+Every rank checks the capture configuration, tensor layouts and addresses,
+graph/event ownership, pool records, and communicator identities before sleep
+and again after restoration. Same-address weight updates are allowed. Changed
+storage, events, or configuration invalidate the certificate, and all ranks
+recapture together before inference resumes. Known graph-only restoration
+failures also recapture. An unknown native mapping state fails the worker and
+requires restart; the old graph is never replayed in that state.
+
+The transaction moves from `READY` to `ASLEEP`, optionally `PARTIAL`, then
+`RESTORING`, and finally `READY`. Inference is rejected while the transaction
+is incomplete. Repeating sleep at the same level or wake after complete restore
+is idempotent. Level 2 supports the `weights` / external weight reload /
+`kv_cache` sequence above: restoring weights alone never enables replay.
+Control transitions and worker inference entry points share a lock; device
+synchronization drains work queued before sleep.
+
+To return to the existing cleanup and recapture behavior, set
+`sleep_mode_graph_reuse=False` and start a new engine. No additional HTTP
+endpoint is introduced.
 
 ## Prepare Model Weights
 
