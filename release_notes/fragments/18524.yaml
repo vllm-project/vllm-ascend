@@ -1,0 +1,4 @@
+pr: 18524
+entries:
+  - category: performance
+    text: Reduced repeated compilation of the KDA convolution-state copy kernel when request counts change by keeping the request count as a runtime argument.
