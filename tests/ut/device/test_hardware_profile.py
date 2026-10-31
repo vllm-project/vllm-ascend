@@ -53,10 +53,12 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.DSV41_RING_COMPRESSOR},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.DSV41_RING_COMPRESSOR,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,

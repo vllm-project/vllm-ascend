@@ -842,15 +842,14 @@ class TestPCPBatchLifecycle:
         torch.nn.Module.__init__(compressor)
         compressor.wkv, compressor.wgate, compressor.norm = _linear(4, 2), _linear(4, 2), torch.nn.Identity()
         compressor.state_cache = SimpleNamespace(kv_cache=[torch.zeros(256, 2)])
-        compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2), 1
+        compressor._ring_pooled = torch.empty(64, 2)
         attn.compressor = compressor
         state.context.no_compile_layers = {PREFIXES["long_kv"]: attn.long_kv_cache}
         ring_steps, stores = [], []
 
-        def pool(kv, scores, cache, metadata, output, **kwargs):
-            ring_steps.append(int(metadata[1].sum()))
-            output.copy_(kv)
-            return output
+        def pool(x, metadata):
+            ring_steps.append(int(metadata.c2_ring_metadata[1].sum()))
+            return compressor.wkv(x)
 
         def scatter(cache, slots, values):
             block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache[0].data_ptr() else 4
@@ -882,7 +881,7 @@ class TestPCPBatchLifecycle:
             indexer.k_cache_folded = None
             attn.window_size = 4
 
-        monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
+        monkeypatch.setattr(compressor, "compress_native", pool)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
         monkeypatch.setattr(
             dsa_cp.dsa_v1.torch_npu,
