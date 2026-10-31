@@ -5501,7 +5501,7 @@ def test_stash_pending_reformat_merges_batches_arriving_separately():
     assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
 
     # The consumer drains every stashed group of the request exactly once.
-    applied = []
+    applied: list[list[tuple[int, list[list[int]], int, list[int]]]] = []
     receiver._apply_kv_cache_reformat = applied.append
     receiver._reformat_pending_kv_caches("req-split")
     assert applied == [[indexer_group, mla_group, gqa_group], [gqa_group]]
