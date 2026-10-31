@@ -280,7 +280,7 @@ class SFAPDRD2HConsumerWorker:
                             kv_tokens=int(getattr(req, "kv_tokens", 0) or 0),
                         )
         for req_id, pool_slot in getattr(metadata, "d2h_releases", {}).items():
-            if req_id in self._d2h_released_req_ids:
+            if req_id in getattr(self, "_d2h_released_req_ids", ()):
                 continue
             self.copy_sfa_slots_by_req.setdefault(req_id, int(pool_slot))
 
@@ -313,7 +313,7 @@ class SFAPDRD2HConsumerWorker:
             getattr(self, "_dspark_draft_blocks_by_req", {}).pop(ext_id, None)
             getattr(self, "copy_sfa_slots_by_req", {}).pop(req_id, None)
             getattr(self, "_copy_sfa_tail_by_req", {}).pop(ext_id, None)
-            self._d2h_pending_release_req_ids.discard(req_id)
+            getattr(self, "_d2h_pending_release_req_ids", set()).discard(req_id)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
@@ -424,30 +424,44 @@ class SFAPDRD2HConsumerWorker:
             ready_to_cleanup = set(finished_req_ids)
         else:
             ready_to_cleanup = set()
+        # __new__-style light construction (upstream unit tests) skips
+        # __init__; lazily materialize the delayed-release ledger.
+        d2h_pending = getattr(self, "_d2h_pending_release_req_ids", None)
+        if d2h_pending is None:
+            d2h_pending = self._d2h_pending_release_req_ids = set()
+        # Same light-construction tolerance for the manager handle itself.
+        offload_manager = getattr(self, "offload_manager", None)
         if ready_to_cleanup:
-            if self.offload_manager is not None and getattr(self.offload_manager, "delayed_d2h", False):
+            if offload_manager is not None and getattr(offload_manager, "delayed_d2h", False):
                 # Request-owned Copy-SFA rows stay reserved until every delayed
                 # D2H batch referencing them has retired; only then may cleanup
                 # run and the scheduler get its finished_sending acknowledgement.
-                d2h_owned = {req_id for req_id in ready_to_cleanup if req_id in self.copy_sfa_slots_by_req}
-                self._d2h_pending_release_req_ids.update(d2h_owned)
+                d2h_owned = {
+                    req_id
+                    for req_id in ready_to_cleanup
+                    if req_id in getattr(self, "copy_sfa_slots_by_req", {})
+                }
+                d2h_pending.update(d2h_owned)
                 self._cleanup_request_state(ready_to_cleanup - d2h_owned)
             else:
                 self._cleanup_request_state(ready_to_cleanup)
-        if self._d2h_pending_release_req_ids:
-            if self.offload_manager is None:
+        if d2h_pending:
+            if offload_manager is None:
                 raise RuntimeError("delayed D2H row release requires the sparse KV offload manager")
             releasable = {
                 req_id
-                for req_id in self._d2h_pending_release_req_ids
-                if self.offload_manager.d2h_slot_releasable(self.copy_sfa_slots_by_req[req_id])
+                for req_id in d2h_pending
+                if offload_manager.d2h_slot_releasable(self.copy_sfa_slots_by_req[req_id])
             }
             if releasable:
                 slots = [self.copy_sfa_slots_by_req[req_id] for req_id in sorted(releasable)]
-                self.offload_manager.release_d2h_slots(slots)
-                self._d2h_pending_release_req_ids.difference_update(releasable)
+                offload_manager.release_d2h_slots(slots)
+                d2h_pending.difference_update(releasable)
                 self._cleanup_request_state(releasable)
-                self._d2h_released_req_ids.update(releasable)
+                d2h_released = getattr(self, "_d2h_released_req_ids", None)
+                if d2h_released is None:
+                    d2h_released = self._d2h_released_req_ids = set()
+                d2h_released.update(releasable)
                 done_sending.update(releasable)
 
         return done_sending, done_recving

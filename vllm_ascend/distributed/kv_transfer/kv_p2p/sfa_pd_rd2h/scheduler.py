@@ -513,8 +513,13 @@ class SFAPDRD2HScheduler:
                     dspark_draft_group_ids=(self._dspark_context_groups if req_id in context_requests else ()),
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
-        for req_id, pool_slot in self._d2h_pending_releases.items():
-            meta.add_d2h_release(req_id, pool_slot)
+        # __new__-style light construction (upstream unit tests) skips
+        # __init__; tolerate a missing ledger the same way _d2h_delayed_free
+        # tolerates its missing cache below.
+        pending_releases = getattr(self, "_d2h_pending_releases", None)
+        if pending_releases:
+            for req_id, pool_slot in pending_releases.items():
+                meta.add_d2h_release(req_id, pool_slot)
         self._reqs_need_recv.clear()
         return meta
 
@@ -572,7 +577,7 @@ class SFAPDRD2HScheduler:
             # The dspark drain path releases the slot allocator without the
             # finished_sending handshake; drop the delayed D2H release entry
             # too, or it is resent forever and re-reserves the reused slot.
-            self._d2h_pending_releases.pop(request_id, None)
+            getattr(self, "_d2h_pending_releases", {}).pop(request_id, None)
             self._cleanup_finished_request(request_id)
 
     def _cleanup_finished_request(self, request_id: str) -> None:
