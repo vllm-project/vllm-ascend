@@ -31,7 +31,7 @@ jobs:
     if: >-
       github.repository == 'vllm-project/vllm-ascend' &&
       vars.RECIPES_PREVIEW_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     timeout-minutes: 5
     environment:
       name: recipes-preview

@@ -1,0 +1,203 @@
+name: Recipes Preview Comment
+
+# Use trusted workflow code and PR metadata only; never check out PR code.
+# Keep comments independent of the App-based preview dispatch so scheduled
+# previews also have a discoverable link. Only recipe-labeled PRs get new links;
+# existing comments can be deactivated after the label or eligibility goes away.
+# Do not filter paths or base branches: those changes also require cleanup.
+# Enable all comment entry points with the repository Actions variable
+# RECIPES_PREVIEW_COMMENT_ENABLED=true, independently of preview dispatch.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed, edited, labeled, unlabeled]
+  workflow_run:
+    workflows: [PR Create]
+    types: [completed]
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to backfill or refresh
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  select-prs:
+    if: >-
+      github.repository == 'vllm-project/vllm-ascend' &&
+      vars.RECIPES_PREVIEW_COMMENT_ENABLED == 'true' &&
+      ((github.event_name == 'pull_request_target' &&
+        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+         github.event.label.name == 'recipe')) ||
+       (github.event_name == 'workflow_run' && github.ref == 'refs/heads/main' &&
+        github.event.workflow_run.event == 'pull_request_target' &&
+        github.event.workflow_run.path == '.github/workflows/bot_pr_create.yaml') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        github.ref == 'refs/heads/main'))
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      prs: ${{ steps.select.outputs.prs }}
+    steps:
+      - name: Select PRs to refresh
+        id: select
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const hasRecipeLabel = pr => pr.labels.some(label => label.name === 'recipe');
+            const getPr = async value => {
+              const prNumber = String(value ?? '');
+              if (!/^[1-9][0-9]*$/.test(prNumber) || !Number.isSafeInteger(Number(prNumber))) {
+                throw new Error('Expected a positive integer PR number without leading zeros.');
+              }
+              const { data } = await github.rest.pulls.get({
+                ...context.repo, pull_number: Number(prNumber),
+              });
+              return data;
+            };
+            let candidates;
+            if (context.eventName === 'schedule') {
+              const openPrs = await github.paginate(github.rest.pulls.list, {
+                ...context.repo, state: 'open', per_page: 100,
+              });
+              candidates = openPrs.filter(hasRecipeLabel);
+            } else if (context.eventName === 'workflow_run') {
+              // GITHUB_TOKEN label changes do not trigger labeled/unlabeled runs.
+              // PR Create may fail after updating labels, so read current state
+              // on every completion, regardless of its conclusion.
+              const run = context.payload.workflow_run;
+              candidates = [];
+              for (const pr of run.pull_requests ?? []) {
+                candidates.push(await getPr(pr.number));
+              }
+              if (!candidates.length) {
+                // Fork runs can omit pull_requests. Match repository AND branch,
+                // including closed PRs; an older run may refer to a previous SHA.
+                const headRepo = run.head_repository;
+                if (headRepo?.owner?.login && headRepo.full_name && run.head_branch) {
+                  const prs = await github.paginate(github.rest.pulls.list, {
+                    ...context.repo, state: 'all',
+                    head: `${headRepo.owner.login}:${run.head_branch}`, per_page: 100,
+                  });
+                  candidates = prs.filter(pr =>
+                    pr.head.repo?.full_name === headRepo.full_name &&
+                    pr.head.ref === run.head_branch &&
+                    pr.base.repo.full_name === 'vllm-project/vllm-ascend'
+                  );
+                } else {
+                  core.warning('No PR association or head repository metadata; use a manual backfill if needed.');
+                }
+              }
+            } else {
+              candidates = [await getPr(context.payload.pull_request?.number ?? context.payload.inputs?.pr_number)];
+            }
+            // Keep targeted cleanup candidates even without a label or comment:
+            // an in-flight writer could still be creating the first comment.
+            // Decide eligibility inside the shared per-PR concurrency group.
+            const prs = [...new Set(candidates.map(pr => pr.number))];
+            // GitHub Actions limits a matrix to 256 jobs; never silently drop PRs.
+            const maxMatrixJobs = 256;
+            if (prs.length > maxMatrixJobs) {
+              throw new Error(`Too many recipe PRs for one matrix (${prs.length}); split the scan before retrying.`);
+            }
+            core.setOutput('prs', JSON.stringify(prs));
+
+  comment:
+    needs: select-prs
+    if: >-
+      vars.RECIPES_PREVIEW_COMMENT_ENABLED == 'true' &&
+      needs.select-prs.outputs.prs != '' && needs.select-prs.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.select-prs.outputs.prs) }}
+    concurrency:
+      # All triggers serialize writes to the same PR, including the hourly scan.
+      group: recipes-preview-comment-${{ matrix.pr }}
+      cancel-in-progress: false
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Create or update the recipe preview comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+        with:
+          script: |
+            const marker = '<!-- recipes-preview:vllm-ascend -->';
+            const prNumber = process.env.PR_NUMBER ?? '';
+            if (!/^[1-9][0-9]*$/.test(prNumber) || !Number.isSafeInteger(Number(prNumber))) {
+              throw new Error('Expected a positive integer PR number without leading zeros.');
+            }
+            const repo = context.repo;
+            const issue_number = Number(prNumber);
+            // Read current state even on reruns or delayed events.
+            const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number: issue_number });
+            if (pr.base.repo.full_name !== 'vllm-project/vllm-ascend') {
+              throw new Error('Unexpected PR base repository.');
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.user?.type === 'Bot' &&
+              comment.body?.startsWith(marker + '\n')
+            );
+            let status;
+            let active = false;
+            if (pr.state === 'closed') {
+              if (!existing) return;
+              status = pr.merged
+                ? 'This PR has been merged. Preview cleanup and production publication are handled separately by the recipes repository.'
+                : 'This PR has been closed. Preview cleanup is handled separately by the recipes repository.';
+            } else if (pr.base.ref !== 'main') {
+              if (!existing) return;
+              status = 'This PR no longer targets `main`, so it is not eligible for a recipe preview.';
+            } else if (!pr.labels.some(label => label.name === 'recipe')) {
+              // Recheck the live label after selection or waiting for concurrency.
+              if (!existing) return;
+              status = 'This PR no longer has the `recipe` label, so it is not eligible for a recipe preview.';
+            } else {
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                ...repo, pull_number: issue_number, per_page: 100,
+              });
+              const hasRecipes = files.some(file =>
+                file.filename.startsWith('recipes/') || file.previous_filename?.startsWith('recipes/')
+              );
+              if (!hasRecipes && pr.changed_files > files.length) {
+                throw new Error('Incomplete PR file list; leaving the preview comment unchanged.');
+              }
+              if (!hasRecipes && !existing) return;
+              active = hasRecipes;
+              status = hasRecipes
+                ? 'The preview builds asynchronously and may not be ready or may still show an earlier commit. Check the preview banner for the rendered revision; this comment does not report deployment success.'
+                : 'This PR no longer changes `recipes/**`, so this preview link is no longer applicable.';
+            }
+            const url = `https://vllm-recipes-git-preview-vllm-ascend-pr-${issue_number}-inferact-inc.vercel.app`;
+            const body = [
+              marker,
+              '### Recipe preview',
+              '',
+              ...(active ? [`[Open recipe preview](${url})`, ''] : []),
+              `Current PR commit: \`${pr.head.sha}\` (not a deployment status).`,
+              '',
+              status,
+              ...(active ? [
+                '',
+                'The recipes scheduled scanner requires the `recipe` label. Builds and deployment status are available in the [recipes preview workflow](https://github.com/vllm-project/recipes/actions/workflows/preview-prs.yml) and its preview branch checks.',
+              ] : []),
+            ].join('\n');
+            if (existing) {
+              if (existing.body === body) return;
+              await github.rest.issues.updateComment({ ...repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...repo, issue_number, body });
+            }
