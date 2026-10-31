@@ -33,15 +33,16 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     modules["torch"] = torch
                     kernel = MagicMock()
                     upstream = modules[target]
-                    upstream._vit_mrope_setup_kernel = kernel
-                    modules["vllm.triton_utils"].triton = types.SimpleNamespace(
+                    vars(upstream)["_vit_mrope_setup_kernel"] = kernel
+                    vars(modules["vllm.triton_utils"])["triton"] = types.SimpleNamespace(
                         cdiv=lambda x, y: (x + y - 1) // y,
                         next_power_of_2=lambda x: 1 << (x - 1).bit_length(),
                     )
                     copy = MagicMock()
-                    modules["vllm.utils.torch_utils"].async_tensor_h2d = copy
+                    vars(modules["vllm.utils.torch_utils"])["async_tensor_h2d"] = copy
                     path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_mrope_vit_setup.py"
                     spec = importlib.util.spec_from_file_location("_test_vit_mrope_patch", path)
+                    assert spec is not None and spec.loader is not None
                     module = importlib.util.module_from_spec(spec)
                     with patch.dict(sys.modules, modules):
                         spec.loader.exec_module(module)
