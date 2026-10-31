@@ -278,16 +278,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 # Preserve step-0 indices when later MTP steps reuse the buffer.
                 if self.skip_topk and out is not None:
                     return out
-                result = torch.full(
+                if out is not None:
+                    # hidden_states is not sliced to num_tokens without
+                    # metadata, so fill the caller's real-token buffer instead
+                    # of copying a possibly larger tensor into it.
+                    out.fill_(-1)
+                    return out
+                return torch.full(
                     (hidden_states.shape[0], self.output_width),
                     -1,
                     dtype=torch.int32,
                     device=hidden_states.device,
                 )
-                if out is not None:
-                    out.copy_(result)
-                    return out
-                return result
 
             raw_metadata, compressed_metadata = metadata
             num_tokens = raw_metadata.num_actual_tokens
@@ -327,16 +329,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 # Preserve step-0 indices when later MTP steps reuse the buffer.
                 if self.skip_topk and out is not None:
                     return out, None
-                result = torch.full(
+                if out is not None:
+                    # hidden_states is not sliced to num_tokens without
+                    # metadata, so fill the caller's real-token buffer instead
+                    # of copying a possibly larger tensor into it.
+                    out.fill_(-1)
+                    return out, None
+                return torch.full(
                     (hidden_states.shape[0], self.output_width),
                     -1,
                     dtype=torch.int32,
                     device=hidden_states.device,
-                )
-                if out is not None:
-                    out.copy_(result)
-                    return out, None
-                return result, None
+                ), None
 
             raw_metadata, compressed_metadata = metadata
             num_tokens = raw_metadata.num_actual_tokens

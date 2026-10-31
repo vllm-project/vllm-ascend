@@ -543,7 +543,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     d.decode_query_len,
                     sm_scale=self.scale,
                 )
-                # The v0.32.0 Triton decode follows the upstream single-tensor
+                # The A3 Triton decode returns the upstream single-tensor
                 # contract, while the A5 Triton decode returns
                 # (topk_idx, select_num_idx). The sparse decode op derives the
                 # per-query selected counts from ``topk_idx`` when they are not
