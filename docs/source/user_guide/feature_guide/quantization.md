@@ -60,6 +60,68 @@ After quantization completes, the output directory will contain the quantized mo
 
 For more examples, refer to the [official examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example).
 
+#### Qwen3.8 Flash Next PLE n-gram table INT8
+
+Qwen3.8 Flash Next stores its large PLE n-gram embedding as checkpoint row shards named
+`...ple.ple_embedding.ngram_embedding.shard_N.weight`. These are hashed n-gram vector rows,
+not readable tokenizer vocabulary entries. The PLE table format is independent of the
+W8A8 or MXFP8 recipe used for linear layers and MTP.
+
+The [Qwen4Exp ModelSlim adapter](https://gitcode.com/code_mingming/msmodelslim/tree/master-qwen38-1022)
+supports symmetric INT8 PLE tables. Add the following to the model recipe's `spec` section;
+for MTP linear-layer selection, start from the
+[MTP recipe](https://gitcode.com/code_mingming/msmodelslim/blob/master-qwen38-1022/lab_practice/qwen4_exp_flash_next/qwen4_w8a8_mtp.yaml)
+and change its PLE setting from `bf16`:
+
+```yaml
+spec:
+  model_adapter:
+    ple_quant_type: int8_sym
+    ple_quant_group_size: 32
+```
+
+The linked MTP recipe is a configuration reference; it does not establish that MTP
+weights in an existing export were quantized. Check `quant_model_description.json`
+in the exported model. If all `mtp.*` entries are marked `FLOAT`, its MTP weights
+remain unquantized.
+
+Run ModelSlim against the original BF16 checkpoint with the completed recipe:
+
+```bash
+python -m msmodelslim.cli quant \
+  --model_path /path/to/Qwen3.8-Flash-Next \
+  --save_path /path/to/new-quantized-model \
+  --device npu --model_type Qwen3.8-Flash-Next \
+  --config /path/to/qwen4_w8a8_mtp_ple.yaml \
+  --trust_remote_code true
+```
+
+For each table row, ModelSlim groups 32 adjacent columns. For a group `x`, it computes
+`scale = max(max(abs(x)) / 127, 1e-12)` and
+`q = clamp(round(x / scale), -127, 127)`. The output holds `shard_N.weight` as signed
+INT8 with the original `[rows, width]` shape, and `shard_N.scale` as FP32 with shape
+`[rows, width / 32]`. Its `quant_model_description.json` records
+`shard_N.quant_type: INT8_SYM`; `quant_model_weights.safetensors.index.json` maps both
+tensors to their shard files. The smaller PLE projections, norms, convolution weights,
+and integer hash-layout buffers retain their source dtypes.
+
+At inference time, a selected row is reconstructed as
+`weight[row, column].float() * scale[row, column // 32]` before the PLE projections.
+This is lossy: use the original BF16 checkpoint when exact source values are needed.
+Check every table has a matching scale with the expected shape, then compare sampled
+reconstructed rows and model outputs against the BF16 PLE baseline. A small table
+reconstruction error alone does not establish generation accuracy.
+
+If the starting point is an existing ModelSlim W8A8/MXFP8 export whose PLE tables are
+still BF16, convert only its PLE table shards into a **new** model directory. Preserve
+other weight shards, add the scale keys to the index, set the `INT8_SYM` description
+markers, and recompute the index's `metadata.total_size` from the actual tensor
+payloads. Do not run the full-model quantizer on an already quantized checkpoint.
+
+The current Ascend PLE INT8 runtime path keeps the table on device and dequantizes
+only looked-up rows. Pinned-host PLE offload is not supported for this format and
+fails explicitly during model initialization.
+
 ### 2. LLM-Compressor
 
 [LLM-Compressor](https://github.com/vllm-project/llm-compressor) is a unified compressed model library for faster vLLM inference.

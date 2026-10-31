@@ -254,12 +254,17 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
-    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpNGramEmbedding, Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
 
+    from vllm_ascend.models.qwen4_exp.ple_int8 import (
+        PLE_INT8_QUANT_TYPE,
+        AscendQwen4ExpPLEInt8EmbeddingMethod,
+        load_ple_int8_scales,
+    )
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
@@ -289,6 +294,17 @@ def patch_upstream_ple_short_conv() -> None:
             embedding_dtype: str | None = None,
         ) -> Qwen4ExpPLEEmbeddingMethod:
             if isinstance(quant_config, AscendModelSlimConfig):
+                descriptions = quant_config.quant_description
+                shard_prefix = f"{prefix}.shard_"
+                markers = {
+                    value
+                    for key, value in descriptions.items()
+                    if key.startswith(shard_prefix) and key.endswith(".quant_type")
+                }
+                if markers:
+                    if markers != {PLE_INT8_QUANT_TYPE} or embedding_dtype == "float8_e4m3fn":
+                        raise ValueError(f"Unsupported PLE quantization markers for {prefix}: {markers}")
+                    return AscendQwen4ExpPLEInt8EmbeddingMethod()
                 return Qwen4ExpPLEUnquantizedEmbeddingMethod()
             return original_from_quant_config(
                 quant_config,
@@ -297,6 +313,16 @@ def patch_upstream_ple_short_conv() -> None:
             )
 
         Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(from_quant_config)
+
+    scale_attr = "_ascend_original_load_weights"
+    if not hasattr(Qwen4ExpNGramEmbedding, scale_attr):
+        original_load_weights = Qwen4ExpNGramEmbedding.load_weights
+        setattr(Qwen4ExpNGramEmbedding, scale_attr, original_load_weights)
+
+        def load_weights(self: Qwen4ExpNGramEmbedding, weights):
+            return load_ple_int8_scales(self, weights, original_load_weights)
+
+        Qwen4ExpNGramEmbedding.load_weights = load_weights
 
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 
