@@ -54,6 +54,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.kv_read_batcher import KVReadBatcher
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
@@ -503,6 +504,12 @@ class KVCacheRecvingThread(threading.Thread):
             initializer=torch.npu.set_device,
             initargs=(kv_cache_device,),
         )
+        kv_config = vllm_config.kv_transfer_config
+        assert kv_config is not None
+        self._kv_read_batcher = KVReadBatcher(
+            max_bytes=kv_config.get_from_extra_config("kv_read_batch_bytes", 0),
+            max_descriptors=kv_config.get_from_extra_config("kv_read_batch_descriptors", 128),
+        )
         self.peer_request_queues: defaultdict[tuple[str, int], deque[dict[str, Any]]] = defaultdict(deque)
         self.active_peer_request_handlers: set[tuple[str, int]] = set()
         self.peer_request_queues_lock = threading.Lock()
@@ -816,7 +823,7 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_list.append(dst)
                     length_list.append(length)
 
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        ret = self._kv_read_batcher.read(self.engine, session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
@@ -916,7 +923,7 @@ class KVCacheRecvingThread(threading.Thread):
                 dst_list.append(dst)
                 length_list.append(length)
 
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        ret = self._kv_read_batcher.read(self.engine, session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
