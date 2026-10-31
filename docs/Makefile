@@ -42,7 +42,7 @@ build-zh:
 	DOCS_LANG=zh SITE_DIR=$(CURDIR)/$(BUILDDIR)/zh bash tools/rtd_build.sh
 
 gen-zh:
-	python tools/generate_zh_docs.py
+	python -m tools.generate_zh_docs
 
 clean:
 	rm -rf $(BUILDDIR)

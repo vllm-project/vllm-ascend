@@ -2,8 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import logging
-from dataclasses import dataclass
-from enum import Enum, auto
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -59,43 +58,16 @@ def seed_module(monkeypatch):
 def planner_module(monkeypatch):
     _stub(monkeypatch, "vllm.logger", logger=logging.getLogger("rfork-planner-validation-test"))
     _stub(monkeypatch, "vllm.utils.network_utils", get_ip=lambda: "127.0.0.1")
-    _stub(monkeypatch, "vllm_ascend.model_loader.rfork.config", RForkConfig=object)
-    _stub(monkeypatch, "vllm_ascend.model_loader.rfork.identity", build_seed_key=lambda **kwargs: "seed-key")
-
-    class LeaseReleaseResult(Enum):
-        RELEASED = auto()
-        RETRYABLE = auto()
-        REJECTED = auto()
-
-    class SeedReportStatus(Enum):
-        ACCEPTED = auto()
-        RETRYABLE = auto()
-        REJECTED = auto()
-
-    @dataclass(frozen=True)
-    class SeedReportResult:
-        status: SeedReportStatus
-        reason: str = ""
-
-    @dataclass(frozen=True)
-    class SeedLease:
-        seed_ip: str
-        seed_port: int
-        user_id: str
-        seed_rank: int
-        seed_key: str
-        lease_ttl_sec: float = 60.0
-
+    rfork_config = _load_module(monkeypatch, "rfork_test_planner_config", "config.py")
     _stub(
         monkeypatch,
-        "vllm_ascend.model_loader.rfork.types",
-        LeaseReleaseResult=LeaseReleaseResult,
-        SeedLease=SeedLease,
-        RForkIdentity=object,
-        SeedAdvertisement=object,
-        SeedReportResult=SeedReportResult,
-        SeedReportStatus=SeedReportStatus,
+        "vllm_ascend.model_loader.rfork.config",
+        RForkConfig=rfork_config.RForkConfig,
+        RForkConfigurationError=rfork_config.RForkConfigurationError,
     )
+    _stub(monkeypatch, "vllm_ascend.model_loader.rfork.identity", build_seed_key=lambda **kwargs: "seed-key")
+
+    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.types", "types.py")
     return _load_module(monkeypatch, "rfork_test_planner_client", "planner_client.py")
 
 
@@ -270,6 +242,16 @@ def test_canonicalization_is_deterministic_for_dicts_sets_and_dtype(identity_mod
     assert identity_module._canonicalize_fingerprint_value(first) == identity_module._canonicalize_fingerprint_value(
         second
     )
+
+
+def test_canonicalization_rejects_distinct_keys_with_one_label(identity_module):
+    with pytest.raises(ValueError, match="distinct keys with one label"):
+        identity_module._canonicalize_fingerprint_value({1: "int", "1": "text"})
+
+    assert identity_module._canonicalize_fingerprint_value({1: "int", "1.0": "float"}) == {
+        "1": "int",
+        "1.0": "float",
+    }
 
 
 def test_fingerprint_changes_when_seed_compatibility_changes(identity_module):
@@ -778,18 +760,128 @@ def test_recursive_fingerprint_values_fail_with_actionable_error(identity_module
             identity_module._canonicalize_fingerprint_value(value)
 
 
+@pytest.fixture
+def config_module(monkeypatch):
+    return _load_module(monkeypatch, "rfork_test_model_identity_config", "config.py")
+
+
+def _identity_header_config(config_module, extra_config=None):
+    raw_config = {
+        "model_url": "model",
+        "model_deploy_strategy_name": "strategy",
+        "rfork_scheduler_url": "http://planner",
+    }
+    if extra_config is not None:
+        raw_config.update(extra_config)
+    return config_module.RForkConfig.from_extra_config(raw_config)
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, False),
+        ("1", True),
+        ("false", False),
+    ],
+)
+def test_model_identity_header_switch_reads_rfork_environment(monkeypatch, config_module, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("RFORK_MODEL_IDENTITY_HEADERS", raising=False)
+    else:
+        monkeypatch.setenv("RFORK_MODEL_IDENTITY_HEADERS", env_value)
+
+    cfg = _identity_header_config(config_module)
+
+    assert cfg.send_model_identity_headers is expected
+
+
+@pytest.mark.parametrize("env_value", ["", "yes"])
+def test_model_identity_header_switch_rejects_invalid_values(monkeypatch, config_module, env_value):
+    monkeypatch.setenv("RFORK_MODEL_IDENTITY_HEADERS", env_value)
+
+    with pytest.raises(
+        config_module.RForkConfigurationError,
+        match="RFORK_MODEL_IDENTITY_HEADERS must be '0', '1', 'true' or 'false'",
+    ):
+        _identity_header_config(config_module)
+
+
+@pytest.mark.parametrize("json_value", [None, "true"])
+def test_model_identity_header_switch_rejects_non_boolean_json(monkeypatch, config_module, json_value):
+    monkeypatch.delenv("RFORK_MODEL_IDENTITY_HEADERS", raising=False)
+
+    with pytest.raises(
+        config_module.RForkConfigurationError, match="rfork_model_identity_headers must be a JSON boolean"
+    ):
+        _identity_header_config(config_module, {"rfork_model_identity_headers": json_value})
+
+
+@pytest.mark.parametrize("switch_source", ["json", "environment"])
+def test_identity_headers_reject_non_ascii_metadata_at_initialization(monkeypatch, config_module, switch_source):
+    monkeypatch.setenv("RFORK_MODEL_IDENTITY_HEADERS", "1" if switch_source == "environment" else "0")
+    extra_config: dict[str, str | bool] = {"model_url": "model/部署A"}
+    if switch_source == "json":
+        extra_config["rfork_model_identity_headers"] = True
+
+    with pytest.raises(config_module.RForkConfigurationError, match="model_url must contain only ASCII characters"):
+        _identity_header_config(config_module, extra_config)
+
+
+@pytest.mark.parametrize("field", ["model_url", "model_deploy_strategy_name"])
+def test_disabled_identity_headers_allow_non_ascii_metadata(monkeypatch, config_module, field):
+    monkeypatch.setenv("RFORK_MODEL_IDENTITY_HEADERS", "1")
+
+    cfg = _identity_header_config(config_module, {field: "model/部署A", "rfork_model_identity_headers": False})
+
+    assert getattr(cfg, field) == "model/部署A"
+
+
+@pytest.mark.parametrize(
+    "json_value,env_value",
+    [
+        (True, "0"),
+        (False, "1"),
+    ],
+)
+def test_json_switch_takes_precedence_over_environment(monkeypatch, config_module, json_value, env_value):
+    if env_value is None:
+        monkeypatch.delenv("RFORK_MODEL_IDENTITY_HEADERS", raising=False)
+    else:
+        monkeypatch.setenv("RFORK_MODEL_IDENTITY_HEADERS", env_value)
+    cfg = _identity_header_config(config_module, {"rfork_model_identity_headers": json_value})
+    assert cfg.send_model_identity_headers is json_value
+
+
 @pytest.mark.parametrize("raw", [[], "model", 1])
-def test_extra_config_requires_json_object(monkeypatch, raw):
-    config = _load_module(monkeypatch, "rfork_test_config", "config.py")
-    with pytest.raises(RuntimeError, match="JSON object"):
-        config.RForkConfig.from_extra_config(raw)
+def test_extra_config_requires_json_object(config_module, raw):
+    with pytest.raises(config_module.RForkConfigurationError, match="JSON object"):
+        config_module.RForkConfig.from_extra_config(raw)
 
 
 @pytest.mark.parametrize("value", ["8080", 8080.5, True, -1, 65536])
-def test_seed_port_base_rejects_non_integer_extra_config(monkeypatch, value):
-    config = _load_module(monkeypatch, "rfork_test_config", "config.py")
-    with pytest.raises(ValueError, match="rfork_seed_port_base must be a JSON integer in range"):
-        config.RForkConfig.from_extra_config({"rfork_seed_port_base": value})
+def test_seed_port_base_rejects_non_integer_extra_config(config_module, value):
+    with pytest.raises(
+        config_module.RForkConfigurationError, match="rfork_seed_port_base must be a JSON integer in range"
+    ):
+        config_module.RForkConfig.from_extra_config({"rfork_seed_port_base": value})
+
+
+def test_unknown_extra_config_keys_are_reported(config_module):
+    config = config_module
+
+    assert config.unknown_extra_config_keys(None) == []
+    assert config.unknown_extra_config_keys("model") == []
+    assert config.unknown_extra_config_keys({"model_url": "model"}) == []
+    assert config.unknown_extra_config_keys(
+        {"model_url": "model", "rfork_seed_timeout_secc": 1.0, "RFORK_SEED_BIND_HOST": "0.0.0.0"}
+    ) == ["RFORK_SEED_BIND_HOST", "rfork_seed_timeout_secc"]
+
+
+def test_session_rejects_missing_required_configuration(runtime):
+    with pytest.raises(runtime.session.RForkConfigurationError, match="rfork_scheduler_url"):
+        runtime.session.RForkSession(replace(runtime.config, planner_url=""), runtime.identity)
+    with pytest.raises(runtime.session.RForkConfigurationError, match="model_url and model_deploy_strategy_name"):
+        runtime.session.RForkSession(replace(runtime.config, model_deploy_strategy_name=""), runtime.identity)
 
 
 def test_build_seed_key_rejects_missing_identity_values(identity_module):
@@ -959,6 +1051,19 @@ def test_seed_metadata_rejects_other_protocol_versions(seed_module, monkeypatch,
     assert seed_module.fetch_seed_transfer_info("http://seed", "key", 1.0) is None
 
 
+def test_seed_metadata_request_disables_redirects(seed_module, monkeypatch):
+    get = Mock(return_value=SimpleNamespace(status_code=404))
+    monkeypatch.setattr(seed_module.requests, "get", get)
+
+    assert seed_module.fetch_seed_transfer_info("http://seed", "key", 1.5) is None
+
+    assert get.call_args.args[0].endswith("/get_rfork_transfer_engine_info")
+    assert get.call_args.kwargs["params"] == {"seed_key": "key"}
+    assert get.call_args.kwargs["timeout"] == 1.5
+    # Match the planner client: never follow a redirected metadata endpoint.
+    assert get.call_args.kwargs["allow_redirects"] is False
+
+
 @pytest.mark.parametrize(
     ("seed_port", "seed_rank", "message"),
     [("not-a-port", "0", "malformed"), ("0", "-1", "invalid")],
@@ -971,6 +1076,7 @@ def test_planner_rejects_invalid_lease_headers_with_error(
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
         lease_release_max_attempts=1,
         lease_release_retry_interval_sec=1.0,
         heartbeat_interval_sec=1.0,
@@ -1003,6 +1109,7 @@ def test_planner_seed_key_requires_bound_structural_digest(planner_module, monke
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"
@@ -1037,6 +1144,7 @@ def test_planner_verify_structural_digest_binds_and_reports_drift(planner_module
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"
@@ -1060,6 +1168,7 @@ def test_planner_acquires_and_renews_a_ttl_lease(planner_module, monkeypatch):
         planner_url="http://planner",
         model_url="model",
         model_deploy_strategy_name="strategy",
+        send_model_identity_headers=False,
     )
     identity = SimpleNamespace(
         tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"

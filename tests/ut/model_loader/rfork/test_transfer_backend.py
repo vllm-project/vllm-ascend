@@ -702,6 +702,7 @@ def _make_register_memory_region_backend(
     snapshot_blocks,
     stale_blocks=(),
     unregister_error=False,
+    register_outcome="ok",
 ):
     registrations: list[tuple[int, int, int, int]] = []
     unregistered_calls = []
@@ -719,6 +720,12 @@ def _make_register_memory_region_backend(
 
     def batch_register_memory_ex(items):
         registrations.extend(item.values for item in items)
+        if register_outcome == "raise":
+            raise RuntimeError("mock registration raised")
+        if register_outcome == "none":
+            return None
+        if register_outcome == "error":
+            return SimpleNamespace(is_error=lambda: True, to_string=lambda: "mock registration error")
         return _Ret()
 
     def batch_unregister_memory(addresses):
@@ -824,6 +831,58 @@ def test_register_memory_region_skips_empty_batch_after_excluding_all_weights(mo
     assert backend._registered_transferable_tensors == []
     assert backend.registered_weight_blocks == []
     assert registrations == []
+
+
+def _single_block_snapshot(storage):
+    return [
+        {
+            "address": storage.data_ptr(),
+            "size": storage.numel() * storage.element_size(),
+            "state": "active_allocated",
+        }
+    ]
+
+
+@pytest.mark.parametrize("register_outcome", ["raise", "error", "none"])
+def test_register_memory_region_rolls_back_attempted_addresses_when_registration_fails(monkeypatch, register_outcome):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, registrations, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        register_outcome=register_outcome,
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # Roll back attempted registrations even when the engine never confirmed them.
+    assert registrations == [(storage.data_ptr(), 40, storage.data_ptr(), 40)]
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.weight_manifest is None
+    assert backend.registered_weight_blocks == []
+    assert backend.registered_memory_addresses == []
+    assert backend._registered_transferable_tensors is None
+
+
+def test_register_memory_region_retains_owners_when_rollback_also_fails(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, _, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        unregister_error=True,
+        register_outcome="error",
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # Keep addresses and tensor owners pinned when rollback fails so cleanup can retry safely.
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.registered_memory_addresses == [storage.data_ptr()]
+    assert backend.registered_weight_blocks == [(storage.data_ptr(), 40)]
+    assert backend.weight_manifest is not None and "weight" in backend.weight_manifest
+    assert backend._registered_transferable_tensors is not None
+    assert [name for name, _ in backend._registered_transferable_tensors] == ["weight"]
 
 
 def test_read_weights_from_seed_rejects_missing_registration_cache(monkeypatch):

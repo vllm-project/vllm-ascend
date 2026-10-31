@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import sys
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from tests.ut.model_loader.rfork.session_test_utils import dummy_model, make_session, run_and_join
+
+from .rfork_test_support import _load_module
 
 
 @pytest.mark.parametrize("tp_rank", [0, 2])
@@ -225,21 +229,26 @@ def test_shutdown_retains_resources_for_an_unresolved_lease(runtime, caplog):
 def test_register_destination_binds_structural_digest(runtime, monkeypatch):
     backend = Mock()
     backend.register_memory_region.return_value = True
+    backend.registered_structural_digest = "registered-digest"
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", Mock(return_value=backend))
     session = runtime.session.RForkSession(runtime.config, runtime.identity)
 
     assert session.register_destination(dummy_model(), True)
-    assert session.planner.structural_digest is not None
+    assert session.planner.structural_digest == "registered-digest"
     assert session.planner.seed_key == "model-key"
 
 
 def test_seed_service_refuses_advertisement_after_digest_drift(runtime, monkeypatch, caplog):
     backend = Mock()
-    backend.register_memory_region.return_value = True
+    digests = iter(["digest-a", "digest-b"])
+
+    def register(*args):
+        backend.registered_structural_digest = next(digests)
+        return True
+
+    backend.register_memory_region.side_effect = register
     backend.unregister_memory_region.return_value = True
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", Mock(return_value=backend))
-    digests = iter(["digest-a", "digest-b"])
-    monkeypatch.setattr(runtime.session, "build_structural_digest", lambda tensors: next(digests))
     session = runtime.session.RForkSession(runtime.config, runtime.identity)
 
     assert session.register_destination(dummy_model(), True)
@@ -247,3 +256,240 @@ def test_seed_service_refuses_advertisement_after_digest_drift(runtime, monkeypa
     assert session.start_seed_service(dummy_model(), True) is runtime.types.RForkSeedServiceStartResult.FAILED
     assert session.planner.structural_digest == "digest-a"
     assert "structure changed" in caplog.text
+
+
+class _SeedHandle:
+    def __init__(self):
+        self.is_alive = True
+
+    def stop(self):
+        self.is_alive = False
+        return True
+
+
+def _session(runtime):
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    session.planner.bind_structural_digest("digest")
+    session.transfer_backend.finalize_transfer_engine.return_value = True
+    session.state = runtime.types.RForkLifecycleState.REGISTERED
+    return session
+
+
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_missing_removal_route_stops_metadata_but_retains_published_memory(runtime, monkeypatch, status):
+    session = _session(runtime)
+    handle = _SeedHandle()
+    session.seed_server = handle
+    session.state = runtime.types.RForkLifecycleState.SERVING
+    session.planner.last_advertisement = runtime.types.SeedAdvertisement("127.0.0.1", 1234, 0)
+    post = Mock(return_value=SimpleNamespace(status_code=status))
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+
+    assert not session.shutdown()
+    assert not handle.is_alive
+    assert session.seed_server is handle
+    assert session.planner.last_advertisement is not None
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+    session.transfer_backend.unregister_memory_region.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [409, 503])
+def test_pending_removal_keeps_metadata_available_for_existing_receivers(runtime, monkeypatch, status):
+    session = _session(runtime)
+    handle = _SeedHandle()
+    session.seed_server = handle
+    session.state = runtime.types.RForkLifecycleState.SERVING
+    session.planner.last_advertisement = runtime.types.SeedAdvertisement("127.0.0.1", 1234, 0)
+    monkeypatch.setattr(runtime.client.requests, "post", Mock(return_value=SimpleNamespace(status_code=status)))
+    monkeypatch.setattr(runtime.client, "SEED_REMOVAL_RETRY_BACKOFF_SEC", 0)
+
+    assert not session.shutdown()
+    assert handle.is_alive
+    assert session.seed_server is handle
+    assert session.planner.last_advertisement is not None
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+
+
+def _configure_real_session(runtime, monkeypatch, model, processed_layout):
+    prefix = "vllm_ascend.model_loader.rfork"
+    layout = sys.modules[f"{prefix}.tensor_layout"]
+    transfer = _load_module(monkeypatch, f"{prefix}.transfer_backend", "transfer_backend.py")
+    monkeypatch.setattr(runtime.session, "RForkTransferBackend", transfer.RForkTransferBackend)
+    monkeypatch.setattr(
+        runtime.client,
+        "build_seed_key",
+        lambda **kwargs: f"model-key:{kwargs['structural_digest']}",
+    )
+    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(layout, "read_npu_format", lambda tensor: 0)
+    monkeypatch.setattr(transfer, "read_npu_format", lambda tensor: 0)
+    monkeypatch.setattr(sys.modules[f"{prefix}.manifest"], "read_npu_format", lambda tensor: 0)
+
+    def memory_snapshot():
+        blocks = [
+            {
+                "address": tensor.data_ptr(),
+                "size": tensor.numel() * tensor.element_size(),
+                "state": "active_allocated",
+            }
+            for _, tensor in layout.collect_transferable_tensors(model, processed_layout)
+        ]
+        return [{"blocks": blocks}]
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(memory=SimpleNamespace(memory_snapshot=memory_snapshot)),
+        raising=False,
+    )
+
+    success = SimpleNamespace(is_error=lambda: False, to_string=lambda: "success")
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    backend = session.transfer_backend
+    backend.transfer_engine = SimpleNamespace(
+        batch_register_memory_ex=lambda registrations: success,
+        batch_unregister_memory=lambda addresses: success,
+        batch_transfer_sync_read=lambda *args: success,
+        finalize=lambda: success,
+    )
+    backend._memory_registration_cls = lambda *fields: fields
+    backend.transfer_session_id = "receiver-session"
+    backend._is_initialized = True
+
+    # Stub external scheduling hooks while exercising real registration and lifecycle logic.
+    monkeypatch.setattr(session, "_ensure_lease_release_retry_locked", lambda: None)
+    monkeypatch.setattr(session, "_run_seed_heartbeat", lambda *args: None)
+    monkeypatch.setattr(session.planner, "report_seed_once", lambda *args, **kwargs: True)
+    monkeypatch.setattr(session.planner, "remove_seed", lambda *args, **kwargs: True)
+    server = Mock(is_alive=True, port=1234, stop=Mock(return_value=True))
+    start_server = Mock(return_value=server)
+    monkeypatch.setattr(runtime.session, "start_rfork_server", start_server)
+    return session, backend, layout, start_server
+
+
+def _transfer_model(runtime, monkeypatch, session, backend, model, processed_layout):
+    seed_info = runtime.types.SeedTransferInfo(
+        "seed-session", dict(backend.weight_manifest), formats=dict(backend.weight_formats)
+    )
+    monkeypatch.setattr(runtime.session, "fetch_seed_transfer_info", lambda *args: seed_info)
+    session.state = runtime.types.RForkLifecycleState.LEASED
+    session.seed_lease = runtime.lease
+    assert session.transfer_from_seed(model, processed_layout)
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_post_load_rebinds_manifest_without_changing_seed_identity(runtime, monkeypatch, deferred):
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    session, backend, layout, start_server = _configure_real_session(runtime, monkeypatch, model, False)
+
+    try:
+        assert session.register_destination(model, False)
+        original_digest = session.planner.structural_digest
+        original_key = session.planner.seed_key
+        _transfer_model(runtime, monkeypatch, session, backend, model, False)
+        if not deferred:
+            session.seed_lease = None
+
+        model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2))
+        new_weight = model.weight
+        assert session.log_transferred_model_layout(model, False) != original_digest
+        compute_digest = Mock(wraps=runtime.session._compute_structural_digest)
+        verify_digest = Mock(wraps=session.planner.verify_structural_digest)
+        monkeypatch.setattr(runtime.session, "_compute_structural_digest", compute_digest)
+        monkeypatch.setattr(session.planner, "verify_structural_digest", verify_digest)
+
+        result = session.start_seed_service(model, False)
+
+        assert result is getattr(runtime.types.RForkSeedServiceStartResult, "DEFERRED" if deferred else "STARTED")
+        assert session.planner.structural_digest == original_digest
+        assert session.planner.seed_key == original_key
+        assert compute_digest.call_count == 0
+        assert verify_digest.call_count == 0
+        if deferred:
+            session.seed_lease = None
+            session._promote_deferred_seed()
+            assert session.state is runtime.types.RForkLifecycleState.SERVING
+
+        assert backend.weight_manifest["weight"][0] == new_weight.data_ptr()
+        assert backend.weight_manifest["weight"][3] == (3, 2)
+        if not deferred:
+            assert backend.registered_structural_digest == layout.build_structural_digest([("weight", new_weight)])
+        assert start_server.call_count == 1
+        advertised_info = start_server.call_args.args[1]
+        assert start_server.call_args.args[0] == original_key
+        assert advertised_info.weights["weight"][0] == new_weight.data_ptr()
+        assert advertised_info.weights["weight"][3] == (3, 2)
+        assert compute_digest.call_count == 0
+        assert verify_digest.call_count == 0
+    finally:
+        session.seed_lease = None
+        assert session.shutdown()
+
+
+def _published_session(runtime):
+    """A SERVING session whose seed server and planner are cheap test doubles."""
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    session.planner = Mock()
+    session.transfer_backend = Mock()
+    session.transfer_backend.finalize_transfer_engine.return_value = True
+    session.seed_server = SimpleNamespace(stop=lambda: True)
+    session.heartbeat_thread = None
+    session.state = runtime.types.RForkLifecycleState.SERVING
+    return session
+
+
+def test_final_shutdown_exempts_unsupported_removal(runtime):
+    session = _published_session(runtime)
+    session.planner.remove_seed.return_value = runtime.types.SeedRemovalResult.UNSUPPORTED
+
+    assert session.shutdown(final=True) is True
+
+    session.transfer_backend.finalize_transfer_engine.assert_called_once()
+    assert session.state is runtime.types.RForkLifecycleState.FINALIZED
+    assert session.seed_server is None
+
+
+@pytest.mark.parametrize("outcome", ["UNCONFIRMED", "DRAINING", "RETRYABLE"])
+def test_final_shutdown_does_not_exempt_other_removal_outcomes(runtime, outcome):
+    session = _published_session(runtime)
+    session.planner.remove_seed.return_value = getattr(runtime.types.SeedRemovalResult, outcome)
+
+    assert session.shutdown(final=True) is False
+
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+
+
+def test_explicit_shutdown_keeps_unsupported_as_failure(runtime):
+    session = _published_session(runtime)
+    session.planner.remove_seed.return_value = runtime.types.SeedRemovalResult.UNSUPPORTED
+
+    assert session.shutdown() is False
+
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+
+
+def test_final_shutdown_still_requires_server_stop_success(runtime):
+    session = _published_session(runtime)
+    session.planner.remove_seed.return_value = runtime.types.SeedRemovalResult.UNSUPPORTED
+    session.seed_server = SimpleNamespace(stop=lambda: False)
+
+    assert session.shutdown(final=True) is False
+
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+
+
+def test_atexit_callback_requests_final_shutdown(runtime, monkeypatch):
+    session = _published_session(runtime)
+    session.planner.remove_seed.return_value = runtime.types.SeedRemovalResult.UNSUPPORTED
+    calls = []
+
+    def record_shutdown(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(session, "shutdown", record_shutdown)
+
+    assert session._atexit_callback() is True
+
+    assert calls == [{"final": True}]
