@@ -50,6 +50,7 @@ def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tok
     table.vocab_start_idx, table.vocab_end_idx = 5, 8
     table.tp_size, table.dp_size = tp, dp
     table._codes_uva = None
+    table._remote_reader = None
     codes = torch.arange(3 * 64).reshape(3, 64).remainder(31).sub(15)
     table.weight = torch.nn.Parameter(codes.to(torch.int8 if quantized else torch.bfloat16), requires_grad=False)
     table.weight_scale_inv = torch.nn.Parameter(torch.full((3, 2), 0.125), requires_grad=False) if quantized else None
@@ -78,6 +79,41 @@ def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tok
     monkeypatch.setattr(embedding_mod, "tensor_model_parallel_all_gather", gather)
     result = table.embed_gathered(ids, tokens)
     torch.testing.assert_close(result, torch.cat([expected[:tokens]] * tp, dim=1), rtol=0, atol=0)
+
+
+def test_shared_backends_allocate_distinct_storage(monkeypatch):
+    from vllm_ascend.models.deepseek_v41.engram import shared_pool
+
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *args, **kwargs: device("cpu"))
+    views = []
+
+    class FakeClient:
+        def __init__(self, root, identity, *, device):
+            assert (root, identity) == ("/pool", "model")
+
+        def view(self, key, start, end, *, rows, width, dtype):
+            assert rows == 4
+            views.append(key)
+            return SimpleNamespace(tensor=torch.empty((end - start, width), dtype=dtype))
+
+    monkeypatch.setattr(shared_pool, "SharedPoolClient", FakeClient)
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.part_num_embeddings, table.dim, table.block_size = 4, 64, 32
+    table.num_embeddings = 4
+    table.storage_dtype, table.scale_dtype = torch.int8, torch.float32
+    table.vocab_start_idx, table.vocab_end_idx = 0, 4
+    table._remote_reader = None
+    table._shared_pool_spec = ("/pool", "model", "layers.1.engram.embed")
+    weight, scale = table._allocate_weights()
+    assert weight.device.type == "cpu" and scale.device.type == "cpu"
+    assert views == ["layers.1.engram.embed.weight", "layers.1.engram.embed.scale"]
+
+    table._remote_reader = object()
+    table._shared_pool_spec = (None, None, None)
+    weight, scale = table._allocate_weights()
+    assert weight.device.type == "meta" and scale.device.type == "meta"
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):

@@ -64,10 +64,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        remote_reader=None,
         shared_pool_dir: str | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
     ) -> None:
+        self._remote_reader = remote_reader
+        if remote_reader is not None and (not cpu_offload or not dp_shared_memory or storage_dtype != torch.int8):
+            raise ValueError("Remote Engram requires INT8 cpu_offload with dp_shared_memory")
+        if remote_reader is not None and shared_pool_dir:
+            raise ValueError("Remote Engram and shared host VMM are mutually exclusive")
         self._shared_pool_spec = (shared_pool_dir, shared_pool_identity, shared_pool_key)
         self._shared_pool_client: SharedPoolClient | None = None
         if shared_pool_dir and (
@@ -128,7 +134,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if param is None:
                 continue
             set_weight_attrs(param, {"weight_loader": self._weight_loader, "engram_vocab_start": self.vocab_start_idx})
-        if cpu_offload:
+        if cpu_offload and remote_reader is None:
             set_weight_attrs(self.weight, {"dummy_weight_value": 0})
             if self.weight_scale_inv is not None:
                 scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
@@ -154,6 +160,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        if self._remote_reader is not None:
+            return (
+                torch.empty(codes_shape, dtype=self.storage_dtype, device="meta"),
+                torch.empty(scales_shape, dtype=self.scale_dtype, device="meta"),
+            )
         pool_dir, identity, key = self._shared_pool_spec
         if pool_dir:
             from .shared_pool import SharedPoolClient
@@ -220,6 +231,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         stays retryable and a half-finished release never leaves a live
         parameter pointing at memory the other buffer has already freed.
         """
+        if self._remote_reader is not None:
+            self._remote_reader.close()
+            return
         client = getattr(self, "_shared_pool_client", None)
         if client is not None:
             client.close()
@@ -261,6 +275,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self._checkpoint_key = key
 
     def _weight_loader(self, param, loaded_weight) -> None:
+        if self._remote_reader is not None:
+            return
         if param is self.weight:
             self.load_checkpoint(self._checkpoint_path, self._checkpoint_key)
 
@@ -270,6 +286,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_remote_reader", None) is not None:
+            return
         if getattr(self, "_shared_pool_client", None) is not None:
             expected = self._shared_pool_spec[2] + ".weight"
             if key != expected:
@@ -387,7 +405,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     self.weight_scale_inv.data[offset:target_end].copy_(scales)
         logger.info("Engram rows [%d, %d) loaded from %s", start, end, index[key])
 
-    def embed_gathered(self, gathered: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    def embed_gathered(
+        self, gathered: torch.Tensor, num_tokens: int, *, cpu_ids=None, local_values=None
+    ) -> torch.Tensor:
         """Embed ids already gathered across the EDP group.
 
         ``gathered`` is ``[slot * EDP, n_hash_cols]`` rank-major; each replica
@@ -396,14 +416,20 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         """
         # The kernel walks ids as [token, columns] with a unit inner stride, and
         # `gathered` is a slice of a [tokens, layers, columns] buffer.
-        gathered = gathered.contiguous()
-        # lookup writes every allocated head, including zeroes for invalid IDs.
-        out = torch.empty(
-            (gathered.shape[0], self.part_n_hash_cols, self.dim),
-            dtype=torch.bfloat16,
-            device=gathered.device,
-        )
-        self.lookup(gathered, out)
+        if local_values is not None:
+            out = local_values
+        else:
+            if cpu_ids is None:
+                gathered = gathered.contiguous()
+            out = torch.empty(
+                (gathered.shape[0], self.part_n_hash_cols, self.dim),
+                dtype=torch.bfloat16,
+                device=gathered.device,
+            )
+            if cpu_ids is None:
+                self.lookup(gathered, out)
+            else:
+                self.lookup(gathered, out, cpu_ids=cpu_ids)
         if self.dp_size > 1:
             out = exchange_engram_rows(out, num_tokens)
         else:
@@ -433,13 +459,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
         return self.embed_gathered(gathered, num_tokens)
 
-    def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False) -> None:
+    def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False, *, cpu_ids=None) -> None:
         """Look up this shard's heads into ``[tokens, padded_heads, dim]`` bf16.
 
         All local head columns are written, including zeroes for invalid IDs.
         """
         tokens = indices.shape[0]
         if tokens == 0 or self.part_n_hash_cols == 0:
+            return
+        if self._remote_reader is not None:
+            self._remote_reader.lookup(self, indices, out, cpu_ids=cpu_ids)
             return
         launch = dict(
             head_start=self.head_start,

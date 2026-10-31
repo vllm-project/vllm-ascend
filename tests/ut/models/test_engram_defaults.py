@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.ascend_config import AscendConfig
+from vllm_ascend.ascend_config import AscendConfig, SharedEngramRdmaConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -18,3 +18,12 @@ def test_engram_overlap_hardware_default_and_explicit_override(monkeypatch, devi
     config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), **kwargs)
     expected = device == AscendDeviceType.A5 if explicit is None else explicit
     assert config.multistream_engram_overlap is expected
+
+
+def test_engram_shared_backends_are_mutually_exclusive():
+    rdma = SharedEngramRdmaConfig(endpoint="127.0.0.1:29500")
+    kwargs = {"sparse_kv_offload_config": SimpleNamespace(enabled=False)}
+    assert AscendConfig(engram_shared_host_dir="/tmp/pool", **kwargs).shared_engram_rdma is None
+    assert AscendConfig(shared_engram_rdma=rdma, **kwargs).engram_shared_host_dir is None
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AscendConfig(engram_shared_host_dir="/tmp/pool", shared_engram_rdma=rdma, **kwargs)

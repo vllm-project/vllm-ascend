@@ -452,6 +452,11 @@ class NPUWorker(WorkerBase):
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        close_engram = getattr(model, "close_shared_engram", None)
+        if callable(close_engram):
+            # Drain NPU readers before KV transports tear down shared networking.
+            close_engram()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
         if ensure_ec_transfer_shutdown is not None:

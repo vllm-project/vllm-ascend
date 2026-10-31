@@ -227,6 +227,19 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
+# Optional A2 shared-table transport; no dependency on HIXL's Python ABI.
+if(EXISTS "${ASCEND_HOME_PATH}/include/hixl/hixl.h")
+  find_library(ENGRAM_HIXL_LIBRARY cann_hixl PATHS ${ASCEND_HOME_PATH}/lib64)
+  if(ENGRAM_HIXL_LIBRARY)
+    add_library(engram_hixl SHARED csrc/engram_hixl/native.cpp)
+    target_include_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/include)
+    target_link_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/lib64)
+    target_link_libraries(engram_hixl PRIVATE ${ENGRAM_HIXL_LIBRARY} ascendcl)
+    add_dependencies(vllm_ascend_C engram_hixl)
+    install(TARGETS engram_hixl DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+  endif()
+endif()
+
 # A3 shared host Engram uses the optional CANN Fabric-handle API.
 if(SOC_VERSION MATCHES "ascend910_93.*")
   check_cxx_source_compiles("
