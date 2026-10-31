@@ -64,14 +64,13 @@ from vllm_ascend.ops.linear_op import get_parallel_op
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
 
-# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
-# A5 decode keeps its lower-latency Triton path.
+# Use CANN MsaIndexScore for prefill and decode on every device, keeping A5
+# aligned with A3. A5's Triton decode kernel stays importable as a rollback
+# path.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = (
-    get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED
-)
+_USE_ASCENDC_INDEX_SCORE_DECODE = True
 
-if not _USE_ASCENDC_INDEX_SCORE_DECODE:
+if get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,

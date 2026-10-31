@@ -92,7 +92,6 @@ ASCEND_RT_VISIBLE_DEVICES=8 python -m pytest -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py
 ```
 
-
 ## Optional GBSA order
 
 `sort_indices=True` additionally orders valid block IDs ascending inside the

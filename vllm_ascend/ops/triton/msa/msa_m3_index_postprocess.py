@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused TopK helpers around the A2/A3 AscendC MsaIndexScore operator."""
+"""Fused TopK helpers around the AscendC MsaIndexScore operator."""
 
 from __future__ import annotations
 
@@ -114,8 +114,6 @@ def _ascendc_decode_topk_postprocess_kernel(
     )
 
 
-
-
 @triton.jit
 def _ascendc_decode_topk_sorted_batched_kernel(
     raw_ptr,
@@ -134,12 +132,8 @@ def _ascendc_decode_topk_sorted_batched_kernel(
     rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     head = tl.program_id(1)
     cols = tl.arange(0, TILE)
-    context = tl.load(
-        context_ptr + rows // decode_query_len, rows < tokens, other=0
-    ).to(tl.int32)
-    visible_blocks = tl.maximum(
-        (context + rows % decode_query_len + BLOCK_SIZE) // BLOCK_SIZE, 0
-    )
+    context = tl.load(context_ptr + rows // decode_query_len, rows < tokens, other=0).to(tl.int32)
+    visible_blocks = tl.maximum((context + rows % decode_query_len + BLOCK_SIZE) // BLOCK_SIZE, 0)
     visible_blocks = tl.minimum(visible_blocks, logical_blocks)
     offsets = (head * tokens + rows[:, None]) * TOPK + cols[None, :]
     mask = (rows[:, None] < tokens) & (cols[None, :] < TOPK)
@@ -164,7 +158,7 @@ def index_decode_topk_fused(
     *,
     sort_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return int32 block IDs and valid counts for A2/A3 decode."""
+    """Return int32 block IDs and valid counts for AscendC decode."""
     if score.ndim != 3 or score.dtype != torch.float32:
         raise ValueError("Expected a [heads, query_tokens, score_width] float32 tensor")
     if context_lens.ndim != 1 or context_lens.dtype not in (torch.int32, torch.int64):
@@ -233,9 +227,7 @@ def index_decode_topk_fused(
         raw_indices = raw_indices.contiguous()
         context_lens = context_lens.contiguous()
     if sort_indices and topk == _SORTED_POSTPROCESS_TOPK:
-        _ascendc_decode_topk_sorted_batched_kernel[
-            (triton.cdiv(tokens, _SORTED_POSTPROCESS_ROWS), heads)
-        ](
+        _ascendc_decode_topk_sorted_batched_kernel[(triton.cdiv(tokens, _SORTED_POSTPROCESS_ROWS), heads)](
             raw_indices,
             indices,
             counts,

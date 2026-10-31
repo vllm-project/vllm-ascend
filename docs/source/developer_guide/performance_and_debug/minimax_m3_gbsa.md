@@ -1,8 +1,9 @@
 # MiniMax-M3 GBSA decode preparation
 
-MiniMax-M3 retains separate decode index-score implementations: AscendC on
-A2/A3 and Triton on A5. Both model paths request ordered block IDs from their
-TopK postprocessor and pass `indices_are_sorted=True` to GBSA. The attention
+MiniMax-M3 uses CANN AscendC index scoring for decode on all supported devices.
+The A5 Triton decode implementation remains available as a rollback path. Both
+indexer paths request ordered block IDs from their TopK postprocessor and pass
+`indices_are_sorted=True` to GBSA. The attention
 wrapper retains its normalizer for direct callers that do not opt into this
 contract.
 

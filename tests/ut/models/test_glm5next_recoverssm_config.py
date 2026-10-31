@@ -37,8 +37,11 @@ def test_default_does_not_change_native_cache_contract():
 
 
 @pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
-def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector):
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector, prefix_caching):
     config = make_config()
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
     if connector is not None:
         config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     assert use_glm_recoverssm(config)
@@ -59,7 +62,7 @@ def test_initialization_requires_speculative_decoding():
     "section,field,value,message",
     [
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
-        ("cache_config", "enable_prefix_caching", True, "prefix caching disabled"),
+        ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("parallel_config", "pipeline_parallel_size", 2, "PP=1 and PCP=1"),
         ("parallel_config", "prefill_context_parallel_size", 2, "PP=1 and PCP=1"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
