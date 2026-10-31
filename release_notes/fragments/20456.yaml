@@ -1,0 +1,8 @@
+pr: 20456
+entries:
+  - category: performance
+    text: >-
+      Improved A2/A3 INT8 per-tile sparse attention performance with actual-width
+      no-RoPE computation and faster KV gather. Adaptive address preparation
+      supports large page tables and valid sparse prefixes followed by invalid slots.
+    hardware: [A2, A3]

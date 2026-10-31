@@ -405,7 +405,7 @@ void QSFAMlaTiling::InitParams()
     perfMode_ = QSFAPerfMode::V_TEMPLATE_MODE;
     coreNum_ = aicNum_;
 
-    // The kernel pads absent RoPE lanes internally; retain the original UB/workspace layout.
+    // Retain the existing UB/workspace capacity; arch22 no-RoPE computes 512 dimensions.
     headDimAlign_ = Align(MLA_NOPE_HEAD_DIM + MLA_ROPE_HEAD_DIM, BYTE_BLOCK);
     ZeroTensorProcess();
 }
@@ -604,6 +604,17 @@ void QSFAMlaTiling::GetWorkspaceSize()
 
 void QSFAMlaTiling::CalcBlockDim()
 {
+    // Reduce idle launches on arch22 for both RoPE and no-RoPE paths.
+    if (qsfaInfo_->npuArch == NpuArch::DAV_2201) {
+        uint64_t taskNum = qsfaInfo_->s1Size;
+        if (qsfaInfo_->qLayout != QSFALayout::TND) {
+            taskNum = static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+        }
+        if (taskNum > 0 && taskNum < usedCoreNum_) {
+            usedCoreNum_ = taskNum;
+            tilingData_.singleCoreParams.set_usedCoreNum(usedCoreNum_);
+        }
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
     auto aicNum = usedCoreNum_;
     auto aivNum = 2 * usedCoreNum_;
