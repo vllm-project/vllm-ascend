@@ -1102,31 +1102,36 @@ void check_compressor_metadata_outputs(
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
-    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual)
+    int64_t slot_mapping_format, int64_t compress_ratio, c10::SymInt num_compressed_tokens,
+    int64_t num_reqs_actual)
 {
     constexpr int64_t VALUE_0 = 0;
+    const int64_t num_compressed_tokens_int = num_compressed_tokens.expect_int();
 
     check_compressor_metadata_common(
         rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table, kv_block_size, slot_mapping_format, compress_ratio,
         num_reqs_actual);
-    TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
+    TORCH_CHECK(num_compressed_tokens_int > VALUE_0, "num_compressed_tokens should be greater than 0");
 
-    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens, 1, 1, rope_cos.size(1)};
+    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens_int, 1, 1, rope_cos.size(1)};
     at::Tensor compress_cos = at::empty(rope_output_size, rope_cos.options());
     at::Tensor compress_sin = at::empty(rope_output_size, rope_sin.options());
 
     at::SmallVector<int64_t, 2> slot_mapping_size;
     if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
-        slot_mapping_size = {num_compressed_tokens, 2};
+        slot_mapping_size = {num_compressed_tokens_int, 2};
     } else {
-        slot_mapping_size = {num_compressed_tokens};
+        slot_mapping_size = {num_compressed_tokens_int};
     }
     at::Tensor slot_mapping = at::empty(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
 
     EXEC_NPU_CMD(aclnnCompressorMetadata, rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table,
                  kv_block_size, slot_mapping_format, compress_ratio, num_reqs_actual, compress_cos, compress_sin,
                  slot_mapping);
-    return std::make_tuple(compress_cos, compress_sin, slot_mapping);
+    return std::make_tuple(
+        compress_cos.view({num_compressed_tokens_int, rope_cos.size(1)}),
+        compress_sin.view({num_compressed_tokens_int, rope_sin.size(1)}),
+        slot_mapping);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_out(
@@ -2582,7 +2587,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "compressor_metadata("
             "Tensor rope_cos, Tensor rope_sin, "
             "Tensor cu_seqlens, Tensor start_pos, Tensor kv_block_table, "
-            "int kv_block_size, int slot_mapping_format, int compress_ratio, int num_compressed_tokens, "
+            "int kv_block_size, int slot_mapping_format, int compress_ratio, SymInt num_compressed_tokens, "
             "int num_reqs_actual"
         ") -> (Tensor, Tensor, Tensor)"
         );

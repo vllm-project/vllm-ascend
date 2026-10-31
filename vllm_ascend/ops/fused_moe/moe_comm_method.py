@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.fused_moe.alltoall_region import run_alltoall_routed_region
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -43,9 +44,20 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
+from vllm_ascend.ops.fxrt_side_effects import (
+    fxrt_record_event,
+    get_fxrt_event_index,
+)
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import fxrt_moe_prefill_decompose_enabled
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+
+
+def _record_moe_event(name: str) -> int | torch.npu.Event | None:
+    if fxrt_moe_prefill_decompose_enabled():
+        return None
+    return torch.npu.current_stream().record_event()
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -75,9 +87,9 @@ class FusedExpertsResult:
     # This field is for shared experts and should be set by the MoE
     # communication method that supports shared experts in parallel with routed
     # experts.
-    before_dispatch_evt: torch.npu.Event | None = None
-    before_gmm2_evt: torch.npu.Event | None = None
-    before_combine_evt: torch.npu.Event | None = None
+    before_dispatch_evt: int | torch.npu.Event | None = None
+    before_gmm2_evt: int | torch.npu.Event | None = None
+    before_combine_evt: int | torch.npu.Event | None = None
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
@@ -136,7 +148,7 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
+        before_dispatch_evt = _record_moe_event("moe.before_dispatch")
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
@@ -155,7 +167,7 @@ class MoECommMethod(ABC):
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
-        before_combine_evt = torch.npu.current_stream().record_event()
+        before_combine_evt = _record_moe_event("moe.before_combine")
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
@@ -242,6 +254,11 @@ class AlltoAllCommImpl(MoECommMethod):
     between data parallel ranks before and after the MLP computation. It should
     have better performance than AllGatherCommImpl when DP size > 1.
     """
+
+    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput):
+        if fxrt_moe_prefill_decompose_enabled():
+            return run_alltoall_routed_region(self, fused_experts_input)
+        return super().fused_experts(fused_experts_input)
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]

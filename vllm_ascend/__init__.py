@@ -32,6 +32,9 @@ def _ensure_global_patch():
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
+    from vllm_ascend.ops.dummy_quant_matmul import install_dummy_quant_matmul_shim
+
+    install_dummy_quant_matmul_shim()
     _GLOBAL_PATCH_APPLIED = True
 
 
