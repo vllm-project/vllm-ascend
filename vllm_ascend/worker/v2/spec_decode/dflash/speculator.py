@@ -23,8 +23,17 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 
+def _physical_kv_block_size(kv_cache_block_size: int | dict[int, int], block_table: torch.Tensor) -> int:
+    if isinstance(kv_cache_block_size, int):
+        return kv_cache_block_size
+    try:
+        return kv_cache_block_size[id(block_table)]
+    except KeyError as error:
+        raise RuntimeError("DFlash received a block table without a physical KV block size") from error
+
+
 def prepare_dflash_inputs_factory(
-    kv_cache_block_size: int,
+    kv_cache_block_size: int | dict[int, int],
     block_tables: Any | None = None,
 ) -> Callable[..., None]:
     # vLLM main (#57169) dropped ``kernel_block_sizes`` from ``BlockTables``
@@ -118,7 +127,7 @@ def prepare_dflash_inputs_factory(
             max_model_len,
             sample_from_anchor,
             num_reqs_override=num_reqs_override,
-            kv_cache_block_size=kv_cache_block_size,
+            kv_cache_block_size=_physical_kv_block_size(kv_cache_block_size, block_table),
         )
 
     return prepare_with_block_size

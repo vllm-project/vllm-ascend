@@ -132,6 +132,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     assert spec.attn_architecture is None
     spec.vllm_config = config
     spec.draft_attn_layer_names = {"draft"}
+    spec.draft_kv_cache_group_ids = [0]
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
     draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
@@ -148,8 +149,13 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
         return {"draft": SimpleNamespace(get_attn_backend=lambda: draft_backend)}
 
     monkeypatch.setattr(shared, "get_layers_from_vllm_config", get_layers)
-    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])])
-    spec.set_attn(None, cache_config, None, None, target_groups)
+    cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["target", "draft"], kv_cache_spec=SimpleNamespace(block_size=128))
+        ]
+    )
+    block_tables = SimpleNamespace(input_block_tables=[torch.zeros(1, 4)], kernel_block_sizes=[128])
+    spec.set_attn(None, cache_config, block_tables, None, target_groups)
     assert spec._context_slot_mappings.dtype == torch.int32
     return spec
 
