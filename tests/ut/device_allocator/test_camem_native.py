@@ -81,6 +81,7 @@ def native_extension(tmp_path_factory):
     compiler = shutil.which("g++")
     if not compiler or sys.platform != "linux":
         pytest.skip("native allocator shim needs Linux and g++")
+    assert compiler is not None
     build = tmp_path_factory.mktemp("camem-native")
     (build / "acl").mkdir()
     (build / "acl/acl.h").write_text(FAKE_ACL)
@@ -110,6 +111,7 @@ def native_extension(tmp_path_factory):
 def native(native_extension):
     extension = native_extension
     spec = importlib.util.spec_from_file_location("vllm_ascend_C", extension)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     lib = ctypes.PyDLL(str(extension))
