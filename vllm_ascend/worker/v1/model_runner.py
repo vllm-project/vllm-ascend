@@ -144,12 +144,7 @@ from vllm_ascend.attention.utils import (
 
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm_ascend.compilation.acl_graph import (
-    ACLGraphWrapper,
-    set_draft_graph_params,
-    set_graph_params,
-    update_full_graph_params,
-)
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -550,7 +545,7 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # When True, run update full graph params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
         self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
@@ -3244,28 +3239,6 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices,
         )
 
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context: ForwardContext,
-        num_tokens_padded: int,
-    ) -> None:
-        if (
-            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and not forward_context.capturing
-            and not self.use_sparse and not self.use_compress
-        ):
-            if self.enable_enpu:
-                torch.npu.current_stream().synchronize()
-
-            update_full_graph_params(
-                self.attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens_padded,
-                self.vllm_config,
-                self.speculative_config,
-            )
-
     def _get_engram_device_inputs(self) -> dict[str, torch.Tensor]:
         """Full-request device metadata for upstream NgramHashState.
 
@@ -3558,13 +3531,8 @@ class NPUModelRunner(GPUModelRunner):
         try:
             if self.decoder_replay is not None:
                 self._prepare_decoder_replay(num_tokens_padded, decoder_replay_dummy)
-            if self.enable_enpu:
-                # The soft segmentation scenario requires event.record first, then event.wait
-                self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-                hidden_states = run_model()
-            else:
-                hidden_states = run_model()
-                self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+            hidden_states = run_model()
+
         finally:
             # A forward that raises must still retire the device-metadata
             # submission: otherwise the next submit() refuses to start and a
@@ -4844,11 +4812,8 @@ class NPUModelRunner(GPUModelRunner):
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
-            if self.drafter is not None:
-                if hasattr(self.drafter, "set_update_stream"):
-                    self.drafter.set_update_stream(self.update_stream)
-                else:
-                    self.drafter.update_stream = self.update_stream
+            if self.drafter is not None and hasattr(self.drafter, "set_update_stream"):
+                self.drafter.set_update_stream(self.update_stream)
 
         with _torch_cuda_wrapper():
             if (
@@ -6928,13 +6893,6 @@ class NPUModelRunner(GPUModelRunner):
             for _, descs in capture_descs
             for desc in descs
         })
-
-        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
-        # we set the graph params right before initializing the keys.
-        if self.use_aclgraph:
-            set_graph_params(capture_sizes)
-            if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

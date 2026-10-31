@@ -46,7 +46,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
@@ -62,7 +62,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     PREPARE_INPUTS_BLOCK_SIZE,
 )
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
+from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
@@ -641,7 +641,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
-            self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
                 self.vllm_config,
@@ -653,37 +652,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def set_update_stream(self, update_stream):
         if hasattr(self._runnable, "set_update_stream"):
             self._runnable.set_update_stream(update_stream)
-        self.update_stream = update_stream
 
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
-        if use_updatable_graph(att_backend):
-            update_params = []
-            for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
-                for layer_name, metadata in per_step_metadata.items():
-                    if self.dcp_size > 1:
-                        # Import lazily: attention backends also import spec-decode utilities.
-                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
+        update_params = []
+        for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
+            for layer_name, metadata in per_step_metadata.items():
+                if self.dcp_size > 1:
+                    # Import lazily: attention backends also import spec-decode utilities.
+                    from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 
-                        update_params.extend(
-                            build_dcp_fia_params(
-                                layer_name,
-                                metadata,
-                                get_dcp_group().rank_in_group,
-                                is_draft_model=True,
-                                is_draft_model_prefill=draft_step == 0,
-                            )
+                    update_params.extend(
+                        build_dcp_fia_params(
+                            layer_name,
+                            metadata,
+                            get_dcp_group().rank_in_group,
+                            is_draft_model=True,
+                            is_draft_model_prefill=draft_step == 0,
                         )
-                        continue
-                    update_params.append(
-                        {
-                            "layer_name": layer_name,
-                            "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                            "actual_seq_lengths_kv": metadata.seq_lens_list,
-                            "block_table": metadata.block_tables,
-                        }
                     )
-            self._runnable.update_draft_model_metadata(update_params)  # type: ignore
-            self._runnable.set_attn_backend(att_backend)  # type: ignore
+                    continue
+                update_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+        self._runnable.update_draft_model_metadata(update_params)  # type: ignore
+        self._runnable.set_attn_backend(att_backend)  # type: ignore
 
     def _prepare_dcp_draft_dummy_metadata(self, common_attn_metadata, draft_index: int) -> None:
         """Match later GQA autoregressive capture steps, including graph padding."""
@@ -982,7 +979,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context = get_forward_context()
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
-
+            
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -993,18 +990,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
-
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context: ForwardContext,
-        num_input_tokens: int,
-        multi_steps_attn_metadata: list[dict[str, Any]],
-    ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
     def _propose(
         self,
@@ -1383,12 +1368,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            draft_token_ids = run_draft()
+
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
         return draft_token_ids
@@ -2473,20 +2454,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
-
-    # update full-graph params for one spec token
-    def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
-        assert len(self.draft_attn_groups) > 0
-        attn_backend = self._get_primary_draft_attn_group().backend
-        update_full_graph_params(
-            attn_backend,
-            self.update_stream,
-            forward_context,
-            num_tokens,
-            self.vllm_config,
-            self.vllm_config.speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
 
     # adjusting tensor into desired size
     def _adjust_tensor(self, tensor, desired_size):

@@ -638,17 +638,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # their own module name, matching vLLM's shared KV-cache ownership.
         return self.kv_sharing_target_layer_name or layer_name
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        raise NotImplementedError("FIA and PA should be use UpdatableGraph.")
-
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
 

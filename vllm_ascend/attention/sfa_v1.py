@@ -900,18 +900,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     def runtime_has_indexer(self) -> bool:
         return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        # sfa does not need to update graph params
-        pass
-
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # kv_b_proj is absorbed into W_UK/W_UV below and then disposed, so it never runs a
         # matmul. What matters is that whichever quant method owns it left a dense weight

@@ -37,16 +37,11 @@ from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import (
-    set_graph_params,
-    update_full_graph_params,
-)
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -62,7 +57,6 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
-
 
 def _get_graph_update_backend(
     attn_groups: list[list[AttentionGroup]],
@@ -109,8 +103,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        if super().needs_capture():
-            set_graph_params(self.capture_sizes)
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
@@ -120,10 +112,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
-        with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
-
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
         try:
             prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
@@ -142,52 +131,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     ),
                 ):
                     prepare_engram()
-            if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
-            else:
-                # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
+            return self._updatable_graph_replay(desc, attn_metadata)
         finally:
             if metadata is not None:
                 metadata.finish_replay()
-
-    def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
-
-        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
-        # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the target config because set_forward_context()
-        # does not update it.
-        # TODO: Remove this explicit current-config scope once ACL graph replay
-        # passes VllmConfig directly through the graph-update interfaces.
-        with (
-            set_current_vllm_config(self.vllm_config),
-            set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=desc.cg_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-                batch_descriptor=None,  # Full graph model don't need batch_descriptor
-                slot_mapping=None,
-            ),
-        ):
-            forward_context = get_forward_context()
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
-                self.vllm_config,
-                self.model_runner.speculative_config,
-            )
-        logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
-        return ret
 
     def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]

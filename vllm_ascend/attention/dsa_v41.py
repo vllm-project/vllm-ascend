@@ -741,11 +741,6 @@ class AscendDSAV41Impl:
         )
         return output
 
-    @staticmethod
-    def update_graph_params(*args, **kwargs):
-        """V4.1 owns stable metadata buffers; no backend pointer patch is needed."""
-        return None
-
     def forward(self, attn, positions, hidden_states, output: torch.Tensor | None = None):
         # The custom-op caller provides a graph-stable output buffer.  Write
         # O-projection results into it directly instead of materializing a

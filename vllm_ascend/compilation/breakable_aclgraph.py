@@ -27,12 +27,6 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_draft_graph_prefill_params,
-    get_graph_params,
-    weak_ref_workspaces,
-)
 
 
 class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
@@ -65,13 +59,6 @@ class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
             forward_context.capturing = True
 
         output = super()._capture(entry, args, kwargs)
-
-        if is_full_capture:
-            # Keep the same workspace lifetime contract as ACLGraphWrapper.
-            weak_ref_workspaces(get_graph_params())
-            weak_ref_workspaces(get_draft_graph_params())
-            weak_ref_workspaces(get_draft_graph_prefill_params())
-
         return output
 
     def _replay(
