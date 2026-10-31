@@ -395,6 +395,7 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
+        catccos_full_visibility = vllm_version_is("0.23.0") and get_ascend_config().fused_mc2_backend == "catccos"
         if not vllm_version_is("0.23.0"):
             # vLLM v0.24.0 (PR #45026) removed automatic per-process device
             # isolation for DP workers. Mirror gpu_worker.py::init_device:
@@ -419,8 +420,27 @@ class NPUWorker(WorkerBase):
                 tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
                 self.local_rank += dp_local_rank * tp_pp_world_size
 
+        elif catccos_full_visibility:
+            parallel_config = self.parallel_config
+            if (
+                parallel_config.data_parallel_size > 1
+                and getattr(parallel_config, "distributed_executor_backend", None) not in ("ray", "external_launcher")
+                and getattr(parallel_config, "data_parallel_backend", None) != "ray"
+                and getattr(parallel_config, "nnodes_within_dp", 1) == 1
+                and getattr(parallel_config, "assigned_physical_gpu_ids", None) is None
+            ):
+                # CatCCOS SHMEM requires the full local device list to remain
+                # visible, so vLLM 0.23 workers select their NPU by DP rank.
+                dp_local_rank = parallel_config.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = parallel_config.data_parallel_index
+                tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
+                self.local_rank += dp_local_rank * tp_pp_world_size
+
+        if not vllm_version_is("0.23.0") or catccos_full_visibility:
+            parallel_config = self.parallel_config
             # Publish the logical-to-physical mapping for topology queries.
-            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            assigned_physical_gpu_ids = getattr(parallel_config, "assigned_physical_gpu_ids", None)
             if assigned_physical_gpu_ids is not None:
                 from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
@@ -429,9 +449,13 @@ class NPUWorker(WorkerBase):
                     f"local_rank {self.local_rank} is out of bounds for "
                     f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
                 )
-                if parallel_config.distributed_executor_backend not in ("ray", "external_launcher"):
-                    assert parallel_config.local_world_size <= len(assigned_physical_gpu_ids), (
-                        f"local_world_size ({parallel_config.local_world_size}) "
+                if getattr(parallel_config, "distributed_executor_backend", None) not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    local_world_size = getattr(parallel_config, "local_world_size", 1)
+                    assert local_world_size <= len(assigned_physical_gpu_ids), (
+                        f"local_world_size ({local_world_size}) "
                         f"exceeds assigned_physical_gpu_ids count "
                         f"({len(assigned_physical_gpu_ids)})"
                     )
@@ -441,8 +465,13 @@ class NPUWorker(WorkerBase):
                     f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
                 )
 
-            visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-            device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
+            if vllm_version_is("0.23.0"):
+                # vLLM 0.23 has no logical-to-visible mapping API. CatCCOS
+                # keeps the full list visible, so the DP rank is the NPU index.
+                device = torch.device(f"npu:{self.local_rank}")
+            else:
+                visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+                device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         else:
             device = torch.device(f"npu:{self.local_rank}")
 
