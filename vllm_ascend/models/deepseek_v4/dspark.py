@@ -456,6 +456,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_local_draft_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return this TP rank's vocabulary shard without gathering it."""
+        logits = self.logits_processor(
+            self.lm_head,
+            self.model.norm(hidden_states),
+            skip_gather=True,
+        )
+        assert logits is not None
+        return logits
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
