@@ -896,7 +896,7 @@ def test_scatter_index_cache_keeps_legacy_op_off_a5(_mock_device_type: MagicMock
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.AscendMiniMaxM3SparseImpl")
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.kv_cache_dtype_str_to_dtype")
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.get_current_vllm_config")
-@patch("vllm_ascend.models.minimax_m3.minimax_m3.GemmaRMSNorm")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.MiniMaxM3RMSNorm")
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.get_rope")
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.RowParallelLinear")
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.QKVParallelLinear")
