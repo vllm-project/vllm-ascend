@@ -23,7 +23,7 @@ FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a3${OS_MARK}${TAG_SUFFIX}
 
 # Build-time configuration. Defaults are the public community mirrors so this
 # Dockerfile can be built standalone.
-ARG PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
+ARG PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG AIS_BENCH_TAG="v3.1-20260609-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 
