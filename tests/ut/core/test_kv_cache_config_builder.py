@@ -73,10 +73,10 @@ def test_generic_uniform_spec_falls_back_to_default_grouping():
 def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):
     sentinel = [KVCacheGroupSpec(["glm"], generic_specs()["layer.a"])]
     glm_mock = Mock(return_value=sentinel)
-    ascend_mock = Mock(return_value=None)
+    ascend_mock = Mock()
     monkeypatch.setattr(builder_module, "is_glm5_next_cache_spec", lambda spec: True)
     monkeypatch.setattr(builder_module, "get_glm5_next_kv_cache_groups", glm_mock)
-    monkeypatch.setattr(builder_module, "_get_ascend_grouped_groups", ascend_mock)
+    monkeypatch.setattr(builder_module, "group_and_unify_kv_cache_specs", ascend_mock)
     assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
     ascend_mock.assert_not_called()
 
@@ -86,7 +86,9 @@ def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     ascend_mock = Mock(return_value=sentinel)
     kimi_mock = Mock(return_value=None)
     monkeypatch.setattr(builder_module, "is_glm5_next_cache_spec", lambda spec: False)
-    monkeypatch.setattr(builder_module, "_get_ascend_grouped_groups", ascend_mock)
+    monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda spec: True)
+    monkeypatch.setattr(builder_module, "group_cache_specs", Mock(return_value=[]))
+    monkeypatch.setattr(builder_module, "make_cache_groups", ascend_mock)
     monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", kimi_mock)
     assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
     kimi_mock.assert_not_called()
