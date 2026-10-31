@@ -253,17 +253,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            # The global size can be the minimum across unrelated target and
-            # compressor-state groups. Physical sizes belong to draft groups;
-            # bind each size to the table passed by the upstream draft caller.
-            draft_block_sizes = {
-                id(block_tables.input_block_tables[group_id]): kv_cache_config.kv_cache_groups[
-                    group_id
-                ].kv_cache_spec.block_size
-                for group_id in self.draft_kv_cache_group_ids
-            }
-            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-                draft_block_sizes,
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
+                self.vllm_config.cache_config.block_size,
                 block_tables,
             )
 
