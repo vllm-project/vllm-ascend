@@ -1021,6 +1021,22 @@ class RecomputeScheduler(Scheduler):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        kv_config = self.vllm_config.kv_transfer_config
+        if kv_config is not None and kv_config.kv_role == "kv_consumer":
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                request = self.requests[req_id]
+                # A normal remote prefill may leave the last prompt token to
+                # recompute locally for logits. Warn only for earlier tokens.
+                if num_tokens > 0 and request.num_computed_tokens < request.num_prompt_tokens - 1:
+                    logger.warning(
+                        "D node scheduled local prefill: request_id=%s, "
+                        "prompt_tokens=%d, computed_tokens=%d, scheduled_tokens=%d",
+                        req_id,
+                        request.num_prompt_tokens,
+                        request.num_computed_tokens,
+                        num_tokens,
+                    )
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         if getattr(self, "_enable_diagnostics", False):
