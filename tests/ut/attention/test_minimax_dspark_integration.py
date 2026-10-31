@@ -20,7 +20,7 @@ def selector_runtime(monkeypatch):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/platform.py"
     tree = ast.parse(source.read_text())
     names = {"_is_supported_flash_attn_draft", "_validate_flash_attn_backend", "_validate_minimax_dspark_flash_attn"}
-    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    nodes: list[ast.stmt] = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     nodes.extend(
         node
         for node in tree.body

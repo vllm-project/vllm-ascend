@@ -43,13 +43,12 @@ Development builds containing the native Flash draft adapter load the draft from
 supported; MXFP8 weights and their byte scales are preserved during loading.
 The draft uses the target model's embeddings and output head.
 
-Keep `dspark/config.json` when it is supplied with the checkpoint. If the export
-omits that file, the adapter accepts only the validated M3.1 Flash profile
-(hidden size 6144, 60 target layers, vocabulary size 200064), checks every draft
-tensor, and derives the five-layer draft configuration. Its defaults include
-target layers `[3, 17, 31, 45, 59]`, block size 7, sliding window 4096, Markov rank
-256 and noise token 200058. Explicit draft training settings take precedence.
-The adapter supplies `mask_token_id` and `ptd_token_id` in the draft HF config;
+The checkpoint must keep its `dspark/config.json` next to the draft tensors.
+The adapter reads the draft geometry from that file, validates every draft
+tensor against it, and corrects the export's target-model leftovers: the draft
+is dense, so MoE routing is dropped and the FFN width comes from
+`dspark_ffn_hidden_size`. The adapter supplies `mask_token_id` and
+`ptd_token_id` in the draft HF config;
 they are not extra `--speculative-config` arguments. Checkpoint files are not
 rewritten.
 

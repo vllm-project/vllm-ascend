@@ -229,7 +229,7 @@ def test_attention_forward_writes_current_draft_kv_before_reading():
     v = torch.randn_like(k)
     new_k = torch.randn(14, 1, 128, dtype=torch.bfloat16)
     new_v = torch.randn_like(new_k)
-    slots = []
+    slots: list[int] = []
     offset = 0
     for index, (q_len, kv_len) in enumerate(zip(q_lengths, kv_lengths)):
         k[index * 2 : index * 2 + 2].view(256, 1, 128)[kv_len - q_len : kv_len] = new_k[offset : offset + q_len]
