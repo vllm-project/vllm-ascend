@@ -1,0 +1,6 @@
+pr: 20527
+entries:
+  - category: bugfix
+    text: Fixed the grouped output-projection layout for generic FP8 DeepSeek V4.1 loading, including stable MXFP8 buffers across weight reloads.
+    model: deepseek-v4.1
+    hardware: [A5]
