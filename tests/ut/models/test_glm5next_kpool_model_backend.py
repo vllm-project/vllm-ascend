@@ -329,10 +329,12 @@ class _RecordingKPool(nn.Module):
         return None
 
 
-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("pcp", [False, True])
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
     graph_mode,
+    pcp,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -369,9 +371,9 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         ),
     )
 
-    # A 64-row graph bucket does not imply reuse for eight one-token requests.
-    normalized_q_c = torch.arange(128, dtype=torch.float32).reshape(64, 2)
-    hidden = torch.ones(64, 3)
+    input_rows = 64 if pcp or graph_mode == CUDAGraphMode.FULL else 8
+    normalized_q_c = torch.arange(2 * input_rows, dtype=torch.float32).reshape(input_rows, 2)
+    hidden = torch.ones(input_rows, 3)
     metadata = _indexer_metadata()
     metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
     metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
@@ -391,7 +393,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert result is not None
     assert recorder.args is not None
     assert recorder.kwargs is not None
-    expected_rows = 64 if graph_mode == CUDAGraphMode.FULL else 8
+    expected_rows = input_rows
     assert result.shape[0] == expected_rows
     torch.testing.assert_close(recorder.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2))
     torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
@@ -537,7 +539,10 @@ def test_cann_indexer_writes_caches_before_optional_selection(
 
 @pytest.mark.parametrize("pcp_local_token_count", [2, 4])
 @pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_local_token_count, actual_tokens) -> None:
+@pytest.mark.parametrize("compute_topk", [False, True])
+def test_backend_restores_pcp_keys_before_kpool_cache_write(
+    monkeypatch, pcp_local_token_count, actual_tokens, compute_topk
+) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -589,11 +594,11 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_loc
     )
 
     result = backend.forward(
-        torch.ones(2, 3),
-        torch.ones(2, 2),
-        torch.full((2, 3), 2.0),
+        torch.ones(pcp_local_token_count, 3),
+        torch.ones(pcp_local_token_count, 2),
+        torch.full((pcp_local_token_count, 3), 2.0),
         metadata,
-        compute_topk=True,
+        compute_topk=compute_topk,
     )
 
     pcp_group.all_gather.assert_called_once()
@@ -601,9 +606,7 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_loc
     recorded_kwargs = recorder.kwargs
     assert recorded_args is not None
     assert recorded_kwargs is not None
-    local_hidden = torch.full((actual_tokens, 3), 2.0)
-    padding = pcp_local_token_count - actual_tokens
-    padded_hidden = torch.nn.functional.pad(local_hidden, (0, 0, 0, padding))
+    padded_hidden = torch.full((pcp_local_token_count, 3), 2.0)
     restore = metadata.pcp_hidden_restore_indices
     assert restore is not None
     assert pcp_group.all_gather.call_args_list[0].args[0].shape[0] == pcp_local_token_count
@@ -612,4 +615,8 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_loc
         torch.cat((padded_hidden, padded_hidden + 10), dim=0)[restore],
     )
     assert recorded_args[-2] is metadata
-    assert result.shape[0] == recorded_args[1].shape[0] == actual_tokens
+    if compute_topk:
+        assert result.shape[0] == recorded_args[1].shape[0] == pcp_local_token_count
+    else:
+        assert result is None
+        assert recorded_args[1:3] == (None, None)
