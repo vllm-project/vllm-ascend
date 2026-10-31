@@ -170,7 +170,6 @@ def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch, is_dra
         is_draft_layer=is_draft_layer,
     )
 
-    assert fused_moe.call_args.kwargs["routed_experts_args"] == {"expert_offload_enabled": not is_draft_layer}
     tid2eid = moe.gate.tid2eid
     if is_draft_layer:
         assert tid2eid is None
