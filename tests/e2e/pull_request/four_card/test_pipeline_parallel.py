@@ -36,15 +36,9 @@ prompts = [
     "The future of AI is",
 ]
 
-# After #15299, routing weights were preserved without intermediate dtype
-# casts, which deterministically changed greedy decoding for the DP2+PP2
-# path of DeepSeek-V2-Lite-Chat, so a separate DP baseline was kept (#15875).
-# After #17068, the router GEMM runs bf16 x bf16 with fp32 accumulation on
-# every path (gate weights follow the model dtype), and the DP2+PP2 greedy
-# decoding re-converges with TP2+PP2 — the separate baseline is no longer
-# needed. The TP1+PP2 case moved to
-# tests/e2e/pull_request/two_card/test_pipeline_parallel.py (#17684) and
-# keeps its own copy of this shared baseline.
+# The CANN-native MoE gating migration changes the DP2+PP2 greedy output
+# for the first prompt to "and I am a". Keep an exact token/text baseline
+# for this path; the two-card PP test maintains its own baseline.
 GOLDEN = [
     (
         [
@@ -64,13 +58,13 @@ GOLDEN = [
             29,
             285,
             304,
-            6,
-            76,
+            608,
             245,
             459,
             6946,
+            29,
         ],
-        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
+        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
     ),
     (
         [

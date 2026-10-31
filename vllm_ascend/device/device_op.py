@@ -269,7 +269,7 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
             x,
             k=k,
             k_group=k_group,
@@ -280,7 +280,7 @@ class BaseDeviceAdaptor:
             out_flag=out_flag,
             routed_scaling_factor=routed_scaling_factor,
             eps=eps,
-            bias_opt=bias_opt,
+            bias=bias_opt,
         )
         return topk_weights, topk_ids.to(torch.int32), out
 
