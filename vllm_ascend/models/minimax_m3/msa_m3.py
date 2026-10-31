@@ -81,7 +81,6 @@ if get_ascend_device_type() == AscendDeviceType.A5:
 
 # CANN GenericBlockSparseAttentionMetadata returns exactly 1024 int32 values.
 _GBSA_METADATA_SIZE = 1024
-_GBSA_DECODE_QUERY_LENGTHS = (1, 4)
 
 
 def _active_decode_num_reqs(
@@ -760,16 +759,19 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         # Retain buffers for the builder lifetime: captured graphs keep these
         # addresses. Different speculative query lengths must not overwrite one
         # another's prefix. Uniform padding follows the previous decode path.
-        max_query_len = max(max(_GBSA_DECODE_QUERY_LENGTHS), self.reorder_batch_threshold)
+        # Reordering already derives this bound from the speculative config,
+        # including variable drafting widths. Prepare every uniform decode
+        # length in that range before capture, rather than naming draft models.
+        self.decode_gbsa_query_lengths = range(1, self.reorder_batch_threshold + 1)
         self.decode_cu_seqlens_q_buffers = {
             query_len: torch.arange(
                 0,
-                (self.context_len_buffer.numel() + 1) * query_len,
+                ((self.context_len_buffer.numel() + query_len - 1) // query_len + 1) * query_len,
                 query_len,
                 dtype=torch.int64,
                 device=device,
             )
-            for query_len in range(1, max_query_len + 1)
+            for query_len in self.decode_gbsa_query_lengths
             if _use_minimax_m3_gbsa(get_current_hardware_profile())
         }
         hardware_profile = get_current_hardware_profile()
@@ -799,14 +801,14 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         self.decode_gbsa_metadata_buffers = {
             (*config, query_len): torch.empty(_GBSA_METADATA_SIZE, dtype=torch.int32, device=device)
             for config in self.decode_gbsa_configs
-            for query_len in _GBSA_DECODE_QUERY_LENGTHS
+            for query_len in self.decode_gbsa_query_lengths
         }
 
     def _get_decode_cu_seqlens_q(self, num_reqs: int, query_len: int) -> torch.Tensor:
         if (
             query_len not in self.decode_cu_seqlens_q_buffers
             or num_reqs < 0
-            or num_reqs > self.context_len_buffer.numel()
+            or num_reqs >= self.decode_cu_seqlens_q_buffers[query_len].numel()
         ):
             raise ValueError("Invalid uniform decode batch or query length")
         return self.decode_cu_seqlens_q_buffers[query_len][: num_reqs + 1]
@@ -818,7 +820,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         *,
         num_prefills: int = 0,
     ) -> None:
-        if metadata.decode_query_len not in _GBSA_DECODE_QUERY_LENGTHS or metadata.seq_lens.numel() == 0:
+        if metadata.decode_query_len not in self.decode_gbsa_query_lengths or metadata.seq_lens.numel() == 0:
             return
         assert metadata.cu_seqlens_q is not None
         assert metadata.gbsa_metadata_cache is not None

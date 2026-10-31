@@ -102,7 +102,7 @@ def _make_prepared_gbsa_builder(kv_dtype):
             }
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
-        speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
+        speculative_config=SimpleNamespace(num_speculative_tokens=15, parallel_drafting=False),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, tensor_parallel_size=1),
     )
     spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
@@ -150,7 +150,7 @@ def _assert_prepared_gbsa_dense_reference(query, kv, output, lengths, query_len,
         torch.testing.assert_close(output[start:stop].cpu().float(), expected, rtol=0.02, atol=2e-3)
 
 
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 4, 8, 9, 16])
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16])
 @pytest.mark.parametrize("capture", [False, True])
 @torch.inference_mode()

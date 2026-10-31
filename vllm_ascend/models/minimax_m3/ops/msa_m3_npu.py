@@ -344,7 +344,8 @@ def _run_generic_block_sparse_attention(
         )
         and q.dtype == key.dtype
         and block_size == _MSA_INDEX_BLOCK_SIZE
-        and max_query_len in (1, 4)
+        and max_query_len > 0
+        and q.shape[0] == seq_lens.numel() * max_query_len
     )
     cache = gbsa_metadata_cache if reuse_metadata else None
     cache_key = (
