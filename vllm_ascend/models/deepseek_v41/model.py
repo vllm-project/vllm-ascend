@@ -1033,6 +1033,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
+        shared_pool_dir = get_ascend_config().engram_shared_host_dir
+        shared_pool_identity = None
+        if shared_pool_dir:
+            from .engram.shared_pool import checkpoint_identity
+
+            shared_pool_identity = checkpoint_identity(self.engram_weight_root)
         if self.engram_layout is not None:
             # Head buckets use TP x DP x PCP when sharded, or TP alone when host
             # storage is shared across local DP x PCP replicas.
@@ -1062,6 +1068,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     storage_dtype=storage_dtype,
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
+                    shared_pool_dir=shared_pool_dir,
+                    shared_pool_identity=shared_pool_identity,
+                    shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_dir else None,
                 )
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
