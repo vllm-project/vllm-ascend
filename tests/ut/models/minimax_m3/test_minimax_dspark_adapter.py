@@ -3,13 +3,16 @@
 
 """CPU checks for the integrated BF16 DSpark path, without importing vLLM."""
 
+import ast
 import importlib
 import importlib.util
+import inspect
 import json
 import math
 import sys
+import textwrap
 from pathlib import Path
-from types import FunctionType, SimpleNamespace
+from types import CodeType, FunctionType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -19,50 +22,16 @@ from pydantic.dataclasses import dataclass
 
 
 @pytest.fixture
-def native_profile():
-    source = {
-        "text_config": {
-            "hidden_size": 6144,
-            "num_hidden_layers": 60,
-            "vocab_size": 200064,
-            "num_attention_heads": 64,
-            "num_key_value_heads": 4,
-            "head_dim": 128,
-            "dense_intermediate_size": 12288,
-            "rope_theta": 10000000,
-            "rotary_dim": 64,
-            "quantization_config": {"quant_method": "ascend"},
-        }
-    }
+def bf16_header():
+    # MiniMaxAI/MiniMax-M3.1-Flash, draft safetensors header (BF16 revision).
     fixture = Path(__file__).parent / "fixtures/minimax_m31_bf16_dspark_header.json"
-    return source, json.loads(fixture.read_text())
+    return json.loads(fixture.read_text())
 
 
-def test_native_config_preserves_the_target_and_uses_bf16(adapter_modules, native_profile):
-    source, header = native_profile
-    original = json.dumps(source, sort_keys=True)
-    config = adapter_modules.weights.native_draft_config(source, header)
-    assert config["architectures"] == ["DSparkMiniMaxDraftModel"]
-    assert config["num_hidden_layers"] == 5
-    assert config["target_layer_ids"] == [3, 17, 31, 45, 59]
-    assert config["dspark_ffn_hidden_size"] == 12288
-    assert config["markov_rank"] == 256
-    assert config["n_predict"] == 7
-    assert config["sliding_window"] == 4096
-    assert config["mask_token_id"] == 200058
-    assert (
-        config["ptd_token_id"] == config["dspark_noise_token_id"] == config["dflash_config"]["mask_token_id"] == 200058
-    )
-    assert config["num_local_experts"] == 0
-    assert "quantization_config" not in config
-    assert json.dumps(source, sort_keys=True) == original
-
-
-def test_native_fallback_rejects_an_unrelated_target(adapter_modules, native_profile):
-    source, header = native_profile
-    source["text_config"]["num_hidden_layers"] = 61
-    with pytest.raises(ValueError, match="only supports the MiniMax M3.1 Flash profile"):
-        adapter_modules.weights.native_draft_config(source, header)
+def test_missing_draft_config_file_is_a_clear_error(adapter_modules, tmp_path):
+    hf_config = SimpleNamespace(model_type="minimax_m3_vl")
+    with pytest.raises(ValueError, match="requires a draft config"):
+        adapter_modules.weights.draft_hf_override(hf_config, model_root=tmp_path)
 
 
 @pytest.fixture
@@ -72,24 +41,38 @@ def official_draft_config():
     return json.loads(path.read_text())
 
 
-def test_official_draft_config_matches_the_actual_bf16_schema(adapter_modules, native_profile, official_draft_config):
-    source, header = native_profile
+def test_official_draft_config_drives_the_bf16_schema(adapter_modules, bf16_header, official_draft_config):
     original = json.dumps(official_draft_config, sort_keys=True)
-    config = adapter_modules.weights.native_draft_config(source, header, official_draft_config)
-    assert config["target_layer_ids"] == [3, 17, 31, 45, 59]
+    config = adapter_modules.weights.draft_config_from_file(official_draft_config, bf16_header)
+    assert config["architectures"] == ["DSparkMiniMaxDraftModel"]
+    assert config["model_type"] == "minimax_m3_text"
+    assert config["ascend_minimax_dspark"] == 1
     assert config["num_hidden_layers"] == 5
+    assert config["target_layer_ids"] == [3, 17, 31, 45, 59]
+    assert config["dspark_ffn_hidden_size"] == 12288
+    assert config["markov_rank"] == 256
     assert config["n_predict"] == 7
-    assert config["intermediate_size"] == 12288
-    assert config["num_local_experts"] == 0
-    assert config["dtype"] == "bfloat16"
+    assert config["sliding_window"] == 4096
+    assert config["ptd_token_id"] == config["mask_token_id"] == config["dspark_noise_token_id"] == 200058
+    assert config["rope_parameters"] == {
+        "rope_type": "default",
+        "rope_theta": 10000000,
+        "partial_rotary_factor": 0.5,
+    }
+    assert config["num_local_experts"] == config["num_experts_per_tok"] == config["n_shared_experts"] == 0
     assert "quantization_config" not in config
     assert json.dumps(official_draft_config, sort_keys=True) == original
 
 
-def test_explicit_draft_training_parameters_override_the_fallback(
-    adapter_modules, native_profile, official_draft_config
-):
-    source, header = native_profile
+def test_export_target_leftovers_are_corrected(adapter_modules, bf16_header, official_draft_config):
+    draft = official_draft_config["text_config"]
+    draft.update(intermediate_size=3072, num_local_experts=128, num_experts_per_tok=4, n_shared_experts=1)
+    config = adapter_modules.weights.draft_config_from_file(official_draft_config, bf16_header)
+    assert config["intermediate_size"] == config["dspark_ffn_hidden_size"] == 12288
+    assert config["num_local_experts"] == config["num_experts_per_tok"] == config["n_shared_experts"] == 0
+
+
+def test_explicit_draft_training_parameters_flow_through(adapter_modules, bf16_header, official_draft_config):
     draft = official_draft_config["text_config"]
     draft.update(
         dspark_target_layer_ids=[0, 10, 20, 30, 40],
@@ -98,60 +81,101 @@ def test_explicit_draft_training_parameters_override_the_fallback(
         sliding_window=512,
         dspark_hidden_norm_type="rms",
     )
-    config = adapter_modules.weights.native_draft_config(source, header, official_draft_config)
+    config = adapter_modules.weights.draft_config_from_file(official_draft_config, bf16_header)
     assert config["target_layer_ids"] == [0, 10, 20, 30, 40]
-    assert config["n_predict"] == config["dflash_config"]["block_size"] == 3
-    assert config["mask_token_id"] == config["dflash_config"]["mask_token_id"] == 123
-    assert config["ptd_token_id"] == config["dspark_noise_token_id"] == 123
-    assert config["sliding_window"] == config["dflash_config"]["sliding_window"] == 512
+    assert config["n_predict"] == 3
+    assert config["mask_token_id"] == config["ptd_token_id"] == config["dspark_noise_token_id"] == 123
+    assert config["sliding_window"] == 512
     assert config["dspark_hidden_norm_type"] == "rms"
 
 
-def test_incompatible_draft_config_is_rejected(adapter_modules, native_profile, official_draft_config):
-    source, header = native_profile
+def test_incompatible_draft_config_is_rejected(adapter_modules, bf16_header, official_draft_config):
     official_draft_config["text_config"]["dspark_markov_rank"] = 128
     with pytest.raises(ValueError, match="Tensor shape mismatch"):
-        adapter_modules.weights.native_draft_config(source, header, official_draft_config)
+        adapter_modules.weights.draft_config_from_file(official_draft_config, bf16_header)
 
 
-def test_main_config_cannot_be_mistaken_for_a_draft_config(adapter_modules, native_profile):
-    source, header = native_profile
-    source["architectures"] = ["MiniMaxM3SparseForConditionalGeneration"]
+def test_main_config_cannot_be_mistaken_for_a_draft_config(adapter_modules, bf16_header):
+    target = {
+        "architectures": ["MiniMaxM3SparseForConditionalGeneration"],
+        "text_config": {"hidden_size": 6144, "num_hidden_layers": 60, "vocab_size": 200064},
+    }
     with pytest.raises(ValueError, match="not a target model config"):
-        adapter_modules.weights.native_draft_config(source, header, source)
+        adapter_modules.weights.draft_config_from_file(target, bf16_header)
 
 
 def test_hf_parser_sentinel_does_not_require_checkpoint_metadata(adapter_modules):
     sentinel = SimpleNamespace(model_type="dummy_minimax_m3_vl")
-    assert (
-        adapter_modules.weights.draft_hf_override(sentinel, model_root="/missing/checkpoint", target_override={})
-        is sentinel
-    )
+    assert adapter_modules.weights.draft_hf_override(sentinel, model_root="/missing/checkpoint") is sentinel
 
 
-def test_native_shard_needs_no_prepared_config_or_index(adapter_modules, native_profile, tmp_path):
-    _, header = native_profile
+def test_native_shard_needs_no_prepared_config_or_index(adapter_modules, bf16_header, tmp_path):
     draft = tmp_path / "dspark"
     draft.mkdir()
-    encoded = json.dumps(header).encode()
+    encoded = json.dumps(bf16_header).encode()
     shard = draft / "model-dspark-00001.safetensors"
     shard.write_bytes(len(encoded).to_bytes(8, "little") + encoded)
-    assert adapter_modules.weights.read_draft_header(tmp_path) == header
+    assert adapter_modules.weights.read_draft_header(tmp_path) == bf16_header
     duplicate = draft / "model-dspark-00002.safetensors"
     duplicate.write_bytes(shard.read_bytes())
     with pytest.raises(ValueError, match="Duplicate DSpark tensor across shards"):
         adapter_modules.weights.read_draft_header(tmp_path)
 
 
+def _load_model_module(monkeypatch):
+    class DSparkLoader(torch.nn.Module):
+        def load_weights(self, weights):
+            self.received = dict(weights)
+            return set(self.received)
+
+    modules = {
+        "vllm.model_executor.layers.layernorm": SimpleNamespace(GemmaRMSNorm=object, RMSNorm=object),
+        "vllm.model_executor.models.qwen3_dflash": SimpleNamespace(
+            DFlashQwen3Attention=object,
+            DFlashQwen3DecoderLayer=torch.nn.Module,
+            DFlashQwen3ForCausalLM=object,
+            _resolve_layer_attention=Mock(),
+        ),
+        "vllm.model_executor.models.qwen3_dspark": SimpleNamespace(Qwen3DSparkModel=torch.nn.Module),
+        "vllm_ascend.models.minimax_m3.minimax_m3": SimpleNamespace(MiniMaxM3MLP=object),
+        "vllm_ascend.models.qwen3_dspark": SimpleNamespace(AscendQwen3DSparkForCausalLM=DSparkLoader),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    model_path = Path(__file__).resolve().parents[4] / "vllm_ascend/models/minimax_m3/minimax_m3_dspark.py"
+    spec = importlib.util.spec_from_file_location("minimax_dspark_model_under_test", model_path)
+    model_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model_module)
+    return model_module
+
+
+def _load_draft_guard():
+    """Compile ``_allow_minimax_draft`` without importing the patch module.
+
+    Importing ``patch_speculative_config`` would apply every monkey-patch it
+    carries against the real vLLM config classes, so extract the guard (and
+    the module constants it reads) straight from the source tree.
+    """
+    patch_path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_speculative_config.py"
+    tree = ast.parse(patch_path.read_text())
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_allow_minimax_draft"
+    )
+    constants = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    ]
+    namespace = {"ast": ast, "inspect": inspect, "textwrap": textwrap, "CodeType": CodeType}
+    module = ast.Module(body=[*constants, function], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(patch_path), "exec"), namespace)
+    return SimpleNamespace(_allow_minimax_draft=namespace["_allow_minimax_draft"])
+
+
 @pytest.fixture
 def adapter_modules(monkeypatch):
-    root = Path(__file__).resolve().parents[4]
-    helper_path = root / "vllm_ascend/patch/minimax_m3_dspark.py"
-    spec = importlib.util.spec_from_file_location("minimax_dspark_helpers", helper_path)
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
-    monkeypatch.setitem(sys.modules, "vllm_ascend.patch.minimax_m3_dspark", helper)
-    yield SimpleNamespace(weights=helper, guard=helper)
+    model_module = _load_model_module(monkeypatch)
+    yield SimpleNamespace(weights=model_module, model=model_module, guard=_load_draft_guard())
     sys.modules.pop("minimax_dspark_model_under_test", None)
 
 
@@ -229,31 +253,8 @@ def test_native_bf16_loading_preserves_tensor_identity_and_values(adapter_module
 
 
 @pytest.fixture
-def adapter_model_module(adapter_modules, monkeypatch):
-    class DSparkLoader(torch.nn.Module):
-        def load_weights(self, weights):
-            self.received = dict(weights)
-            return set(self.received)
-
-    modules = {
-        "vllm.model_executor.layers.layernorm": SimpleNamespace(GemmaRMSNorm=object, RMSNorm=object),
-        "vllm.model_executor.models.qwen3_dflash": SimpleNamespace(
-            DFlashQwen3Attention=object,
-            DFlashQwen3DecoderLayer=torch.nn.Module,
-            DFlashQwen3ForCausalLM=object,
-            _resolve_layer_attention=Mock(),
-        ),
-        "vllm.model_executor.models.qwen3_dspark": SimpleNamespace(Qwen3DSparkModel=torch.nn.Module),
-        "vllm_ascend.models.minimax_m3.minimax_m3": SimpleNamespace(MiniMaxM3MLP=object),
-        "vllm_ascend.models.qwen3_dspark": SimpleNamespace(AscendQwen3DSparkForCausalLM=DSparkLoader),
-    }
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    model_path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_minimax_m3_dspark.py"
-    spec = importlib.util.spec_from_file_location("minimax_dspark_model_under_test", model_path)
-    model_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(model_module)
-    return model_module
+def adapter_model_module(adapter_modules):
+    return adapter_modules.model
 
 
 def test_model_loader_passes_bf16_weights_to_the_existing_dspark_loader(
@@ -328,9 +329,8 @@ def _mxfp8_header(header):
     return result
 
 
-def test_mxfp8_config_selects_native_ascend_quantization(adapter_modules, native_profile):
-    source, header = native_profile
-    config = adapter_modules.weights.native_draft_config(source, _mxfp8_header(header))
+def test_mxfp8_config_selects_native_ascend_quantization(adapter_modules, bf16_header, official_draft_config):
+    config = adapter_modules.weights.draft_config_from_file(official_draft_config, _mxfp8_header(bf16_header))
     quant = config["quantization_config"]
     assert quant["quant_method"] == "ascend"
     assert quant["group_size"] == 32
@@ -355,9 +355,10 @@ def test_mxfp8_loading_preserves_packed_weights_and_scale_bytes(adapter_modules,
 
 
 @pytest.mark.parametrize("fault", ["missing_scale", "scale_dtype", "scale_shape", "mixed_pack"])
-def test_mxfp8_header_rejects_invalid_quantized_checkpoints(adapter_modules, native_profile, fault):
-    source, header = native_profile
-    header = _mxfp8_header(header)
+def test_mxfp8_header_rejects_invalid_quantized_checkpoints(
+    adapter_modules, bf16_header, official_draft_config, fault
+):
+    header = _mxfp8_header(bf16_header)
     name = "language_model.model.dspark.layers.0.decoder_layer.self_attn.q_proj."
     if fault == "missing_scale":
         del header[name + "weight_scale_inv"]
@@ -368,7 +369,7 @@ def test_mxfp8_header_rejects_invalid_quantized_checkpoints(adapter_modules, nat
     else:
         header[name + "weight"]["dtype"] = "BF16"
     with pytest.raises(ValueError):
-        adapter_modules.weights.native_draft_config(source, header)
+        adapter_modules.weights.draft_config_from_file(official_draft_config, header)
 
 
 @pytest.mark.parametrize("fault", ["missing", "duplicate", "mapped_duplicate", "shape", "prefix"])
@@ -475,5 +476,5 @@ def test_native_architecture_is_registered_by_the_standard_plugin(adapter_module
     spec.loader.exec_module(registration)
     registration.register_model()
     registry.register_model.assert_any_call(
-        "DSparkMiniMaxDraftModel", "vllm_ascend.patch.worker.patch_minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
+        "DSparkMiniMaxDraftModel", "vllm_ascend.models.minimax_m3.minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
     )
