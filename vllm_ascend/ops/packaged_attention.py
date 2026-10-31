@@ -17,6 +17,7 @@ from functools import cache
 from importlib import import_module
 
 import torch
+from torch_npu.npu.utils import _erase_stream
 
 
 @cache
@@ -617,6 +618,17 @@ def _mixed_quant_sparse_flash_mla_impl(
         out=attn_out,
         lse=softmax_lse,
     )
+    # CannBotDSL records all native-call arguments on the submission stream.
+    # Retire that use after an ordered device event, without blocking the host.
+    # _erase_stream preserves the registration when the allocation belongs to
+    # another stream; registrations on any other consumer stream also remain.
+    # Graph capture retains its original lifetime/allocator behavior.
+    if not torch.npu.is_current_stream_capturing():
+        stream = torch.npu.current_stream(q.device)
+        submitted = stream.record_event()
+        stream.wait_event(submitted)
+        _erase_stream(q, stream)
+        _erase_stream(attn_out, stream)
     return (attn_out, softmax_lse)
 
 
