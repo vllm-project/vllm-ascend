@@ -103,6 +103,9 @@ class HardwareCapability(Enum):
     FUSED_ROTARY_MUL_INTERLEAVE = auto()
     # Pass ``glu_alpha`` and ``glu_bias`` to the fused dequant-SwiGLU-quant operator.
     FUSED_SWIGLU_TUNING_ARGS = auto()
+    # Official one-group INT8 shared SwiGLU with interleaved channels and
+    # token padding preserves clipped legacy semantics (alpha=1, bias=0).
+    SHARED_SWIGLU_ONE_GROUP = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
     # Register the FX graph rewrite that fuses a supported matmul/reduce-scatter pattern.
@@ -278,6 +281,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.SHARED_SWIGLU_ONE_GROUP,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }

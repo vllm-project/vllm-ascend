@@ -1153,6 +1153,53 @@ def _make_shared_expert_events():
     )
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("limit,alpha,beta", [(10.0, 1.0, 0.0), (0.0, 1.0, 0.0), (10.0, 1.7, 1.0)])
+def test_shared_clipped_swiglu_official_dispatch(monkeypatch, device_type, limit, alpha, beta):
+    shared = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared._shared_swiglu_cache = MagicMock()
+    shared.situ_activation = None
+    shared.swiglu_limit, shared.swiglu_alpha, shared.swiglu_beta = limit, alpha, beta
+    shared.layer = SimpleNamespace(gate_up_proj=MagicMock(), down_proj=MagicMock())
+    shared._wait_for_routed_stage = MagicMock()
+    shared._apply_output_gate = MagicMock(side_effect=lambda states, output: output)
+    submitted = SimpleNamespace(
+        gate_up=torch.zeros((1, 256), dtype=torch.int32),
+        gate_up_input_scale=torch.ones(1),
+        hidden_states=torch.zeros((1, 8), dtype=torch.bfloat16),
+    )
+    activation = (torch.zeros((1, 128), dtype=torch.int8), torch.ones(1))
+    official, legacy = MagicMock(return_value=activation), MagicMock(return_value=activation)
+    down_output = torch.zeros_like(submitted.hidden_states)
+    down = MagicMock(return_value=down_output)
+    monkeypatch.setattr(
+        shared_experts_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    monkeypatch.setattr(shared_experts_module, "shared_dequant_swiglu_quant", official)
+    monkeypatch.setattr(shared_experts_module.torch.ops, "_C_ascend", SimpleNamespace(npu_dequant_swiglu_quant=legacy))
+    monkeypatch.setattr(shared_experts_module.torch_npu, "npu_quant_matmul", down)
+
+    output = shared._run_a8_int_mlp(submitted, _make_shared_expert_events())
+
+    use_official = device_type == AscendDeviceType.A3 and limit > 0 and alpha == 1.0 and beta == 0.0
+    assert output is down_output
+    if use_official:
+        official.assert_called_once_with(
+            submitted.gate_up,
+            shared.layer.gate_up_proj.weight_scale_fp32,
+            submitted.gate_up_input_scale,
+            limit,
+            cache=shared._shared_swiglu_cache,
+        )
+        legacy.assert_not_called()
+    else:
+        legacy.assert_called_once()
+        assert legacy.call_args.kwargs["group_index"] is None
+        official.assert_not_called()
+    assert down.call_args.args[0] is activation[0]
+    assert down.call_args.kwargs["pertoken_scale"] is activation[1]
+
+
 @pytest.mark.parametrize(
     ("quant_type", "has_scales", "has_active_lora", "expected_path"),
     [

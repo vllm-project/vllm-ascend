@@ -33,6 +33,7 @@
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
+#include "moe/shared_dequant_swiglu_quant/shared_dequant_swiglu_quant_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
@@ -3529,6 +3530,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor scale)"
     );
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
+
+    ops.def("official_shared_dequant_swiglu_quant(Tensor x, Tensor weight_scale, "
+            "Tensor activation_scale, float clamp_limit, Tensor? group_counts=None, "
+            "bool weight_is_interleaved=False) -> (Tensor, Tensor)");
+    ops.impl("official_shared_dequant_swiglu_quant", torch::kPrivateUse1,
+             &vllm_ascend::official_shared_swiglu::run);
 
     ops.def(
         "npu_scatter_nd_update_sk("
