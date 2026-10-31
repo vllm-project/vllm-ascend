@@ -8,7 +8,7 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
    group carries ``is_eagle_group`` (Mamba/GDN groups must stay out because
    draft models have no mamba layers).
 2. The standard ``find_longest_cache_hit`` skips the EAGLE last-block drop on
-   the PD prefill producer and on standalone instances. The role is derived
+   the pure PD prefill producer. Standalone instances retain the drop. The role is derived
    from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
    attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
    builder in ``patch_kv_cache_utils``, and read back by the coordinator -
@@ -16,10 +16,9 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.
-4. The producer/standalone EAGLE block-drop suppression is applied inline
+4. The producer EAGLE block-drop suppression is applied inline
    inside ``Scheduler._mamba_block_aligned_split`` (see
-   ``patch_mamba_block_aligned_split``): on a pure producer or a standalone
-   instance the EAGLE block-drop bit (``use_eagle`` on vLLM 0.28.x,
+   ``patch_mamba_block_aligned_split``): on a pure producer the EAGLE block-drop bit (``use_eagle`` on vLLM 0.28.x,
    ``use_eagle_block_drop`` on newer revisions) is cleared for the duration
    of the original call. Otherwise the scheduler's one-page backoff
    suppresses the final full mamba-align chunk split and the boundary state
@@ -37,18 +36,24 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 HASH_BLOCK_SIZE = 128
 
@@ -186,12 +191,10 @@ def test_coordinator_non_producer_tag(monkeypatch):
     assert coordinator.skips_eagle_block_drop is False
 
 
-def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
-    # No kv-transfer config attached: a standalone instance. Not a PD
-    # producer, but every content-hash match is a verified local prompt
-    # block, so the EAGLE drop is suppressed just like on the producer.
+def test_coordinator_keeps_standalone_drop(monkeypatch):
+    # Local prefix hashes do not prove the draft's lookahead token.
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, kv_transfer_config=None)
-    assert coordinator.skips_eagle_block_drop is True
+    assert coordinator.skips_eagle_block_drop is False
 
 
 @pytest.mark.parametrize(
@@ -201,7 +204,7 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
         (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
         (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
         (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
-        (None, True),
+        (None, False),
     ],
 )
 def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
@@ -273,7 +276,9 @@ class _RecordingMamba(_RecordingManager):
 
 def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
-    coordinator.skips_eagle_block_drop = producer or standalone
+    coordinator.skips_eagle_block_drop = mod._skips_eagle_block_drop(
+        None if standalone else _kv_transfer_config(is_kv_producer=producer, is_kv_consumer=not producer)
+    )
     coordinator.dcp_world_size = 1
     coordinator.hash_block_size = HASH_BLOCK_SIZE
     coordinator.scheduler_block_size = None
@@ -319,10 +324,10 @@ def test_standard_lookup_skips_drop_on_producer():
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
-def test_standard_lookup_skips_drop_on_standalone():
+def test_standard_lookup_keeps_drop_on_standalone():
     coordinator = _make_lookup_coordinator(producer=False, standalone=True)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
@@ -347,10 +352,10 @@ def test_per_group_lookup_skips_drop_on_producer():
     assert hit_lengths == (2048, 2048)
 
 
-def test_per_group_lookup_skips_drop_on_standalone():
+def test_per_group_lookup_keeps_drop_on_standalone():
     coordinator = _make_lookup_coordinator(producer=False, standalone=True)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
     assert hit_lengths == (2048, 2048)
 
@@ -364,6 +369,89 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+@pytest.mark.parametrize("block_size", [HASH_BLOCK_SIZE, 17 * HASH_BLOCK_SIZE])
+@pytest.mark.parametrize("shared_blocks", [1, 2])
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("role", ["standalone", "producer", "consumer"])
+def test_divergent_prefix_respects_mtp_replay_boundary(monkeypatch, block_size, shared_blocks, use_eagle, role):
+    """A matching prefix does not prove the draft's next input token."""
+    init_none_hash(sha256)
+
+    def real_manager_factory(kv_cache_spec, max_in_flight_tokens, max_model_len, **kwargs):
+        # Engine startup registers these classes. Keep real managers and the
+        # real BlockPool; replace only registry dispatch for this CPU test.
+        manager_cls = AscendMambaManager if isinstance(kv_cache_spec, MambaSpec) else FullAttentionManager
+        return manager_cls(kv_cache_spec=kv_cache_spec, **kwargs)
+
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", real_manager_factory)
+    config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["draft-attention"],
+                FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.float32),
+                use_eagle,
+            ),
+            KVCacheGroupSpec(
+                ["target-state"],
+                MambaSpec(block_size=block_size, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+                False,
+            ),
+        ],
+    )
+    config.kv_transfer_config = (
+        None
+        if role == "standalone"
+        else _kv_transfer_config(is_kv_producer=role == "producer", is_kv_consumer=role == "consumer")
+    )
+    prompt_blocks = shared_blocks + 1
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=config,
+        max_model_len=prompt_blocks * block_size,
+        use_eagle=use_eagle,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=block_size,
+    )
+    coordinator.retention_interval = None
+    shared_tokens = shared_blocks * block_size
+    prefix = list(range(shared_tokens))
+
+    def make_request(request_id, suffix_token):
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=prefix + [suffix_token] * block_size,
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(HASH_BLOCK_SIZE, sha256),
+        )
+
+    prime = make_request("prime", shared_tokens)
+    sibling = make_request("sibling", shared_tokens + 1)
+    shared_hashes = shared_tokens // HASH_BLOCK_SIZE
+    assert prime.block_hashes[:shared_hashes] == sibling.block_hashes[:shared_hashes]
+    assert prime.block_hashes[shared_hashes] != sibling.block_hashes[shared_hashes]
+
+    # Materialize full-page states only. This tests hash registration and
+    # replay selection, not NPU tensor contents or partial-checkpoint export.
+    for manager in coordinator.single_type_managers:
+        manager.req_to_blocks[prime.request_id] = coordinator.block_pool.get_new_blocks(prompt_blocks)
+    for boundary in range(block_size, (prompt_blocks + 1) * block_size, block_size):
+        coordinator.cache_blocks(prime, boundary)
+        prime.num_computed_tokens = boundary
+
+    drop = use_eagle and role != "producer"
+    state_manager = coordinator.single_type_managers[1]
+    assert state_manager.use_eagle is False
+    assert state_manager.drop_eagle_checkpoint_block is drop
+    _, hit_tokens, _ = coordinator.find_longest_cache_hit(sibling.block_hashes, sibling.num_prompt_tokens - 1)
+    assert hit_tokens == shared_tokens - (block_size if drop else 0)
 
 
 if __name__ == "__main__":
