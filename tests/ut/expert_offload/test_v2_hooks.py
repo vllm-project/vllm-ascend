@@ -584,7 +584,7 @@ def test_routed_hook_passes_consistent_view_and_restores_comm(offload, fail):
     layer.enable_npugraph_ex_static_kernel = False
     layer.moe_config = SimpleNamespace(is_sequence_parallel=False)
     layer.quant_type = "mxfp4"
-    layer.router = object()
+    layer.router = SimpleNamespace(eplb_state=None)
     layer.dynamic_eplb = False
     layer._use_v2_model_runner = True
     layer.return_with_event = False
