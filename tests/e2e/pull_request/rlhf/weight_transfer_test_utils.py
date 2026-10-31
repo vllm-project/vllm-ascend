@@ -21,6 +21,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -430,13 +431,18 @@ class FixedRandomWeightSource(WeightSource):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)
 
-    def metadata(self) -> list[ParamMeta]:
+    def _metadata(self) -> list[ParamMeta]:
         return [ParamMeta(name, dtype, shape) for name, shape, dtype in self._parameters]
+
+    metadata = cached_property(_metadata) if hasattr(WeightSource, "implements_iter_full") else _metadata
 
     def __iter__(self):
         with torch.no_grad():
             for name, shape, dtype in self._parameters:
                 yield name, self._make_tensor(name, shape, dtype)
+
+    def iter_full(self):
+        yield from self
 
     @property
     def case_id(self) -> str:
@@ -480,7 +486,7 @@ def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
     raises ``ValueError: Tensor ... exceeds buffer_size_bytes``. Keep the 1 GiB
     floor and add 128 MiB of headroom above the largest tensor.
     """
-    metadata = source.metadata()
+    metadata = source.metadata() if callable(source.metadata) else source.metadata
     max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
     return max(max_tensor_bytes + 128 * 2**20, 2**30)
 

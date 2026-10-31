@@ -48,6 +48,12 @@ class HCCLWeightTransferInitInfo(NCCLWeightTransferInitInfo):
             raise ValueError("HCCL weight transfer requires TCP rendezvous; `nccl_unique_id_b64` is not supported")
         super().__post_init__()
         _validate_packed_params(self)
+        for name in ("rank_offset", "world_size"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"`{name}` must be a positive integer, got {value!r}")
+        if self.rank_offset >= self.world_size:
+            raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
 
 
 def stateless_init_process_group(

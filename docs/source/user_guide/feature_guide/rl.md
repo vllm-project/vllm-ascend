@@ -158,6 +158,61 @@ The repository contains runnable examples for both backends:
 
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
+
+### Multiple HCCL trainer source ranks
+
+With vLLM's ownership-based broadcast support
+([#63256](https://github.com/vllm-project/vllm/pull/63256) and
+[#62557](https://github.com/vllm-project/vllm/pull/62557)), different trainer
+pipeline stages can broadcast their parameters in one weight-update lifecycle.
+The Ascend adapter reuses upstream's planning and control RPCs and supplies the
+HCCL/NPU data plane. Older paired vLLM releases keep the single-source adapter;
+upgrading vllm-ascend alone does not enable multi-source training on them.
+
+Each trainer rank must expose identical global `WeightSource.metadata` through
+a `cached_property`. Every parameter declares its `ParamMeta.owners`; the first
+owner broadcasts the full checkpoint tensor. `iter_full()` yields only the
+parameters owned by that trainer rank, in metadata order. All trainer ranks
+call `trainer_init()` and `send_weights()` concurrently, including ranks that
+only participate in stage-local gathers.
+
+The transfer group contains trainer rank 0 plus each distinct first owner,
+followed by all inference workers. For example, trainer sources 0 and 4 map to
+transfer group ranks 0 and 1. With two inference workers, use `world_size=4`;
+the worker `rank_offset` is 2. The optional update field `src` identifies the
+**transfer group rank**, defaults to 0, and must be below `rank_offset`.
+Only trainer rank 0 drives RPCs; each other broadcaster also receives and
+discards the current source's data to participate in the collective.
+
+The trainer sends metadata on the first round and reuses it on later rounds.
+Worker caches are independent for each `(model, src)` and are cleared on
+re-initialization. Changing the group membership requires re-initialization.
+Each trainer rank's owned parameters must share a first owner, and rank 0 must
+be first owner of every parameter it owns.
+
+For a four-NPU demonstration, run a TP2 HCCL server on NPUs 0 and 1 using the
+server command above with `ASCEND_RT_VISIBLE_DEVICES=0,1` and
+`--tensor-parallel-size 2 --load-format dummy`, then run:
+
+```bash
+torchrun --standalone --nproc-per-node=2 \
+    examples/rl/rlhf_hccl_multi_source.py --trainer-device-offset 2
+```
+
+This example partitions a replicated HF model into two logical stages. Real
+PP integrations should provide global metadata without replicating all model
+storage. The example defaults to unpacked transfer. Packed multi-source
+protocols have CPU coverage, but the existing packed NPU integration lane remains
+skipped pending the cross-stream regression described by that test; validate
+packed transfers on the target hardware before enabling them.
+
+Pause generation before updating and resume only after every source completes
+successfully. A broadcaster failure can leave peers blocked in HCCL and weights
+partially updated. Keep generation paused, stop the failed job, rebuild the
+transfer session (restarting blocked workers if needed), and replay all weights.
+The [design document](../../developer_guide/Design_Documents/rl_multi_source_weight_broadcast.md)
+includes rank mappings, sequence diagrams, and the validation plan.
+
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
