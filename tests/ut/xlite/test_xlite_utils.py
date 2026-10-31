@@ -26,7 +26,6 @@ import subprocess
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock
 
 import torch
 
@@ -34,15 +33,17 @@ import torch
 def _ensure_xlite_C_importable() -> None:
     """Make the native ``xlite._C`` extension stand-in importable, if needed.
 
-    ``vllm_ascend.xlite.utils`` imports ``xlite._C`` at module scope. Outside an
-    Ascend/CANN environment that native extension aborts the interpreter with a
-    C++ ``std::logic_error`` while importing, so it cannot be imported (or even
-    probed) in the CPU-only CI image. The helpers under test in this module are
-    pure python and never touch the native module at runtime, so probe the
-    native import in a subprocess and, only when it is broken, install a
-    ``MagicMock`` for ``xlite._C`` before importing the module under test. When
-    the native extension imports cleanly (a full CANN environment) nothing is
-    touched.
+    ``vllm_ascend.xlite.utils`` imports ``xlite._C`` at module scope and
+    subclasses ``Model`` / ``ModelConfig`` from it (``XModel`` /
+    ``XModelConfig``). Outside an Ascend/CANN environment that native extension
+    aborts the interpreter with a C++ ``std::logic_error`` while importing, so
+    it cannot be imported (or even probed) in the CPU-only CI image. The
+    helpers under test in this module are pure python and never touch the
+    native module at runtime, so probe the native import in a subprocess and,
+    only when it is broken, install a minimal ``xlite._C`` module whose
+    ``Model`` / ``ModelConfig`` are plain classes (subclassable by
+    ``utils.XModel`` / ``utils.XModelConfig`` at import time). When the native
+    extension imports cleanly (a full CANN environment) nothing is touched.
     """
     probe = subprocess.run(
         [sys.executable, "-c", "import xlite._C"],
@@ -57,8 +58,18 @@ def _ensure_xlite_C_importable() -> None:
     except ImportError:
         xlite = types.ModuleType("xlite")
         sys.modules["xlite"] = xlite
-    xlite._C = MagicMock(name="xlite._C")
-    sys.modules["xlite._C"] = xlite._C
+    xlite_C = types.ModuleType("xlite._C")
+
+    class _StubModel:
+        """Plain stand-in for ``xlite._C.Model`` (native module unavailable)."""
+
+    class _StubModelConfig:
+        """Plain stand-in for ``xlite._C.ModelConfig`` (native module unavailable)."""
+
+    xlite_C.Model = _StubModel
+    xlite_C.ModelConfig = _StubModelConfig
+    xlite._C = xlite_C
+    sys.modules["xlite._C"] = xlite_C
 
 
 _ensure_xlite_C_importable()
