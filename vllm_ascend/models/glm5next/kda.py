@@ -388,6 +388,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+        # Only a splitting op runs eagerly between captured graph segments and
+        # therefore needs a graph-owned output address. With an unsplit FX graph
+        # (full-decode-only / eager) decode capture bakes in this op's own
+        # allocation and prefill runs uncaptured, so the layer returns its
+        # output directly and skips a hidden_size-wide copy per layer.
+        self._needs_output_buffer = "vllm::glm5next_kda_pcp_forward" in (compilation_config.splitting_ops or [])
 
     def _dt_bias_weight_loader(self, param, loaded_weight):
         shard_size = param.shape[0]
@@ -408,13 +414,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        # Allocate in the compiled graph so downstream captures retain the
-        # same output address when this split op executes on each invocation.
-        output = torch.empty_like(hidden_states)
-        torch.ops.vllm.glm5next_kda_pcp_forward(hidden_states, output, self.prefix)
-        return output
+        if self._needs_output_buffer:
+            # Allocate in the compiled graph so downstream captures retain the
+            # same output address when this split op executes on each
+            # invocation.
+            output = torch.empty_like(hidden_states)
+            torch.ops.vllm.glm5next_kda_pcp_forward(hidden_states, output, self.prefix)
+            return output
+        return torch.ops.vllm.glm5next_kda_forward(hidden_states, self.prefix)
 
-    def _forward_with_pcp(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor) -> None:
+    def _forward_with_pcp(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor | None) -> torch.Tensor | None:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
@@ -474,11 +483,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
             local_start = self.pcp_rank * local_num_tokens
             local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+            if output_buffer is None:
+                return torch.index_select(output, 0, local_indices)
             # Restore directly into the graph-owned output rather than
             # allocating an indexed tensor and then copying it again.
             torch.index_select(output, 0, local_indices, out=output_buffer)
-        else:
-            output_buffer.copy_(output)
+            return None
+        if output_buffer is None:
+            return output
+        output_buffer.copy_(output)
+        return None
 
     def _forward(
         self,
@@ -741,4 +755,27 @@ direct_register_custom_op(
     op_func=glm5next_kda_pcp_forward,
     mutates_args=["output"],
     fake_impl=glm5next_kda_pcp_forward_fake,
+)
+
+
+# Returning variant for an unsplit FX graph. No eager_break_during_capture:
+# a freshly returned tensor would change address on each eager replay, which
+# is exactly what the breakable-capture contract forbids. forward() selects
+# this one only when the layer is not a splitting op.
+def glm5next_kda_forward(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    output = layer._forward_with_pcp(hidden_states, None)
+    assert output is not None
+    return output
+
+
+def glm5next_kda_forward_fake(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward",
+    op_func=glm5next_kda_forward,
+    mutates_args=[],
+    fake_impl=glm5next_kda_forward_fake,
 )
