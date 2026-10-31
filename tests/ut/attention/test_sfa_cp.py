@@ -168,6 +168,7 @@ def _make_pcp_o_proj_impl(
 ):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.is_pcp_decode_sharded = sharded_decode
+    impl._is_mtp_layer = False
     impl.vllm_config = SimpleNamespace(
         num_speculative_tokens=num_speculative_tokens,
         model_config=SimpleNamespace(dtype=activation_dtype),
@@ -354,17 +355,19 @@ def test_sfa_pcp_decode_buffer_pool_uses_weight_device():
                 assert getattr(same_device._parallel_o_proj, name) is buffer
 
 
-def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
+@pytest.mark.parametrize("is_mtp_layer", [False, True], ids=["disabled", "replicated-mtp"])
+def test_sfa_pcp_weight_switch_does_not_partition_disabled_or_mtp_layers(is_mtp_layer) -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.o_proj = SimpleNamespace(input_size_per_partition=4, output_size_per_partition=3)
     impl.is_pcp_decode_sharded = False
+    impl._is_mtp_layer = is_mtp_layer
     impl.vllm_config = SimpleNamespace()
     with (
         patch.object(AscendSFAImpl, "__init__", return_value=None),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_pcp_o_proj_weight_sharding",
-            return_value=False,
+            return_value=is_mtp_layer,
         ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=SimpleNamespace()),
@@ -375,6 +378,7 @@ def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
     assert not impl.enable_pcp_o_proj_weight_sharding
     assert impl._parallel_o_proj.config.group is pcp_group
     assert not impl._parallel_o_proj._load_prepared
+    assert impl.o_proj.input_size_per_partition == 4
     prepare_load.assert_not_called()
 
 
