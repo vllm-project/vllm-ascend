@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
@@ -79,6 +81,62 @@ class AscendDecoderReplayLayers:
                     output = output.chunk(tp.world_size)[tp.rank_in_group]
                 outputs.append(output)
             return tuple(outputs)
+
+
+def dsv41_decoder_replay_forward(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    output_hidden_states: torch.Tensor,
+    output_pre_mix: torch.Tensor,
+    output_aux: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Run the decoder tail outside Dynamo's compiled model graph.
+
+    The replay rows and attention context are mutable per-forward state. Resolve
+    them only when this custom op executes so the compiler cannot specialize on
+    the warmup value of ``AscendDecoderReplayLayers.rows``. During graph capture,
+    ordinary tail operators remain in the graph; nested Ascend attention ops
+    keep their own capture boundaries.
+    """
+    forward_context = get_forward_context()
+    replay = forward_context.no_compile_layers[layer_name]
+    outputs = replay(hidden_states, pre_mix, positions, input_ids)
+    output_hidden_states.copy_(outputs[0])
+    output_pre_mix.copy_(outputs[1])
+    aux_outputs = outputs[2:]
+    if len(aux_outputs) != output_aux.shape[0]:
+        raise RuntimeError(
+            f"Decoder replay returned {len(aux_outputs)} auxiliary outputs, "
+            f"but the compiled call reserved {output_aux.shape[0]}"
+        )
+    for index, output in enumerate(aux_outputs):
+        output_aux[index].copy_(output)
+
+
+def dsv41_decoder_replay_forward_fake(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    output_hidden_states: torch.Tensor,
+    output_pre_mix: torch.Tensor,
+    output_aux: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Fake implementation for the in-place replay custom op."""
+    return None
+
+
+direct_register_custom_op(
+    op_name="dsv41_decoder_replay_forward",
+    op_func=dsv41_decoder_replay_forward,
+    mutates_args=["output_hidden_states", "output_pre_mix", "output_aux"],
+    fake_impl=dsv41_decoder_replay_forward_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:
