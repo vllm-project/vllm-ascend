@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -639,3 +641,35 @@ def test_rank_tiled_combine_fp64_reference(
         graph.replay()
         eager = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
         torch.testing.assert_close(replayed, eager, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() == AscendDeviceType.A5,
+    reason="Rank-tiled DCP combine is not supported on A5",
+)
+@torch.inference_mode()
+def test_rank_tiled_token_shapes_reuse_one_compiled_variant(monkeypatch):
+    """Token count is runtime data and must not create a Triton specialization."""
+    original = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    kernel = dcp_a2a.triton.jit(original.fn, do_not_specialize=original.do_not_specialize)
+    compile_spy = Mock(wraps=kernel._do_compile)
+    monkeypatch.setattr(kernel, "_do_compile", compile_spy)
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_rank_tiled_kernel", kernel)
+
+    device = torch.npu.current_device()
+    if hasattr(kernel, "device_caches"):
+        kernel_cache = kernel.device_caches[device][0]
+    else:
+        kernel_cache = kernel.cache[device]
+    kernel_cache.clear()
+
+    ranks, heads, head_dim = 16, 4, 512
+    for tokens in (4, 8, 16, 32, 64, 128):
+        partial = torch.randn(tokens, ranks * heads, head_dim, device="npu", dtype=torch.bfloat16)
+        lse = torch.randn(tokens, ranks * heads, 1, device="npu") * 30
+        recv = pack_dcp_output_lse(partial, lse, ranks, 1)
+        local = torch.randn(tokens, heads, head_dim, device="npu", dtype=torch.bfloat16)
+        local_lse = torch.randn(tokens, heads, 1, device="npu") * 30
+        fused_dcp_lse_combine(recv, head_dim, 1, local_output=local, local_lse=local_lse)
+        torch.npu.synchronize()
+        assert len(kernel_cache) == compile_spy.call_count == 1, tokens

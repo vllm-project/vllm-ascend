@@ -3,7 +3,7 @@
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NUM_HEADS", "NUM_TOKENS"])
 def _fused_dcp_lse_combine_rank_tiled_kernel(
     recv_ptr,
     output_ptr,
@@ -14,8 +14,8 @@ def _fused_dcp_lse_combine_rank_tiled_kernel(
     local_stride_d,
     local_lse_stride_t,
     local_lse_stride_h,
-    NUM_HEADS: tl.constexpr,
-    NUM_TOKENS: tl.constexpr,
+    NUM_HEADS,
+    NUM_TOKENS,
     DCP_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_R: tl.constexpr,
