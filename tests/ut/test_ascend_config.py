@@ -1470,11 +1470,18 @@ class TestUpstreamConfigCompatibility(TestBase):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
                     ("routed_expert_hidden_size", 896),
-                    ("routed_expert_hidden_size", 1536),
                     ("num_experts_per_token", 33),
                 ):
                     with self.subTest(field=field), patch.object(text_config, field, value):
                         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # The unified check uses range + alignment, so 1536 (a multiple
+                # of 512 inside [1024, 8192]) is now accepted even though the
+                # legacy A5 whitelist rejected it.
+                with (
+                    self.subTest(field="routed_expert_hidden_size", value=1536),
+                    patch.object(text_config, "routed_expert_hidden_size", 1536),
+                ):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 # Dense MLP dimensions must not substitute for missing K3
                 # routed-expert dimensions, even if the shape looks supported.
                 with (
@@ -1482,12 +1489,15 @@ class TestUpstreamConfigCompatibility(TestBase):
                     patch.object(text_config, "intermediate_size", 3072, create=True),
                 ):
                     self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
-                # K3's model constructor reads this spelling, not the aliases.
+                # The unified lookup chain prefers num_experts_per_tok when
+                # both spellings are present (K3 configs only carry
+                # num_experts_per_token, so the chain order is irrelevant for
+                # real checkpoints).
                 with (
                     patch.object(text_config, "num_experts_per_token", 33),
                     patch.object(text_config, "num_experts_per_tok", 4, create=True),
                 ):
-                    self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
     @patch(
         "vllm_ascend.ascend_config.get_current_hardware_profile",
@@ -1522,13 +1532,17 @@ class TestUpstreamConfigCompatibility(TestBase):
                 # K3-specific fields must not change the legacy decision.
                 self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
-                    ("hidden_size", 3584),
                     ("moe_intermediate_size", 4608),
                     ("moe_intermediate_size", None),
                     ("num_experts_per_tok", 33),
                 ):
                     with self.subTest(field=field), patch.object(text_config, field, value):
                         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                # hidden_size=3584 (a multiple of 512 inside [1024, 8192]) was
+                # rejected by the legacy A5 whitelist but passes the unified
+                # range + alignment rule.
+                with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
@@ -1537,16 +1551,20 @@ class TestUpstreamConfigCompatibility(TestBase):
                     hidden_size=4096,
                     moe_intermediate_size=1536,
                     moe_quantize="w8a8",
-                )
-            )
+                ),
+                get_num_experts=lambda: 128,
+            ),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
         )
         unsupported = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
                     hidden_size=896,
                     moe_intermediate_size=1536,
-                )
-            )
+                ),
+                get_num_experts=lambda: 128,
+            ),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
         )
 
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
@@ -1554,11 +1572,14 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         minimax_m3 = SimpleNamespace(
             model_config=SimpleNamespace(
+                architectures=["MiniMaxM3SparseForCausalLM"],
                 hf_text_config=SimpleNamespace(
                     hidden_size=6144,
                     intermediate_size=3072,
-                )
-            )
+                ),
+                get_num_experts=lambda: 128,
+            ),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
@@ -1570,8 +1591,10 @@ class TestUpstreamConfigCompatibility(TestBase):
                     routed_expert_hidden_size=3584,
                     moe_intermediate_size=3072,
                     moe_quantize="w4a8",
-                )
-            )
+                ),
+                get_num_experts=lambda: 64,
+            ),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
         )
 
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(kimi_k3))
@@ -1788,6 +1811,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             hidden_size=6144,
             intermediate_size=3072,
         )
+        # MegaMoe requires an EP group >= 2 for its symmetric-memory dispatch
+        # layout; the default single-rank parallel config would roll back.
+        vc.parallel_config.world_size = 8
         vc.additional_config = {"enable_fused_mc2": 2}
 
         with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
