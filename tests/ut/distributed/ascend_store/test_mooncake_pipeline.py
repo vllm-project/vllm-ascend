@@ -26,7 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import moo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
@@ -146,7 +146,7 @@ class TestMooncakePipeline(unittest.TestCase):
         # Construct the real scheduler from stage 0's projected config, as vLLM
         # does; do not hand-copy the worker's layout ID into the scheduler.
         with (
-            patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
+            patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
             scheduler = create_kv_pool_scheduler(
@@ -245,7 +245,7 @@ class TestMooncakePipeline(unittest.TestCase):
         config = deepcopy(workers[0].vllm_config)
         config.cache_config.block_size = 16
         with (
-            patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
+            patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
             scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
