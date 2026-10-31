@@ -22,6 +22,7 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import eplb as eplb_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import moe_comm_method as moe_comm_method_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
@@ -101,10 +102,77 @@ def _build_weight_layer():
     )
 
 
-def test_comm_backend_selects_shared_activation_overlap_window():
-    assert MC2CommImpl.shared_activation_overlaps_routed_gmm1
-    assert AlltoAllCommImpl.shared_activation_overlaps_routed_gmm1
-    assert not AllGatherCommImpl.shared_activation_overlaps_routed_gmm1
+@pytest.mark.parametrize("backend", [MC2CommImpl, AlltoAllCommImpl, AllGatherCommImpl])
+@pytest.mark.parametrize("legacy_mlp", [False, True])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_comm_backend_reuses_gmm2_event_for_shared_activation(monkeypatch, backend, legacy_mlp, overlap):
+    """Keep the activation boundary without adding a dispatch-complete event."""
+    comm = backend.__new__(backend)
+    comm.moe_config = object()
+    order = []
+    recorded = []
+    states = torch.randn(2, 4)
+    dispatch_output = SimpleNamespace(combine_metadata=object(), group_list_type=1, group_list=object())
+    mlp_input = object()
+    gmm2_event = None
+
+    def record():
+        event = object()
+        recorded.append(event)
+        order.append("record")
+        return event
+
+    stream = SimpleNamespace(record_event=record)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    monkeypatch.setattr(moe_comm_method_module, "maybe_record_event", lambda: record() if overlap else None)
+    monkeypatch.setattr(moe_comm_method_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=comm))
+    monkeypatch.setattr(moe_comm_method_module, "build_token_dispatch_input", lambda **kwargs: states)
+    monkeypatch.setattr(moe_comm_method_module, "build_mlp_compute_input", lambda **kwargs: mlp_input)
+
+    def dispatch(**kwargs):
+        order.append("dispatch")
+        return dispatch_output
+
+    def mlp(value, *args):
+        nonlocal gmm2_event
+        assert value is mlp_input
+        order.append("gmm1_act")
+        gmm2_event = record() if overlap else None
+        order.append("gmm2")
+        return states, gmm2_event
+
+    def combine(**kwargs):
+        assert kwargs["hidden_states"] is states
+        assert kwargs["combine_metadata"] is dispatch_output.combine_metadata
+        order.append("combine")
+        return states
+
+    comm.token_dispatcher = SimpleNamespace(token_dispatch=dispatch, token_combine=combine)
+    legacy_apply = MagicMock(side_effect=mlp)
+    staged_apply = MagicMock(side_effect=mlp)
+    comm._apply_mlp = legacy_apply
+    monkeypatch.setattr(moe_comm_method_module, "apply_moe_mlp", staged_apply)
+    quant_method = None if legacy_mlp else object()
+    result = comm.fused_experts(SimpleNamespace(hidden_states=states), quant_method=quant_method)
+
+    assert result.routed_out is states
+    assert result.shared_activation_overlap_start_evt is gmm2_event
+    assert result.before_gmm2_evt is gmm2_event
+    if overlap:
+        assert order == ["record", "dispatch", "gmm1_act", "record", "gmm2", "record", "combine"]
+        assert result.before_dispatch_evt is recorded[0]
+        assert gmm2_event is recorded[1]
+        assert result.before_combine_evt is recorded[2]
+    else:
+        assert order == ["dispatch", "gmm1_act", "gmm2", "combine"]
+        assert not recorded
+        assert result.before_dispatch_evt is result.before_combine_evt is None
+    if legacy_mlp:
+        legacy_apply.assert_called_once_with(mlp_input)
+        staged_apply.assert_not_called()
+    else:
+        staged_apply.assert_called_once_with(mlp_input, quant_method)
+        legacy_apply.assert_not_called()
 
 
 def _build_apply_layer():
@@ -3056,8 +3124,9 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert milestones_arg is milestones
     assert runner.ascend_shared_experts.forward.call_args.kwargs == {
         "defer_output_wait": True,
-        "submitted_gate_up": submitted_gate_up,
     }
+    runner.ascend_shared_experts.prepare_for_router_overlap.assert_not_called()
+    runner.ascend_shared_experts.enqueue_gate_up_after_router.assert_not_called()
     assert result[0] is shared_out
     assert result[1] is routed_out
 
