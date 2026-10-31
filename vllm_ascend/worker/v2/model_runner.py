@@ -820,6 +820,44 @@ class NPUModelRunner(GPUModelRunner):
                 "scheduled locally — a request sent directly to the decode node)."
             )
 
+    def _upload_batch_metadata(
+        self,
+        idx_mapping_np: np.ndarray,
+        cu_num_logits_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        capacity = self.max_num_reqs
+        num_reqs = idx_mapping_np.size
+
+        assert idx_mapping_np.shape == (num_reqs,)
+        assert num_reqs <= capacity
+        assert cu_num_logits_np.shape == (num_reqs + 1,)
+        assert query_start_loc_np.shape == (capacity + 2,)
+
+        buffers = self.input_buffers
+        copy_done = buffers.batch_metadata_copy_done
+        if copy_done is not None:
+            # Stream ordering cannot protect host writes from an in-flight DMA.
+            copy_done.synchronize()
+        else:
+            copy_done = torch.npu.Event()
+        packed_np = buffers.batch_metadata_cpu_np
+        packed_np.fill(0)
+        packed_np[buffers.idx_mapping_slice][:num_reqs] = idx_mapping_np
+        packed_np[buffers.cu_num_logits_slice][: num_reqs + 1] = cu_num_logits_np
+        packed_np[buffers.query_start_loc_slice] = query_start_loc_np
+
+        # Copy directly from the pinned mirror on the current stream, so the
+        # completion event guards exactly this transfer without extra staging.
+        buffers.batch_metadata.copy_(buffers.batch_metadata_cpu, non_blocking=True)
+        copy_done.record(torch.npu.current_stream())
+        buffers.batch_metadata_copy_done = copy_done
+
+        return (
+            buffers.idx_mapping_buffer[:num_reqs],
+            buffers.cu_num_logits_buffer[: num_reqs + 1],
+        )
+
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -849,8 +887,13 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
+
+        # PP retains idx_mapping across steps; each batch needs its own storage.
+        merge_metadata_upload = self.adaptive_verification is None and not self.use_pp
+        idx_mapping = None
+        if not merge_metadata_upload:
+            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         num_valid_tokens = num_scheduled_tokens_np
         if scheduler_output.scheduled_spec_decode_tokens:
@@ -878,9 +921,19 @@ class NPUModelRunner(GPUModelRunner):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
-            expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+            cu_num_logits = None
+
+            if not merge_metadata_upload:
+                cu_num_logits = torch.arange(
+                    num_reqs + 1,
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+            expanded_local_pos = torch.zeros(
+                num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
@@ -894,7 +947,12 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            cu_num_logits = None
+            if not merge_metadata_upload:
+                cu_num_logits = async_copy_to_gpu(
+                    cu_num_logits_np,
+                    device=self.device,
+                )
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -929,8 +987,20 @@ class NPUModelRunner(GPUModelRunner):
                 uniform_query_len=batch_desc.uniform_token_count,
             )
 
+        # The packed upload writes into the persistent input buffers, so the
+        # device view is the same in both paths.
         query_start_loc = self.input_buffers.query_start_loc
-        async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        if merge_metadata_upload:
+            idx_mapping, cu_num_logits = self._upload_batch_metadata(
+                idx_mapping_np,
+                cu_num_logits_np,
+                query_start_loc_np,
+            )
+        else:
+            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+
+        assert idx_mapping is not None
+        assert cu_num_logits is not None
 
         if adaptive_verification_active:
             cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
@@ -959,6 +1029,8 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
+        else:
+            expanded_idx_mapping = idx_mapping
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]

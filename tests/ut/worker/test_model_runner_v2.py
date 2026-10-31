@@ -33,6 +33,69 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
+def test_batch_metadata_waits_for_h2d_before_reusing_host_buffer(monkeypatch):
+    capacity = 3
+    host = torch.zeros(24, dtype=torch.int32)
+    device = torch.zeros_like(host)
+    pending: list[torch.Tensor] = []
+    completed: list[torch.Tensor] = []
+    stream = object()
+
+    class DeferredCopy:
+        def copy_(self, source, non_blocking):
+            assert source is host
+            assert non_blocking
+            assert not pending
+            pending.append(source.clone())
+
+    class CompletionEvent:
+        def record(self, actual_stream):
+            assert actual_stream is stream
+            assert len(pending) == 1
+
+        def synchronize(self):
+            expected = pending.pop()
+            # A host overwrite before this wait would corrupt the pending DMA.
+            torch.testing.assert_close(host, expected)
+            device.copy_(host)
+            completed.append(device.clone())
+
+    event_factory = Mock(side_effect=CompletionEvent)
+    monkeypatch.setattr(torch.npu, "Event", event_factory)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    buffers = SimpleNamespace(
+        batch_metadata=DeferredCopy(),
+        batch_metadata_cpu=host,
+        batch_metadata_cpu_np=host.numpy(),
+        batch_metadata_copy_done=None,
+        query_start_loc_slice=slice(0, 5),
+        idx_mapping_slice=slice(8, 11),
+        cu_num_logits_slice=slice(16, 20),
+        query_start_loc=device[:5],
+        idx_mapping_buffer=device[8:11],
+        cu_num_logits_buffer=device[16:20],
+    )
+    runner = SimpleNamespace(max_num_reqs=capacity, input_buffers=buffers)
+    for count in (3, 1):
+        idx = np.arange(count, dtype=np.int32) + 7
+        cu = np.arange(count + 1, dtype=np.int32) * 2
+        query = np.arange(capacity + 2, dtype=np.int32) + count
+        result = NPUModelRunner._upload_batch_metadata(runner, idx, cu, query)
+        assert len(pending) == 1
+        np.testing.assert_array_equal(buffers.batch_metadata_cpu_np[8 : 8 + count], idx)
+        np.testing.assert_array_equal(buffers.batch_metadata_cpu_np[16 : 17 + count], cu)
+        assert np.all(buffers.batch_metadata_cpu_np[8 + count : 11] == 0)
+        assert np.all(buffers.batch_metadata_cpu_np[17 + count : 20] == 0)
+
+    assert len(completed) == 1
+    buffers.batch_metadata_copy_done.synchronize()
+    assert len(completed) == 2
+    event_factory.assert_called_once()
+    for actual, expected in zip(result, (idx, cu)):
+        torch.testing.assert_close(actual, torch.from_numpy(expected))
+    torch.testing.assert_close(buffers.query_start_loc, torch.from_numpy(query))
+
+
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
@@ -1652,6 +1715,32 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+def test_pp_prepare_inputs_preserves_mapping_for_deferred_consumers(draft, is_last_pp_rank):
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(draft=draft, use_pp=True)
+    runner.is_last_pp_rank = is_last_pp_rank
+    mappings = []
+
+    def combine_tokens(*args):
+        mappings.append(args[1])
+        return torch.tensor([0, 1], dtype=torch.int32)
+
+    with patch.object(runner, "_upload_batch_metadata", side_effect=AssertionError("PP must use independent uploads")):
+        _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, combine_tokens=combine_tokens)
+        # Mimic a PP queue retaining the first batch's device mapping while a
+        # later batch is prepared in a different request order.
+        first_mapping = mappings[0]
+        batch_req_state.idx_mapping_np = np.array([1, 0], dtype=np.int32)
+        batch_req_state.req_ids = ["r1", "r0"]
+        _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, combine_tokens=combine_tokens)
+
+    torch.testing.assert_close(first_mapping, torch.tensor([0, 1], dtype=torch.int32))
+    torch.testing.assert_close(mappings[1], torch.tensor([1, 0], dtype=torch.int32))
+    assert first_mapping.data_ptr() != mappings[1].data_ptr()
+    assert first_mapping.data_ptr() != runner.input_buffers.idx_mapping_buffer.data_ptr()
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
