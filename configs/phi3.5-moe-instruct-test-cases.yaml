@@ -1,0 +1,40 @@
+test_cases:
+  - name: "基础常识问答"
+    input: "请简要说明光合作用的基本过程。"
+    keywords: ["光伏作用", "暗反应", "二氧化碳", "氧气", "葡萄糖"]
+    total: 5
+
+  - name: "逻辑推理题"
+    input: "A 比 B 高，B 比 C 高，D 比 C 矮。请从高到矮排序。"
+    keywords: ["B > C"]
+    total: 1
+
+  - name: "代码生成"
+    input: "写一个Python函数，输入列表返回其中的偶数。"
+    keywords: ["def", "even", "% 2 == 0", "append", "return"]
+    total: 5
+
+  - name: "数学计算"
+    input: "计算 1+2+3+4+5+6+7+8+9+10 的结果，直接给答案。"
+    keywords: ["55"]
+    total: 1
+
+  - name: "长文本摘要"
+    input: "人工智能是模拟人类智能的技术，近年因大模型与算力突破快速发展。请总结。"
+    keywords: ["人工智能", "大模型", "技术"]
+    total: 3
+
+  - name: "多轮一致性"
+    input: "我喜欢编程、健身、阅读。我平时喜欢做什么？"
+    keywords: ["编程", "健身", "阅读"]
+    total: 3
+
+  - name: "指令遵循"
+    input: "用三句话介绍北京，每句不超过10字。"
+    keywords: ["北京"]
+    total: 3
+
+  - name: "翻译任务"
+    input: "将这句话翻译成法语：The Great Wall has been a symbolic representation of China's endurance against invasions for ages."
+    keywords: ["La Grande Muraille", "Chinois"]
+    total: 2
