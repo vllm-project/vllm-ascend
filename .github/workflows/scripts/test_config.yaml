@@ -92,6 +92,7 @@ accuracy_tests:
   - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py
   - tests/e2e/pull_request/two_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+  - tests/e2e/pull_request/four_card/test_deepseek_flash_accuracy_a5.py
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
@@ -111,6 +112,10 @@ runner_mapping:
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
+  tests/e2e/pull_request/four_card/test_deepseek_flash_accuracy_a5\.py$:
+    default: a5-4
+  tests/e2e/pull_request/four_card/(?:model_runner_v2/|context_parallel/)?test_deepseek_v4(?:1)?_a5\.py$:
+    default: a5-4
   tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
@@ -131,7 +136,8 @@ runner_mapping:
 partition:
   a5-4:
     runner_label: linux-aarch64-a5-4
-    count: 1
+    # Balance full-checkpoint files across standard PR jobs.
+    count: 3
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 2

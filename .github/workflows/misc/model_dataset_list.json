@@ -626,7 +626,8 @@
             "vllm-ascend/Qwen3.5-397B-A17B-w4a8",
             "vllm-ascend/qwen36-35ba3b-2d-weights-poken-lora",
             "vllm-ascend/qwen36-35ba3b-moe-all-linear-poken-lora",
-            "deepseek-ai/DeepSeek-V4-Flash-0731"
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "deepseek-ai/DeepSeek-V4.1-Flash"
         ],
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
