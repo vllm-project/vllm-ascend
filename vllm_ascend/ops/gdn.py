@@ -398,21 +398,26 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b.contiguous()
             a = a.contiguous()
         else:
+            # Reuse upstream's projection interface and its device/LoRA/quant
+            # eligibility checks. On NPU it keeps the original two GEMMs.
+            if hasattr(self, "project_input"):
+                projected_states_qkvz, projected_states_ba = self.project_input(hidden_states)
+            else:
+                # vLLM 0.31 predates project_input.
+                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                projected_states_ba, _ = self.in_proj_ba(hidden_states)
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                mixed_qkvz = projected_states_qkvz
                 num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
-                b, a = self._split_ba_for_tp(ba)
+                b, a = self._split_ba_for_tp(projected_states_ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
             else:
-                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                projected_states_ba, _ = self.in_proj_ba(hidden_states)
                 num_tokens = projected_states_qkvz.size(0)
 
                 mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
