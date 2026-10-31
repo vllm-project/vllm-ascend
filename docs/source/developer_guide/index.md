@@ -13,6 +13,8 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 ## Design Documents
 
+- **[Ascend Sleep Backends](sleep_mode_backend.md)** — Backend selection, resource ownership, staged wake and failure behavior
+
 Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, and NPUGraph.
 
 ## Evaluation
