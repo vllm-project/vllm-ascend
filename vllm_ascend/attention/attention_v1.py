@@ -590,6 +590,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.hidden_size = self.num_heads * self.head_size
         self.sliding_window = sliding_window
+        self._non_causal_swa_attn_mask: torch.Tensor | None = None
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
@@ -659,12 +660,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.sliding_window is None:
                 return None, 0, SWA_INT_MAX, SWA_INT_MAX
             # Match upstream FlashAttention's non-causal window (W-1, W-1).
-            # FIA band mode uses a cached compressed triangular template; its
-            # pre/next offsets, rather than the template alone, define visibility.
-            # Warmup creates the shared mask before ACL graph capture.
-            mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
+            # FIA band mode uses a compressed triangular template; its pre/next
+            # offsets, rather than the template alone, define visibility. Build
+            # the mask once and share it between eager and graph execution.
+            if self._non_causal_swa_attn_mask is None:
+                self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
-            return mask, 4, radius, radius
+            return self._non_causal_swa_attn_mask, 4, radius, radius
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,

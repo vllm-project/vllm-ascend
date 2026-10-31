@@ -28,6 +28,7 @@ def _make_impl(impl_cls=AscendAttentionBackendImpl):
     impl.key_cache = None
     impl.value_cache = None
     impl.sliding_window = None
+    impl._non_causal_swa_attn_mask = None
     impl.sinks = None
     impl.enable_c8_quant = False
     impl._use_max_workspace_for_fia_graph = False
@@ -163,10 +164,16 @@ def test_non_causal_fia_mask_params(window, expected_mode, expected_tokens):
     metadata.causal = False
     mask = object()
     builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: mask)
-    with patch.object(attn_module, "AttentionMaskBuilder", return_value=builder):
+    with patch.object(attn_module, "AttentionMaskBuilder", return_value=builder) as builder_cls:
         actual = impl._get_fia_mask_params(metadata, torch.device("cpu"))
+        repeated = impl._get_fia_mask_params(metadata, torch.device("cpu"))
 
     assert actual == (mask if window is not None else None, expected_mode, expected_tokens, expected_tokens)
+    assert repeated == actual
+    if window is None:
+        builder_cls.assert_not_called()
+    else:
+        builder_cls.assert_called_once()
 
 
 @pytest.mark.parametrize("v2", [False, True])
