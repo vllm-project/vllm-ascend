@@ -491,6 +491,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
+            mm_prefix_ranges=self.get_mm_prefix_ranges(input_batch),
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
         )

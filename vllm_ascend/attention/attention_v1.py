@@ -77,6 +77,10 @@ _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return cls is AscendAttentionBackend
+
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
@@ -236,6 +240,7 @@ class AscendMetadata:
     pcp_local_num_input_tokens: int | None = None
     # Resolved by the builder; execution must not infer layout from tensor sizes.
     uses_pcp_sharded_layout: bool = False
+    prefix_masks: list[torch.Tensor] | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -464,6 +469,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
         )
+        if common_attn_metadata.mm_req_doc_ranges:
+            if self.model_config.runner_type != "pooling" or self.use_pcp:
+                raise NotImplementedError("PrefixLM attention currently requires full-request pooling without PCP")
+            query_lengths = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
+            if query_lengths != seq_lens_list[:num_reqs]:
+                raise NotImplementedError("PrefixLM pooling does not support cached or chunked prefill")
+            masks = []
+            for req_index, length in enumerate(query_lengths):
+                mask = torch.ones((length, length), dtype=torch.bool).triu_(1)
+                for start, end in common_attn_metadata.mm_req_doc_ranges.get(req_index, ()):
+                    if not 0 <= start <= end < length:
+                        raise ValueError("PrefixLM range is outside its request")
+                    mask[start : end + 1, start : end + 1] = False
+                masks.append(mask.to(self.device))
+            attn_metadata.prefix_masks = masks
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata
@@ -1158,6 +1178,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         return output
 
+    def _forward_prefix_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.sliding_window is not None:
+            raise NotImplementedError("PrefixLM pooling with sliding attention is not supported")
+        start = 0
+        for end, mask in zip(attn_metadata.actual_seq_lengths_q, attn_metadata.prefix_masks):
+            length = end - start
+            q = query[start:end].reshape(length, self.num_heads, -1).transpose(0, 1).unsqueeze(0)
+            k = key[start:end].reshape(length, self.num_kv_heads, -1).transpose(0, 1).unsqueeze(0)
+            v = value[start:end].reshape(length, self.num_kv_heads, -1).transpose(0, 1).unsqueeze(0)
+            result = torch_npu.npu_fused_infer_attention_score(
+                query=q.contiguous(),
+                key=k.contiguous(),
+                value=v.contiguous(),
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BNSD",
+                scale=self.scale,
+                atten_mask=mask,
+                sparse_mode=0,
+            )[0]
+            output[start:end] = result.squeeze(0).transpose(0, 1).reshape_as(query[start:end])
+            start = end
+        return output
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -1339,6 +1390,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+
+        if attn_metadata.prefix_masks is not None:
+            return self._forward_prefix_attention(query, key, value, attn_metadata, output)
 
         # Initialize key_cache and value_cache from kv_cache if not already set.
         # This is needed for DecodeOnly mode where key/value are None but we still

@@ -234,6 +234,49 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
+    def test_prefix_ranges_preserve_state_isolation_and_other_request_causality(self):
+        # The shared mask builder also serves tests with different mask dtypes.
+        mask_builder = self.builder.attn_mask_builder
+        with patch.object(mask_builder, "attn_mask_cache", None), patch.object(mask_builder, "_seq_len_cached", 0):
+            self._check_prefix_ranges()
+
+    def _check_prefix_ranges(self):
+        self.mock_vllm_config.use_v2_model_runner = False
+        self.mock_vllm_config.model_config.runner_type = "pooling"
+        common = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 4, 7]),
+            query_start_loc_cpu=torch.tensor([0, 4, 7]),
+            seq_lens=torch.tensor([4, 3]),
+            seq_lens_cpu=torch.tensor([4, 3]),
+            num_reqs=2,
+            num_actual_tokens=7,
+            max_query_len=4,
+            max_seq_len=4,
+            block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(7),
+            attn_state=AscendAttentionState.PrefillNoCache,
+            mm_req_doc_ranges={0: [(0, 1), (2, 3)]},
+        )
+        metadata = self.builder.build(0, common)
+        torch.testing.assert_close(
+            metadata.prefix_masks[0],
+            torch.tensor(
+                [
+                    [False, False, True, True],
+                    [False, False, True, True],
+                    [False, False, False, False],
+                    [False, False, False, False],
+                ]
+            ),
+        )
+        torch.testing.assert_close(
+            metadata.prefix_masks[1],
+            torch.tensor([[False, True, True], [False, False, True], [False, False, False]]),
+        )
+        common.mm_req_doc_ranges = {0: [(0, 4)]}
+        with self.assertRaisesRegex(ValueError, "outside its request"):
+            self.builder.build(0, common)
+
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -432,6 +475,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
         self.attn_metadata = MagicMock()
+        self.attn_metadata.prefix_masks = None
         self.attn_metadata.uses_pcp_sharded_layout = False
         self.attn_metadata.return_value = "1"
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])

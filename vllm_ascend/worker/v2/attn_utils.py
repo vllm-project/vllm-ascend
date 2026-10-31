@@ -465,6 +465,7 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    mm_prefix_ranges: dict[int, list[tuple[int, int]]] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -585,6 +586,7 @@ def build_attn_metadata(
             is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            mm_req_doc_ranges=mm_prefix_ranges,
             req_ids_tensor=req_ids_tensor,
             token_to_req=token_to_req,
             offload_dummy=offload_dummy,
