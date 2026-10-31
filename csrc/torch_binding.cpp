@@ -42,6 +42,7 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "aclnn_torch_adapter/gbsa_torch_adpt.h"
+#include "aclnn_torch_adapter/lightning_indexer_v2_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
@@ -3067,6 +3068,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_lightning_indexer_v2_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, *, "
+        "Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
+        "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, int max_seqlen_q=-1, "
+        "int max_seqlen_k=-1, str layout_q=\"BSND\", str layout_k=\"BSND\", int mask_mode=0, "
+        "int cmp_ratio=1) -> Tensor"
+    );
+    ops.impl("npu_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::li_v2::LightningIndexerMetadata);
+    ops.def(
+        "npu_lightning_indexer_v2(Tensor q, Tensor k, Tensor w, int topk, *, Tensor? cu_seqlens_q=None, "
+        "Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, Tensor? seqused_k=None, "
+        "Tensor? cmp_residual_k=None, Tensor? block_table=None, Tensor? output_idx_offset=None, "
+        "Tensor? metadata=None, int max_seqlen_q=-1, str layout_q=\"BSND\", str layout_k=\"BSND\", "
+        "int mask_mode=0, int cmp_ratio=1, int return_value=0) -> (Tensor, Tensor)"
+    );
+    ops.impl("npu_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::li_v2::LightningIndexer);
 
     ops.def(
         "npu_generic_block_sparse_attention_metadata(Tensor sparse_block_idx, Tensor sparse_block_count, "
