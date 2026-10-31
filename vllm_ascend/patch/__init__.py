@@ -1841,3 +1841,20 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: worker/patch_mrope_vit_setup.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.rotary_embedding.mrope_vit_setup`
+#    Why:
+#       Reduce ViT mRoPE setup UB pressure on Ascend A5.
+#    How:
+#       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
+#       to 16, using the same value for the launch grid divisor. Keep the
+#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
+#       it is already loaded; subsequent imports use the patched wrapper.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58526
+#       https://github.com/vllm-project/vllm/pull/58673
+#    Future Plan:
+#       Remove once upstream supports a backend-specific setup block size
+#       suitable for Ascend UB capacity.
+#
