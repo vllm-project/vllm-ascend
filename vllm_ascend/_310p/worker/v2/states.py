@@ -56,11 +56,14 @@ class Ascend310PStagedWriteTensor:
         self._dirty_indices.add(index)
 
     def apply_write(self) -> None:
-        if not self._dirty_indices:
-            return
         if self.uva_instead_of_gpu:
+            # ``uva()`` publishes whatever the tracker saw, including rows
+            # written through ``.cpu``/``.np`` outside stage_write(). Asking it
+            # every time is a no-op when nothing is dirty.
             self.gpu = self._uva_buffer.uva()
             self._dirty_indices.clear()
+            return
+        if not self._dirty_indices:
             return
         # Small request vectors favor one bulk H2D.
         self.gpu.copy_(self.cpu, non_blocking=True)

@@ -23,6 +23,7 @@ from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.patch.worker import patch_uva as patch_uva_module
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -437,6 +438,31 @@ def test_promote_mtp_spec_decoding_keeps_uniform_mtp_on_full_graph() -> None:
         return_value=AscendAttentionState.ChunkedPrefill,
     ):
         assert runner._scheduler_output_needs_spec_eager(scheduler_output) is False
+
+
+def test_staged_write_publishes_rows_written_through_the_mirror(monkeypatch) -> None:
+    # post_update writes decoded tokens through ``all_token_ids.cpu``; the
+    # publish must not depend on stage_write() having been used.
+    monkeypatch.setattr(patch_uva_module, "is_uva_available", lambda: False)
+    monkeypatch.setattr(patch_uva_module, "_zeros_on_npu", torch.zeros_like)
+    pinned_zeros = torch.zeros
+    monkeypatch.setattr(
+        torch,
+        "zeros",
+        lambda *args, **kwargs: pinned_zeros(*args, **{**kwargs, "pin_memory": False}),
+    )
+    staged = Ascend310PStagedWriteTensor(
+        (2, 8),
+        dtype=torch.int32,
+        device=torch.device("cpu"),
+        uva_instead_of_gpu=True,
+    )
+
+    staged.cpu[1, 0:2] = torch.tensor([10, 11], dtype=torch.int32)
+    staged.apply_write()
+
+    torch.testing.assert_close(staged.gpu[1, 0:2], torch.tensor([10, 11], dtype=torch.int32))
+    torch.testing.assert_close(staged.gpu[0], torch.zeros(8, dtype=torch.int32))
 
 
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
