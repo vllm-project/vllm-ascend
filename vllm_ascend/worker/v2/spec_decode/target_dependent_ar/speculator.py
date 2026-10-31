@@ -86,6 +86,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     model_state: "AscendModelState"
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         """Override the upstream __init__ for Ascend NPUs.
 

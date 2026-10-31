@@ -8,7 +8,7 @@ verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
@@ -1140,8 +1140,16 @@ class KDARecoverSSMCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
+        backend: Literal["cute", "triton"] = "triton",
     ) -> "KDARecoverSSMCommitContext":
-        """Bind layer-owned page views and allocate reusable commit-plan buffers."""
+        """Bind layer-owned page views and allocate reusable commit-plan buffers.
+
+        ``backend`` is accepted for signature compatibility with the upstream
+        factory on vLLM main, which selects between its CuTe and Triton commit
+        kernels. Ascend only implements the Triton plan, so the value is
+        ignored.
+        """
+        del backend
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
         if any(len(layer.kv_cache) != 4 for layer in layers):

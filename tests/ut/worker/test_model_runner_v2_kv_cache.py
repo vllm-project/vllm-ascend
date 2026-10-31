@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
@@ -79,6 +80,8 @@ def test_initialize_builds_aux_output_connector_when_enabled():
     runner.cache_config.kv_sharing_fast_prefill = False
     # Mirror of the case above: exercise the AuxOutput branch only.
     runner.vllm_config.aux_output_config.enabled = True
+    connector = MagicMock()
+    runner.aux_output_connector = None
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
 
@@ -94,14 +97,20 @@ def test_initialize_builds_aux_output_connector_when_enabled():
         patch.object(upstream, "check_attention_cp_compatibility"),
         patch.object(upstream, "init_kv_cache", return_value=caches),
         patch.object(upstream, "get_kv_connector"),
-        patch.object(upstream, "get_aux_output_connector", return_value="aux") as get_aux,
+        patch.object(upstream, "get_aux_output_connector", return_value=connector) as get_aux,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=False)
 
     # The initializer deep-copies the config, so assert against the resolved one
     # (identity shortcut) instead of comparing the original object by value.
-    get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
-    assert runner.aux_output_connector == "aux"
+    if vllm_version_is("0.32.0"):
+        get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
+    else:
+        # Main creates the connector without the KV-cache config and
+        # initializes its storage once the layout is resolved.
+        get_aux.assert_called_once_with(runner.model, runner.vllm_config)
+        connector.initialize_output_storage.assert_called_once_with(runner.kv_cache_config)
+    assert runner.aux_output_connector is connector
 
 
 def test_mrv2_block_copy_preserves_segmented_mamba_storage():

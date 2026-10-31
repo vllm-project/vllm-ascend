@@ -120,7 +120,9 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
         engine.is_sender = True
         engine.npu_uuid = "node-0"
         engine.gpu_uuid = engine.npu_uuid
-        source = iter([("model.weight", torch.zeros(3))])
+        source = MagicMock()
+        source.__iter__.return_value = iter([("model.weight", torch.zeros(3))])
+        source.iter_full.return_value = iter([("model.weight", torch.zeros(3))])
         with patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles):
             engine._send_unpacked(source)
 
@@ -272,7 +274,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.packed = True
     engine.npu_uuid = "node-0"
     engine.packed_buffer_size_bytes = 16
-    engine.source = []
+    engine.source = MagicMock()
     events: list[str] = []
 
     def chunks(**kwargs):

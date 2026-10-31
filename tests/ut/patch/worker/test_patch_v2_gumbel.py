@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker import patch_triton
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize(
@@ -46,7 +47,22 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator.temperature = torch.tensor([0.5, 1.5])
     speculator.seeds = torch.tensor([3, 7])
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
-    speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
+    if vllm_version_is("0.32.0"):
+        # vLLM main (#63554) forwards the draft-logits cache shard to the sampler.
+        speculator.draft_logits = (  # type: ignore[assignment]
+            torch.empty(2, 2, 3) if probabilistic else None
+        )
+        speculator.draft_logits_num_shards = 1  # type: ignore[attr-defined]
+        speculator.draft_logits_shard_idx = 0  # type: ignore[attr-defined]
+    else:
+        # Main supplies the cache object itself instead of separate shard args.
+        from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
+            DraftLogitsCache,
+        )
+
+        speculator.draft_logits = (  # type: ignore[assignment]
+            DraftLogitsCache(2, 2, 3, dtype=torch.float32, fill=0.0, device="cpu") if probabilistic else None
+        )
     speculator.use_fp64_gumbel = False
 
     # This fixture bypasses __init__, so provide defaults used by current main.
@@ -77,7 +93,12 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
         assert kwargs["is_drafting"] is True
-        assert kwargs["logits_cache"] is speculator.draft_logits
+        if vllm_version_is("0.32.0"):
+            assert kwargs["logits_cache"] is speculator.draft_logits
+        else:
+            assert kwargs["logits_cache"] is speculator.draft_logits.values  # type: ignore[attr-defined]
+            row_mapping = speculator.draft_logits.row_mapping  # type: ignore[attr-defined]
+            assert kwargs["logits_cache_row_mapping"] is row_mapping
         torch.testing.assert_close(
             kwargs["logits_cache_col"],
             speculator._step_cols[1],

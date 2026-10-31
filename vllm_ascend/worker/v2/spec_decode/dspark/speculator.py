@@ -64,6 +64,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)

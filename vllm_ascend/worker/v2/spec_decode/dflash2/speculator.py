@@ -122,6 +122,10 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # V2 passes the runner's cudagraph mode to the draft speculator
         # without consulting the spec-level enforce_eager. Honor it here:

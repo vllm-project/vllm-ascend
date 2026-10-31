@@ -422,7 +422,16 @@ def _categorical_sample_main(
     logits_cache: torch.Tensor | None = None,
     logits_cache_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    logits_cache_source: torch.Tensor | None = None,
+    logits_cache_row_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # 0.32.0 has `logits_cache_source` (only watermarking supplies a separate
+    # source); main adds the per-row mapping for batch-sharded caches. The NPU
+    # kernels support neither.
+    if logits_cache_row_mapping is not None:
+        raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+    if logits_cache_source is not None:
+        raise NotImplementedError("A separate draft-logits cache source is not supported on NPU.")
     return _categorical_sample(
         logits,
         expanded_idx_mapping,

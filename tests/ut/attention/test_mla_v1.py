@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type, assignment, index, method-assign, type-var, union-attr"
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2803,7 +2804,13 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        if vllm_version_is("0.32.0"):
+            # A re-derived value that no longer fits rebinds the parameter.
+            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        else:
+            # Main copies a smaller value into the parameter's own storage, so
+            # the address captured by graphs is preserved.
+            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),

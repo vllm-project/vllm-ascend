@@ -86,7 +86,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found,import-untyped]  # noqa: F401, PLC0415
 
             enable_custom_op()
             x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(

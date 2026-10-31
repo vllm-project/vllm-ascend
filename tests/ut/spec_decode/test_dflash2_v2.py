@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, misc"
 #
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
@@ -147,7 +148,12 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 1024
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 1024
+    else:
+        # vLLM main exposes max_model_len as a read-only view of vllm_config.
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
+    speculator.draft_max_seq_len = 1024
     speculator.dcp_size = 1
     speculator.input_buffers = SimpleNamespace(
         query_start_loc=torch.zeros(5, dtype=torch.int32),

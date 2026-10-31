@@ -19,11 +19,14 @@
 import os
 from collections.abc import Callable, Sequence
 from importlib.metadata import version
+from typing import cast
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def check_triton_ascend_version_valid() -> bool:
@@ -153,7 +156,7 @@ class UvaBufferWrapper:
         self._modified_indices: set[int] = set()
         requested_real_uva = is_uva_available()
         if requested_real_uva:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found,import-untyped]  # noqa: F401
 
         view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu) if requested_real_uva else None
         self._use_real_uva = view is not None
@@ -205,5 +208,29 @@ class UvaBufferWrapper:
         self._sync_dirty_rows()
         return self._uva if n is None else self._uva[:n]
 
+    def copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
+        """Concatenate staged chunks into the CPU mirror and mark them dirty.
+
+        vLLM main (#63633) stages values by reference and copies them with
+        ``np.concatenate(out=...)``, which bypasses ``MonitoredNumPyArray``'s
+        ``__setitem__``, so mark the written rows explicitly.
+        """
+        np.concatenate(chunks, out=self._np[:n], casting="unsafe")
+        self._modified_indices.update(range(n))
+        return self.uva(n)
+
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
+
+
+if not vllm_version_is("0.32.0"):
+
+    def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
+        buf = self._next_buf(n)
+        if isinstance(buf, UvaBufferWrapper):
+            return cast(UvaBufferWrapper, buf).copy_chunks_to_uva(chunks, n)
+        # NonUvaBuffer keeps its own CPU mirror and copy on uva().
+        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
+        return buf.uva(n)
+
+    vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore

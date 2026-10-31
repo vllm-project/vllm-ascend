@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib.util import find_spec
 from typing import Any, ClassVar
 
 import torch
@@ -61,14 +63,40 @@ from vllm_ascend.utils import (
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
 
-# Use CANN MsaIndexScore for prefill and decode on every device, keeping A5
-# aligned with A3. A5's Triton decode kernel stays importable as a rollback
-# path.
-_USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = True
+
+@lru_cache
+def _cann_index_score_available() -> bool:
+    """Whether the installed CANN ops-transformer package ships MsaIndexScore.
+
+    This is a toolchain/dependency question, not a vLLM-version one: newer
+    CANN wheels provide the op, older ones keep the Triton path.
+    """
+    if find_spec("cann_ops_transformer") is None:
+        return False
+    try:
+        from cann_ops_transformer.ops import msa_index_score  # noqa: F401, PLC0415
+    except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> Triton
+        return False
+    return True
+
+
+# MiniMax-M3 index-score kernels select the CANN path when the op is installed.
+_CANN_INDEX_SCORE_AVAILABLE = _cann_index_score_available()
+
+# Use CANN MsaIndexScore for prefill and decode on every device when the
+# installed CANN package provides the op, keeping A5 aligned with A3. Triton
+# kernels stay importable as a fallback/rollback path.
+_USE_ASCENDC_INDEX_SCORE_PREFILL = _CANN_INDEX_SCORE_AVAILABLE
+_USE_ASCENDC_INDEX_SCORE_DECODE = _CANN_INDEX_SCORE_AVAILABLE
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
@@ -502,7 +530,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     decode_query_len=d.decode_query_len,
                 )
             else:
-                decode_topk, decode_select_num_idx = minimax_m3_index_decode(
+                decode_result = minimax_m3_index_decode(
                     decode_iq,
                     kv,
                     d.block_table,
@@ -515,6 +543,16 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     d.decode_query_len,
                     sm_scale=self.scale,
                 )
+                # The v0.32.0 Triton decode follows the upstream single-tensor
+                # contract, while the A5 Triton decode returns
+                # (topk_idx, select_num_idx). The sparse decode op derives the
+                # per-query selected counts from ``topk_idx`` when they are not
+                # supplied (see _select_num_idx_from_topk).
+                if isinstance(decode_result, tuple):
+                    decode_topk, decode_select_num_idx = decode_result
+                else:
+                    decode_topk = decode_result
+                    decode_select_num_idx = None
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None

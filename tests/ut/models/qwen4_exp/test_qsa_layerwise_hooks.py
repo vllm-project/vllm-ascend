@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatch):
@@ -35,9 +36,10 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
         raw_key_cache = SimpleNamespace(prefix="raw")
         output_width = 4
 
-        def __call__(self, *args):
+        def __call__(self, *args, **kwargs):
             order.append("indexer_update")
-            return torch.zeros(2, self.output_width, dtype=torch.int32)
+            selected = torch.zeros(2, self.output_width, dtype=torch.int32)
+            return selected if vllm_version_is("0.32.0") else (selected, None)
 
     owner = SimpleNamespace(
         layer_name="main",
@@ -47,6 +49,7 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
         impl=SimpleNamespace(
             do_kv_cache_update=lambda *args: order.append("main_kv_update"),
             forward_qsa=lambda *args, **kwargs: order.append("attention"),
+            forward=lambda *args, **kwargs: order.append("attention"),
         ),
     )
     value = torch.zeros(2, 4)

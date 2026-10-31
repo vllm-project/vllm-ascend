@@ -1,3 +1,4 @@
+# mypy: disable-error-code="operator, union-attr"
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -819,6 +820,17 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
 
     from vllm_ascend.models.qwen4_exp import qsa
 
+    if vllm_version_is("0.32.0"):
+        import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
+
+        QSARawKeyCache = qsa_module.QSAKeyStateCache
+        QSAIndexerBackend = qsa_module.QSAStateBackend
+    else:
+        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
+
+        QSARawKeyCache = qsa_module.QSARawKeyCache
+        QSAIndexerBackend = qsa_module.QSAIndexerBackend
+
     groups = [
         KVCacheGroupSpec(
             group.layer_names,
@@ -852,7 +864,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
-    backend = qsa.qsa_cache.QSAStateBackend
+    backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
@@ -863,7 +875,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
-    layer = qsa.qsa_cache.QSACompressedKeyCache(
+    layer = qsa.qsa_indexer.QSACompressedKeyCache(
         head_size=spec.head_size,
         dtype=spec.dtype,
         prefix=name,
@@ -876,7 +888,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
     raw_name = groups[1].layer_names[0]
-    raw_layer = qsa.qsa_cache.QSAKeyStateCache(
+    raw_layer = QSARawKeyCache(
         head_size=20,
         dtype=spec.dtype,
         prefix=raw_name,
@@ -913,7 +925,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     # One real request owns all eight tokens; avoid the device-only mapping kernel.
     common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
-    monkeypatch.setattr(qsa.qsa_cache, "build_qsa_metadata", qsa.qsa_cache._build_qsa_metadata_torch)
+    monkeypatch.setattr(qsa.qsa_indexer, "build_qsa_metadata", qsa.qsa_indexer._build_qsa_metadata_torch)
     metadata = builder.build(0, common)
     torch.testing.assert_close(metadata.block_table, virtual)
     # Cross the manager-block boundary: flattened storage addresses must agree

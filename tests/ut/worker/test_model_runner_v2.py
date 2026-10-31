@@ -2,6 +2,7 @@ import ast
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, Mock, call, patch
 
 import numpy as np
@@ -41,9 +42,13 @@ def _make_runner(need_timing: bool = True):
         kvpp_config=SimpleNamespace(size=1),
     )
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
-    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="other_model"))
+    runner.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="other_model"),
+        # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
+        enable_sleep_mode=False,
+    )
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
-    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)  # type: ignore[assignment]
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
     runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
@@ -56,14 +61,14 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner._uses_flashmla = False
     runner.adaptive_verification = None
-    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
     # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
     # attribute must exist on every runner built here.
-    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())
+    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())  # type: ignore[assignment]
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -860,7 +865,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.use_flashmla = False
         impl.use_pcp = False
         impl.use_dcp = False
-        impl.supports_prolog_v3_writer = lambda: True
+        impl.supports_prolog_v3_writer = lambda: True  # type: ignore[method-assign]
         layer.impl = impl
         layer.indexer = None
         layer.kv_cache_dtype = "auto"
@@ -878,7 +883,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
             allocated_bytes += weight.numel() * weight.element_size()
             return {"weight_dq": weight}
 
-        impl._build_prolog_v3_weights = Mock(side_effect=build_weights)
+        impl._build_prolog_v3_weights = Mock(side_effect=build_weights)  # type: ignore[method-assign]
         layers[name] = layer
         impl.process_weights_after_loading(torch.bfloat16)
 
@@ -889,6 +894,9 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         return model
 
     runner.speculator = Mock(spec=vllm_model_runner.DraftModelSpeculator) if with_draft else None
+    if runner.speculator:
+        # vLLM main reads the draft-logits cache while loading the model.
+        runner.speculator.draft_logits = None
     if runner.speculator:
         runner.speculator.load_model.side_effect = lambda _target: load_attention("draft.attn")
 
@@ -1058,10 +1066,10 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=32)
-    state.kvpp_runtime = runner.kvpp
+    state.kvpp_runtime = runner.kvpp  # type: ignore[assignment]
     state.decoder_replay = None
     runner.model_state = state
-    batch = SimpleNamespace(
+    batch: Any = SimpleNamespace(
         num_reqs=2,
         num_reqs_after_padding=4,
         num_tokens=2,
