@@ -8,6 +8,7 @@ on:
     paths:
       - 'recipes/**'
       - '.github/workflows/recipes.yml'
+      - '.github/workflows/validate-ascend-recipes.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,3 +25,8 @@ jobs:
     with:
       source: vllm-ascend
       path: recipes
+
+  ascend-validation:
+    name: Ascend configuration
+    needs: validate
+    uses: ./.github/workflows/validate-ascend-recipes.yml
