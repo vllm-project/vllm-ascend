@@ -77,7 +77,14 @@ setup_vllm_cache_root() {
   # A cancelled self-hosted job can leave that baton behind and make every
   # later NPU job sharing the default cache wait forever before ninja starts.
   export TORCH_EXTENSIONS_DIR
-  TORCH_EXTENSIONS_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-extensions-${npu_type}-${num_npus}card.XXXXXX")"
+  if [ "$npu_type" = "310p" ]; then
+    if [ -z "${TORCH_EXTENSIONS_DIR:-}" ]; then
+      TORCH_EXTENSIONS_DIR="$(mktemp -d /tmp/torch-extensions-310p.XXXXXX)"
+    fi
+    test -d "$TORCH_EXTENSIONS_DIR"
+  else
+    TORCH_EXTENSIONS_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-extensions-${npu_type}-${num_npus}card.XXXXXX")"
+  fi
   echo "Using Torch extensions directory: ${TORCH_EXTENSIONS_DIR}"
 }
 

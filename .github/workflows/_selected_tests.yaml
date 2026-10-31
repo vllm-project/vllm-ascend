@@ -360,6 +360,29 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Calculate GDN package cache key
+        if: ${{ matrix.group.npu_type == '310p' }}
+        id: gdn-key
+        env:
+          GDN_IMAGE_TAG: ${{ matrix.group.image_tag }}
+        run: |
+          KEY="$(bash .github/workflows/scripts/gdn_packages.sh key)"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Restore GDN packages
+        if: ${{ matrix.group.npu_type == '310p' }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: .cache/gdn-packages
+          key: ${{ steps.gdn-key.outputs.key }}
+          fail-on-cache-miss: true
+
+      - name: Install and verify GDN packages
+        if: ${{ matrix.group.npu_type == '310p' }}
+        env:
+          GDN_IMAGE_TAG: ${{ matrix.group.image_tag }}
+        run: bash .github/workflows/scripts/gdn_packages.sh install
+
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}

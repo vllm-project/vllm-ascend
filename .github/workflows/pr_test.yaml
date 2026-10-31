@@ -613,11 +613,37 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
+  prepare-gdn-cache:
+    needs:
+      - select-tests
+    # !cancelled() is required: select-tests depends on recommend-tests,
+    # which is skipped under ready-all or main2main. Without a status check
+    # function, the skipped need propagates transitively and skips this job
+    # even when select-tests succeeded.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.select-tests.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
+      }}
+    uses: ./.github/workflows/_prepare_gdn_cache.yaml
+    with:
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      ref: ${{ github.event.pull_request.head.sha }}
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
+
   run-selected-tests:
     needs:
       - pre-commit
       - select-tests
       - prepare-csrc-cache
+      - prepare-gdn-cache
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all or main2main) through select-tests, without
     # running after workflow cancel.
@@ -626,6 +652,7 @@ jobs:
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
+        needs.prepare-gdn-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
