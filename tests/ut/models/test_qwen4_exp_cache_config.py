@@ -812,6 +812,34 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
 
 
+def test_layout_sizes_slots_for_pp_aggregated_state_owners() -> None:
+    groups = _groups()
+    gdn_group = groups[3]
+    groups[3] = KVCacheGroupSpec(
+        [*gdn_group.layer_names, "model.layers.2.linear_attn"],
+        gdn_group.kv_cache_spec,
+    )
+
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
+
+    assert layout is not None
+    assert layout.slot_count == 3
+    assert [owner.slot for owner in layout.owners if owner.role == GDN] == [0, 1, 2]
+
+
+def test_layout_allows_pp_stage_without_ple_owner() -> None:
+    groups = [
+        group
+        for group in _groups()
+        if not isinstance(group.kv_cache_spec, MambaSpec) or len(group.kv_cache_spec.shapes) != 1
+    ]
+
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
+
+    assert layout is not None
+    assert all(owner.role != PLE for owner in layout.owners)
+
+
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
     from vllm.v1.attention.backend import CommonAttentionMetadata

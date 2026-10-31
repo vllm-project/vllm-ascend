@@ -25,6 +25,51 @@ def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
         assert not (model_root / platform_neutral_dir).exists()
 
 
+def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
+    model = _source("vllm_ascend/models/qwen4_exp/model.py")
+    mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
+    pp_compat = _source("vllm_ascend/patch/platform/patch_qwen4_exp_pp.py")
+    model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
+    runner = _source("vllm_ascend/worker/v1/model_runner.py")
+
+    assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
+    assert "class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer)" in model
+    assert "self.mlp = AscendQwen4ExpSparseMoeBlock(" in model
+    assert "upstream_model.Qwen4ExpDecoderLayer = AscendQwen4ExpDecoderLayer" in model
+    assert "reduce_results=not self.use_sequence_parallel" in model
+    assert "already_sequence_parallel=self.use_sequence_parallel" in model
+    assert "block_input = sp_all_gather(block_input)" in model
+    assert "attn_out = sp_reduce_scatter(attn_out)" in model
+    assert "gathered_ple = sp_all_gather(" in model
+    assert "torch.cat((gated_output, conv_input), dim=-1)" in model
+    assert "gated_output.add_(conv_output)" in model
+    assert "ple_output_is_full_tokens = self.use_sequence_parallel" in model
+    assert "injection = sp_shard(injection)" in model
+    assert "local_ngram_ids = sp_shard(ngram_ids)" in model
+    assert "qwen4_exp_amd_ple_ngram_embedding_pinned(" in model
+    assert "return ple_metadata.num_prefills > 0" in model
+    assert "embeddings = sp_shard(embeddings)" in model
+    assert "forward_context.is_padding = sp_padding_mask(" in model
+    assert "hidden_states = sp_shard(hidden_states)" in model
+    assert "pp_group = get_pp_group()" in model
+    assert "if pp_group.is_first_rank:" in model
+    assert "if not pp_group.is_last_rank:" in model
+    assert "and hidden_states.shape[0] == positions.shape[-1]" in model
+    assert "hidden_states = sp_all_gather(hidden_states)" in model
+    assert "pp_intermediate_tensors_are_full_tokens = True" in model
+    assert "def _get_pp_intermediate_tensors" in runner
+    assert "MRV1 transports full PP intermediates" in runner
+    assert "pipeline_parallel_size=1" not in model
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in model
+    assert "and hidden_states.shape[0] == positions.shape[-1]" in mtp
+    assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
+    assert "text_config.ple_layer_ids = []" in pp_compat
+    assert "Qwen4ExpModelState.__init__" not in pp_compat
+    assert "class AscendQwen4ExpModelState" in model_state
+    assert "get_pp_group().is_first_rank" in model_state
+
+
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
     registry = _source("vllm_ascend/models/__init__.py")
     for architecture, wrapper in (
@@ -67,6 +112,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     )
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
+    assert qsa_sources.count("positions.clamp(0, cache.shape[0] - 1).contiguous()") >= 3
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
@@ -85,8 +131,8 @@ def test_qsa_uses_fused_sparse_backends_and_upstream_qkv_projection() -> None:
     assert "return qsa_select_paged_tokens_lightning(" in qsa
     assert "return qsa_gbsa_attention(" in qsa
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
-    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" not in qsa
-    assert "def _project_qkv_gate(" not in qsa
+    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" in qsa
+    assert "def _project_qkv_gate(" in qsa
     for fallback in (
         "qsa_select_paged_tokens_reference",
         "qsa_select_paged_tokens_triton",

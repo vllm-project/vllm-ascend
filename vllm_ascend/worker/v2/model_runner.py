@@ -21,7 +21,7 @@ import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -31,6 +31,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -101,6 +102,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_sp,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -177,6 +179,7 @@ class NPUModelRunner(GPUModelRunner):
                 "Qwen3_5ForConditionalGeneration",
             )
         )
+
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -285,6 +288,49 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+        self._install_sp_dp_token_padding()
+
+    def _install_sp_dp_token_padding(self) -> None:
+        """Keep DP metadata consistent with runner-level SP token padding.
+
+        Upstream synchronizes per-DP token counts before ``prepare_inputs``.
+        Ascend then pads a non-TP-aligned batch once at the runner boundary for
+        sequence parallelism. Without updating the synchronized counts,
+        ``DPMetadata.make`` can observe 55 scheduled rows and a 56-row batch.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            getattr(parallel_config, "data_parallel_size", 1) <= 1
+            or getattr(parallel_config, "pipeline_parallel_size", 1) <= 1
+            or not enable_sp(self.vllm_config)
+        ):
+            return
+
+        dispatch_and_sync = vllm_model_runner.dispatch_cg_and_sync_dp
+        if getattr(dispatch_and_sync, "_ascend_sp_token_padding", False):
+            return
+
+        tp_size = parallel_config.tensor_parallel_size
+
+        def dispatch_and_sync_with_sp(*args, **kwargs):
+            batch_desc, dp_sync_state = dispatch_and_sync(*args, **kwargs)
+            if dp_sync_state is not None:
+                num_tokens_across_dp = (
+                    torch.div(
+                        dp_sync_state.num_tokens_across_dp + tp_size - 1,
+                        tp_size,
+                        rounding_mode="floor",
+                    )
+                    * tp_size
+                )
+                dp_sync_state = replace(
+                    dp_sync_state,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                )
+            return batch_desc, dp_sync_state
+
+        cast(Any, dispatch_and_sync_with_sp)._ascend_sp_token_padding = True
+        vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_and_sync_with_sp
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -834,6 +880,23 @@ class NPUModelRunner(GPUModelRunner):
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
+        # Sequence-parallel collectives require an equal number of token rows
+        # on every TP rank. Pad once in the runner so every PP stage observes
+        # the same full-token layout and shares one padding/metadata contract.
+        # Without this, each stage independently pads inside the model; for a
+        # non-TP-aligned prefill the PP boundary drops that row and the next
+        # stage rebuilds it, desynchronizing hybrid/GDN state metadata.
+        if enable_sp(self.vllm_config) and self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            num_tokens_after_padding += (
+                round_up(
+                    num_tokens_after_padding,
+                    self.vllm_config.parallel_config.tensor_parallel_size,
+                )
+                - num_tokens_after_padding
+            )
+        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
+        is_padding[:num_tokens].fill_(False)
+        is_padding[num_tokens:].fill_(True)
         graph_num_reqs = batch_desc.num_reqs
         global_graph_num_reqs = (
             self.pcp_manager.get_global_graph_num_reqs(batch_desc) if self.pcp_manager is not None else None
@@ -1058,7 +1121,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
