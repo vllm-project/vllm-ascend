@@ -276,6 +276,11 @@ class TestCaMem(PytestBase):
         mock_npu_sync.assert_called_once_with(handle[0])
         mock_cuda_sync.assert_not_called()
         assert ptr not in allocator.pointer_to_data
+        assert allocator._pending_free[ptr] is data
+        assert data.cpu_backup_tensor is not None
+        allocator.python_free_complete_callback(ptr)
+        assert ptr not in allocator.pointer_to_data
+        assert ptr not in allocator._pending_free
         assert data.cpu_backup_tensor is None
 
     @patch("vllm_ascend.device_allocator.camem.unmap_and_release")
@@ -431,3 +436,47 @@ class TestCaMem(PytestBase):
             unmap.assert_not_called()
         assert not data.is_asleep
         assert data.cpu_backup_tensor is None
+
+    def test_free_sync_failure_keeps_handle_and_backup(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        backup = torch.zeros(16, dtype=torch.uint8)
+        data = AllocationData((0, 16, 1000, 42), "weights", cpu_backup_tensor=backup)
+        monkeypatch.setattr(allocator, "pointer_to_data", {1000: data})
+        monkeypatch.setattr(allocator, "_pending_free", {})
+        with (
+            patch.object(torch.npu, "synchronize", side_effect=RuntimeError("sync failed")),
+            pytest.raises(RuntimeError, match="sync failed"),
+        ):
+            allocator.python_free_callback(1000)
+        assert allocator.pointer_to_data[1000] is data
+        assert not allocator._pending_free
+        assert data.cpu_backup_tensor is backup
+
+    def test_native_free_error_rejects_sleep_and_wake_before_device_work(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "_unmap_failed", False)
+        error = MagicMock(side_effect=RuntimeError("CaMem free callback failed; restart the worker"))
+        monkeypatch.setattr(camem_module, "python_check_free_error", error)
+        with patch.object(torch.npu, "synchronize") as sync:
+            for transition in (allocator.sleep, allocator.wake_up):
+                with pytest.raises(RuntimeError, match="restart the worker"):
+                    transition()
+            sync.assert_not_called()
+
+    @patch("vllm_ascend.device_allocator.camem.init_module")
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.memory.NPUPluggableAllocator")
+    def test_free_completion_callback_is_registered(self, mock_allocator, mock_init):
+        complete = MagicMock()
+        get_pluggable_allocator(dummy_malloc, dummy_free, complete)
+        mock_init.assert_called_once_with(dummy_malloc, dummy_free, complete)
+
+    def test_graph_pool_release_cannot_hide_pending_free_records(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        data = AllocationData((0, 16, 1000, 42), camem_module.ACL_GRAPH_TAG)
+        monkeypatch.setattr(allocator, "pointer_to_data", {})
+        monkeypatch.setattr(allocator, "_pending_free", {1000: data})
+        monkeypatch.setattr(allocator, "allocator_and_pools", {})
+        monkeypatch.setattr(allocator, "_unmap_failed", False)
+        monkeypatch.setattr(camem_module, "python_check_free_error", None)
+        with pytest.raises(RuntimeError, match="still have live owners"):
+            allocator.release_aclgraph_pool()

@@ -61,7 +61,9 @@ def case(monkeypatch):
         ),
     )
     allocator = SimpleNamespace(
-        allocator_and_pools={ACL_GRAPH_TAG: (SimpleNamespace(id=(0, 7)), object())}, pointer_to_data={}
+        allocator_and_pools={ACL_GRAPH_TAG: (SimpleNamespace(id=(0, 7)), object())},
+        pointer_to_data={},
+        _check_memory_state=MagicMock(),
     )
     monkeypatch.setattr(module.CaMemAllocator, "get_instance", lambda: allocator)
     monkeypatch.setattr(
@@ -298,6 +300,50 @@ def test_model_execution_holds_sleep_transition_lock(case):
         finish.set()
         thread.join(5)
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("fail_after_execution", [False, True])
+@pytest.mark.parametrize("reuse_enabled", [False, True])
+def test_native_free_failure_closes_inference_without_replay_or_recapture(
+    case, monkeypatch, fail_after_execution, reuse_enabled
+):
+    manager = SleepWakeupManager(case.config, object(), lambda: case.runner, graph_reuse_enabled=reuse_enabled)
+    monkeypatch.setattr(module.CaMemAllocator, "instance", case.allocator)
+    calls = []
+    failure = RuntimeError("CaMem free callback failed; restart the worker")
+    case.allocator._check_memory_state.side_effect = [None, failure] if fail_after_execution else failure
+
+    class Worker:
+        sleep_wakeup_manager = manager
+
+        @serialized_model_execution
+        def execute(self):
+            calls.append("execute")
+
+    worker = Worker()
+    with pytest.raises(RuntimeError, match="restart the worker"):
+        worker.execute()
+    assert calls == (["execute"] if fail_after_execution else [])
+    if reuse_enabled:
+        assert manager.graph_reuse.state == "ERROR"
+        assert manager.graph_reuse.reuses == manager.graph_reuse.recaptures == 0
+    case.allocator._check_memory_state.side_effect = failure
+    with pytest.raises(RuntimeError, match="Inference is unavailable|restart the worker"):
+        worker.execute()
+
+
+def test_ordinary_inference_does_not_create_a_sleep_allocator(case, monkeypatch):
+    monkeypatch.setattr(module.CaMemAllocator, "instance", None)
+    create = MagicMock(side_effect=AssertionError("must not instantiate"))
+    monkeypatch.setattr(module.CaMemAllocator, "get_instance", create)
+
+    class Worker:
+        @serialized_model_execution
+        def execute(self):
+            return "ordinary"
+
+    assert Worker().execute() == "ordinary"
+    create.assert_not_called()
 
 
 @pytest.mark.parametrize("enabled,cleanup", [(False, False), (True, False), (False, True)])
