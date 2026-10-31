@@ -832,8 +832,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        # attn_state is forced to DecodeOnly during FULL graph capture, including
+        # mixed prefill-decode graphs and spec-decode verify batches, which still
+        # need the causal mask. Only genuine single-token decode may skip the mask;
+        # max_query_len is 1 for pure decode and for uniform-decode capture, but
+        # equals num_tokens for mixed-batch capture and 1 + num_spec_tokens for
+        # spec-decode capture.
+        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+        attn_mask, sparse_mode = (
+            (None, 0)
+            if is_decode and not self.sliding_window
+            else (attn_metadata.attn_mask, 4 if self.sliding_window else 3 if attn_metadata.causal else 0)
+        )
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
@@ -1333,11 +1343,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                is_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if is_decode else attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1353,7 +1366,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
+                    sparse_mode=0 if is_decode else 3,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
