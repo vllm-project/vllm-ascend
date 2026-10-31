@@ -93,6 +93,11 @@ Use a disposable checkout because the validator writes and removes
 `.content/validate`. Clear inherited `RECIPES_*` overrides when reproducing CI.
 Static validation does not establish NPU correctness or performance.
 
+The subsequent `Ascend configuration` job checks effective NPU installation and
+serving settings against the PR target branch through the local
+`validate-ascend-recipes.yml` reusable workflow. See the [checker guide](tools/README.md)
+for its rules, baseline policy, local commands and coverage limits.
+
 ## Pull request previews
 
 The existing PR labeler adds the `recipe` label to PRs changing `recipes/**`.
