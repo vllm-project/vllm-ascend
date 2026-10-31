@@ -50,6 +50,21 @@ from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
+class AscendQwen4ExpSparseMoeBlock(upstream_model.Qwen4ExpSparseMoeBlock):
+    """Describe Ascend MoE's already-reduced output to the HC decoder."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.is_sequence_parallel:
+            # AscendMoERunner always reduces the final non-SP result (either
+            # in dispatch/finalize or its runtime all-reduce op). HC must shard
+            # that complete result rather than sum it a second time.
+            self.experts.moe_config.skip_final_all_reduce = False
+
+
+upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock
+
+
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 

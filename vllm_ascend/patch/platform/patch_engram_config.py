@@ -17,9 +17,11 @@
 """Allow Engram on Ascend and host table sharing across PCP replicas."""
 
 import importlib.util
+from copy import copy
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.config.engram import EngramConfig, model_has_engram_layers
 
     def verify_model_config(self, model_config) -> None:
@@ -43,3 +45,42 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
 
     EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config
+
+    _original_resolve_engram = VllmConfig._resolve_and_verify_engram_config
+
+    def resolve_engram_config(self) -> None:
+        """Keep Qwen host offload opt-in before upstream creates defaults."""
+        model = self.model_config
+        spec = self.speculative_config
+        if spec is not None and model is spec.draft_model_config:
+            model = spec.target_model_config
+        if (
+            self.engram_config is None
+            and model is not None
+            and model.architecture in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        ):
+            self.engram_config = EngramConfig(cpu_offload=False)
+        _original_resolve_engram(self)
+
+    VllmConfig._resolve_and_verify_engram_config = resolve_engram_config
+
+    _original_verify_parallel = ModelConfig.verify_with_parallel_config
+
+    def verify_qwen_hc_parallel(self, parallel_config) -> None:
+        """Validate Ascend Qwen HC SP without impersonating a CUDA platform."""
+        if parallel_config.enable_hc_sp and self.architecture in (
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+            "Qwen4ExpMTP",
+        ):
+            if parallel_config.pipeline_parallel_size != 1:
+                raise ValueError("Ascend Qwen HC SP requires PP=1")
+            if not self.registry.is_hc_sp_supported_model(self.architectures, self):
+                raise ValueError("HC SP is not supported by this Qwen implementation")
+            checked_parallel = copy(parallel_config)
+            checked_parallel.enable_hc_sp = False
+            _original_verify_parallel(self, checked_parallel)
+            return
+        _original_verify_parallel(self, parallel_config)
+
+    ModelConfig.verify_with_parallel_config = verify_qwen_hc_parallel

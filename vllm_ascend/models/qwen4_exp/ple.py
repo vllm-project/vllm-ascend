@@ -244,6 +244,8 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
+    from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple
+    from vllm.models.qwen4_exp.amd.ops.sequence_parallel import sp_reduce_scatter, sp_shard
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
@@ -253,6 +255,14 @@ def patch_upstream_ple_short_conv() -> None:
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
+
+    from .ple_embedding import AscendPLEHostEmbedding
+
+    upstream_ple.Qwen4ExpPLEPinnedHostEmbedding = AscendPLEHostEmbedding
+    # Preserve runtime padding for token counts not divisible by TP; Dynamo
+    # must not specialize the common Python helpers on its example batch.
+    upstream_ple.sp_reduce_scatter = sp_reduce_scatter
+    upstream_ple.sp_shard = sp_shard
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

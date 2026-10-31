@@ -1,0 +1,5 @@
+pr: 20326
+entries:
+  - category: feature
+    text: Added opt-in BF16 PLE/ngram embedding host offload for Qwen3.8-Next on Ascend with Model Runner V2.
+    model: qwen3.8-next
