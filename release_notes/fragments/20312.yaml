@@ -1,0 +1,4 @@
+pr: 20312
+entries:
+  - category: performance
+    text: Improved Model Runner V2 structured-output decoding on Ascend by optimizing VectorCore grammar bitmask application scheduling.
