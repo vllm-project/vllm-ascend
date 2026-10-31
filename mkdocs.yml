@@ -183,7 +183,7 @@ extra:
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
   # Update this group when repository requirements or the verified main build image changes.
-  cann_image_tag: 9.2.0-920b-ubuntu22.04-py3.12
+  cann_image_tag: 9.2.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.2.0"
   main_pytorch_version: "2.10.0"
