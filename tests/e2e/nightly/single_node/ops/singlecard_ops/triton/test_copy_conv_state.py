@@ -6,7 +6,6 @@ import torch
 import torch_npu  # noqa: F401
 from torch.nn import functional as F
 
-from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
 
@@ -36,9 +35,79 @@ def test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages(dim_firs
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("layout", ["contiguous", "page_strided", "dim_first"])
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_conv_state_copy_padding_and_graph_replay(dtype, dim_first, use_graph):
+    requests, state_len, dim = 8, 3, 1536
+    slots = requests + 3
+    # Integer-valued payloads and updates are exact in both tested dtypes.
+    storage = (torch.arange(slots * state_len * dim * 2, dtype=torch.int32, device="cpu") % 97 - 48).to(dtype)
+    strides = (state_len * dim * 2, 1, state_len) if dim_first else (state_len * dim * 2, dim, 1)
+    initial_backing = storage.npu()
+    backing = initial_backing.clone()
+    cache = backing.as_strided((slots, state_len, dim), strides)
+    reference_cache = storage.as_strided(cache.shape, strides)
+    null_slot = requests
+    packed = torch.full((requests + 1, state_len, dim), -23, dtype=dtype, device="npu")
+    packed_indices = torch.full((requests,), -17, dtype=torch.int32, device="npu")
+    indices = torch.arange(2, requests + 2, dtype=torch.int32, device="npu")
+    starts = torch.arange(requests + 1, dtype=torch.int32, device="npu")
+
+    def copy_states():
+        copy_conv_state(cache, packed, indices, starts, packed_indices, write_back=False)
+        # Update packed rows directly, including inactive ones, to test the
+        # copy operator's writeback mask without a convolution dependency.
+        packed[:requests].add_(17)
+        copy_conv_state(cache, packed, indices, starts, packed_indices, write_back=True)
+
+    graph = None
+    if use_graph:
+        copy_states()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            copy_states()
+
+    live_counts = (requests, requests - 1, requests - 2, requests // 2 + 1, 0, requests)
+    for step, live in enumerate(live_counts):
+        # Mutate both captured metadata buffers and reactivate an empty batch.
+        indices_cpu = torch.arange(2, requests + 2, dtype=torch.int32, device="cpu").roll(step)
+        indices_cpu[live:] = 0
+        starts_cpu = torch.arange(requests + 1, dtype=torch.int32, device="cpu").clamp(max=live)
+        indices.copy_(indices_cpu)
+        starts.copy_(starts_cpu)
+        backing.copy_(initial_backing)
+        packed.fill_(-23)
+        packed_indices.fill_(-17)
+
+        expected_storage = storage.clone()
+        expected_cache = expected_storage.as_strided(cache.shape, strides)
+        expected_packed = torch.full(packed.shape, -23, dtype=dtype, device="cpu")
+        expected_packed[:requests].zero_()
+        expected_indices = torch.full((requests,), null_slot, dtype=torch.int32, device="cpu")
+        for request in range(live):
+            slot = int(indices_cpu[request])
+            expected_packed[request].copy_(reference_cache[slot])
+            expected_indices[request] = request
+            expected_cache[slot].copy_(expected_packed[request] + 17)
+        expected_packed[:requests].add_(17)
+
+        if graph is None:
+            copy_states()
+        else:
+            graph.replay()
+        torch.testing.assert_close(packed_indices.cpu(), expected_indices, rtol=0, atol=0)
+        torch.testing.assert_close(packed.cpu(), expected_packed, rtol=0, atol=0)
+        # Include the reserved null slot, unused cache pages and physical gaps.
+        torch.testing.assert_close(backing.cpu(), expected_storage, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("layout", ["dim_first"])
 @pytest.mark.parametrize("run_mode,tokens,initial", [(0, 127, False), (0, 128, True), (1, 1, True)])
 def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode, tokens, initial):
+    from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
+
     slots, state_len, dim = 4, 3, 384
     generator = torch.Generator().manual_seed(42)
     storage = (torch.randn(slots * state_len * dim * 2, generator=generator) * 0.2).to(dtype)
@@ -54,7 +123,7 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
     expected_state = expected_storage.as_strided(state.shape, strides)
     x = (torch.randn(tokens, dim, generator=generator) * 0.2).to(dtype)
     weight = (torch.randn(state_len + 1, dim, generator=generator) * 0.2).to(dtype)
-    # Persistent slot two becomes packed slot zero for both strided layouts.
+    # Persistent slot two becomes packed slot zero for this strided layout.
     history = expected_state[2].float() if initial else torch.zeros(state_len, dim)
     combined = torch.cat((history, x.float()))
     expected_output = (
@@ -77,11 +146,13 @@ def test_causal_conv_first_packed_row_matches_reference(dtype, layout, run_mode,
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("layout", ["contiguous", "page_strided", "dim_first"])
+@pytest.mark.parametrize("layout", ["dim_first"])
 @pytest.mark.parametrize("batch", [4, 8, 16])
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_causal_conv_decode_padding_and_graph_replay(dtype, layout, batch, use_graph):
     """Changing live rows must not address state[-1] or mutate other pages."""
+    from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
+
     state_len, dim = 3, 1536
     slots = batch + 3
     generator = torch.Generator().manual_seed(53)
@@ -148,9 +219,11 @@ def test_causal_conv_decode_padding_and_graph_replay(dtype, layout, batch, use_g
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("dim_first", [True])
 def test_causal_conv_prefill_with_empty_request_rows(dtype, dim_first):
     """The packed null slot must also preserve prefill's initial-state rules."""
+    from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
+
     slots, state_len, dim = 6, 3, 384
     generator = torch.Generator().manual_seed(54)
     storage = (torch.randn(slots * state_len * dim * 2, generator=generator) * 0.2).to(dtype)

@@ -346,7 +346,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # Empty query ranks also join hidden and weight collectives.
         global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
         projector = attn.dsa_attn.dsa_attn.impl
-        projector._maybe_all_gather_pcp_o_proj_weights()
+        projector._parallel_o_proj.all_gather_weights()
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
         return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
 
@@ -362,5 +362,5 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         projector = attn.dsa_attn.dsa_attn.impl
         # V4 owns the quantized O modules and their batch-scoped collective mode.
         # V4.1 already projects padded output even on empty query ranks.
-        with projector._o_proj_batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
+        with projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(attn, positions, hidden_states, output)
