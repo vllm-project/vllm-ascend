@@ -193,7 +193,9 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
     """Qwen3.5 is_hybrid must select Ascend310PMambaHybridModelState on 310P."""
     from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(is_hybrid=True))
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(is_hybrid=True),
+    )
     model = MagicMock(spec=["forward"])  # no get_model_state_cls
     encoder_cache = object()
     device = torch.device("cpu")

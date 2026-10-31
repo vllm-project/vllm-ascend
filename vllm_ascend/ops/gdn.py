@@ -854,24 +854,38 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     last_recurrent_state,
                 )
             else:
-                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                # Under the hybrid KV-cache manager the state cache is a view
+                # over padded physical pages, so ``ssm_state[indices]`` would
+                # first copy the entire cache on NPU. Gather only the selected
+                # rows there; a packed contiguous cache keeps the plain index.
+                padded_state = ssm_state.stride(0) != ssm_state[0].numel()
+                if padded_state:
+                    initial_state = gather_ssm_states(
+                        ssm_state,
+                        prefill_state_indices,
+                        prefill_has_initial_state,
+                    )
+                else:
+                    initial_state = ssm_state[prefill_state_indices]
+                    clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=initial_state,
+                    initial_state=initial_state.transpose(-1, -2).contiguous(),
                     output_final_state=True,
                     cu_seqlens=prefill_query_start_loc,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                final_state = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                if padded_state:
+                    scatter_ssm_states_(ssm_state, prefill_state_indices, final_state)
+                else:
+                    ssm_state[prefill_state_indices] = final_state
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],

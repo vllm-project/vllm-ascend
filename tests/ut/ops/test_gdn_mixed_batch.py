@@ -416,3 +416,90 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
     else:
         update_mock.assert_not_called()
     torch.testing.assert_close(output, packed[:, 2 * head_dim :].reshape(3, 1, head_dim))
+
+
+@pytest.mark.parametrize("padded_state", [True, False])
+def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> None:
+    """A page-padded state cache must not be materialized by plain indexing."""
+    head_dim = 2
+    layer = _make_layer()
+    if padded_state:
+        # Logical state rows sitting inside pages that carry padding lanes,
+        # mirroring the non-contiguous hybrid KV-cache view on MRv2.
+        backing = torch.zeros(2, 1, head_dim, 2 * head_dim)
+        ssm_state = backing[..., :head_dim]
+    else:
+        ssm_state = torch.zeros(2, 1, head_dim, head_dim)
+    layer.kv_cache = (torch.zeros(2, 1, 3 * head_dim), ssm_state)
+
+    metadata = _make_mixed_metadata()
+    metadata.num_decodes = metadata.num_decode_tokens = 0
+    metadata.num_prefill_tokens = 3
+    metadata.prefill_query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
+    conv_meta.query_start_loc = metadata.prefill_query_start_loc
+    conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
+    conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
+
+    packed = torch.arange(9 * head_dim, dtype=torch.float32).reshape(3, 3 * head_dim)
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    output = torch.empty(3, 1, head_dim)
+
+    def gather_state(state, indices, has_initial_state):
+        gathered = state.index_select(0, indices.to(torch.long))
+        zero_rows = ~has_initial_state.to(torch.bool)
+        gathered[zero_rows] = 0
+        return gathered
+
+    def scatter_state(state, indices, source):
+        state.index_copy_(0, indices.to(torch.long), source)
+
+    def conv(x, *args, **kwargs):
+        assert kwargs["head_num"] == 0
+        return x.clone()
+
+    with (
+        override_forward_context(context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv),
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
+        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch(
+            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            side_effect=lambda **kw: (
+                kw["v"].clone(),
+                torch.full_like(kw["initial_state"], 7.0),
+            ),
+        ),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(3, 1), torch.zeros(3, 1), output)
+
+    torch.testing.assert_close(output, packed[:, 2 * head_dim :].reshape(3, 1, head_dim))
+    if padded_state:
+        # Only the selected prefill row is read and written; the padding lanes
+        # and every other page stay untouched.
+        gather_mock.assert_called_once()
+        assert gather_mock.call_args.args[0] is ssm_state
+        scatter_mock.assert_called_once()
+        assert scatter_mock.call_args.args[0] is ssm_state
+        clear_mock.assert_not_called()
+        torch.testing.assert_close(backing[1, 0, :, :head_dim], torch.full((head_dim, head_dim), 7.0))
+        assert torch.count_nonzero(backing[1, 0, :, head_dim:]) == 0
+        assert torch.count_nonzero(backing[0]) == 0
+    else:
+        gather_mock.assert_not_called()
+        scatter_mock.assert_not_called()
+        clear_mock.assert_called_once()
+        torch.testing.assert_close(ssm_state[1], torch.full((1, head_dim, head_dim), 7.0))
