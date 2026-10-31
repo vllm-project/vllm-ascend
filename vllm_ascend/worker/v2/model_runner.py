@@ -808,22 +808,6 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
-        if (
-            not dummy_run
-            and batch_state is not None
-            and batch_state.has_prefill
-            and "Qwen4ExpForConditionalGeneration"
-            in (getattr(self.model_config.hf_config, "architectures", None) or ())
-        ):
-            # QSA phase routing keeps even a one-token prompt tail on FIA.
-            # Do not reuse the decode-only GBSA graph or relabel this prefill
-            # as decode in hybrid metadata preparation. Other models retain
-            # upstream's one-token-extend graph optimization.
-            batch_state = batch_state._replace(
-                decode_graph_eligible=False,
-                prefill_runs_as_decode_np=None,
-            )
-            uniform_token_count = None
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
