@@ -105,13 +105,15 @@ def test_business_shape_index_packing_reuses_output_without_running_kernel(monke
     assert args[4:11] == (2051, output.stride(0), 2048, 4, 2, output.shape[1], 4096)
 
 
-def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel(monkeypatch):
+@pytest.mark.parametrize("quantized", [False, True])
+def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel(monkeypatch, quantized):
     launch = MagicMock()
     monkeypatch.setattr(adapters, "_write_keypool_caches_kernel", launch)
     dim = 128
     tail = torch.empty(3, 80, 2 * dim)[:, :7]
-    cache = torch.empty(3, 48, 1, dim)[:, :32]
-    pooled = torch.empty(4, dim + 64)[:, :dim]
+    cache = torch.empty(3, 48, 1, dim, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)[:, :32]
+    scale_cache = torch.empty(3 * 64 + 7).as_strided((3, 32, 1, 1), (64, 1, 1, 1), 3) if quantized else None
+    pooled = torch.empty(4, dim + 64, dtype=torch.bfloat16)[:, :dim]
     writes = torch.tensor([[1, 81, 241]], dtype=torch.int64)
     state_rows = torch.empty_like(writes)
     slots = torch.tensor([0, 33, 96, -1], dtype=torch.int64)
@@ -120,11 +122,16 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
         cann_inputs=SimpleNamespace(write_indices=writes, state_indices=state_rows, page_rows=80)
     )
     state = torch.empty(5, 4, 2 * dim)
-    adapters.write_keypool_caches(tail, cache, None, None, pooled, metadata, tail_metadata, state)
+    adapters.write_keypool_caches(
+        tail, cache, None, None, pooled, metadata, tail_metadata, state, scale_cache=scale_cache
+    )
     args = launch.__getitem__.return_value.call_args.args
     assert launch.__getitem__.call_args.args == ((7,),)
     assert args[0] is tail
     assert args[1] is cache
+    assert args[2] is scale_cache
+    assert args[18] == (scale_cache.stride(0) if quantized else 0)
+    assert args[23] is quantized
     tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
     assert any(arg is slots for arg in tensors)
     assert any(arg is writes for arg in tensors)
