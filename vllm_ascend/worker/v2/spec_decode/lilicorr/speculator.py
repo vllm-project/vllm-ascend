@@ -26,6 +26,9 @@ class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
         # [requests, steps, topk] IDs rather than the flat token rows required by
         # Ascend's embedding exchange buffers. Reject special layouts before
         # profiling can produce partial-vocabulary candidates or fail a copy.
+        # TODO: Remove this guard once LiLiCorr gathers candidates across the
+        # fine-grained/PCP vocabulary shards and exchanges candidate IDs in the
+        # layout expected by Ascend embeddings, with coverage for both modes.
         unsupported_modes = (VocabParallelMode.FINE_GRAINED, VocabParallelMode.PCP_X_TP)
         for name, layer in (("target embedding", self.target_embeddings), ("candidate LM head", model.lm_head)):
             if getattr(layer, "parallel_mode", None) in unsupported_modes:
