@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -416,12 +416,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
-        self._pcp_hidden_early_supported = (
-            vllm_config.model_config.enforce_eager
-            and vllm_config.lora_config is None
-            and vllm_config.speculative_config is None
-            and not ascend_config.enable_force_eplb
-        )
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
@@ -684,30 +678,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         return topk_weights, topk_ids
 
     def start_pcp_hidden_gather(self, hidden_states: torch.Tensor):
-        # Gate only on rank-invariant configuration and global token count.
-        # The first prototype deliberately excludes decode and small batches.
+        # Work handles must be consumed in the same eager invocation. A service
+        # configured for decode graphs can still overlap its eager prefill.
         cfg = self.moe_config
         if (
-            not self._pcp_hidden_early_supported
-            or cfg.tp_size != 1
-            or cfg.dp_size != 1
-            or cfg.pcp_size != 8
-            or cfg.ep_size != 8
+            get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or (cfg.dp_size <= 1 and cfg.pcp_size <= 1)
             or cfg.is_sequence_parallel
-            or cfg.num_experts != 288
-            or cfg.experts_per_token != 8
-            or hidden_states.dtype != torch.bfloat16
-            or hidden_states.shape[-1] != 4096
-            or _EXTRA_CTX.max_tokens_across_pcp < 1024
-            or _EXTRA_CTX.in_profile_run
-            or self.dynamic_eplb
-            or self.mix_placement
-            or self.tid2eid is not None
             or getattr(self, "_ascend_moe_lora_context", None) is not None
         ):
             return None
         comm = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, cfg)
         if not isinstance(comm, AllGatherCommImpl):
+            return None
+        if not comm.prepare_finalize.is_large_payload(hidden_states.shape[-1] * hidden_states.element_size()):
             return None
         return comm, comm.prepare_finalize.start_pcp_hidden_gather(hidden_states)
 
@@ -739,14 +723,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         num_source_tokens = hidden_states.shape[0]
         if pcp_hidden_prepare is not None:
             assert pcp_hidden_prepare[0] is moe_comm_method
-        # Small batches retain the original path: the 8-rank microbenchmark
-        # found packing overhead dominates at decode sizes.
+        # Only row-independent routers may move before prepare. Use payload
+        # size rather than a model, topology or token-count allowlist. Reserve
+        # eight bytes per ID so this also covers INT64 router outputs.
         use_local_topk = (
             isinstance(moe_comm_method, AllGatherCommImpl)
-            and self.moe_config.pcp_size == 8
-            and self.moe_config.dp_size == 1
-            and get_tensor_model_parallel_world_size() == 1
-            and not self.moe_config.is_sequence_parallel
+            and (self.moe_config.pcp_size > 1 or self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel)
             and not enable_force_load_balance
             and not get_ascend_config().enable_force_eplb
             and not self.dynamic_eplb
@@ -754,22 +736,21 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             and not self.mix_placement
             and lora_context is None
             and input_ids is None
-            and router_logits.shape[1] == 288
             and self.router is not None
-            # EPLB load accounting expects the established global routing path.
-            and self.router.eplb_state is None
-            and type(self.router).__name__ == "AscendFusedTopKRouter"
-            and self.router.top_k == 8
-            and self.router.scoring_func == "sigmoid"
-            and _EXTRA_CTX.max_tokens_across_pcp >= 1024
+            and getattr(self.router, "supports_local_routing", False)
+            and moe_comm_method.prepare_finalize.is_large_payload(
+                router_logits.shape[1] * router_logits.element_size()
+                - self.router.top_k * (max(4, router_logits.element_size()) + 8)
+            )
         )
         if use_local_topk:
-            logger.info_once("PCP local complete TopK enabled for large prefill batches.")
+            logger.info_once("MoE local complete TopK enabled before AllGather.")
             prepare_output, topk_weights, topk_ids = moe_comm_method.prepare_finalize.prepare_local_topk(
                 hidden_states,
                 router_logits,
                 self._select_experts,
                 pending=pcp_hidden_prepare[1] if pcp_hidden_prepare is not None else None,
+                quant_type=self.quant_type,
             )
         elif pcp_hidden_prepare is not None:
             prepare_output = pcp_hidden_prepare[1](router_logits)
