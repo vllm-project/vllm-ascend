@@ -1484,6 +1484,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
         """A3 MLAPO via ``torch.ops._C_ascend.mla_preprocess`` (W8A8, ≤ 1024 tokens)."""
+        assert self.q_a_layernorm is not None and self.kv_a_layernorm is not None, (
+            "MLAPO requires Q and KV RMSNorm layers."
+        )
         k_nope, k_pe = kv_cache[0], kv_cache[1]
         ql_nope = torch.empty(
             (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
@@ -1531,6 +1534,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_out1=q_pe,
             kv_cache_out1=k_pe,
             inner_out=q_c,
+            q_epsilon=self.q_a_layernorm.variance_epsilon,
+            kv_epsilon=self.kv_a_layernorm.variance_epsilon,
         )
         return hidden_states, ql_nope, q_pe, q_c
 
