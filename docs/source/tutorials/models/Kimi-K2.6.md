@@ -720,9 +720,9 @@ Here is one accuracy evaluation method.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64GB × 16) |
-| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64GB × 16) |
-| MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64GB × 16) |
+| AIME2026 | - | accuracy | gen | 96.67 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
+| GPQA | - | accuracy | gen | 90.91 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
+| MMMU | - | accuracy | gen | 81.89 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
 
 ## 8 Performance Evaluation
 
