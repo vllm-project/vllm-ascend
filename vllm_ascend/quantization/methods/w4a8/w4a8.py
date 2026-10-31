@@ -511,14 +511,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
-        bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
-        scale = [w1_scale[0].to(w2_scale[0].dtype)]
+        # W4A8 only supports per-channel weights (is_per_channel_weight is
+        # always True), so the A8W4 gmm scale must always be in [E, 1, N]
+        # layout (unsqueeze -2); otherwise the kernel tiling treats the
+        # flattened per-channel scale as the quant group count and computes
+        # out-of-bounds memory addresses. The dequant offset (scale_bias)
+        # must not be passed either: unlike the fused
+        # grouped_matmul_swiglu_quant_v2 op (weight_assist_matrix), the
+        # standalone npu_grouped_matmul has no per-channel offset input.
+        scale = [item.to(w2_scale[0].dtype).unsqueeze(-2) for item in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],
             scale=scale,
-            bias=bias1,
+            bias=None,
             per_token_scale=[pertoken_scale],
             split_item=2,
             group_type=0,
