@@ -1074,7 +1074,8 @@ class NPUWorker(WorkerBase):
         # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
         # are already registered here; process-wide migration must not revisit
         # their pinned backing, which may also be shared across NUMA nodes.
-        bind_worker_cpus(self.vllm_config, self.local_rank)
+        if get_ascend_config().enable_cpu_binding:
+            bind_worker_cpus(self.vllm_config, self.local_rank)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
