@@ -1267,6 +1267,168 @@ def test_print_scheduler_summary_counts_structured_output_waiting(monkeypatch):
     assert "schedule() | scheduler req num: [0, 1, 0, 0, 1, 0]" in "\n".join(messages)
 
 
+class _CountingTokenIds(list):
+    """Token ids that record how often the block estimator walks them."""
+
+    def __init__(self, tokens: list[int]) -> None:
+        super().__init__(tokens)
+        self.len_calls = 0
+
+    def __len__(self) -> int:
+        self.len_calls += 1
+        return super().__len__()
+
+
+def _counting_diagnostic_request(request_id: str, status: RequestStatus, num_tokens: int):
+    request = _diagnostic_request(request_id, status, num_tokens)
+    request.all_token_ids = _CountingTokenIds(request.all_token_ids)
+    return request
+
+
+def _summary_counts_for_population(
+    waiting: list[Any],
+    running: list[Any],
+    lb_paused_req_ids: set[str],
+    block_size: int,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    """Reference implementation: one ``sum()`` per counter, as before this change."""
+
+    def block_num(request: Any) -> int:
+        return (len(request.all_token_ids) + block_size - 1) // block_size
+
+    def is_schedulable_waiting(request: Any) -> bool:
+        return request.status == RequestStatus.WAITING or request.request_id in lb_paused_req_ids
+
+    structured_output_waiting_status = getattr(RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None)
+    return (
+        len(running),
+        len(waiting),
+        sum(is_schedulable_waiting(request) for request in waiting),
+        sum(request.status == RequestStatus.WAITING_FOR_REMOTE_KVS for request in waiting),
+        sum(request.status == structured_output_waiting_status for request in waiting),
+        sum(
+            request.status == RequestStatus.PREEMPTED and request.request_id not in lb_paused_req_ids
+            for request in waiting
+        ),
+        sum(block_num(request) for request in running),
+        sum(block_num(request) for request in waiting),
+        sum(block_num(request) for request in waiting if is_schedulable_waiting(request)),
+    )
+
+
+def _collect_summary_line(monkeypatch, scheduler) -> str:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        dyntra_lb_scheduler_module.logger,
+        "info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+    print_scheduler_summary(scheduler, SimpleNamespace(num_scheduled_tokens={}))
+    return "\n".join(messages)
+
+
+def test_print_scheduler_summary_estimates_blocks_once_per_request(monkeypatch):
+    running = [_counting_diagnostic_request("running", RequestStatus.RUNNING, 17)]
+    waiting = [
+        _counting_diagnostic_request("waiting", RequestStatus.WAITING, 9),
+        _counting_diagnostic_request("remote", RequestStatus.WAITING_FOR_REMOTE_KVS, 5),
+        _counting_diagnostic_request("preempted", RequestStatus.PREEMPTED, 25),
+        _counting_diagnostic_request("lb-paused", RequestStatus.PREEMPTED, 17),
+    ]
+    requests = [*running, *waiting]
+    scheduler = SimpleNamespace(
+        running=running,
+        waiting=[waiting[0], waiting[2]],
+        kv_holding_waiting=[waiting[1], waiting[3]],
+        block_size=8,
+        cache_config=SimpleNamespace(block_size=8),
+        _lb_paused_req_ids={"lb-paused"},
+    )
+
+    _collect_summary_line(monkeypatch, scheduler)
+
+    # The block estimate walks the request's token ids, so the summary must not
+    # ask for it more than once per request (it used to be computed once per
+    # schedulable request plus one extra call for the whole queue).
+    assert [request.all_token_ids.len_calls for request in requests] == [1] * len(requests)
+
+
+def test_print_scheduler_summary_matches_multi_pass_reference(monkeypatch):
+    grammar_status = getattr(RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None)
+    populations: list[tuple[list[tuple[str, RequestStatus, int]], list[tuple[str, RequestStatus, int]], set[str]]] = [
+        ([], [], set()),
+        (
+            [("waiting", RequestStatus.WAITING, 9), ("remote", RequestStatus.WAITING_FOR_REMOTE_KVS, 5)],
+            [("running", RequestStatus.RUNNING, 17)],
+            set(),
+        ),
+        (
+            [
+                ("waiting", RequestStatus.WAITING, 9),
+                ("lb-paused", RequestStatus.PREEMPTED, 17),
+                ("preempted", RequestStatus.PREEMPTED, 25),
+                ("paused-remote", RequestStatus.WAITING_FOR_REMOTE_KVS, 33),
+            ],
+            [],
+            {"lb-paused", "paused-remote"},
+        ),
+        (
+            [("r1", RequestStatus.RUNNING, 1), ("r2", RequestStatus.RUNNING, 64)],
+            [
+                ("waiting", RequestStatus.WAITING, 1000),
+                ("paused-fsm", RequestStatus.PREEMPTED, 7),
+                ("lb-paused", RequestStatus.PREEMPTED, 3),
+            ],
+            {"lb-paused", "paused-fsm"},
+        ),
+    ]
+    if grammar_status is not None:
+        populations.append(
+            (
+                [
+                    ("fsm", grammar_status, 9),
+                    ("paused-fsm", grammar_status, 17),
+                    ("lb-paused", RequestStatus.PREEMPTED, 3),
+                ],
+                [],
+                {"lb-paused", "paused-fsm"},
+            )
+        )
+
+    for waiting_spec, running_spec, lb_paused_req_ids in populations:
+        waiting = [_diagnostic_request(*spec) for spec in waiting_spec]
+        running = [_diagnostic_request(*spec) for spec in running_spec]
+        scheduler = SimpleNamespace(
+            running=running,
+            waiting=waiting[: len(waiting) // 2],
+            kv_holding_waiting=waiting[len(waiting) // 2 :],
+            block_size=64,
+            cache_config=SimpleNamespace(block_size=64),
+            _lb_paused_req_ids=lb_paused_req_ids,
+        )
+
+        output = _collect_summary_line(monkeypatch, scheduler)
+
+        (
+            num_running,
+            num_waiting,
+            schedulable_waiting,
+            waiting_for_remote_kvs,
+            waiting_for_fsm,
+            preempted,
+            running_blocks,
+            waiting_queue_blocks,
+            waiting_blocks,
+        ) = _summary_counts_for_population(waiting, running, lb_paused_req_ids, block_size=64)
+        expected = (
+            f"schedule() | scheduler req num: [{num_running}, {num_waiting}, {schedulable_waiting}, "
+            f"{waiting_for_remote_kvs}, {waiting_for_fsm}, {preempted}] | "
+            f"blk num [{running_blocks}, {waiting_queue_blocks}, {waiting_blocks}] | "
+            f"block size [scheduler=64, dyntra_lb=64]"
+        )
+        assert output == expected, f"population={waiting_spec!r}, running={running_spec!r}"
+
+
 def _sync_scheduler(**config_kwargs):
     vllm_config = make_dyntra_test_config(**config_kwargs)
     vllm_config.kv_transfer_config = None
