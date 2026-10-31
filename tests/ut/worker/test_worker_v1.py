@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 from vllm.v1.kv_cache_interface import (
@@ -20,6 +21,61 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
+
+
+@pytest.mark.parametrize("sp_enabled", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 3, 4])
+def test_pp_transport_preserves_rank_local_topk_without_current_config(monkeypatch, sp_enabled, num_tokens):
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.sequence import IntermediateTensors
+
+    from vllm_ascend.worker import worker as worker_module
+
+    monkeypatch.setattr("vllm.config.vllm._current_vllm_config", None)
+    assert get_current_vllm_config_or_none() is None
+    worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            use_sequence_parallel_moe=sp_enabled,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=3,
+            distributed_executor_backend="mp",
+        ),
+    )
+    worker.log_memory_stats = lambda: None
+    worker._pp_send_work = []
+    worker.profiler = None
+    worker.use_v2_model_runner = False
+    monkeypatch.setattr(worker_module, "get_ascend_config", lambda: SimpleNamespace(msmonitor_use_daemon=False))
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    pp_group = MagicMock(is_first_rank=False, is_last_rank=False)
+    monkeypatch.setattr(worker_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(worker_module, "get_pp_group", lambda: pp_group)
+
+    # DSA-CP stores this rank's selections in the shared buffer prefix.
+    local_tokens = (num_tokens + tp_group.world_size - 1) // tp_group.world_size
+    topk = torch.full((num_tokens, 4), -1, dtype=torch.int32)
+    topk[:local_tokens] = torch.arange(local_tokens * 4).reshape(local_tokens, 4) + 100
+    key = "pp_transport_topk_indices_0"
+    pp_group.irecv_tensor_dict.return_value = ({key: topk.clone()}, [], [])
+    pp_group.isend_tensor_dict.return_value = []
+
+    def execute_model(scheduler_output, intermediate_tensors):
+        torch.testing.assert_close(intermediate_tensors[key][:local_tokens], topk[:local_tokens])
+        output = IntermediateTensors({key: intermediate_tensors[key]})
+        output.kv_connector_output = None
+        return output
+
+    worker.model_runner = SimpleNamespace(execute_model=execute_model)
+    result = worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=num_tokens))
+
+    # Only replicated tensors can use TP slice/all-gather during PP transfer.
+    expected_group = None if sp_enabled else tp_group
+    pp_group.irecv_tensor_dict.assert_called_once_with(all_gather_group=expected_group)
+    pp_group.isend_tensor_dict.assert_called_once()
+    assert pp_group.isend_tensor_dict.call_args.kwargs["all_gather_group"] is expected_group
+    torch.testing.assert_close(pp_group.isend_tensor_dict.call_args.args[0][key], topk)
+    assert result is None
 
 
 class TestNPUWorker(TestBase):
