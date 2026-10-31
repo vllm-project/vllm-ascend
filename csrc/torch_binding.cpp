@@ -54,6 +54,7 @@
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
+#include "attention/engram_hash_ids/engram_hash_ids_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
@@ -3587,6 +3588,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_lightning_indexer_manage);
+
+    ops.def(
+        "engram_hash_ids(Tensor input_ids, Tensor token_map, Tensor dead_mask, Tensor positions, "
+        "Tensor? block_table, Tensor query_start_loc, Tensor req_ids, Tensor multipliers, Tensor primes, "
+        "Tensor offsets, Tensor? cache, Tensor lookback_token_ids, Tensor lookback_dead_mask, Tensor(a!) output, "
+        "int num_tokens, int num_slots, int pad_id, int input_stride, int mask_stride, int position_stride, "
+        "int table_stride, int table_col_stride, int query_stride, int num_table_rows, int max_blocks, "
+        "int cache_block_size, int MAX_NGRAM, int num_heads, int dead_id, int lookback_depth, "
+        "int lookback_row_stride, int lookback_col_stride, int lookback_mask_row_stride, "
+        "int lookback_mask_col_stride, int num_layers) -> ()"
+    );
+    ops.impl("engram_hash_ids", torch::kPrivateUse1, &vllm_ascend::engram_hash_ids);
 
     ops.def(
         "npu_fused_scatter_copy_sparse_flash_attention("

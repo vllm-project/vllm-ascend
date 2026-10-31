@@ -36,6 +36,24 @@
 
 namespace vllm_ascend {
 namespace meta {
+void engram_hash_ids_meta(
+    const at::Tensor &input_ids, const at::Tensor &token_map, const at::Tensor &dead_mask,
+    const at::Tensor &positions, const c10::optional<at::Tensor> &block_table,
+    const at::Tensor &query_start_loc, const at::Tensor &req_ids,
+    const at::Tensor &multipliers, const at::Tensor &primes, const at::Tensor &offsets,
+    const c10::optional<at::Tensor> &cache, const at::Tensor &lookback_token_ids,
+    const at::Tensor &lookback_dead_mask, const at::Tensor &output,
+    int64_t num_tokens, int64_t num_slots, int64_t pad_id,
+    int64_t input_stride, int64_t mask_stride, int64_t position_stride,
+    int64_t table_stride, int64_t table_col_stride, int64_t query_stride,
+    int64_t num_table_rows, int64_t max_blocks, int64_t cache_block_size,
+    int64_t MAX_NGRAM, int64_t num_heads, int64_t dead_id, int64_t lookback_depth,
+    int64_t lookback_row_stride, int64_t lookback_col_stride,
+    int64_t lookback_mask_row_stride, int64_t lookback_mask_col_stride, int64_t num_layers)
+{
+    // All output storage and metadata belong to the caller; there is no allocation.
+}
+
 const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
@@ -1885,6 +1903,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
+    ops.impl("engram_hash_ids", &vllm_ascend::meta::engram_hash_ids_meta);
     // Fused lightning indexer manage
     ops.impl("npu_fused_lightning_indexer_manage",
              &vllm_ascend::meta::npu_fused_lightning_indexer_manage_meta);
