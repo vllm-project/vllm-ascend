@@ -78,6 +78,8 @@ def _filter_queue_insert_blocks(blocks: list[KVCacheBlock], where: str) -> list[
 
 
 _orig_block_pool_free_blocks = BlockPool.free_blocks
+_orig_block_pool_get_new_blocks = BlockPool.get_new_blocks
+_negative_get_new_blocks_warned = False
 
 
 def _ascend_free_blocks(
@@ -92,6 +94,27 @@ def _ascend_free_blocks(
             continue
         filtered_blocks.append(block)
     _orig_block_pool_free_blocks(self, filtered_blocks, prepend)
+
+
+def _ascend_get_new_blocks(
+    self: BlockPool,
+    num_blocks: int,
+) -> list[KVCacheBlock]:
+    # Backport vLLM PR #52707 at the allocator boundary: a negative allocation
+    # request must not inflate FreeKVCacheBlockQueue.num_free_blocks.
+    if num_blocks < 0:
+        global _negative_get_new_blocks_warned
+        if not _negative_get_new_blocks_warned:
+            _negative_get_new_blocks_warned = True
+            logger.warning(
+                "SWA_BLOCK_DIAG negative_get_new_blocks "
+                "where=BlockPool.get_new_blocks requested_num_blocks=%d "
+                "num_free_blocks=%d",
+                num_blocks,
+                self.get_num_free_blocks(),
+            )
+        return []
+    return _orig_block_pool_get_new_blocks(self, num_blocks)
 
 
 _orig_free_queue_prepend_n = FreeKVCacheBlockQueue.prepend_n
@@ -337,7 +360,9 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 BlockPool.free_blocks = _ascend_free_blocks
+BlockPool.get_new_blocks = _ascend_get_new_blocks
 vllm.v1.core.block_pool.BlockPool.free_blocks = _ascend_free_blocks
+vllm.v1.core.block_pool.BlockPool.get_new_blocks = _ascend_get_new_blocks
 FreeKVCacheBlockQueue.prepend_n = _ascend_free_queue_prepend_n
 FreeKVCacheBlockQueue.append_n = _ascend_free_queue_append_n
 vllm.v1.core.kv_cache_utils.FreeKVCacheBlockQueue.prepend_n = _ascend_free_queue_prepend_n
