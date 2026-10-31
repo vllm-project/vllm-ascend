@@ -168,7 +168,7 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
 
     pip install \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-        "triton-ascend=={{ release_triton_ascend_version }}"
+        "triton-ascend==={{ release_triton_ascend_version }}"
     ```
 
     ??? note "Can community Triton and Triton Ascend coexist?"

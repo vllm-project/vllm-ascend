@@ -14,8 +14,8 @@
 # the sync tool then mirrors swr.cn-north-12 -> quay.io.
 #
 # All dependency versions (CANN, torch-npu, triton-ascend, memcache, memfabric,
-# vLLM) are pinned in the root Dockerfiles. This workflow only selects the source
-# branch and does not accept or pass any version overrides.
+# vLLM) are pinned in requirements.txt and the root Dockerfiles. This workflow
+# only selects the source branch and does not accept or pass any version overrides.
 name: Image Build and Push
 on:
   push:

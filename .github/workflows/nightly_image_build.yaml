@@ -22,8 +22,8 @@
 # PR builds: add the 'nightly-image-build' label to a PR to run a build-only
 # verification (login/push/merge are skipped, no image is published).
 #
-# Dependency versions are pinned in the root Dockerfiles; this workflow does not
-# select versions.
+# Dependency versions are pinned in requirements.txt and the root Dockerfiles;
+# this workflow does not select versions.
 name: Nightly Image Build Schedule
 
 on:

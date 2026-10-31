@@ -192,14 +192,13 @@ jobs:
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
+          UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1
         run: |
           pip install uv
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install uc-manager
           uv pip install -r requirements-dev.txt
 
       - name: Install and run Gitleaks Secret Scan

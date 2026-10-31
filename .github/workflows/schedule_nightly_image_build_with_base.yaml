@@ -24,8 +24,8 @@
 # nightly test image (via _nightly_image_build.yaml) on top of it.
 #
 # All dependency versions (CANN, torch-npu, triton-ascend, memcache, memfabric,
-# vLLM) are pinned in the root Dockerfiles, so this workflow only selects the
-# source branch and, optionally, the chips to build.
+# vLLM) are pinned in requirements.txt and the root Dockerfiles, so this workflow
+# only selects the source branch and, optionally, the chips to build.
 name: Nightly Image Build (with base)
 
 on:

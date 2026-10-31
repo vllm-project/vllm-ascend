@@ -30,7 +30,7 @@ def _read(path: str) -> str:
 def _requirements_versions() -> dict[str, str]:
     versions = {}
     for name, version in re.findall(
-        r"^(torch|torch-npu|torchvision|torchaudio|triton-ascend)==([^\s;]+)$",
+        r"^(torch|torch-npu|torchvision|torchaudio|triton-ascend)={2,3}([^\s;]+)$",
         _read("requirements.txt"),
         flags=re.MULTILINE,
     ):
@@ -41,7 +41,7 @@ def _requirements_versions() -> dict[str, str]:
 def _pyproject_versions() -> dict[str, str]:
     versions = {}
     for name, version in re.findall(
-        r'"(torch|torch-npu|triton-ascend)==([^";]+)"',
+        r'"(torch|torch-npu|triton-ascend)={2,3}([^";]+)"',
         _read("pyproject.toml"),
     ):
         versions[name] = version
