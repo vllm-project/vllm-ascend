@@ -921,10 +921,13 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
         )
+        # GroupCoordinator retains and reaps the metadata send. As in GPUWorker,
+        # only wait for tensor sends before reusing output buffers next step.
+        self._pp_send_work = handles[1:]
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner

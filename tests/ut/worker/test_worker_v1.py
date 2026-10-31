@@ -39,6 +39,10 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
             for forward_pass in (False, True):
                 with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
                     pp_group.return_value.reset_mock()
+                    metadata_handle = MagicMock()
+                    tensor_handles = [MagicMock(), MagicMock()]
+                    send_handles = [metadata_handle, *tensor_handles]
+                    pp_group.return_value.isend_tensor_dict.return_value = send_handles
                     worker = NPUWorker.__new__(NPUWorker)
                     worker.vllm_config = SimpleNamespace(
                         parallel_config=SimpleNamespace(
@@ -66,6 +70,24 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     pp_group.return_value.isend_tensor_dict.assert_called_once_with(
                         output.tensors, all_gather_group=group
                     )
+                    self.assertEqual(worker._pp_send_work, tensor_handles)
+                    # Do not mutate the list retained by GroupCoordinator.
+                    self.assertEqual(send_handles, [metadata_handle, *tensor_handles])
+                    for handle in send_handles:
+                        handle.wait.assert_not_called()
+
+                    def next_forward(*args, metadata_handle=metadata_handle, tensor_handles=tensor_handles):
+                        metadata_handle.wait.assert_not_called()
+                        for handle in tensor_handles:
+                            handle.wait.assert_called_once_with()
+                        return None
+
+                    worker.model_runner.is_pooling_model = False
+                    worker.model_runner.execute_model.side_effect = next_forward
+                    self.assertIsNone(worker.execute_model(scheduler_output))
+                    self.assertEqual(worker._pp_send_work, [])
+                    # A step with no new sends must not re-wait old handles.
+                    self.assertIsNone(worker.execute_model(scheduler_output))
 
 
 class TestNPUWorker(TestBase):
