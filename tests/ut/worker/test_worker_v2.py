@@ -16,6 +16,61 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from tests.ut.base import TestBase
 
 
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_triton_warmup_precedes_model_runs(enforce_eager, use_v2):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    events: list[tuple[str] | tuple[str, int]] = []
+    compilation_config = SimpleNamespace(
+        compile_sizes=[2, 4],
+        cudagraph_mode=CUDAGraphMode.NONE,
+        get_compile_ranges=lambda: [],
+        compilation_time=0.0,
+    )
+    worker = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        vllm_config=SimpleNamespace(compilation_config=compilation_config),
+        model_config=SimpleNamespace(enforce_eager=enforce_eager, seed=0),
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=1),
+        model_runner=SimpleNamespace(
+            _dummy_run=lambda size: events.append(("dummy", size)),
+            capture_model=lambda: events.append(("capture",)),
+        ),
+    )
+    with (
+        patch(
+            "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
+            side_effect=lambda worker: events.append(("kernels",)),
+        ),
+        patch("vllm_ascend.worker.worker.get_current_hardware_profile") as profile,
+        patch("vllm_ascend.worker.worker.get_ascend_config", return_value=SimpleNamespace(enable_cpu_binding=False)),
+        patch("vllm_ascend.worker.worker.set_random_seed"),
+    ):
+        profile.return_value.supports.return_value = False
+        NPUWorker.compile_or_warm_up_model(worker)
+    expected = [("kernels",), ("dummy", 4), ("dummy", 2)]
+    if not enforce_eager:
+        expected.append(("capture",))
+    assert events == expected
+
+
+def test_triton_warmup_failure_prevents_model_runs():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = SimpleNamespace(model_runner=MagicMock())
+    with (
+        patch(
+            "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
+            side_effect=RuntimeError("KDA compilation failed"),
+        ),
+        pytest.raises(RuntimeError, match="KDA compilation failed"),
+    ):
+        NPUWorker.compile_or_warm_up_model(worker)
+    worker.model_runner._dummy_run.assert_not_called()
+    worker.model_runner.capture_model.assert_not_called()
+
+
 class TestNPUWorkerV2(TestBase):
     def test_worker_imports_planning_helpers_from_supported_lane(self):
         from vllm_ascend.utils import vllm_version_is

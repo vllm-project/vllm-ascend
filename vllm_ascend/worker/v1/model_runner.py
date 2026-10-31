@@ -4968,14 +4968,17 @@ class NPUModelRunner(GPUModelRunner):
                 kernel_block_sizes=kernel_block_sizes,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
-        # Cache layouts are final and bound now; prepare on disposable
-        # scratch storage before any warmup forward, graph capture or request.
+        # Register the exact bound state-copy layouts; kernel_warmup owns
+        # compilation before model dummy runs and graph capture.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
-        initialize_kda_state_copy(
-            self.compilation_config.static_forward_context,
-            self.scheduler_config.max_num_seqs,
-        )
+        registry = getattr(self, "jit_warmup_registry", None)
+        with registry.activate() if registry is not None else nullcontext():
+            initialize_kda_state_copy(
+                self.compilation_config.static_forward_context,
+                self.scheduler_config.max_num_seqs,
+            )
+
         if any(is_circular_kv_cache_spec(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups):
             # Lazy import avoids the model/cache registration cycle.
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor

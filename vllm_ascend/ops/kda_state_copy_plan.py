@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-owned prepared plans for PR17301-aligned Kimi prefill state copies.
 
-Flow: bound cache metadata -> bounded disposable warmup -> seal every plan ->
-attach to layers -> direct compiled launches. No cache payload is read or written
-by preparation, and neither tensors nor stream handles are retained by a plan.
+Flow: bound cache metadata -> register compile keys -> seal and attach plans ->
+JitWarmupRegistry compiles -> direct compiled launches. Plans retain metadata,
+not tensors or stream handles; preparation never accesses cache contents.
 """
 
 from __future__ import annotations
@@ -12,13 +12,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import copy
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.kda_state_copy_kernel import (
     DEFAULT_KDA_BLOCK_SIZE,
@@ -31,8 +34,55 @@ from vllm_ascend.utils import is_950
 if TYPE_CHECKING:
     from vllm_ascend.ops.triton.kda_state_copy_kernel import _CompiledKernel
 
-
 _FALLBACK_COPY_BLOCK_SIZE = 8192
+
+
+@dataclass(frozen=True)
+class StateCopyCompileKey:
+    device: torch.device
+    arguments: tuple[tuple[str, Any], ...]
+
+
+class StateCopyJitKernel(AscendTritonJitKernel[StateCopyCompileKey]):
+    """Worker-owned compiled launchers scheduled by JitWarmupRegistry.
+
+    Metadata-only warmup compiles without allocating or launching device data.
+    The cached executor includes its ABI constants, resolved once at compile
+    time. With JIT warmup disabled, the framework cache compiles on first use.
+    """
+
+    def __init__(self, kernel: Any, constexpr_names: tuple[str, ...]) -> None:
+        super().__init__()
+        self.kernel = kernel
+        self._constexpr_names = constexpr_names
+
+    @property
+    def supports_parallel_compile(self) -> bool:
+        # Signature inspection needs a completed CompiledKernel rather than
+        # the futures returned inside Triton's asynchronous compile pool.
+        return False
+
+    def get_warmup_keys(self, key: StateCopyCompileKey) -> list[StateCopyCompileKey]:
+        return [key]
+
+    def warmup_inputs(self, compile_key: StateCopyCompileKey) -> dict[str, Any]:
+        return dict(compile_key.arguments)
+
+    def compile(self, compile_key: StateCopyCompileKey) -> None:
+        if compile_key in self._compiled_cache:
+            return
+        inputs = self.warmup_inputs(compile_key)
+        with torch.npu.device(compile_key.device):
+            compiled = self.kernel.warmup(grid=(1,), **inputs)
+        constants = (
+            tuple(inputs[name] for name in self._constexpr_names)
+            if "constexpr" in compiled.src.signature.values()
+            else ()
+        )
+        self._compiled_cache[compile_key] = compiled, constants
+
+    def executor(self, compile_key: StateCopyCompileKey) -> tuple[_CompiledKernel, tuple[Any, ...]]:
+        return self._get_or_compile(compile_key)
 
 
 def supports_kda_state_copy(state: torch.Tensor) -> bool:
@@ -81,13 +131,14 @@ def _canonical(tensor: torch.Tensor, dtype: torch.dtype, device: torch.device, *
 
 
 class KDAStateCopyPlan:
-    """Exactly four compiled variants per bound cache layout, sealed at startup.
+    """Four compile keys per bound cache layout, registered at startup.
 
     Variants retain aligned contiguous INT32 or INT64 indices; gather uses aligned BOOL
     flags. Thus batch sizes, sliced metadata and INT32/INT64 source indices do
     not multiply the registry. Payload/cache strides stay fixed for a worker;
     selected counts from zero through scheduler.max_num_seqs are supported.
-    The plan is request-stateless and has no eviction or serving-time JIT path.
+    The plan is request-stateless and has no eviction. The registry precompiles
+    its keys before model runs; disabling JIT warmup permits lazy compilation.
     """
 
     # Preparation initializes layout/launch metadata; publication binds the name.
@@ -98,72 +149,55 @@ class KDAStateCopyPlan:
     _payload: int
     _scalars: tuple[int, int, int, int]
     _tiles: int
-    _compiled: Mapping[tuple[torch.dtype, bool], _CompiledKernel]
+    _compile_keys: Mapping[tuple[torch.dtype, bool], StateCopyCompileKey]
+    _kernel: StateCopyJitKernel
     _layer_name: str
 
     @classmethod
     def prepare(cls, state: torch.Tensor, max_selected: int) -> KDAStateCopyPlan:
-        """Compile on a single disposable row using the real cache's metadata.
-
-        Passing cache_rows/page_stride as scalars does not require allocating
-        the whole cache: the warmup index is zero, so only row zero is touched.
-        Scratch memory is O(payload), even for large or heavily gapped caches.
-        All four kernel pointers refer to scratch, never to the live cache.
-        """
+        """Bind cache metadata and register four compile keys without JIT work."""
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
-        # Reject the real cache before allocating disposable warmup buffers.
         payload, rows, page_stride = _validate_cache_layout(state)
+        if _kda_state_copy_kernel.pre_run_hooks:
+            raise RuntimeError("JIT pre-run hooks are unsupported by strict KDA")
         plan = cls()
         plan._sealed = False
         plan._signature = cache_signature(state)
         plan._max_selected = max_selected
         plan._configuration = _configuration()
-        with torch.npu.device(state.device):
-            packed = torch.empty((1, *state.shape[1:]), dtype=state.dtype, device=state.device)
-            indices = torch.zeros(1, dtype=torch.int64, device=state.device)
-            flags = torch.ones(1, dtype=torch.bool, device=state.device)
-            backing = torch.zeros(payload + 16 // state.element_size(), dtype=state.dtype, device=state.device)
-            # Preserve the cache's alignment class even with a custom allocator
-            # whose scratch backing does not itself start on a 16-byte boundary.
-            state_alignment = state.data_ptr() % 16
-            offset = ((state_alignment - backing.data_ptr() % 16) % 16) // state.element_size()
-            scratch = backing.narrow(0, offset, payload)
-            if scratch.data_ptr() % 16 != state_alignment:
-                raise RuntimeError("unsupported cache alignment during strict KDA preparation")
-            if any(t.data_ptr() % 16 for t in (packed, indices, flags)):
-                raise RuntimeError("strict KDA requires aligned allocator outputs")
-            if _kda_state_copy_kernel.pre_run_hooks:
-                raise RuntimeError("JIT pre-run hooks are unsupported by strict KDA")
-            plan._payload = payload
-            plan._scalars = (rows, page_stride, payload, 1)
-            plan._tiles = (payload + DEFAULT_KDA_BLOCK_SIZE - 1) // DEFAULT_KDA_BLOCK_SIZE
-            compiled = {}
-            for index_dtype in (torch.int32, torch.int64):
-                indices = torch.zeros(1, dtype=index_dtype, device=state.device)
-                for to_cache in (False, True):
-                    compiled[index_dtype, to_cache] = _kda_state_copy_kernel[(1, plan._tiles)](
-                        scratch,
-                        packed,
-                        indices,
-                        indices if to_cache else flags,
-                        *plan._scalars,
-                        0 if to_cache else 1,
-                        TO_CACHE=to_cache,
-                        HAS_FLAGS=not to_cache,
-                        BLOCK_SIZE=DEFAULT_KDA_BLOCK_SIZE,
-                    )
-            # Synchronize before disposable allocations leave this scope, also
-            # surfacing asynchronous compilation/launch errors during startup.
-            torch.npu.synchronize()
-        plan._compiled = MappingProxyType(compiled)
+        plan._payload = payload
+        plan._scalars = (rows, page_stride, payload, 1)
+        plan._tiles = (payload + DEFAULT_KDA_BLOCK_SIZE - 1) // DEFAULT_KDA_BLOCK_SIZE
+        plan._kernel = StateCopyJitKernel(_kda_state_copy_kernel, ("TO_CACHE", "HAS_FLAGS", "BLOCK_SIZE"))
+        compile_keys = {}
+        for index_dtype in (torch.int32, torch.int64):
+            for to_cache in (False, True):
+                inputs = dict(
+                    cache_ptr=TritonWarmupTensor(state.dtype, aligned=state.data_ptr() % 16 == 0),
+                    packed_ptr=TritonWarmupTensor(state.dtype),
+                    indices_ptr=TritonWarmupTensor(index_dtype),
+                    flags_ptr=TritonWarmupTensor(index_dtype if to_cache else torch.bool),
+                    cache_rows=rows,
+                    cache_stride_elements=page_stride,
+                    payload_elements=payload,
+                    index_stride=1,
+                    flag_stride=0 if to_cache else 1,
+                    TO_CACHE=to_cache,
+                    HAS_FLAGS=not to_cache,
+                    BLOCK_SIZE=DEFAULT_KDA_BLOCK_SIZE,
+                )
+                key = StateCopyCompileKey(state.device, tuple(inputs.items()))
+                compile_keys[index_dtype, to_cache] = key
+                plan._kernel.register_warmup(key)
+        plan._compile_keys = MappingProxyType(compile_keys)
         return plan
 
     def seal(self) -> None:
-        """Publish a ready, immutable launch table after configuration checks.
+        """Seal the immutable compile-key table after configuration checks.
 
-        No global monkey-patching is needed: serving never references the JIT
-        object. This lets independent worker lifecycles coexist in one process.
+        Serving resolves cached compiled executors through the kernel owner.
+        Independent worker lifecycles can coexist in one process.
         """
         if self._configuration != _configuration():
             raise RuntimeError("KDA compiler/runtime configuration changed during preparation")
@@ -198,10 +232,12 @@ class KDAStateCopyPlan:
         if any(t.data_ptr() % 16 for t in tensors[1:]):
             raise RuntimeError("unaligned normalized KDA buffer")
         with nullcontext() if torch.npu.current_device() == state.device.index else torch.npu.device(state.device):
-            self._compiled[indices.dtype, to_cache][(indices.numel(), self._tiles, 1)](
+            compiled, constants = self._kernel.executor(self._compile_keys[indices.dtype, to_cache])
+            compiled[(indices.numel(), self._tiles, 1)](
                 *tensors,
                 *self._scalars,
                 0 if to_cache else 1,
+                *constants,
             )
 
     def gather(self, state: torch.Tensor, indices: torch.Tensor, flags: torch.Tensor | None) -> torch.Tensor:
@@ -238,11 +274,11 @@ class KDAStateCopyPlan:
 
 
 class StridedKDAFallbackPlan:
-    """PR #17301 byte-copy fallback, compiled once on disposable startup data.
+    """PR #17301 byte-copy fallback registered with the JIT warmup framework.
 
     Used for unsupported contiguous and strided NPU caches. Keep the original
     byte-pointer arithmetic and invalid-row masking, but never enter the
-    batch_memcpy JIT in serving. Clearing uses Torch to avoid a second Triton
+    batch_memcpy JIT after registry warmup. Clearing uses Torch to avoid a second Triton
     warmup contract on unsupported devices. This is not the optimized A5 path.
     """
 
@@ -252,13 +288,13 @@ class StridedKDAFallbackPlan:
     _max_selected: int
     _state_bytes: int
     _configuration: tuple[str, str, tuple[tuple[str, str], ...]]
-    _compiled: _CompiledKernel
-    _launch_constants: tuple[int, ...]
+    _kernel: StateCopyJitKernel
+    _compile_key: StateCopyCompileKey
     _layer_name: str
 
     @classmethod
     def prepare(cls, state: torch.Tensor, max_selected: int) -> StridedKDAFallbackPlan:
-        """Validate pages and warm one byte-copy variant without live pointers."""
+        """Validate pages and register one byte-copy key without live pointers."""
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
         if state.device.type != "npu" or state.ndim != 4 or state.shape[0] <= 0:
@@ -276,20 +312,17 @@ class StridedKDAFallbackPlan:
         plan._state_bytes = payload * state.element_size()
         plan._sealed = False
         plan._configuration = _configuration()
-        with torch.npu.device(state.device):
-            source = torch.zeros(32, dtype=torch.uint8, device=state.device)
-            dest = torch.empty_like(source)
-            src = torch.tensor([source.data_ptr()], dtype=torch.int64, device=state.device)
-            dst = torch.tensor([dest.data_ptr()], dtype=torch.int64, device=state.device)
-            size = torch.tensor([32], dtype=torch.int64, device=state.device)
-            plan._compiled = batch_memcpy_kernel[(1,)](src, dst, size, BLOCK_SIZE=_FALLBACK_COPY_BLOCK_SIZE)
-            # Newer Triton launchers retain constexpr slots; older signatures
-            # contain only runtime arguments. Resolve this once during prepare
-            # so direct serving launches match the compiled kernel's ABI.
-            plan._launch_constants = (
-                (_FALLBACK_COPY_BLOCK_SIZE,) if "constexpr" in plan._compiled.src.signature.values() else ()
-            )
-            torch.npu.synchronize()
+        if batch_memcpy_kernel.pre_run_hooks:
+            raise RuntimeError("JIT pre-run hooks are unsupported by KDA fallback")
+        plan._kernel = StateCopyJitKernel(batch_memcpy_kernel, ("BLOCK_SIZE",))
+        inputs = dict(
+            src_ptrs=TritonWarmupTensor(torch.int64),
+            dst_ptrs=TritonWarmupTensor(torch.int64),
+            sizes=TritonWarmupTensor(torch.int64),
+            BLOCK_SIZE=_FALLBACK_COPY_BLOCK_SIZE,
+        )
+        plan._compile_key = StateCopyCompileKey(state.device, tuple(inputs.items()))
+        plan._kernel.register_warmup(plan._compile_key)
         return plan
 
     def seal(self):
@@ -326,10 +359,11 @@ class StridedKDAFallbackPlan:
             packed.zero_()
             src, dst = cache_ptrs, packed_ptrs
         with torch.npu.device(state.device):
-            self._compiled[(count, 1, 1)](src, dst, sizes, *self._launch_constants)
+            compiled, constants = self._kernel.executor(self._compile_key)
+            compiled[(count, 1, 1)](src, dst, sizes, *constants)
 
     def gather(self, state, indices, flags):
-        """Gather valid rows and clear false flags without any serving JIT."""
+        """Gather valid rows and clear false flags through the cached executor."""
         if torch.compiler.is_compiling():
             return torch.ops.vllm.kda_state_gather(state, indices, flags, self._layer_name)
         if flags is not None:
@@ -352,7 +386,7 @@ class StridedKDAFallbackPlan:
 
 
 def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -> None:
-    """Prepare then atomically attach plans after worker cache binding.
+    """Register metadata and atomically attach plans after worker cache binding.
 
     Kimi layers are identified by an internal class marker, not a user setting.
     Non-KDA layers and empty pipeline stages require no state-copy plans.

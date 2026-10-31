@@ -2,8 +2,8 @@
 """Production-plan copy correctness adapted from PR #17301 at 5bcbad36fdc3.
 
 Retain the original 17 parameterized cases and exact assertions. A test-local
-set of worker-owned plans is prepared on disposable scratch during setup,
-sealed, then exercised while compiler entry points are forbidden.
+set of worker-owned plans is registered and compiled through JitWarmupRegistry
+during setup, then exercised while compiler entry points are forbidden.
 """
 
 import importlib
@@ -11,18 +11,16 @@ import importlib
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops import kda_state_copy_plan as production
 
-# Triton Ascend KDA state-copy launcher arguments are incompatible.
-KDA_LAUNCHER_SKIP = pytest.mark.skip(reason="Triton Ascend KDA state-copy launcher arguments are incompatible")
 
-
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
@@ -66,9 +64,9 @@ def test_kda_state_copy_preserves_gaps_offsets_and_invalid_rows(dtype, index_dty
     torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @torch.inference_mode()
 def test_kda_state_copy_graph_replay_changed_indices_and_flags():
@@ -94,9 +92,9 @@ def test_kda_state_copy_graph_replay_changed_indices_and_flags():
     assert torch.all(backing[0::3] == -23) and torch.all(backing[2::3] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @torch.inference_mode()
 def test_kda_state_copy_address_beyond_four_gib():
@@ -123,9 +121,9 @@ def test_kda_state_copy_address_beyond_four_gib():
     assert torch.all(backing[:offset] == -23) and torch.all(backing[-32:] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @torch.inference_mode()
 def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
@@ -139,9 +137,9 @@ def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
         _copy_state(state.transpose(-1, -2), torch.empty((0, 2, 4, 3), device="npu"), indices, None, False)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
@@ -189,7 +187,10 @@ def prepared_state_copy():
                 # preparing a new plan (or entering JIT) during formal tests.
                 production._validate_cache_layout(state)
                 raise AssertionError("Unprepared production cache layout")
-            plan = production.KDAStateCopyPlan.prepare(state, 129)
+            registry = JitWarmupRegistry(None)
+            with registry.activate():
+                plan = production.KDAStateCopyPlan.prepare(state, 129)
+            registry.warmup()
             plan.seal()
             plan._layer_name = "standalone_test"
             plans[signature] = plan
@@ -226,9 +227,9 @@ def prepared_state_copy():
         torch.npu.synchronize()
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
-    get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
 )
 @pytest.mark.parametrize("selected", [1, 65, 129])
 @torch.inference_mode()
