@@ -1,0 +1,12 @@
+pr: 20085
+entries:
+  - category: performance
+    text: >-
+      Updated Model Runner V2 penalty statistics to build prompt-presence
+      bitmaps using zero-initialized byte flags and two Triton passes,
+      based on PR #15270. Output counts retain atomic accumulation.
+  - category: bugfix
+    text: >-
+      Bounded the bincount statistics grid by the device Vector-core count
+      to support large request histories, including the 64-request,
+      1M-token launch boundary.
