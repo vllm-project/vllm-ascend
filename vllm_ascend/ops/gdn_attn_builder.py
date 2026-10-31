@@ -860,7 +860,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             else:
                 self._pad_spec_decode_metadata(metadata, common_attn_metadata.num_reqs)
                 self._attach_spec_decode_metadata(metadata)
-            return metadata
+            # Re-attaching the descriptors above drops the host-only bindings
+            # (dedicated 1-D convolution indices and the shared output buffer),
+            # so the cache-hit path must finalize like the full build does.
+            return self._finalize_metadata(metadata)
         self._decode_layout_key = None
         self._decode_layout_metadata = None
         m = common_attn_metadata
@@ -1200,8 +1203,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             ):
                 setattr(template, name, getattr(attn_metadata, name).clone())
             self._decode_layout_metadata = template
-        return self._finalize_metadata(attn_metadata)
-
         return self._finalize_metadata(attn_metadata)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:

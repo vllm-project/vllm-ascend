@@ -848,6 +848,47 @@ def test_decode_layout_reuse_refreshes_offsets_lengths_and_physical_states(build
         assert plan.call_count == 3
 
 
+def test_host_layout_cache_hit_keeps_conv_buffers_bound():
+    """A cache hit must keep the host builder's convolution contract.
+
+    ``AscendGDNHostMetadataBuilder._finalize_metadata`` binds the shared output
+    buffer and rewrites the convolution indices into the dedicated contiguous
+    buffer. The cache-hit path rebuilds those descriptors, so it must finalize
+    again; otherwise GLM5Next layers read the recurrent-state view and lose the
+    shared output buffer.
+    """
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="none",
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    # Mirror the two buffers the opted-in GLM5Next layers allocate.
+    builder._spec_conv_indices = torch.empty(builder.spec_sequence_masks.numel(), dtype=torch.int32)
+    builder._non_spec_conv_indices = torch.empty_like(builder._spec_conv_indices)
+    builder._conv_output_buffer = torch.zeros((64, 12), dtype=torch.float32)
+
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    accepted = torch.ones(2, dtype=torch.int32)
+    for step in range(2):
+        common = create_common_attn_metadata(
+            BatchSpec([64 + step * 16, 96 + step * 16], [4, 4]), 16, torch.device("cpu")
+        )
+        common.is_prefilling.zero_()
+        # Same layout, different physical blocks: step 1 is a cache hit.
+        common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16).flip(0) + step * 100
+        metadata = builder.build(0, common, accepted, drafts)
+
+        assert metadata.spec_decode_metadata is not None
+        conv = metadata.spec_decode_metadata.spec_causal_conv1d
+        assert conv.output_buffer is builder._conv_output_buffer
+        assert conv.cache_indices.ndim == 1
+        assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+
+
 @pytest.mark.parametrize("use_v2", [False, True])
 def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
     builder = _make_builder(
