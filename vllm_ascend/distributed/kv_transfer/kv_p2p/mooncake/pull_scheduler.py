@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
+SENDING_THREAD_START_TIMEOUT = 10
 
 
 class MooncakeSchedulerSendingThread(threading.Thread):
@@ -108,6 +109,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             self.use_kv_pp,
         )
         self.ready_event = ready_event
+        self.startup_error: Exception | None = None
         self.stop_event = threading.Event()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
@@ -342,9 +344,12 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
                 self.ready_event.set()
                 self._run_busy_loop(sock)
-        except Exception:
-            self.ready_event.set()
+        except Exception as exc:
+            if not self.ready_event.is_set():
+                self.startup_error = exc
             logger.exception("Mooncake scheduler sending thread failed on %s", path)
+        finally:
+            self.ready_event.set()
 
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
@@ -571,8 +576,12 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             ready_event,
         )
         self._sending_thread.start()
-        if not ready_event.wait(timeout=10):
+        if not ready_event.wait(timeout=SENDING_THREAD_START_TIMEOUT):
             raise RuntimeError("Timed out starting Mooncake scheduler sending thread")
+        if self._sending_thread.startup_error is not None:
+            raise RuntimeError(
+                f"Mooncake scheduler sending thread failed to start: {self._sending_thread.startup_error}"
+            ) from self._sending_thread.startup_error
         if not self._sending_thread.is_alive():
             raise RuntimeError("Mooncake scheduler sending thread failed to start")
 

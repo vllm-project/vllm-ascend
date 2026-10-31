@@ -636,6 +636,7 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
 
     def make_fake_thread(*args, **_kwargs):
         fake = MagicMock()
+        fake.startup_error = None
         ready_event = args[-1]
         fake.start.side_effect = ready_event.set
         fake.is_alive.return_value = True
@@ -656,6 +657,84 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     thread_cls.assert_called_once()
     assert thread_cls.call_args.args[-2] is True
     created[0].start.assert_called_once_with()
+
+
+def test_set_worker_metadata_reports_real_zmq_bind_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    scheduler.side_channel_host = "127.0.0.1"
+    scheduler.tp_size = 1
+    scheduler.pp_size = 1
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+
+    context = zmq.Context()  # type: ignore[attr-defined]
+    occupied_socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+    scheduler.side_channel_port = occupied_socket.bind_to_random_port("tcp://127.0.0.1")
+    # Deterministically exercise the window in which startup has failed but
+    # Thread.is_alive() can still report true while run() is unwinding.
+    monkeypatch.setattr(MooncakeSchedulerSendingThread, "is_alive", lambda _self: True)
+
+    try:
+        with pytest.raises(RuntimeError, match="failed to start") as exc_info:
+            scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
+    finally:
+        scheduler.shutdown()
+        occupied_socket.close(linger=0)
+        context.destroy(linger=0)
+
+    assert isinstance(exc_info.value.__cause__, zmq.ZMQError)  # type: ignore[attr-defined]
+    assert "Address already in use" in str(exc_info.value)
+    assert "Address already in use" in str(exc_info.value.__cause__)
+
+
+def test_set_worker_metadata_starts_and_stops_real_sending_thread() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    scheduler.side_channel_host = "127.0.0.1"
+    scheduler.tp_size = 1
+    scheduler.pp_size = 1
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+
+    context = zmq.Context()  # type: ignore[attr-defined]
+    temporary_socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+    scheduler.side_channel_port = temporary_socket.bind_to_random_port("tcp://127.0.0.1")
+    temporary_socket.close(linger=0)
+    context.destroy(linger=0)
+
+    scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
+    assert scheduler._sending_thread is not None
+    assert scheduler._sending_thread.startup_error is None
+    assert scheduler._sending_thread.is_alive()
+
+    scheduler.shutdown()
+    assert not scheduler._sending_thread.is_alive()
+
+
+def test_set_worker_metadata_times_out_if_startup_result_is_not_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    scheduler.tp_size = 1
+    scheduler.pp_size = 1
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    fake_thread = MagicMock(startup_error=None)
+    monkeypatch.setattr(
+        pull_scheduler,
+        "MooncakeSchedulerSendingThread",
+        MagicMock(return_value=fake_thread),
+    )
+    monkeypatch.setattr(pull_scheduler, "SENDING_THREAD_START_TIMEOUT", 0.01)
+
+    with pytest.raises(RuntimeError, match="Timed out starting"):
+        scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
+
+    fake_thread.start.assert_called_once_with()
 
 
 def test_set_worker_metadata_is_ignored_on_consumer() -> None:
