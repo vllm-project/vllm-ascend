@@ -25,9 +25,9 @@ Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking st
 
 CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. CPP is recommended for PD (Prefill/Decode) disaggregation scenarios. Supported features are as follows:
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Flashcomm1 |
-| ------- | ----- | ----- | ------ | ------ | ------ |
-| **CPP** | ✅    | ✅     | ✅      | ✅       | ✅       |
+|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Flashcomm1 | SRF |
+| ------- | ----- | ----- | ------ | ------ | ------ | ------ |
+| **CPP** | ✅    | ✅     | ✅      | ✅       | ✅       | ✅  |
 
 ## How to Enable
 
@@ -37,8 +37,8 @@ In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. Bel
 
 Note:
 
-- CPP supports asynchronous scheduling (`--async-scheduling`) only with Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Enabling asynchronous scheduling together with CPP on Model Runner V1 fails startup with a configuration error. Short Request First (SRF) can be combined with CPP asynchronous scheduling; the CPP async scheduler installs the SRF waiting queue.
-- It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.
+- Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) is recommended for CPP because it supports both synchronous and asynchronous scheduling. Model Runner V1 supports CPP only with synchronous scheduling.
+- It is recommended to use `MooncakeConnectorV1` and `MooncakeConnectorV2` as `kv_connector` options, as they provide more comprehensive support for PP.
 
 === "P Node (Prefiller — with CPP)"
 
@@ -52,6 +52,7 @@ Note:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     vllm serve Qwen/Qwen3-30B-A3B \
         --host 0.0.0.0 \
@@ -138,7 +139,7 @@ Note:
         --host <PROXY_IP> \
         --port 8080 \
         --prefiller-hosts <PREFILL_MACHINE_IP> \
-        --prefiller-port 13700 \
+        --prefiller-ports 13700 \
         --decoder-hosts <DECODE_MACHINE_IP> \
         --decoder-ports 13701
     ```
@@ -146,7 +147,7 @@ Note:
     | Parameter | Meaning |
     | --- | --- |
     | --port | Port of proxy |
-    | --prefiller-port | All ports of prefill |
+    | --prefiller-ports | All ports of prefill |
     | --decoder-ports | All ports of decoder |
 
 === "Verification"
@@ -212,7 +213,8 @@ Controls trust level in dynamic prediction
 
 - `1.0`: Strictly follow model prediction
 - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead
-- `0.0`: No dynamic adjustment (degrades to fixed chunking)
+
+The value must be in the range (0, 1]. To disable CPP and return to normal fixed chunking, set `profiling_chunk_config.enabled` to `false`.
 
 Enabling `need_timing` for correct online calibration can typically yield more accurate chunk-latency fitting results. Therefore, you are advised not to adjust `smooth_factor` when `need_timing` is enabled. If `need_timing` is disabled, you can adjust `smooth_factor` to a value ranging from 0.5 to 0.8 to achieve the effect of enabling `need_timing`.
 
@@ -276,13 +278,13 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length 128k    | TTFT: 22.5s | TTFT: 27.0s |
+    | Input length 128k    | TTFT: 24.04s | TTFT: 28.33s |
 
 - Qwen3-235B:
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length 256k    | TTFT: 53.5s | TTFT: 61.4s |
+    | Input length 256k    | TTFT: 51.41s | TTFT: 55.61s |
 
 **Variable-length requests, concurrency=4**:
 
