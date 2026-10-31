@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 
+import torch
 from vllm.triton_utils import tl, triton
 
 
@@ -94,11 +95,13 @@ def _pack_indices_kernel(
     indices,
     positions,
     cumulative,
+    selection_index,
     output,
     INPUT_STRIDE: tl.constexpr,
     OUTPUT_STRIDE: tl.constexpr,
     TOPK: tl.constexpr,
     POOL_SIZE: tl.constexpr,
+    HAS_QUERY_PLAN: tl.constexpr,
     num_reqs,
     OUTPUT_COLS: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -109,7 +112,16 @@ def _pack_indices_kernel(
     position = tl.load(positions + row, valid_row, other=0).to(tl.int64)
     tail_start = (position + 1) // POOL_SIZE * POOL_SIZE
     history = tl.minimum(tail_start, TOPK).to(tl.int32)
-    value = tl.load(indices + row * INPUT_STRIDE + cols, valid_row & (cols < history), other=-1)
+    input_row = row
+    if HAS_QUERY_PLAN:
+        input_row = tl.load(selection_index + row)
+    value = tl.load(
+        indices + tl.maximum(input_row, 0) * INPUT_STRIDE + cols,
+        valid_row & (input_row >= 0) & (cols < history),
+        other=-1,
+    )
+    if HAS_QUERY_PLAN:
+        value = tl.where(valid_row & (input_row < 0) & (cols < history), cols, value)
     tail_columns = cols - history
     tail_count = (position + 1 - tail_start).to(tl.int32)
     # Keep wide index vectors in int32: Ascend scalarizes int64 vector
@@ -123,18 +135,23 @@ def _pack_indices_kernel(
     tl.store(output + row * OUTPUT_STRIDE + cols, value, cols < OUTPUT_COLS)
 
 
-def pack_keypool_indices(indices, metadata, topk, pool_size, output_buffer=None):
+def pack_keypool_indices(indices, metadata, topk, pool_size, output_buffer=None, *, query_plan=None):
     positions, cumulative = metadata.positions, metadata.cum_query_lens
-    output = indices if output_buffer is None else output_buffer[: indices.shape[0]]
-    _pack_indices_kernel[(indices.shape[0],)](
+    num_tokens = indices.shape[0] if query_plan is None else query_plan.num_tokens
+    if query_plan is not None and output_buffer is None:
+        output_buffer = torch.empty((num_tokens, topk + pool_size - 1), dtype=torch.int32, device=positions.device)
+    output = indices if output_buffer is None else output_buffer[:num_tokens]
+    _pack_indices_kernel[(num_tokens,)](
         indices,
         positions,
         cumulative,
+        None if query_plan is None else query_plan.selection_index,
         output,
         indices.stride(0),
         output.stride(0),
         topk,
         pool_size,
+        query_plan is not None,
         cumulative.numel(),
         output.shape[1],
         triton.next_power_of_2(output.shape[1]),

@@ -662,6 +662,29 @@ def _common():
     )
 
 
+@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay"])
+def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels, mode):
+    config, common = _config(), _common()
+    config.model_config.hf_text_config = SimpleNamespace(index_topk=16)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens_cpu = common.seq_lens.clone()
+    common.graph_pad_size = 10 if mode == "replay" else -1
+    builder = _builder(config)
+    if mode == "capture":
+        metadata = builder.build_for_graph_capture(common)
+    elif mode == "draft":
+        metadata = builder.build_for_drafting(common, 1)
+    else:
+        metadata = builder.build(0, common)
+    if mode == "normal":
+        assert metadata.query_plan is not None
+        assert metadata.query_plan.full_visible_ranges == ((0, 6), (6, 8))
+        assert metadata.query_plan.selective_rows.tolist() == []
+        assert metadata.query_plan.cum_query_lens.tolist() == [0, 0]
+    else:
+        assert metadata.query_plan is None
+
+
 @pytest.mark.parametrize("input_tokens", [9, 10])
 @pytest.mark.parametrize("unpadded", [None, "positions", "slot_mapping"])
 def test_metadata_delegates_to_kernel_and_keeps_capture_storage(input_tokens, unpadded, keypool_kernels, monkeypatch):

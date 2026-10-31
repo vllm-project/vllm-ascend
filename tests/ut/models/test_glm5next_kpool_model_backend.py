@@ -19,6 +19,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
 )
+from vllm_ascend.attention.kpool_query_plan import build_kpool_query_plan
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -405,6 +406,106 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     torch.testing.assert_close(recorder.args[2], expected_weights)
     assert recorder.args[-1] is tail_metadata
     assert recorder.kwargs["compute_topk"] is True
+
+
+@pytest.mark.parametrize("all_visible", [False, True])
+@pytest.mark.parametrize("compute_topk", [False, True])
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
+    monkeypatch, all_visible, compute_topk, runtime_mode
+):
+    op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(op)
+    op.topk_tokens, op.head_dim, op.n_head, op.index_kpool = 8, 2, 2, 4
+    op.softmax_scale = 0.5
+    op._key_weight = torch.ones(2, 3)
+    op._gate_weight = torch.ones(2, 3)
+    op._head_weight_f32 = torch.arange(6, dtype=torch.float32).view(2, 3)
+    op._norm_weight_f32 = op._norm_bias_f32 = None
+    op.k_norm = SimpleNamespace(eps=1e-6)
+    op.index_kpool_compress_ape = torch.zeros(4, 2)
+    op.topk_indices_buffer = torch.full((16, 16), -17, dtype=torch.int32)
+    cache = torch.zeros(6, 2, 1, 2, dtype=torch.bfloat16)
+    tail = torch.zeros(6, 4, 4)
+    op.k_cache = SimpleNamespace(prefix="cache", kv_cache=cache)
+    op.tail_cache = SimpleNamespace(prefix="tail", kv_cache=tail)
+    projection_inputs = []
+
+    class Projection(nn.Module):
+        def forward(self, values):
+            projection_inputs.append(values.clone())
+            return values.repeat(1, 2), None
+
+    op.wq_b = Projection()
+    lengths = [6, 3, 2] if all_visible else [10, 3, 14]
+    common = SimpleNamespace(
+        num_reqs=3,
+        num_actual_tokens=11,
+        query_start_loc_cpu=torch.tensor([0, 6, 9, 11]),
+        seq_lens_cpu=torch.tensor(lengths),
+    )
+    plan = build_kpool_query_plan(common, 8, torch.device("cpu"), min_partial_rows=0)
+    assert plan is not None
+    positions = torch.cat([torch.arange(length - query, length) for length, query in zip(lengths, [6, 3, 2])])
+    metadata = replace(
+        _indexer_metadata(),
+        num_actual_tokens=11,
+        positions=positions,
+        cum_query_lens=torch.tensor([6, 9, 11]),
+        raw_seq_lens=torch.tensor(lengths),
+        seq_lens=torch.tensor(lengths) // 4,
+        pool_tail=torch.tensor(lengths) % 4,
+        query_start_loc=torch.tensor([0, 6, 9, 11]),
+        start_pos=torch.tensor(lengths) - torch.tensor([6, 3, 2]),
+        pooled_slot_mapping=torch.tensor([0, 1, 2]),
+        query_plan=plan,
+        keypool_state_table=torch.zeros(3, 3, dtype=torch.int32),
+        keypool_start_offsets=torch.zeros(3),
+    )
+    tail_metadata = replace(_tail_metadata(), cann_inputs=SimpleNamespace(retained_indices=None))
+    context = SimpleNamespace(attn_metadata={"tail": tail_metadata}, cudagraph_runtime_mode=runtime_mode)
+    monkeypatch.setattr(backend_module, "get_forward_context", lambda: context)
+    op._prepare_keypool_state = MagicMock(return_value=torch.empty(7, 4, 4))
+    op._key_pool = MagicMock(return_value=torch.ones(3, 2, dtype=torch.bfloat16))
+
+    def write_caches(*args):
+        cache.fill_(3)
+        tail.fill_(5)
+
+    op._write_keypool_caches = MagicMock(side_effect=write_caches)
+    op._pool_key_indexer = MagicMock(return_value=(torch.empty(11, 11, dtype=torch.int32), None))
+    op._pack_keypool_indices = MagicMock(return_value=op.topk_indices_buffer[:11, :11].unsqueeze(1))
+    hidden = torch.arange(33, dtype=torch.float32).view(11, 3)
+    query = torch.arange(22, dtype=torch.float32).view(11, 2)
+    with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected D2H")):
+        result = op.forward(hidden, query, hidden + 1, metadata, compute_topk=compute_topk)
+    torch.testing.assert_close(op._key_pool.call_args.args[0], hidden + 1)
+    assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
+    assert torch.all(cache == 3) and torch.all(tail == 5)
+    op._write_keypool_caches.assert_called_once()
+    bypass = runtime_mode == CUDAGraphMode.NONE
+    if not compute_topk or (all_visible and bypass):
+        assert projection_inputs == []
+        op._pool_key_indexer.assert_not_called()
+    else:
+        rows = plan.selective_rows if bypass else torch.arange(11)
+        torch.testing.assert_close(projection_inputs[0], query[rows])
+        call = op._pool_key_indexer.call_args
+        torch.testing.assert_close(call.args[0], query[rows].repeat(1, 2).view(-1, 2, 2).bfloat16())
+        expected_weights = torch.nn.functional.linear(hidden[rows], op._head_weight_f32) * (0.5 * 2**-0.5)
+        torch.testing.assert_close(call.args[2], expected_weights.bfloat16())
+        assert call.kwargs["actual_seq_k"] is metadata.seq_lens
+        assert call.args[3] is metadata.pool_tail
+        assert call.kwargs["block_table"] is metadata.block_table
+        expected_ends = plan.cum_query_lens if bypass else metadata.cum_query_lens
+        torch.testing.assert_close(call.kwargs["actual_seq_q"], expected_ends)
+    if compute_topk:
+        assert result is not None
+        assert result.data_ptr() == op.topk_indices_buffer.data_ptr()
+        assert op._pack_keypool_indices.call_args.kwargs["query_plan"] is (plan if bypass else None)
+    else:
+        assert result is None
+        op._pack_keypool_indices.assert_not_called()
 
 
 @pytest.mark.parametrize("missing", ["cann_ops_transformer", "vllm_ascend.ops.triton.glm5_next_cann_keypool"])
