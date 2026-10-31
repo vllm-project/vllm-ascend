@@ -28,7 +28,7 @@ conflict early and reports it with the information needed to recover from it.
 import socket
 from typing import Any
 
-from vllm_ascend.logger import logger
+from vllm.logger import logger
 
 __all__ = ["check_dp_rpc_port_available", "find_tcp_listener"]
 
@@ -71,9 +71,13 @@ def find_tcp_listener(host: str, port: int) -> tuple[int, str] | None:
         if conn.status != psutil.CONN_LISTEN or conn.pid is None:
             continue
         laddr = conn.laddr
-        if laddr is None or laddr.port != port:
+        # psutil types the local address as a union of the address
+        # namedtuple and an empty tuple for unix sockets.
+        listen_port = getattr(laddr, "port", None)
+        listen_ip = getattr(laddr, "ip", None)
+        if listen_port != port or listen_ip is None:
             continue
-        if not _address_matches(str(laddr.ip), host):
+        if not _address_matches(str(listen_ip), host):
             continue
         try:
             name = psutil.Process(conn.pid).name()
