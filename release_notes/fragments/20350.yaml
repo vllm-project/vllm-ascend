@@ -1,0 +1,4 @@
+pr: 20350
+entries:
+  - category: bugfix
+    text: Fixed low DFlash/DSpark speculative acceptance when the RoPE backend returns new tensors instead of modifying context keys in place.
