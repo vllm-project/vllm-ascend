@@ -18,7 +18,9 @@ from vllm.model_executor.layers.activation import SituAndMul
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
+from vllm_ascend.ops.fused_moe import eplb as eplb_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
@@ -951,9 +953,11 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("v2_eplb", [False, True])
+@pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
+def test_routed_experts_forward_impl_runs_current_flow(
+    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
+):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -982,18 +986,15 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     object.__setattr__(routed_experts, "quant_method", quant_method)
     topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+    state = AscendEplbLayerState() if v2_eplb else None
+    if state is not None:
+        state.expert_load_view = expert_load
+        state.should_record_tensor = torch.tensor(False)
+        state.local_expert_count = 2
+        state.local_expert_start = 2
     routed_experts.router = SimpleNamespace(
         _select_experts=MagicMock(return_value=(topk_weights, topk_ids)),
-        eplb_state=(
-            SimpleNamespace(
-                expert_load_view=expert_load,
-                should_record_tensor=torch.tensor(False),
-                local_expert_count=2,
-                local_expert_start=2,
-            )
-            if v2_eplb
-            else None
-        ),
+        eplb_state=state,
     )
     routed_experts.top_k = 2
     routed_experts.renormalize = True
@@ -1016,7 +1017,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     routed_experts.log2phy = None
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts._use_v2_model_runner = v2_eplb
+    routed_experts._use_v2_model_runner = use_v2
     routed_experts.dynamic_eplb = False
     routed_experts.return_with_event = return_with_event
     moe_comm_method = MagicMock()
@@ -1044,6 +1045,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     record_expert_tokens = MagicMock()
+    monkeypatch.setattr(eplb_ops, "use_allgather_eplb", lambda enabled: False)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
     result = routed_experts.forward_impl(

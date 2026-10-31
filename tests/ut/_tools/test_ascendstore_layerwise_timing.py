@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only regressions for observational timing, cleanup, and the separate diagnostic pass."""
+"""CPU-only regressions for observational timing, comparison phases, and cleanup."""
 
 import ast
 import json
 import os
 import shlex
 import sys
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -221,75 +220,6 @@ def test_stop_restores_hooks_even_if_out_of_timing_store_drain_fails(monkeypatch
     assert not hasattr(extension, "_layerwise_load_timing")
 
 
-@pytest.mark.parametrize("failure", [None, "benchmark", "sources", "stop", "benchmark-and-stop", "coverage"])
-def test_diagnostic_is_separate_and_always_stops_without_masking_request_errors(failure):
-    source = Path(__file__).resolve().parents[3] / "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py"
-    entry = next(
-        node
-        for node in ast.parse(source.read_text()).body
-        if isinstance(node, ast.FunctionDef) and node.name == "_diagnose_external_load"
-    )
-    timing, _, _, lookup, runner, _ = _make_timing()
-    timing.install()
-    try:
-        lookup._lookup(None)
-        runner.execute_model(_schedule("request-0"))
-        runner.sample_tokens(None)
-    finally:
-        timing.restore()
-    report = timing.report()
-    if failure == "coverage":
-        report["stages"].pop("range_copy")
-    calls = []
-
-    def rpc(server, method):
-        calls.append(method)
-        if method == "stop_ascendstore_layerwise_load_timing":
-            if failure in ("stop", "benchmark-and-stop"):
-                raise RuntimeError("stop failed")
-            return {"workers": [report]}
-        return {}
-
-    def benchmark(*args):
-        calls.append("benchmark")
-        if failure in ("benchmark", "benchmark-and-stop"):
-            raise ValueError("request failed")
-        return {"mean_ttft_ms": 1000}
-
-    def assert_sources(measurement, *, external):
-        assert external
-        calls.append("assert_sources")
-        if failure == "sources":
-            raise AssertionError("wrong prompt sources")
-
-    namespace: dict[str, Any] = {
-        "Any": Any,
-        "call_worker_rpc": rpc,
-        "reset_local_prefix_cache": lambda _: calls.append("reset"),
-        "run_benchmark": benchmark,
-        "assert_prompt_sources": assert_sources,
-    }
-    exec(compile(ast.Module(body=[entry], type_ignores=[]), str(source), "exec"), namespace)
-    measurements = [{"external_load": {"mean_ttft_ms": 900}}]
-    run: dict[str, Any] = {"measurements": measurements, "external_load_diagnostic": {}}
-    if failure is None:
-        namespace[entry.name]("server", tokenizer=None, inputs=[None], run=run)
-        assert run["external_load_diagnostic"]["reference_mean_ttft_ms"] == 900
-    else:
-        messages = {
-            "benchmark": "request failed",
-            "benchmark-and-stop": "request failed",
-            "sources": "wrong prompt sources",
-            "stop": "stop failed",
-            "coverage": "Missing Load timing",
-        }
-        with pytest.raises((ValueError, RuntimeError, AssertionError), match=messages[failure]):
-            namespace[entry.name]("server", tokenizer=None, inputs=[None], run=run)
-    assert calls[:3] == ["drain_ascendstore_benchmark_stores", "reset", "start_ascendstore_layerwise_load_timing"]
-    assert calls[-1] == "stop_ascendstore_layerwise_load_timing"
-    assert run["measurements"] == [{"external_load": {"mean_ttft_ms": 900}}]
-
-
 @pytest.mark.parametrize("implementation", ["production", "v1"])
 def test_start_rpc_only_installs_on_v1_and_double_start_does_not_replace_hooks(monkeypatch, implementation):
     extension = AscendStoreLayerwiseWorkerExtension()
@@ -318,35 +248,58 @@ def test_start_rpc_only_installs_on_v1_and_double_start_does_not_replace_hooks(m
             installed.restore()
 
 
-@pytest.mark.parametrize("with_diagnostic", [False, True])
-def test_shared_serving_helper_runs_callback_after_all_rounds_before_server_exit(tmp_path, with_diagnostic):
+@pytest.mark.parametrize("mode", ["accuracy", "performance", "request_failure"])
+def test_shared_serving_helper_separates_accuracy_and_performance_and_cleans_up(tmp_path, mode):
     source = Path(__file__).resolve().parents[3] / "tests/e2e/pull_request/one_card/test_ascendstore_v1.py"
     entry = next(
         node
         for node in ast.parse(source.read_text()).body
         if isinstance(node, ast.FunctionDef) and node.name == "_exercise_connector"
     )
-    events = []
+    events, sources = [], []
     server = object()
 
     @contextmanager
     def server_context(*args, **kwargs):
         events.append("server_enter")
-        yield server
-        events.append("server_exit")
+        try:
+            yield server
+        finally:
+            events.append("server_exit")
 
     @contextmanager
     def pool_context(*args, **kwargs):
-        yield SimpleNamespace(server_envs={}, master_address="127.0.0.1:1234")
+        try:
+            yield SimpleNamespace(server_envs={}, master_address="127.0.0.1:1234")
+        finally:
+            events.append("pool_exit")
 
-    def benchmark(server, tokenizer, inputs):
+    def benchmark(received, tokenizer, inputs):
+        assert received is server
         events.append("warmup" if inputs == ["warmup"] else "benchmark")
+        if mode == "request_failure" and inputs == ["inputs"]:
+            raise ValueError("request failed")
         return {}
+
+    def rpc(received, method, **kwargs):
+        assert received is server
+        events.append("pool_reset" if method == "reset_ascendstore_benchmark_pool" else "store_drain")
+        return {"workers": [{"removed_objects": 1}]}
+
+    def reset(received):
+        assert received is server
+        events.append("local_reset")
+        return {}
+
+    def accuracy(producer, consumer, tokenizer, directory, observations):
+        assert producer is consumer is server
+        assert directory == tmp_path / "saved-kv"
+        events.append("accuracy")
+        observations.append({"checked": True})
 
     namespace: dict[str, Any] = {
         "Any": Any,
         "Path": Path,
-        "Callable": Callable,
         "TokenizerLike": Any,
         "SampleRequest": Any,
         "WORKER_EXTENSION": "extension",
@@ -365,29 +318,37 @@ def test_shared_serving_helper_runs_callback_after_all_rounds_before_server_exit
         "__file__": str(source),
         "import_module": lambda _: SimpleNamespace(SingleNodeMooncakeManager=pool_context),
         "run_benchmark": benchmark,
-        "call_worker_rpc": lambda *args, **kwargs: {"workers": [{"removed_objects": 1}]},
-        "reset_local_prefix_cache": lambda _: {},
-        "assert_prompt_sources": lambda *args, **kwargs: None,
+        "call_worker_rpc": rpc,
+        "run_byte_accuracy": accuracy,
+        "reset_local_prefix_cache": reset,
+        "assert_prompt_sources": lambda measurement, *, external: sources.append(external),
     }
-    # The real server class also appears in an annotation; postpone annotation evaluation for this boundary double.
-    entry.returns = None
-    entry.args.kwonlyargs[-1].annotation = None
     exec(compile(ast.Module(body=[entry], type_ignores=[]), str(source), "exec"), namespace)
     observations: list[dict[str, Any]] = []
-    callback = lambda received: events.append("diagnostic") if received is server else pytest.fail()
-    namespace[entry.name](
-        tmp_path,
-        "model",
-        None,
-        ["inputs"],
-        ["warmup"],
-        ("v1", "v1", "module"),
-        observations,
-        after_measurements=callback if with_diagnostic else None,
-    )
-    expected = ["server_enter", "warmup", "benchmark", "benchmark", "benchmark", "benchmark"]
-    assert events == expected + (["diagnostic"] if with_diagnostic else []) + ["server_exit"]
-    assert len(observations) == 2
+    arguments = (tmp_path, "model", None, ["inputs"], ["warmup"], ("v1", "AscendStoreV1Connector"), observations)
+    if mode == "request_failure":
+        with pytest.raises(ValueError, match="request failed"):
+            namespace[entry.name](*arguments)
+        assert events == [
+            "server_enter",
+            "warmup",
+            "pool_reset",
+            "local_reset",
+            "benchmark",
+            "server_exit",
+            "pool_exit",
+        ]
+        assert len(observations) == 1 and not sources
+    elif mode == "accuracy":
+        namespace[entry.name](*arguments, accuracy_directory=tmp_path / "saved-kv")
+        assert events == ["server_enter", "accuracy", "server_exit", "pool_exit"]
+        assert observations == [{"checked": True}] and not sources
+    else:
+        namespace[entry.name](*arguments)
+        phase = ["pool_reset", "local_reset", "benchmark", "store_drain", "local_reset", "benchmark"]
+        assert events == ["server_enter", "warmup", *phase, *phase, "server_exit", "pool_exit"]
+        assert sources == [False, True, False, True]
+        assert len(observations) == 2
 
 
 def test_timing_code_never_touches_device_data_or_synchronization():

@@ -212,10 +212,16 @@ jobs:
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
 
+      # Stage manifests where both the job container and runner can read them.
+      - name: Check layout and stage actions
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: bash .github/workflows/scripts/stage_ci_actions.sh
+
       - name: Restore incremental cache
         id: fallback-l1
         if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
           architecture: ${{ steps.get_arch.outputs.arch }}

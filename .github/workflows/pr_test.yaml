@@ -236,6 +236,7 @@ jobs:
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
+        timeout-minutes: 10
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
@@ -557,12 +558,20 @@ jobs:
 
           # Keep the public selector's image/cache/device configuration; run only this validation slice.
           routes = (
-              ("tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py", "linux-aarch64-a2b3-1"),
+              ("bulk", "tests/e2e/pull_request/one_card/test_ascendstore_v1.py", "linux-aarch64-a2b3-1"),
+              (
+                  "layerwise", "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py",
+                  "linux-aarch64-a2b3-1",
+              ),
+              (
+                  "tp-mismatch", "tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py",
+                  "linux-aarch64-a2b3-4",
+              ),
           )
           selection_env = dict(os.environ)
           selection_env.pop("GITHUB_OUTPUT", None)
           groups = []
-          for test_path, runner in routes:
+          for scenario, test_path, runner in routes:
               assert Path(test_path).is_file(), test_path
               output = subprocess.check_output(
                   [sys.executable, ".github/workflows/scripts/select_tests.py",
@@ -572,7 +581,10 @@ jobs:
               selected = json.loads(next(line.split("=", 1)[1] for line in output.splitlines()
                                          if line.startswith("test_groups=")))
               assert len(selected) == 1 and selected[0]["runner"] == runner, selected
-              groups.extend(selected)
+              group = selected[0]
+              # Single-card scenarios must not share job or artifact names.
+              group["partition"] = scenario + "-" + group["partition"]
+              groups.append(group)
           cache_targets = sorted({group["csrc_cache_target"] for group in groups if group.get("csrc_cache_target")})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print("has_tests=true", file=output)

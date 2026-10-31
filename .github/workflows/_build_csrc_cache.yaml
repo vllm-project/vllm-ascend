@@ -178,9 +178,14 @@ jobs:
           yum install -y python3-pip net-tools numactl patch clang
           pip install uv
 
+      # Stage manifests where both the job container and runner can read them.
+      - name: Check layout and stage actions
+        shell: bash
+        run: bash .github/workflows/scripts/stage_ci_actions.sh
+
       - name: Restore incremental build cache
         id: incremental-cache-restore
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ env.VLLM_ASCEND_BUILD_CACHE_DIR }}
           architecture: ${{ fromJSON(inputs.target).cache_arch }}
@@ -218,7 +223,7 @@ jobs:
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
-        uses: $/.github/actions/csrc-l1-save
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-save
         with:
           cache-dir: ${{ steps.incremental-cache-restore.outputs.cache-dir }}
           primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from statistics import median
@@ -23,34 +24,47 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LAYERWISE_TEST = "tests/e2e/pull_request/one_card/test_ascendstore_v1_layerwise.py"
 
 
-@pytest.mark.parametrize("failure", [None, "production", "v1"])
-def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(tmp_path, failure):
-    source = ast.parse((REPO_ROOT / LAYERWISE_TEST).read_text())
-    entry = next(node for node in source.body if isinstance(node, ast.FunctionDef))
-    # Execute the actual orchestration with boundary doubles; do not import pytest's NPU E2E conftest.
-    module = ast.Module(body=[entry], type_ignores=[])
+@pytest.mark.parametrize("failure", [None, "production", "v1", "byte-comparison"])
+def test_layerwise_checks_accuracy_before_balanced_performance_and_keeps_failure_reports(tmp_path, failure):
+    entry_source = ast.parse((REPO_ROOT / LAYERWISE_TEST).read_text())
+    entry = next(node for node in entry_source.body if isinstance(node, ast.FunctionDef))
+    shared_source = ast.parse((REPO_ROOT / "tests/e2e/pull_request/ascendstore_v1_benchmark.py").read_text())
+    comparison = next(
+        node for node in shared_source.body if isinstance(node, ast.FunctionDef) and node.name == "run_comparison"
+    )
+    # Execute real orchestration with server and byte-comparison boundaries replaced.
+    module = ast.Module(body=[comparison, entry], type_ignores=[])
     launches, reports = [], []
     connectors = (("production", "production"), ("v1", "v1"))
-
-    def exercise(path, model, tokenizer, inputs, warmup, connector, observations, **kwargs):
-        diagnostic = kwargs.pop("after_measurements")
-        assert kwargs == {"use_layerwise": True, "worker_extension": "layerwise-extension"}
-        assert path.is_dir()
-        launches.append(connector[0])
-        observations.append({"cold_store": {}, "external_load": {}})
-        if connector[0] == failure:
-            raise AssertionError("Injected serving failure")
-        if connector[0] == "v1":
-            assert diagnostic is not None
-            diagnostic("server")
-        else:
-            assert diagnostic is None
-
+    compare_bytes = Mock(
+        side_effect=AssertionError("Injected serving failure") if failure == "byte-comparison" else None
+    )
     compare = Mock(return_value={"output_and_performance_comparison": True})
+
+    def exercise(path, connector, observations, accuracy_directory=None, **kwargs):
+        assert kwargs == {
+            "model_path": "model",
+            "tokenizer": None,
+            "inputs": [],
+            "warmup": [],
+            "use_layerwise": True,
+            "worker_extension": "layerwise-extension",
+        }
+        assert path.is_dir()
+        phase = "accuracy" if accuracy_directory is not None else "performance"
+        launches.append((phase, connector[0]))
+        if phase == "accuracy":
+            observations.append({"stored_objects": {"key": "saved-bytes"}})
+            if connector[0] == failure:
+                raise AssertionError("Injected serving failure")
+        else:
+            assert compare_bytes.called, "Performance started before the production/v1 byte comparison"
+            observations.append({"cold_store": {}, "external_load": {}})
 
     namespace: dict[str, Any] = {
         "Path": Path,
-        "Any": object,
+        "Any": Any,
+        "Callable": Callable,
         "partial": partial,
         "shutil": SimpleNamespace(which=lambda _: "master"),
         "MODEL": "model",
@@ -58,11 +72,12 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
         "get_tokenizer": lambda _: None,
         "make_requests": lambda *args, **kwargs: [],
         "CONCURRENCY": 8,
-        "make_report": lambda *args: {"runs": []},
+        "make_report": lambda *args: {"runs": [], "accuracy": []},
+        "CONNECTORS": connectors,
         "CROSSOVER_RUNS": connectors + connectors[::-1],
         "LAYERWISE_WORKER_EXTENSION": "layerwise-extension",
         "_exercise_connector": exercise,
-        "_diagnose_external_load": lambda server, **kwargs: kwargs["run"]["external_load_diagnostic"].update(done=True),
+        "compare_saved_bytes": compare_bytes,
         "compare_runs": compare,
         "time": SimpleNamespace(monotonic=lambda: 1),
         "write_report": lambda *args: reports.append(args[-1]),
@@ -71,25 +86,35 @@ def test_direct_layerwise_serving_reports_outputs_and_performance_without_probe(
     test = namespace[entry.name]
     if failure is None:
         test(tmp_path)
-        assert launches == ["production", "v1", "v1", "production"]
+        assert launches == [
+            ("accuracy", "production"),
+            ("accuracy", "v1"),
+            ("performance", "production"),
+            ("performance", "v1"),
+            ("performance", "v1"),
+            ("performance", "production"),
+        ]
+        assert reports[0]["accuracy_status"] == "passed"
         assert reports[0]["status"] == "measured"
         assert reports[0]["comparisons"] == compare.return_value
-        assert [run.get("external_load_diagnostic") for run in reports[0]["runs"]] == [
-            None,
-            {"done": True},
-            {"done": True},
-            None,
-        ]
         compare.assert_called_once_with(reports[0]["runs"])
+        compare_bytes.assert_called_once()
+        assert all(run["measurements"] and "duration_seconds" in run for run in reports[0]["runs"])
     else:
         with pytest.raises(AssertionError, match="Injected serving failure"):
             test(tmp_path)
-        assert launches == (["production"] if failure == "production" else ["production", "v1"])
+        expected = [("accuracy", "production")]
+        if failure in ("v1", "byte-comparison"):
+            expected.append(("accuracy", "v1"))
+        assert launches == expected
         assert reports[0]["status"] == "incomplete"
+        assert not reports[0]["runs"]
+        if failure == "byte-comparison":
+            compare_bytes.assert_called_once()
+        else:
+            compare_bytes.assert_not_called()
         compare.assert_not_called()
     assert reports[0]["scenario"] == "layerwise"
-    assert "validation" not in reports[0]
-    assert all(run["measurements"] and "duration_seconds" in run for run in reports[0]["runs"])
 
 
 @pytest.mark.parametrize("implementation", ["production", "v1"])
@@ -144,20 +169,7 @@ def test_output_differences_are_reported_alongside_performance_results():
         assert comparison["output_throughput"]["v1_over_production"] == 2.0
 
 
-def test_layerwise_byte_probe_and_instrumentation_entry_points_are_removed():
-    assert not (REPO_ROOT / "tests/e2e/common/kv_pool/ascendstore_layerwise_probe.py").exists()
-    worker = (REPO_ROOT / "tests/e2e/pull_request/one_card/ascendstore_v1_layerwise.py").read_text()
-    assert "LayerwiseRangeProbe" not in worker
-    assert "validation" not in worker
-    assert "kv_caches" not in worker
-    shared = ast.parse((REPO_ROOT / "tests/e2e/pull_request/one_card/test_ascendstore_v1.py").read_text())
-    exercise = next(
-        node for node in shared.body if isinstance(node, ast.FunctionDef) and node.name == "_exercise_connector"
-    )
-    assert "validate" not in [argument.arg for argument in exercise.args.kwonlyargs]
-
-
-def test_demo_ci_selects_only_one_tp1_layerwise_e2e_and_has_real_timeouts(tmp_path):
+def test_demo_ci_selects_all_comparisons_with_distinct_artifacts_and_real_timeouts(tmp_path):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr_test.yaml").read_text())
     step = next(step for step in workflow["jobs"]["select-tests"]["steps"] if step.get("id") == "scope-v1")
     script = step["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
@@ -169,10 +181,27 @@ def test_demo_ci_selects_only_one_tp1_layerwise_e2e_and_has_real_timeouts(tmp_pa
     assert result.returncode == 0, result.stdout + result.stderr
     outputs = dict(line.split("=", 1) for line in output_path.read_text().splitlines())
     groups = json.loads(outputs["test_groups"])
-    assert len(groups) == 1
-    assert groups[0]["runner"] == "linux-aarch64-a2b3-1"
-    assert groups[0]["num_npus"] == 1
-    assert groups[0]["tests"].split() == [LAYERWISE_TEST]
+    expected = {
+        "tests/e2e/pull_request/one_card/test_ascendstore_v1.py": ("bulk", "linux-aarch64-a2b3-1", 1),
+        LAYERWISE_TEST: ("layerwise", "linux-aarch64-a2b3-1", 1),
+        "tests/e2e/pull_request/four_card/test_ascendstore_v1_tp_mismatch.py": (
+            "tp-mismatch",
+            "linux-aarch64-a2b3-4",
+            4,
+        ),
+    }
+    assert len(groups) == len(expected)
+    assert {group["tests"] for group in groups} == set(expected)
+    artifact_ids = set()
+    for group in groups:
+        scenario, runner, cards = expected[group["tests"]]
+        assert group["runner"] == runner and group["num_npus"] == cards
+        assert group["npu_type"] == "a2"
+        assert group["partition"].startswith(scenario + "-")
+        assert group["image_tag"] and group["csrc_cache_target"] == "a2-arm64-ubuntu"
+        artifact_ids.add((group["npu_type"], group["num_npus"], group["partition"]))
+    assert len(artifact_ids) == len(groups)
+    assert json.loads(outputs["csrc_cache_target_ids"]) == ["a2-arm64-ubuntu"]
     assert outputs["has_tests"] == "true"
     assert workflow["jobs"]["run-selected-tests"]["with"]["timeout-minutes"] == 120
     selected = yaml.safe_load((REPO_ROOT / ".github/workflows/_selected_tests.yaml").read_text())
@@ -197,7 +226,7 @@ def test_ci_installs_new_layerwise_sdk_and_runs_npu_tests_without_cpu_preflight(
         "'mooncake-transfer-engine-npu==0.3.13.post1' || 'mooncake-transfer-engine-npu==0.3.11.post1' }}"
     )
     assert '"$MOONCAKE_WHEEL"' in install["run"]
-    assert steps.index(install) + 1 == steps.index(build) < steps.index(run)
+    assert steps.index(install) < steps.index(build) < steps.index(run)
     assert "MC_FORCE_TCP" not in source
     assert "check_mooncake_layerwise" not in source
     assert not (REPO_ROOT / ".github/workflows/scripts/check_mooncake_layerwise.py").exists()

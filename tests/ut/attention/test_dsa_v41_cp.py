@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -30,7 +31,7 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
-from vllm_ascend.weight_switch import WeightSwitchConfig
+from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
@@ -113,18 +114,29 @@ def _projector(
     projector.head_dim = width
     projector.support_fp8_attention = False
     projector.enable_pcp_o_proj_weight_sharding = sharding
-    projector._pcp_decode_sharded = decode_sharded
-    projector._pcp_o_proj_weight_switches = None
     projector.wo_a_pcp_weight_method = projector.wo_a.quant_method
     projector.wo_b_pcp_weight_method = projector.wo_b.quant_method
     group = SimpleNamespace(world_size=world, rank_in_group=rank, device_group=object())
-    projector.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(group)
     projector.vllm_config = SimpleNamespace(
         num_speculative_tokens=speculative_tokens,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=compilation_config,
         model_config=SimpleNamespace(dtype=torch.float32),
     )
+    projector._parallel_o_proj = ParallelOProjection(
+        world * width,
+        projector.wo_b,
+        config=WeightSwitchConfig.from_group(group),
+        tp_group=SimpleNamespace(world_size=1, rank_in_group=0),
+        pool={},
+        pool_key="dsa_pcp_o_proj",
+        project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(projector),
+        decode_sharded=decode_sharded,
+        input_layer=projector.wo_a,
+        input_projection=projector._wo_a_bmm,
+        num_input_groups=world,
+    )
+    projector._parallel_o_proj.enabled = sharding
     monkeypatch.setattr(dsa_cp.AscendDSAPCPImpl, "o_proj_full_pools", {})
 
     def matmul(value, weight, **kwargs):
@@ -149,18 +161,18 @@ def _projector(
 
     def exchange(destination, source, *, group):
         events.append("exchange")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_ag_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_ag_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.all_gather_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.all_gather_output.data_ptr()
         peers = projector.peer_inputs
         torch.testing.assert_close(source, peers[rank])
         destination.copy_(torch.cat(peers))
 
     def scatter(destination, source, *, group):
         events.append("scatter")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_rs_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_rs_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.reduce_scatter_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.reduce_scatter_output.data_ptr()
         destination.copy_(reduce(source).chunk(world)[rank])
 
     group.all_reduce = reduce
@@ -170,12 +182,12 @@ def _projector(
     monkeypatch.setattr(importlib.import_module("vllm_ascend.distributed.utils"), "all_gather_async", gather_weight)
     monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
     monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0))
-    monkeypatch.setattr(dsa_cp.dist, "all_gather_into_tensor", exchange)
-    monkeypatch.setattr(dsa_cp.dist, "reduce_scatter_tensor", scatter)
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", exchange)
+    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", scatter)
     monkeypatch.setattr(dsa_cp.dsa_v1, "oproj_tp_enable", lambda: False)
     monkeypatch.setattr(torch.ops.vllm, "unquantized_gemm", torch.nn.functional.linear, raising=False)
     if sharding and decode_sharded:
-        projector._initialize_pcp_o_proj_exchange_buffers()
+        projector._parallel_o_proj._prepare_exchange_buffers(projector.vllm_config)
     return projector
 
 
@@ -737,7 +749,7 @@ class TestPCPBatchLifecycle:
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
         assert state.events == (["project", "reduce"] if sharding else [])
-        switches = state.projector._pcp_o_proj_weight_switches or ()
+        switches = state.projector._parallel_o_proj._weight_switch_states or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())
             for layer, _, weight in switches
@@ -771,8 +783,9 @@ class TestPCPBatchLifecycle:
     def test_failed_prefill_drains_both_weight_gathers_and_restores_decode(self, runtime, monkeypatch, stage):
         state = runtime()
         projector = state.projector
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states
+        assert switches is not None and len(switches) == 2
         addresses = [layer.weight.data_ptr() for layer, _, _ in switches]
 
         def fail(*args, **kwargs):
@@ -911,6 +924,8 @@ class TestPCPProjectionPartition:
         tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank)
         monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: tp_group)
+        monkeypatch.setattr(vllm_distributed, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(vllm_distributed, "get_tp_group", lambda: tp_group)
         impl = dsa_cp.AscendDSAPCPImpl.__new__(dsa_cp.AscendDSAPCPImpl)
         impl.n_local_groups = pcp_size
         impl.wo_a, impl.wo_b = torch.nn.Module(), torch.nn.Module()
@@ -945,7 +960,20 @@ class TestPCPProjectionPartition:
                     parameter.weight_loader = lambda parameter, value: parameter.data.copy_(value)
                     layer.register_parameter(attr, parameter)
                     checkpoints.append((layer, parameter, full, 0))
-        impl._prepare_pcp_o_proj_weight_shards()
+        impl._parallel_o_proj = ParallelOProjection(
+            pcp_size * 4,
+            impl.wo_b,
+            config=WeightSwitchConfig.from_group(group),
+            tp_group=tp_group,
+            pool={},
+            pool_key="dsa_pcp_o_proj",
+            project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(impl),
+            decode_sharded=False,
+            input_layer=impl.wo_a,
+            input_projection=impl._wo_a_bmm,
+            num_input_groups=pcp_size,
+        )
+        impl._parallel_o_proj.prepare_weight_load(SimpleNamespace())
         composed_rank = tp_rank * pcp_size + pcp_rank
         for layer, parameter, full, axis in checkpoints:
             parameter.weight_loader(parameter, full)
@@ -955,10 +983,10 @@ class TestPCPProjectionPartition:
             assert layer.tp_group is tp_group
         assert impl.n_local_groups == pcp_size
         assert impl.wo_a.n_local_groups == 1
-        assert impl.pcp_o_proj_weight_switch_config.group is group
+        assert impl._parallel_o_proj.config.group is group
         impl.wo_a.quant_method.supports_weight_switch = False
         with pytest.raises(RuntimeError, match="weight-switch capable"):
-            impl._get_pcp_weight_switch_method(impl.wo_a)
+            impl._parallel_o_proj._resolve_o_proj_weight_switch_method(impl.wo_a)
 
     @pytest.mark.parametrize("world,rank", [(2, 0), (2, 1), (4, 3)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
@@ -1017,7 +1045,7 @@ class TestPCPProjectionPartition:
             projector.reference_input = peers[rank]
             expected = torch.nn.functional.linear(peers[rank], dense_weight)
             output = torch.full_like(expected, -777)
-            with projector._o_proj_batch(needs_global_metadata=decode_sharded, has_prefill=False):
+            with projector._parallel_o_proj.batch(needs_global_metadata=decode_sharded, has_prefill=False):
                 assert projector._forward_o_proj(peers[rank].view(rows, world, width), output) is output
             torch.testing.assert_close(output, expected)
             assert events.count("exchange") == events.count("scatter") == int(decode_sharded)
@@ -1045,8 +1073,9 @@ class TestPCPProjectionPartition:
             hidden = torch.tensor([values])
             output = torch.empty_like(hidden)
             impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
-            with projector._o_proj_batch(needs_global_metadata=True, has_prefill=True):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+            with projector._parallel_o_proj.batch(needs_global_metadata=True, has_prefill=True):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
                 impl._project_output(attn, hidden.view(1, 2, 2), hidden, None, projected=output)
             outputs.append(output[0, 0].item())
         assert outputs == [3.0, 30.0]
@@ -1062,8 +1091,8 @@ class TestPCPProjectionPartition:
         full_weight = torch.eye(2).repeat(2, 1, 1)
         full_scale = torch.cat((projector.wo_a.weight_scale, projector.wo_a.weight_scale + 1))
         expected_parts = {}
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states or ()
             for layer, _, weight in switches:
                 for name, part in weight.gather_parts.items():
                     full = (
@@ -1094,8 +1123,9 @@ class TestPCPProjectionPartition:
         )
         addresses = [getattr(layer, name).data_ptr() for layer, _, weight in switches for name in weight.gather_parts]
         for has_prefill in (True, False, True):
-            with projector._o_proj_batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+            with projector._parallel_o_proj.batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
                 output = torch.empty_like(projector.reference_input)
                 projector._forward_o_proj(projector.reference_input.view(2, 2, 2), output)
                 torch.testing.assert_close(output, projector.reference_input)
