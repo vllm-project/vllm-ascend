@@ -1,7 +1,0 @@
-enhancements:
-  - title: "Qwen PLE CPU tables shared across local DP replicas"
-    description: >
-      Add opt-in BF16 PLE shared host tables for node-local DP replicas with
-      ETP=TP and PCP=DCP=1. Reuse CANN-registered shared memory, load through
-      one writer, synchronize loading failures, and retain owners through
-      graph teardown. Preserve explicitly disabled Qwen table sharing.
