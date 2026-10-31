@@ -216,6 +216,13 @@ class WeightLayoutPolicy(Enum):
     FORCE_NZ = auto()
 
 
+class MiniMaxM3SparseAttentionBackend(Enum):
+    """MiniMax-M3 sparse attention implementation selected by each profile."""
+
+    SAS = auto()
+    CANN_GBSA = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class HardwareProfile:
     """Immutable semantic contracts registered for one SoC family.
@@ -241,6 +248,7 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    minimax_m3_sparse_attention_backend: MiniMaxM3SparseAttentionBackend = MiniMaxM3SparseAttentionBackend.SAS
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -298,6 +306,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            minimax_m3_sparse_attention_backend=MiniMaxM3SparseAttentionBackend.CANN_GBSA,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
