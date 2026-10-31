@@ -762,6 +762,8 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     assert torch.count_nonzero(actual[valid_query_tokens:]) == 0
     atol, rtol = (BF16_ATOL, BF16_RTOL) if dtype == torch.bfloat16 else (FP16_ATOL, FP16_RTOL)
     torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
+
+
 def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
     """TND NoPE (rope_dim=0) inputs: `capacity` query rows, only `actual` valid."""
     generator = torch.Generator().manual_seed(seed)
@@ -771,11 +773,11 @@ def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
     q[actual:] = 0
     q = q.npu()
     vals = torch.randint(-5, 10, (block_num, block_size, 1, dim), generator=generator, dtype=torch.int8)
-    scales = torch.rand((block_num, block_size, 1, dim // tile), generator=generator,
-                        dtype=torch.float32).uniform_(0.1, 1.0)
+    scales = torch.rand((block_num, block_size, 1, dim // tile), generator=generator, dtype=torch.float32).uniform_(
+        0.1, 1.0
+    )
     kv = torch.cat((vals, scales.contiguous().view(torch.int8)), dim=-1).contiguous().npu()
-    idx = torch.randint(0, block_num * block_size, (capacity, 1, topk), generator=generator,
-                        dtype=torch.int32)
+    idx = torch.randint(0, block_num * block_size, (capacity, 1, topk), generator=generator, dtype=torch.int32)
     idx[actual:] = 0
     idx = idx.npu()
     bt = torch.arange(block_num, dtype=torch.int32).reshape(1, block_num).expand(nseq, -1).contiguous().npu()
@@ -794,17 +796,29 @@ def test_tnd_output_tail_zeroed():
     if get_ascend_device_type() == AscendDeviceType.A5:
         bootstrap_custom_op_env()
         import_module("vllm_ascend.vllm_ascend_C")
-    heads, dim, actual = 64, 512, 36
+    dim, actual = 512, 36
 
     def call(capacity):
         q, kv, idx, bt, aq, akv = _make_tnd_tail_inputs(capacity)
         out = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-            query=q, key=kv, value=kv, sparse_indices=idx,
-            scale_value=dim ** -0.5, sparse_block_size=1, block_table=bt,
-            actual_seq_lengths_query=aq, actual_seq_lengths_kv=akv,
-            layout_query="TND", layout_kv="PA_BSND", sparse_mode=3,
-            attention_mode=2, quant_scale_repo_mode=1, tile_size=128,
-            key_quant_mode=2, value_quant_mode=2, rope_head_dim=0,
+            query=q,
+            key=kv,
+            value=kv,
+            sparse_indices=idx,
+            scale_value=dim**-0.5,
+            sparse_block_size=1,
+            block_table=bt,
+            actual_seq_lengths_query=aq,
+            actual_seq_lengths_kv=akv,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=0,
             return_softmax_lse=False,
         )
         return out[0] if isinstance(out, tuple) else out
