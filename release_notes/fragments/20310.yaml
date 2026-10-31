@@ -1,0 +1,4 @@
+pr: 20310
+entries:
+  - category: feature
+    text: Added Ascend inference support for Qwen4Exp PLE n-gram tables quantized to symmetric INT8 with FP32 group scales.
