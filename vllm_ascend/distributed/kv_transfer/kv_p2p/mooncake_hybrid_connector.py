@@ -2086,6 +2086,17 @@ class MooncakeConnectorWorker:
         return sum(self._get_remote_ranks_for_req(req_id), [])
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
+        if self.kv_role == "kv_producer":
+            # Cross-prefill loads receive P-shaped KV, not D-shaped KV. The
+            # decode grouping can merge several P shards (or select replicas),
+            # so indexing it with a P rank can fail or silently load wrong heads.
+            remote_tp_size = self._prefill_tp_size if prefill_tp_size is None else prefill_tp_size
+            if remote_tp_size != self.tp_size:
+                raise ValueError(
+                    "Cross-prefill KV loads require matching source and destination "
+                    f"TP sizes, got source TP={remote_tp_size} and destination TP={self.tp_size}."
+                )
+            return [self.tp_rank + pp_rank * remote_tp_size for pp_rank in range(self._prefill_pp_size)]
         return self._get_remote_ranks_for_req(req_id, prefill_tp_size)[self.tp_rank]
 
     def _get_remote_tp_ranks(
