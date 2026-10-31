@@ -69,7 +69,19 @@ def prepare_attention_update(
     relative when previous_anchor is supplied; the remaining LSEs are
     absolute. Every real query has a finite current-chunk prefix LSE.
     """
+    # The kernel indexes every LSE with ``lses[0].numel()`` rows and assumes
+    # all inputs share one dtype/device, so mismatched inputs would either
+    # crash or silently compute on the wrong elements. Reject them explicitly
+    # to surface misuse rather than a wrong result.
+    assert len(lses) > 0, "lses must be non-empty."
+    assert len(lses) <= 16, f"at most 16 LSE inputs supported, got {len(lses)}."
     rows = lses[0].numel()
+    first_dtype = lses[0].dtype
+    first_device = lses[0].device
+    for i, lse in enumerate(lses):
+        assert lse.numel() == rows, f"lses[{i}] has {lse.numel()} elements, expected {rows} (same as lses[0])."
+        assert lse.dtype == first_dtype, f"lses[{i}] dtype {lse.dtype} != lses[0] dtype {first_dtype}."
+        assert lse.device == first_device, f"lses[{i}] device {lse.device} != lses[0] device {first_device}."
     relative = torch.empty((len(lses), rows), dtype=torch.float32, device=lses[0].device)
     anchor = lses[0].new_empty(rows)
     if rows:

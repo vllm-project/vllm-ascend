@@ -1,0 +1,7 @@
+pr: 20054
+entries:
+  - category: bugfix
+    text: >-
+      Reject mismatched LSE inputs (different numel/dtype/device, an empty list,
+      or more than 16 LSEs) in prepare_attention_update with a clear error
+      instead of a Triton kernel crash or a silently wrong result.
