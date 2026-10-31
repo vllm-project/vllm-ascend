@@ -435,6 +435,7 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
     # so the weight must remain ND.
     self.wo_a.skip_weight_nz_conversion = True
+    self.wo_a.dsa_o_lora_rank = config.o_lora_rank
     self.wo_b = RowParallelLinear(
         self.n_groups * config.o_lora_rank,
         self.dim,

@@ -211,16 +211,26 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         else:
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
+        target_weight = padded_weight.transpose(0, 1)
+        o_rank = getattr(layer, "dsa_o_lora_rank", None)
+        if o_rank is not None:
+            if o_rank <= 0 or n_dim % o_rank or prefix_padding or suffix_padding:
+                raise ValueError("Grouped DSA output projection requires complete output groups and aligned input")
+            groups = n_dim // o_rank
+            target_weight = padded_weight.reshape(groups, o_rank, -1).transpose(1, 2)
+            target_scale = reshaped_scale.reshape(groups, o_rank, -1, 2).transpose(1, 2)
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            layer._mxfp8_weight_buf = target_weight.contiguous()
+            if not (
+                getattr(layer, "_fused_preprocess_managed", False) or getattr(layer, "skip_weight_nz_conversion", False)
+            ):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
+            layer._mxfp8_weight_buf.copy_(target_weight.contiguous())
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf
@@ -259,6 +269,14 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
+
+        if getattr(layer, "dsa_o_lora_rank", None) is not None:
+            # Retain the grouped graph buffers; load checkpoint data into separate
+            # original-layout tensors and refresh the persistent buffers afterward.
+            layer.weight.data = layer.weight.data.transpose(1, 2).reshape(orig_shapes["weight"]).contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
+            layer._mxfp8_transformed = False
+            return
 
         # Restore weight: (input_size, output_size) -> (output_size, input_size)
         target_weight = layer.weight.data.transpose(0, 1).contiguous()
