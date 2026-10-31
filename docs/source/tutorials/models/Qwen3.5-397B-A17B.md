@@ -18,6 +18,13 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
 :::
 
+Text-only checkpoints that use `Qwen3_5ForCausalLM` or
+`Qwen3_5MoeForCausalLM` are also supported. Unlike the multimodal
+`Qwen3_5ForConditionalGeneration` variants, these checkpoints do not need a
+`vision_config` or multimodal RoPE sections. W8A8 and MTP use the same command
+line options shown below when their corresponding checkpoint tensors are
+present.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
