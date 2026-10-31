@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, mock_open, patch
 
 import vllm_ascend.cpu_binding as cpu_binding_module
-from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
+from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, bind_worker_cpus, is_arm_cpu
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import AscendDeviceType
@@ -1343,6 +1343,67 @@ class TestBindNpuIdResolution(unittest.TestCase):
             self.assertEqual(NPUPlatform.device_id_to_physical_device_id(0), 0)
             # ... while the CANN runtime resolves the host physical ID.
             self.assertEqual(NPUPlatform.visible_device_id_to_physical_device_id(0), 5)
+
+
+class TestBindWorkerCpus(unittest.TestCase):
+    """The worker binding path must be driven by the runtime-bound device."""
+
+    def _run_bind(self, local_rank, current_device, platform_ns, engram=None, enabled=True):
+        vllm_config = SimpleNamespace(engram_config=engram)
+        with (
+            patch(
+                "vllm_ascend.ascend_config.get_ascend_config",
+                return_value=SimpleNamespace(enable_cpu_binding=enabled),
+            ),
+            patch("vllm_ascend.cpu_binding.current_platform", platform_ns),
+            patch("vllm_ascend.cpu_binding.torch") as mock_torch,
+            patch("vllm_ascend.cpu_binding.bind_cpus") as mock_bind,
+        ):
+            mock_torch.npu.current_device.return_value = current_device
+            bind_worker_cpus(vllm_config, local_rank)
+        return mock_bind
+
+    def test_runtime_device_drives_npu_id(self):
+        resolver = MagicMock(return_value=7)
+        ordinal = MagicMock(return_value=123)
+        platform_ns = SimpleNamespace(
+            visible_device_id_to_physical_device_id=resolver,
+            device_id_to_physical_device_id=ordinal,
+        )
+        # local_rank and the runtime device differ on purpose: the resolver
+        # must receive the runtime device and its result must reach bind_cpus.
+        mock_bind = self._run_bind(local_rank=3, current_device=0, platform_ns=platform_ns)
+
+        resolver.assert_called_once_with(0)
+        mock_bind.assert_called_once_with(3, npu_id=7, migrate_memory=True)
+        ordinal.assert_not_called()
+
+    def test_ordinal_fallback_without_runtime_resolution(self):
+        ordinal = MagicMock(return_value=123)
+        platform_ns = SimpleNamespace(device_id_to_physical_device_id=ordinal)
+        mock_bind = self._run_bind(local_rank=3, current_device=0, platform_ns=platform_ns)
+
+        ordinal.assert_called_once_with(3)
+        mock_bind.assert_called_once_with(3, npu_id=123, migrate_memory=True)
+
+    def test_cpu_offload_disables_memory_migration(self):
+        resolver = MagicMock(return_value=7)
+        platform_ns = SimpleNamespace(
+            visible_device_id_to_physical_device_id=resolver,
+            device_id_to_physical_device_id=MagicMock(),
+        )
+        mock_bind = self._run_bind(
+            local_rank=0,
+            current_device=0,
+            platform_ns=platform_ns,
+            engram=SimpleNamespace(cpu_offload=True),
+        )
+        self.assertFalse(mock_bind.call_args.kwargs["migrate_memory"])
+
+    def test_disabled_binding_is_skipped(self):
+        platform_ns = SimpleNamespace(device_id_to_physical_device_id=MagicMock())
+        mock_bind = self._run_bind(local_rank=0, current_device=0, platform_ns=platform_ns, enabled=False)
+        mock_bind.assert_not_called()
 
 
 if __name__ == "__main__":

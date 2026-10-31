@@ -5,10 +5,13 @@ import platform
 import shutil
 import subprocess
 from collections import defaultdict
+from typing import Any
 
 import psutil
 import regex as re
+import torch
 from vllm.logger import logger
+from vllm.platforms import current_platform
 
 from vllm_ascend.device.hardware_profile import (
     CPUBindingMode,
@@ -800,3 +803,33 @@ def bind_cpus(rank_id: int, npu_id: int, *, migrate_memory: bool = True) -> None
         return
     binder = CpuAlloc(rank_id, npu_id=npu_id)
     binder.run_all(migrate_memory=migrate_memory)
+
+
+def bind_worker_cpus(vllm_config: Any, local_rank: int) -> None:
+    """Bind the worker's threads to the CPU pool of its runtime-bound NPU.
+
+    The host physical NPU ID must be resolved from the runtime-bound device:
+    ordinal arithmetic on ``local_rank`` cannot pierce per-process device
+    renumbering (internal DP workers), where it made every DP group's TP0/TP1
+    ranks share the same CPU/NUMA/IRQ pool. Falls back to the ordinal mapping
+    when the platform does not provide the runtime resolution.
+    """
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    if not get_ascend_config().enable_cpu_binding:
+        return
+    engram_config = getattr(vllm_config, "engram_config", None)
+    try:
+        resolve_fn = getattr(current_platform, "visible_device_id_to_physical_device_id", None)
+        npu_id = (
+            resolve_fn(torch.npu.current_device())
+            if resolve_fn is not None
+            else current_platform.device_id_to_physical_device_id(local_rank)
+        )
+        bind_cpus(
+            local_rank,
+            npu_id=npu_id,
+            migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
+        )
+    except Exception as e:
+        logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", local_rank, e)
