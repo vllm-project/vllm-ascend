@@ -215,6 +215,56 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         custom_ops.grouped_matmul_swiglu_quant_weight_nz_tensor_list.assert_not_called()
         custom_ops.npu_dequant_swiglu_quant.assert_not_called()
 
+    def test_w4a8_mxfp_situ_forwards_dispatch_counts(self):
+        hidden_states = torch.randn(3, 4, dtype=torch.bfloat16)
+        gate_up_out = torch.randn(3, 4, dtype=torch.bfloat16)
+        quantized_situ = torch.ones(3, 2)
+        situ_scale = torch.ones(3, 1)
+        down_out = torch.randn(3, 4, dtype=torch.bfloat16)
+        custom_ops = SimpleNamespace(
+            situ_mx_quant=MagicMock(return_value=(quantized_situ, situ_scale)),
+        )
+
+        with (
+            patch.object(moe_mlp_module.torch.ops, "_C_ascend", custom_ops),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                return_value=[gate_up_out],
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_grouped_matmul_gmm2",
+                return_value=down_out,
+            ),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.dispose_tensor"),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream",
+                return_value=MagicMock(record_event=MagicMock()),
+            ),
+        ):
+            output, _ = quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.ones(2, 4, 4),
+                w1_scale=torch.ones(2, 4),
+                w2=torch.ones(2, 2, 4),
+                w2_scale=torch.ones(2, 4),
+                group_list=torch.tensor([1, 3], dtype=torch.int32),
+                group_list_type=0,
+                dynamic_scale=torch.ones(3, 1),
+                activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+                use_mxfp_quant=True,
+                mxfp_quant_dtype=QuantType.W4A8MXFP,
+            )
+
+        self.assertIs(output, down_out)
+        situ_call = custom_ops.situ_mx_quant.call_args.kwargs
+        self.assertIs(situ_call["x"], gate_up_out)
+        torch.testing.assert_close(situ_call["group_list"], torch.tensor([1, 2], dtype=torch.int64))
+
     def test_w4a8_swiglu_stays_on_existing_fused_path(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
         quantized_input = torch.ones(2, 4, dtype=torch.int8)
