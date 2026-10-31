@@ -86,6 +86,8 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
+    pool: tuple[int, int]
+
     def __init__(
         self,
         vllm_config: VllmConfig,
