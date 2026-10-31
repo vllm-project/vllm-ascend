@@ -31,8 +31,20 @@ these tests pin.
 import unittest
 from unittest.mock import MagicMock, patch
 
-import vllm_ascend.core.kv_cache_config_builder as builder_module
-from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+import pytest
+
+try:
+    import vllm_ascend.core.kv_cache_config_builder as builder_module
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+except ImportError:
+    # The builder subclasses ``vllm.v1.core.kv_cache_planning.
+    # DefaultKVCacheConfigBuilder``, which the oldest pinned vLLM matrix leg
+    # (v0.32.0) does not ship. A module-level import error would abort the
+    # whole cpu-ut collection, so skip the module on that leg instead.
+    pytest.skip(
+        "kv_cache_config_builder requires a vLLM version that ships vllm.v1.core.kv_cache_planning",
+        allow_module_level=True,
+    )
 
 
 def _builder() -> AscendKVCacheConfigBuilder:
