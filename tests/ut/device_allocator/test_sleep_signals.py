@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import signal
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +35,23 @@ def test_unchanged_handlers_are_not_reinstalled(monkeypatch):
     with sleep_signals.preserve_worker_signal_handlers():
         pass
     setter.assert_not_called()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("python_handler", [signal.SIG_DFL, signal.SIG_IGN])
+def test_native_unknown_handler_is_not_reinstalled(monkeypatch, fail, python_handler):
+    handlers = {signal.SIGTERM: None, signal.SIGINT: python_handler}
+    monkeypatch.setattr(signal, "getsignal", handlers.get)
+    setter = MagicMock(side_effect=lambda number, handler: handlers.__setitem__(number, handler))
+    monkeypatch.setattr(signal, "signal", setter)
+    expected = pytest.raises(ValueError, match="SDK initialization failed") if fail else nullcontext()
+    with expected, sleep_signals.preserve_worker_signal_handlers():
+        handlers[signal.SIGTERM] = object()
+        handlers[signal.SIGINT] = object()
+        if fail:
+            raise ValueError("SDK initialization failed")
+    setter.assert_called_once_with(signal.SIGINT, python_handler)
+    assert handlers[signal.SIGINT] == python_handler
 
 
 def test_background_thread_does_not_modify_signal_handlers(monkeypatch):
