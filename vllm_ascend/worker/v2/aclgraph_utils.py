@@ -289,6 +289,9 @@ class ModelWithContext(nn.Module):
                 raise
             return getattr(original_model, name)
 
+    def embed_input_ids(self, *args, **kwargs):
+        return self.original_model.embed_input_ids(*args, **kwargs)
+
 
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
