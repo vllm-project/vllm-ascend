@@ -13,6 +13,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import _fused_dcp_lse_combine_rank_tiled_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -449,6 +450,40 @@ def fused_dcp_lse_combine(
             DCP_SIZE=dcp_size,
             BLOCK_D=triton.next_power_of_2(head_dim),
             BLOCK_ROWS=8,
+        )
+        return output
+    # Bound the FP32 rank/feature temporary. Require enough rank work and
+    # feature tiles to occupy the vector cores.
+    rank_tile = triton.next_power_of_2(dcp_size)
+    feature_tile = min(128, triton.next_power_of_2(head_dim), 2048 // rank_tile)
+    tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
+    min_rows = max(triton.cdiv(4 * vector_cores, max(dcp_size, 1)), triton.cdiv(vector_cores, tiles_per_head))
+    rank_tiled = (
+        not is_950()
+        and recv.dtype == torch.bfloat16
+        and 4 <= dcp_size <= 16
+        and dcp_size >= 2 * tiles_per_head
+        and scatter_dim == 1
+        and total_rows >= min_rows
+        and local_output is not None
+        and local_output.stride(-1) == 1
+    )
+    if rank_tiled:
+        assert local_output is not None and local_lse is not None
+        tiled_grid = min(total_rows * tiles_per_head, vector_cores)
+        _fused_dcp_lse_combine_rank_tiled_kernel[(tiled_grid,)](
+            recv,
+            output,
+            local_output,
+            local_lse,
+            *local_output.stride(),
+            *local_lse.stride()[:2],
+            NUM_HEADS=num_heads,
+            NUM_TOKENS=num_tokens,
+            DCP_SIZE=dcp_size,
+            HEAD_DIM=head_dim,
+            BLOCK_R=rank_tile,
+            BLOCK_D=feature_tile,
         )
         return output
     _fused_dcp_lse_combine_kernel[(grid_size,)](
