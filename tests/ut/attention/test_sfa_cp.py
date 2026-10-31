@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
+import vllm.distributed as vllm_distributed
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
@@ -17,16 +18,9 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
     AscendSFADCPMetadataBuilder,
-    AscendSFADSACPImpl,
-    AscendSFADSACPMetadata,
-    AscendSFADSACPMetadataBuilder,
-    AscendSFADSADCPImpl,
-    AscendSFADSADCPMetadata,
-    AscendSFADSADCPMetadataBuilder,
     AscendSFAPCPDCPImpl,
     AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
-    DCPGatherContext,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
@@ -44,6 +38,7 @@ from vllm_ascend.weight_switch import (
     WeightSwitchLoadState,
     WeightSwitchMixin,
 )
+from vllm_ascend.weight_switch.o_proj import OProjectionMode, ParallelOProjection
 
 
 @pytest.mark.parametrize("first_block_id", [0, 3])
@@ -183,16 +178,14 @@ def _make_pcp_o_proj_impl(
             cudagraph_capture_sizes=capture_sizes,
         ),
     )
-    impl._o_proj_weight_switch_enabled = False
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
-    impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
-    impl.o_proj_weight_load_state = WeightSwitchLoadState(
+    load_state = WeightSwitchLoadState(
         input_size_per_partition_before=4,
         input_size_per_partition_after=2,
     )
     impl.o_proj = SimpleNamespace(
         input_size=8,
-        input_size_per_partition=2,
+        input_size_per_partition=4,
         output_size=3,
         output_size_per_partition=3,
         weight=torch.nn.Parameter(
@@ -205,7 +198,11 @@ def _make_pcp_o_proj_impl(
         tp_rank=0,
         skip_bias_add=False,
     )
-    load_state = impl.o_proj_weight_load_state
+
+    def prepare_load(*_args):
+        impl.o_proj.input_size_per_partition = 2
+        return load_state
+
     with (
         patch.object(AscendSFAImpl, "__init__", return_value=None),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_pcp_o_proj_weight_sharding", return_value=True),
@@ -214,7 +211,13 @@ def _make_pcp_o_proj_impl(
             "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
             return_value=SimpleNamespace(world_size=2, rank_in_group=0),
         ),
-        patch.object(impl.o_proj.quant_method, "prepare_layer_for_parallel_weight_load", return_value=load_state),
+        patch.object(vllm_distributed, "get_pcp_group", return_value=pcp_group),
+        patch.object(
+            vllm_distributed,
+            "get_tp_group",
+            return_value=SimpleNamespace(world_size=2, rank_in_group=0),
+        ),
+        patch.object(impl.o_proj.quant_method, "prepare_layer_for_parallel_weight_load", side_effect=prepare_load),
     ):
         AscendSFAPCPImpl.__init__(impl)
     return impl
@@ -224,14 +227,18 @@ def _make_pcp_o_proj_impl(
 def test_sfa_pcp_decode_buffers_exist_before_forward_with_activation_dtype(activation_dtype):
     impl = _make_pcp_o_proj_impl(sharded_decode=True, activation_dtype=activation_dtype, weight_dtype=torch.int8)
     assert impl.o_proj.weight.dtype == torch.int8
+    projection = impl._parallel_o_proj
+    assert projection.o_proj is impl.o_proj
+    assert projection.input_size == 4
+    assert projection.output_size == 3
     expected_shapes = {
-        "_pcp_o_proj_ag_in_buf": (4, 4),
-        "_pcp_o_proj_ag_out_buf": (8, 4),
-        "_pcp_o_proj_rs_in_buf": (8, 3),
-        "_pcp_o_proj_rs_out_buf": (4, 3),
+        "all_gather_input": (4, 4),
+        "all_gather_output": (8, 4),
+        "reduce_scatter_input": (8, 3),
+        "reduce_scatter_output": (4, 3),
     }
     for name, shape in expected_shapes.items():
-        buffer = getattr(impl, name)
+        buffer = getattr(impl._parallel_o_proj, name)
         assert buffer.shape == shape
         assert buffer.dtype == activation_dtype
         assert buffer.device.type == "cpu"
@@ -256,36 +263,44 @@ def test_sfa_pcp_decode_buffers_cover_verification_tokens_and_graph_padding(
         max_capture_size=max_capture_size,
         capture_sizes=capture_sizes,
     )
-    assert impl._pcp_o_proj_token_capacity == expected_capacity
-    assert impl._pcp_o_proj_ag_in_buf.shape == (expected_capacity, 4)
-    assert impl._pcp_o_proj_ag_out_buf.shape == (2 * expected_capacity, 4)
-    assert impl._pcp_o_proj_rs_in_buf.shape == (2 * expected_capacity, 3)
-    assert impl._pcp_o_proj_rs_out_buf.shape == (expected_capacity, 3)
+    assert impl._parallel_o_proj.token_capacity == expected_capacity
+    assert impl._parallel_o_proj.all_gather_input.shape == (expected_capacity, 4)
+    assert impl._parallel_o_proj.all_gather_output.shape == (2 * expected_capacity, 4)
+    assert impl._parallel_o_proj.reduce_scatter_input.shape == (2 * expected_capacity, 3)
+    assert impl._parallel_o_proj.reduce_scatter_output.shape == (expected_capacity, 3)
 
 
 def test_sfa_pcp_decode_buffers_are_shared_across_compatible_layers():
     with (
         patch.object(AscendSFAPCPImpl, "o_proj_full_pools", {}),
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.torch.empty", wraps=torch.empty) as allocate,
+        patch("vllm_ascend.weight_switch.o_proj.torch.empty", wraps=torch.empty) as allocate,
     ):
         first = _make_pcp_o_proj_impl(sharded_decode=True)
         second = _make_pcp_o_proj_impl(sharded_decode=True)
 
         assert allocate.call_count == 4
         buffers = [
-            value for name, value in vars(first).items() if name.startswith("_pcp_o_proj_") and name.endswith("_buf")
+            value
+            for name, value in vars(first._parallel_o_proj).items()
+            if name in {"all_gather_input", "all_gather_output", "reduce_scatter_input", "reduce_scatter_output"}
+            and isinstance(value, torch.Tensor)
         ]
         assert len({buffer.data_ptr() for buffer in buffers}) == 4
-        for name, buffer in vars(first).items():
-            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
-                assert getattr(second, name) is buffer
+        for name, buffer in vars(first._parallel_o_proj).items():
+            if name in {
+                "all_gather_input",
+                "all_gather_output",
+                "reduce_scatter_input",
+                "reduce_scatter_output",
+            } and isinstance(buffer, torch.Tensor):
+                assert getattr(second._parallel_o_proj, name) is buffer
 
-        first._enable_o_proj_full_weight_switch()
-        second._enable_o_proj_full_weight_switch()
-        assert first.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr() == (
-            second.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr()
+        first._parallel_o_proj.enable()
+        second._parallel_o_proj.enable()
+        assert first._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor.data_ptr() == (
+            second._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor.data_ptr()
         )
-        assert first.o_proj_weight_state.gather_parts["weight"].full_tensor.data_ptr() not in {
+        assert first._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor.data_ptr() not in {
             buffer.data_ptr() for buffer in buffers
         }
 
@@ -296,9 +311,14 @@ def test_sfa_pcp_decode_buffer_pool_separates_dtype_and_shape(changed_config):
         first = _make_pcp_o_proj_impl(sharded_decode=True)
         second = _make_pcp_o_proj_impl(sharded_decode=True, **changed_config)
 
-        for name, buffer in vars(first).items():
-            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
-                assert getattr(second, name).data_ptr() != buffer.data_ptr()
+        for name, buffer in vars(first._parallel_o_proj).items():
+            if name in {
+                "all_gather_input",
+                "all_gather_output",
+                "reduce_scatter_input",
+                "reduce_scatter_output",
+            } and isinstance(buffer, torch.Tensor):
+                assert getattr(second._parallel_o_proj, name).data_ptr() != buffer.data_ptr()
 
 
 def test_sfa_pcp_decode_buffer_pool_uses_weight_device():
@@ -309,7 +329,7 @@ def test_sfa_pcp_decode_buffer_pool_uses_weight_device():
 
     with (
         patch.object(AscendSFAPCPImpl, "o_proj_full_pools", {}),
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.torch.empty", side_effect=allocate) as allocate_mock,
+        patch("vllm_ascend.weight_switch.o_proj.torch.empty", side_effect=allocate) as allocate_mock,
         patch("torch.nn.Parameter") as parameter,
     ):
         parameter.return_value = SimpleNamespace(device=torch.device("npu:0"))
@@ -323,14 +343,23 @@ def test_sfa_pcp_decode_buffer_pool_uses_weight_device():
         assert [call.kwargs["device"] for call in allocate_mock.call_args_list] == (
             [torch.device("npu:0")] * 4 + [torch.device("npu:1")] * 4
         )
-        for name, buffer in vars(first).items():
-            if name.startswith("_pcp_o_proj_") and name.endswith("_buf"):
-                assert getattr(second, name) is not buffer
-                assert getattr(same_device, name) is buffer
+        for name, buffer in vars(first._parallel_o_proj).items():
+            if name in {
+                "all_gather_input",
+                "all_gather_output",
+                "reduce_scatter_input",
+                "reduce_scatter_output",
+            } and isinstance(buffer, torch.Tensor):
+                assert getattr(second._parallel_o_proj, name) is not buffer
+                assert getattr(same_device._parallel_o_proj, name) is buffer
 
 
 def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.o_proj = SimpleNamespace(input_size_per_partition=4, output_size_per_partition=3)
+    impl.is_pcp_decode_sharded = False
+    impl.vllm_config = SimpleNamespace()
     with (
         patch.object(AscendSFAImpl, "__init__", return_value=None),
         patch(
@@ -338,14 +367,15 @@ def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
             return_value=False,
         ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
-        patch.object(AscendSFAPCPImpl, "_get_o_proj_weight_switch_method") as get_method,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=SimpleNamespace()),
+        patch.object(ParallelOProjection, "prepare_weight_load") as prepare_load,
     ):
-        impl = AscendSFAPCPImpl()
+        AscendSFAPCPImpl.__init__(impl)
 
     assert not impl.enable_pcp_o_proj_weight_sharding
-    assert impl.o_proj_weight_switch_config.group is pcp_group
-    assert not hasattr(impl, "o_proj_weight_load_state")
-    get_method.assert_not_called()
+    assert impl._parallel_o_proj.config.group is pcp_group
+    assert not impl._parallel_o_proj._load_prepared
+    prepare_load.assert_not_called()
 
 
 def test_sfa_dcp_extends_v1_backend() -> None:
@@ -358,33 +388,15 @@ def test_sfa_dcp_extends_v1_backend() -> None:
     )
     assert "dcp_context" not in {field.name for field in fields(AscendSFAMetadata)}
     assert "dcp_context" in {field.name for field in fields(AscendSFADCPMetadata)}
-    assert "dsa_cp_context" not in {field.name for field in fields(AscendSFAMetadata)}
-    assert "dsa_cp_context" in {field.name for field in fields(AscendSFADSACPMetadata)}
-    assert issubclass(AscendSFADSADCPImpl, AscendSFADCPImpl)
-    assert issubclass(AscendSFADSADCPImpl, AscendSFADSACPImpl)
-    assert issubclass(AscendSFADSADCPMetadataBuilder, AscendSFADCPMetadataBuilder)
-    assert issubclass(AscendSFADSADCPMetadataBuilder, AscendSFADSACPMetadataBuilder)
-    assert issubclass(AscendSFADSADCPMetadata, AscendSFADCPMetadata)
-    impl_mro = AscendSFADSADCPImpl.__mro__
-    builder_mro = AscendSFADSADCPMetadataBuilder.__mro__
-    assert impl_mro.index(AscendSFADCPImpl) < impl_mro.index(AscendSFADSACPImpl)
-    assert builder_mro.index(AscendSFADCPMetadataBuilder) < builder_mro.index(AscendSFADSACPMetadataBuilder)
 
 
-def test_sfa_cp_four_mode_resolution() -> None:
-    expected = {
-        (False, False): (AscendSFAMetadataBuilder, AscendSFAImpl),
-        (True, False): (AscendSFADSACPMetadataBuilder, AscendSFADSACPImpl),
-        (False, True): (AscendSFADCPMetadataBuilder, AscendSFADCPImpl),
-        (True, True): (AscendSFADSADCPMetadataBuilder, AscendSFADSADCPImpl),
-    }
-    for flags, classes in expected.items():
-        with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=flags[0]),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
-                return_value=flags[1],
-            ),
+def test_sfa_dcp_resolution() -> None:
+    for enabled, classes in (
+        (False, (AscendSFAMetadataBuilder, AscendSFAImpl)),
+        (True, (AscendSFADCPMetadataBuilder, AscendSFADCPImpl)),
+    ):
+        with patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer", return_value=enabled
         ):
             assert resolve_sfa_metadata_builder() is classes[0]
             assert resolve_sfa_impl() is classes[1]
@@ -395,7 +407,6 @@ def test_sfa_pcp_resolution_for_mrv2_config() -> None:
         parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
     )
     with (
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
             return_value=False,
@@ -569,7 +580,6 @@ def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill:
     builder._build_block_table_replicated_view = Mock(return_value=local_block_table)
     builder._build_slot_mapping_replicated_view = Mock(return_value=torch.tensor([0, -1]))
     builder._build_compact_kv_gather_metadata = Mock(return_value=(compact_ids, compact_table))
-    builder._update_parallel_slot_mapping = Mock()
     original_slots = torch.tensor([0, -1], dtype=torch.int32)
     original_blocks = torch.tensor([[7]], dtype=torch.int32)
     common = SimpleNamespace(
@@ -616,6 +626,7 @@ def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill:
 
 def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
+    impl.qk_rope_head_dim = 64
     impl.dcp_group = object()
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
@@ -827,12 +838,9 @@ def test_sfa_pcp_packed_kv_writes_gather_order_slots() -> None:
             k_pe,
             k_nope,
             knope_scale,
-            None,
-            [],
             kv_cache,
             torch.tensor([4, 8]),
             metadata,
-            False,
         )
 
     scatter.assert_called_once()
@@ -987,7 +995,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl.indexer = Mock(return_value=torch.zeros(len(local), 1, 1, dtype=torch.int32))
     impl._execute_sparse_flash_attention_process = Mock(return_value=hidden)
     impl._v_up_proj = lambda values: values
-    impl._finalize_o_proj = lambda values, output, gather_full_o_proj: output.copy_(values)
+    impl._finalize_o_proj = lambda values, output: output.copy_(values)
 
     def quantize(values, *_args, **_kwargs):
         rows = len(values)
@@ -1072,31 +1080,33 @@ def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
     AscendSFAPCPImpl.o_proj_full_pools.clear()
     impl = _make_pcp_o_proj_impl()
 
-    impl._enable_o_proj_full_weight_switch()
+    impl._parallel_o_proj.enable()
 
-    assert impl._o_proj_weight_switch_enabled
+    assert impl._parallel_o_proj._weight_switch_enabled
     torch.testing.assert_close(
         impl.o_proj.weight,
         torch.tensor([[2.0, 3.0], [6.0, 7.0], [10.0, 11.0]]),
     )
-    assert impl.o_proj_weight_state.gather_parts["weight"].full_tensor.shape == (3, 4)
+    assert impl._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor.shape == (3, 4)
 
 
 def test_sfa_pcp_prefill_gathers_weight_and_restores_local_view() -> None:
     impl = _make_pcp_o_proj_impl()
-    impl._enable_o_proj_full_weight_switch()
+    impl._parallel_o_proj.enable()
 
     local_weight_ptr = impl.o_proj.weight.data_ptr()
-    full_weight = impl.o_proj_weight_state.gather_parts["weight"].full_tensor
+    full_weight = impl._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor
     full_weight.copy_(torch.arange(12, dtype=torch.float32).view(3, 4))
 
-    def fake_finalize(_self, _attn_output, output, _gather_full_o_proj):
-        assert impl.o_proj.weight.data_ptr() == full_weight.data_ptr()
+    def fake_project(_attn_output, output):
+        assert impl.o_proj.weight.data_ptr() == full_weight_tensor.data_ptr()
         output.fill_(7)
         return output
 
-    with patch.object(AscendSFAImpl, "_finalize_o_proj", new=fake_finalize):
-        result = impl._finalize_o_proj(torch.empty(1, 4), torch.empty(1, 3), gather_full_o_proj=True)
+    full_weight_tensor = full_weight
+    impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
+    with patch.object(impl._parallel_o_proj, "project_full", side_effect=fake_project):
+        result = impl._finalize_o_proj(torch.empty(1, 4), torch.empty(1, 3))
 
     assert result.tolist() == [[7.0, 7.0, 7.0]]
     assert impl.o_proj.weight.data_ptr() == local_weight_ptr
@@ -1105,16 +1115,17 @@ def test_sfa_pcp_prefill_gathers_weight_and_restores_local_view() -> None:
 def test_sfa_pcp_decode_projects_local_weight_then_reduces_pcp_and_tp() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     impl = _make_pcp_o_proj_impl()
-    impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
-    impl._enable_o_proj_full_weight_switch()
+    impl._parallel_o_proj.config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
+    impl._parallel_o_proj.enable()
 
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     input_ = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
     expected = torch.nn.functional.linear(input_, full_weight, impl.o_proj.bias)
     pcp_group.all_reduce = lambda _: torch.nn.functional.linear(input_, full_weight, bias=None)
     tp_group = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=lambda x: x)
-    with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
-        result = impl._finalize_o_proj(input_, torch.empty_like(expected), gather_full_o_proj=False)
+    impl._parallel_o_proj.set_mode(use_full_weight=False, exchange_tokens=False)
+    impl._parallel_o_proj.tp_group = tp_group
+    result = impl._finalize_o_proj(input_, torch.empty_like(expected))
 
     torch.testing.assert_close(result, expected)
 
@@ -1127,27 +1138,27 @@ def test_sfa_pcp_decode_projects_local_weight_then_reduces_pcp_and_tp() -> None:
 def test_sfa_pcp_sharded_decode_preserves_token_owners(rank, tp_size, padding, quantized, num_speculative_tokens):
     group = SimpleNamespace(world_size=2, rank_in_group=rank, device_group=object(), all_reduce=Mock())
     impl = _make_pcp_o_proj_impl(sharded_decode=True, num_speculative_tokens=num_speculative_tokens)
-    impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(group, shard_axis="input")
+    impl._parallel_o_proj.config = WeightSwitchConfig.from_group(group, shard_axis="input")
     weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     impl.o_proj.weight = torch.nn.Parameter(weight[:, rank * 2 : (rank + 1) * 2].clone(), requires_grad=False)
-    impl._enable_o_proj_full_weight_switch()
+    impl._parallel_o_proj.enable()
     quant_bias = torch.tensor([0.25, 0.5, 0.75]) if quantized else torch.zeros(3)
     if quantized:
         method = MagicMock(spec=AscendLinearScheme)
 
-        def apply(layer, x, bias=None, tp_rank=0):
-            return torch.nn.functional.linear(x, layer.weight) + (quant_bias if tp_rank == 0 else 0)
+        def apply_weight_shard(layer, x, *, bias_rank=0):
+            return torch.nn.functional.linear(x, layer.weight) + (quant_bias if bias_rank == 0 else 0)
 
-        method.apply.side_effect = apply
-        impl._get_o_proj_weight_switch_method = Mock(return_value=method)
+        method.apply_weight_shard.side_effect = apply_weight_shard
+        impl.o_proj.quant_method = method
     buffer_names = (
-        "_pcp_o_proj_ag_in_buf",
-        "_pcp_o_proj_ag_out_buf",
-        "_pcp_o_proj_rs_in_buf",
-        "_pcp_o_proj_rs_out_buf",
+        "all_gather_input",
+        "all_gather_output",
+        "reduce_scatter_input",
+        "reduce_scatter_output",
     )
-    buffer_ptrs = tuple(getattr(impl, name).data_ptr() for name in buffer_names)
-    for num_rows in [1, 2, impl._pcp_o_proj_token_capacity]:
+    buffer_ptrs = tuple(getattr(impl._parallel_o_proj, name).data_ptr() for name in buffer_names)
+    for num_rows in [1, 2, impl._parallel_o_proj.token_capacity]:
         inputs = [torch.arange(num_rows * 4, dtype=torch.float32).view(num_rows, 4) + 1 + i * 20 for i in range(2)]
         if padding:
             inputs[1][-1].zero_()
@@ -1173,18 +1184,124 @@ def test_sfa_pcp_sharded_decode_preserves_token_owners(rank, tp_size, padding, q
         expected = full_projection[rank * num_rows : (rank + 1) * num_rows] + impl.o_proj.bias
         if tp_size > 1:
             expected += 3
+        impl._parallel_o_proj.set_mode(use_full_weight=False, exchange_tokens=True)
+        impl._parallel_o_proj.tp_group = tp_group
         with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.dist.all_gather_into_tensor", side_effect=gather),
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.dist.reduce_scatter_tensor", side_effect=scatter),
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.weight_switch.o_proj.dist.all_gather_into_tensor", side_effect=gather),
+            patch("vllm_ascend.weight_switch.o_proj.dist.reduce_scatter_tensor", side_effect=scatter),
         ):
-            actual = impl._finalize_o_proj(inputs[rank], torch.empty_like(expected), gather_full_o_proj=False)
+            actual = impl._finalize_o_proj(inputs[rank], torch.empty_like(expected))
         torch.testing.assert_close(actual, expected)
-        assert tuple(getattr(impl, name).data_ptr() for name in buffer_names) == buffer_ptrs
+        assert tuple(getattr(impl._parallel_o_proj, name).data_ptr() for name in buffer_names) == buffer_ptrs
         group.all_reduce.assert_not_called()
         assert tp_group.all_reduce.call_count == int(tp_size > 1)
         if quantized:
-            assert method.apply.call_args.kwargs["tp_rank"] == (0 if rank == 0 else 1)
+            assert method.apply_weight_shard.call_args.kwargs["bias_rank"] == (0 if rank == 0 else 1)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("reduce_results", [False, True])
+@pytest.mark.parametrize("skip_bias_add", [False, True])
+@pytest.mark.parametrize("sharded_decode", [False, True])
+def test_sfa_pcp_ordinary_bias_is_added_once_when_tp_reduction_is_deferred(
+    tp_size, reduce_results, skip_bias_add, sharded_decode
+):
+    """The decoder's deferred TP sum must receive one complete ordinary bias."""
+    num_rows = 2
+    inputs = torch.arange(2 * num_rows * 4 * tp_size, dtype=torch.float32).view(2 * num_rows, 4 * tp_size) / 8
+    weight = torch.arange(3 * 4 * tp_size, dtype=torch.float32).view(3, 4 * tp_size) / 16
+    bias = torch.tensor([0.5, 1.0, 1.5])
+    owner_outputs: dict[int, list[torch.Tensor]] = {0: [], 1: []}
+    for pcp_rank in range(2):
+        for tp_rank in range(tp_size):
+            impl = _make_pcp_o_proj_impl(sharded_decode=sharded_decode)
+            layer = impl.o_proj
+            layer.input_size = 4 * tp_size
+            layer.reduce_results = reduce_results
+            layer.skip_bias_add = skip_bias_add
+            layer.tp_size = tp_size
+            layer.tp_rank = tp_rank
+            layer.bias = torch.nn.Parameter(bias.clone(), requires_grad=False)
+            tp_weight = weight[:, tp_rank * 4 : (tp_rank + 1) * 4]
+            layer.weight = torch.nn.Parameter(
+                tp_weight[:, pcp_rank * 2 : (pcp_rank + 1) * 2].clone(), requires_grad=False
+            )
+            all_tp_inputs = inputs[:, tp_rank * 4 : (tp_rank + 1) * 4]
+            local_inputs = (
+                all_tp_inputs[pcp_rank * num_rows : (pcp_rank + 1) * num_rows]
+                if sharded_decode
+                else all_tp_inputs[:num_rows]
+            )
+            tp_projection = torch.nn.functional.linear(all_tp_inputs, tp_weight)
+            full_projection = torch.nn.functional.linear(inputs, weight)
+            local_slice = (
+                slice(pcp_rank * num_rows, (pcp_rank + 1) * num_rows) if sharded_decode else slice(0, num_rows)
+            )
+            events: list[str] = []
+
+            local_partial = torch.nn.functional.linear(local_inputs[:, pcp_rank * 2 : (pcp_rank + 1) * 2], layer.weight)
+            global_partial = torch.nn.functional.linear(
+                all_tp_inputs[:, pcp_rank * 2 : (pcp_rank + 1) * 2], layer.weight
+            )
+
+            def reduce_pcp(partial, expected=local_partial, reduced=tp_projection[:num_rows], events=events):
+                events.append("pcp")
+                torch.testing.assert_close(partial, expected)
+                return reduced.clone()
+
+            def gather(destination, source, *, group, expected=local_inputs, gathered=all_tp_inputs, events=events):
+                events.append("gather")
+                torch.testing.assert_close(source, expected)
+                destination.copy_(gathered)
+
+            def scatter(
+                destination,
+                source,
+                *,
+                group,
+                expected=global_partial,
+                reduced=tp_projection[local_slice],
+                events=events,
+            ):
+                events.append("pcp")
+                torch.testing.assert_close(source, expected)
+                destination.copy_(reduced)
+
+            def reduce_tp(
+                partial, expected=tp_projection[local_slice], reduced=full_projection[local_slice], events=events
+            ):
+                events.append("tp")
+                torch.testing.assert_close(partial, expected)
+                return reduced.clone()
+
+            pcp_group = SimpleNamespace(
+                world_size=2, rank_in_group=pcp_rank, device_group=object(), all_reduce=Mock(side_effect=reduce_pcp)
+            )
+            tp_group = SimpleNamespace(
+                world_size=tp_size, rank_in_group=tp_rank, all_reduce=Mock(side_effect=reduce_tp)
+            )
+            executor = impl._parallel_o_proj
+            executor.config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
+            executor.tp_group = tp_group
+            executor.enable()
+            executor.set_mode(use_full_weight=False, exchange_tokens=sharded_decode)
+            with (
+                patch("vllm_ascend.weight_switch.o_proj.dist.all_gather_into_tensor", side_effect=gather),
+                patch("vllm_ascend.weight_switch.o_proj.dist.reduce_scatter_tensor", side_effect=scatter),
+            ):
+                actual = impl._finalize_o_proj(local_inputs, torch.empty(num_rows, 3))
+            assert events == (["gather", "pcp"] if sharded_decode else ["pcp"]) + (
+                ["tp"] if reduce_results and tp_size > 1 else []
+            )
+            assert tp_group.all_reduce.call_count == int(reduce_results and tp_size > 1)
+            expected_partial = full_projection[local_slice] if reduce_results else tp_projection[local_slice]
+            if not skip_bias_add and (reduce_results or tp_rank == 0):
+                expected_partial = expected_partial + bias
+            torch.testing.assert_close(actual, expected_partial)
+            owner_outputs[pcp_rank].append(actual)
+        expected = torch.nn.functional.linear(inputs[local_slice], weight, None if skip_bias_add else bias)
+        combined = owner_outputs[pcp_rank][0] if reduce_results else torch.stack(owner_outputs[pcp_rank]).sum(0)
+        torch.testing.assert_close(combined, expected)
 
 
 @pytest.mark.parametrize(
@@ -1200,236 +1317,54 @@ def test_sfa_pcp_sharded_decode_preserves_token_owners(rank, tp_size, padding, q
         (AscendAttentionState.DecodeOnly, True, False, False),
     ],
 )
-def test_sfa_pcp_context_gathers_weight_for_global_prefill(
-    attn_state, global_has_prefill, weight_switch_enabled, expected_gather
+@pytest.mark.parametrize("decode_sharded", [False, True])
+def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
+    attn_state, global_has_prefill, weight_switch_enabled, expected_gather, decode_sharded
 ) -> None:
-    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl._o_proj_weight_switch_enabled = weight_switch_enabled
-    impl._all_gather_o_proj_full_weight = MagicMock()
+    impl = _make_pcp_o_proj_impl(sharded_decode=decode_sharded)
+    impl._parallel_o_proj.enable()
+    impl._parallel_o_proj.enabled = weight_switch_enabled
+    impl._parallel_o_proj._weight_switch_enabled = weight_switch_enabled
+    impl.o_proj.quant_method.all_gather_weight = MagicMock()
     base_context = SFAForwardContext(
         actual_seq_lengths_query=torch.empty(0),
         actual_seq_lengths_key=torch.empty(0),
         kv_slot_mapping=torch.empty(0),
         topk_num_tokens=0,
     )
-
-    with patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context):
-        context = impl._get_parallel_forward_context(
-            SimpleNamespace(attn_state=attn_state, pcp_has_global_prefill=global_has_prefill),
-            1,
-            torch.empty(1),
-        )
-    assert context.gather_full_o_proj is expected_gather
-    if expected_gather:
-        impl._all_gather_o_proj_full_weight.assert_called_once_with()
-    else:
-        impl._all_gather_o_proj_full_weight.assert_not_called()
-
-
-@pytest.mark.parametrize("async_gather", [False, True])
-def test_sfa_dsa_dcp_query_stays_async_until_indexer_cache_gather(async_gather):
-    impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
-    handle = MagicMock() if async_gather else None
-    context = DCPGatherContext(
-        handle=handle, gathered=torch.arange(12).reshape(2, 6), restore_perm=None, split_sizes=(4, 2)
+    expected_mode = (
+        OProjectionMode.LOCAL_WEIGHT
+        if not weight_switch_enabled
+        else OProjectionMode.FULL_WEIGHT
+        if expected_gather
+        else OProjectionMode.EXCHANGE_TOKENS
+        if decode_sharded
+        else OProjectionMode.LOCAL_WEIGHT
     )
-    with patch.object(AscendSFADCPImpl, "_start_dcp_query_gather", return_value=context):
-        result = impl._start_dcp_query_gather(torch.empty(2, 4), torch.empty(2, 2))
-    assert result is context
-    if handle is not None:
-        handle.wait.assert_not_called()
 
+    def forward(owner, layer_name, hidden, cache, metadata, output):
+        assert owner is impl
+        assert owner._parallel_o_proj.mode is expected_mode
+        assert owner._parallel_o_proj.uses_full_weight is expected_gather
+        owner.o_proj.quant_method.all_gather_weight.assert_not_called()
+        assert owner._get_parallel_forward_context(metadata, hidden.shape[0], hidden) is base_context
+        return output
 
-def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
-    dcp_impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
-    combined_impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
-    assert dcp_impl._parallel_query_gather_dim() == 1
-    assert combined_impl._parallel_query_gather_dim() == 0
-
-
-@pytest.mark.parametrize("sfa_c8", [False, True])
-@pytest.mark.parametrize("li_c8", [False, True])
-@pytest.mark.parametrize("preprocess_type", [PreprocessType.NATIVE, PreprocessType.MLAPO, PreprocessType.PROLOG_V3])
-@pytest.mark.parametrize(
-    "has_indexer,is_mtp,skip_topk,expect_indexer",
-    [(True, False, True, False), (True, True, True, True), (True, False, False, True), (False, False, True, False)],
-)
-def test_dsa_cp_indexer_cache_follows_runtime_ownership(
-    sfa_c8, li_c8, preprocess_type, has_indexer, is_mtp, skip_topk, expect_indexer
-):
-    # Exercise the actual SFA forward, including cache composition and metadata
-    # lookup. Only projections/kernels are mocked; static layers have no cache
-    # or metadata, while MTP must call the indexer even when top-k is skipped.
-    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-    impl.has_indexer = has_indexer
-    impl.layerwise_kv_cache_hook = None
-    impl.g_proj = None
-    impl._is_mtp_layer = is_mtp
-    impl.skip_topk = skip_topk
-    impl.use_index_cache = True
-    impl.enable_sparse_sfa_c8 = sfa_c8
-    impl.enable_sparse_sfa_turboquant = False
-    impl.enable_sparse_li_c8 = li_c8
-    impl.preprocess_type = preprocess_type
-    impl.layer_name = "model.layers.80.self_attn.attn" if is_mtp else "model.layers.2.self_attn.attn"
-    impl.q_lora_rank = 2
-    impl.qk_rope_head_dim = 2
-    impl.kv_lora_rank = 4
-    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-    shared_topk = torch.ones(2, 1, dtype=torch.int32)
-    computed_topk = torch.zeros_like(shared_topk)
-    main_cache = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
-    indexer_cache = tuple(torch.empty(1) for _ in range(2 if li_c8 else 1))
-    indexer = MagicMock(return_value=computed_topk)
-    indexer.k_cache = SimpleNamespace(prefix="indexer.k_cache", kv_cache=indexer_cache if expect_indexer else None)
-    indexer.num_cache_tensors = len(indexer_cache)
-    impl.indexer = indexer if has_indexer else None
-    metadata = SimpleNamespace(
-        cos=hidden_states,
-        sin=hidden_states,
-        num_input_tokens=2,
-        num_actual_tokens=2,
-        num_decode_tokens=2,
-        attn_state=AscendAttentionState.DecodeOnly,
-    )
-    slots = torch.tensor([0, 1])
-    lengths = torch.tensor([1, 2])
-    context = SimpleNamespace(
-        actual_seq_lengths_query=lengths,
-        actual_seq_lengths_key=lengths,
-        kv_slot_mapping=slots,
-        gather_full_o_proj=False,
-        topk_num_tokens=2,
-    )
-    own_query_lengths = torch.tensor([9, 10])
-    own_key_lengths = torch.tensor([11, 12])
-    own_metadata = SimpleNamespace(
-        actual_seq_lengths_query=own_query_lengths,
-        actual_seq_lengths_key=own_key_lengths,
-    )
-    forward_context = SimpleNamespace(attn_metadata={"indexer.k_cache": own_metadata} if expect_indexer else {})
-    impl._get_sfa_kv_slot_mapping = MagicMock(return_value=slots)
-    impl._get_parallel_forward_context = MagicMock(return_value=context)
-    impl._prepare_native_hidden_states = MagicMock(return_value=hidden_states)
-    impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(2, 8),))
-    impl.q_a_layernorm = MagicMock(side_effect=lambda x: x)
-    impl.exec_kv = MagicMock(return_value=(hidden_states, hidden_states))
-    impl._prepare_kv_for_parallel = MagicMock(return_value=(None, []))
-    impl._store_parallel_kv = MagicMock(return_value=(hidden_states, hidden_states))
-    impl._q_proj_and_k_up_proj = MagicMock(return_value=(hidden_states, hidden_states))
-    impl.rope_single = MagicMock(return_value=hidden_states)
-    impl._record_query_gather_context = MagicMock()
-    fused_output = (hidden_states, hidden_states, hidden_states, hidden_states)
-    impl._sfa_preprocess_mlapo = MagicMock(return_value=fused_output)
-    impl._sfa_preprocess_prolog_v3 = MagicMock(return_value=fused_output)
-    impl._get_indexcache_topk_indices = MagicMock(return_value=shared_topk)
-    impl._update_indexcache_topk_indices = MagicMock()
-    impl._execute_sparse_flash_attention_process = MagicMock(return_value=hidden_states)
-    impl._v_up_proj = MagicMock(return_value=hidden_states)
-    impl._finalize_o_proj = MagicMock(return_value=hidden_states)
+    hidden = torch.empty(1, 4)
+    output = torch.empty(1, 3)
+    metadata = SimpleNamespace(attn_state=attn_state, pcp_has_global_prefill=global_has_prefill)
     with (
-        patch("vllm_ascend.attention.sfa_v1.get_forward_context", return_value=forward_context),
-        patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify,
-        patch("vllm_ascend.attention.sfa_v1.attention_transfer_window"),
-        patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),
+        patch.object(AscendSFAImpl, "forward", forward),
+        patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context),
     ):
-        impl.forward(impl.layer_name, hidden_states, main_cache, metadata, output=torch.empty_like(hidden_states))
-    if expect_indexer:
-        indexer.assert_called_once()
-        assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
-        # Trimming attention inputs may create a view of the original tensor.
-        k_hidden_states = indexer.call_args.args[2]
-        torch.testing.assert_close(k_hidden_states, hidden_states)
-        assert k_hidden_states.data_ptr() == hidden_states.data_ptr()
-        assert indexer.call_args.args[3] is own_metadata
-        assert own_metadata.actual_seq_lengths_query is own_query_lengths
-        assert own_metadata.actual_seq_lengths_key is own_key_lengths
-    else:
-        indexer.assert_not_called()
-    attention_args = impl._execute_sparse_flash_attention_process.call_args.args
-    assert len(attention_args[2]) == len(main_cache) + (len(indexer_cache) if expect_indexer else 0)
-    assert attention_args[3] is (shared_topk if skip_topk else computed_topk)
-    notify.assert_called_once_with(impl.layer_name)
-
-
-@pytest.mark.parametrize("nope", [False, True])
-def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths(nope) -> None:
-    builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
-    builder.actual_seq_lengths_query = torch.tensor([3, 5, 0], dtype=torch.int32)
-    builder.actual_seq_lengths_key = torch.tensor([3, 5, 0], dtype=torch.int32)
-    builder.dsa_cp_actual_seq_lengths_query = torch.zeros(3, dtype=torch.int32)
-    builder.dsa_cp_actual_seq_lengths_key = torch.zeros(3, dtype=torch.int32)
-    builder.dsa_cp_spec_actual_seq_lengths_query = None
-    builder.dsa_cp_spec_actual_seq_lengths_key = None
-    common = SimpleNamespace(
-        num_reqs=2,
-        num_input_tokens=5,
-        num_actual_tokens=5,
-        query_start_loc=torch.tensor([0, 3, 5], dtype=torch.int32),
-    )
-    tp_group = SimpleNamespace(world_size=2, rank_in_group=1)
-    with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
-        cos, sin, slot_mapping, extra = builder._prepare_parallel_metadata(
-            common,
-            None if nope else torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
-            None if nope else torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
-            torch.arange(5, dtype=torch.int32),
-            torch.tensor([3, 5], dtype=torch.int32),
-            torch.tensor([3, 5], dtype=torch.int32),
-            draft_index=None,
+        assert impl.forward("layer", hidden, (), metadata, output) is output
+    assert impl._parallel_o_proj.mode is OProjectionMode.LOCAL_WEIGHT
+    if expected_gather:
+        impl.o_proj.quant_method.all_gather_weight.assert_called_once_with(
+            impl._parallel_o_proj._weight_switch_states[0][2], impl._parallel_o_proj.config
         )
-
-    if nope:
-        assert cos is None and sin is None
     else:
-        assert cos.shape[0] == sin.shape[0] == 3
-    torch.testing.assert_close(slot_mapping, torch.tensor([0, 1, 2, 3, 4, -1], dtype=torch.int32))
-    context = extra["dsa_cp_context"]
-    torch.testing.assert_close(context.slot_mapping_cp, torch.tensor([3, 4, -1], dtype=torch.int32))
-    torch.testing.assert_close(context.actual_seq_lengths_query, torch.tensor([0, 2], dtype=torch.int32))
-    torch.testing.assert_close(context.actual_seq_lengths_key, torch.tensor([0, 5], dtype=torch.int32))
-    torch.testing.assert_close(context.query_start_loc, torch.tensor([0, 0, 2], dtype=torch.int32))
-    torch.testing.assert_close(builder.actual_seq_lengths_query, torch.tensor([3, 5, 0], dtype=torch.int32))
-    torch.testing.assert_close(builder.actual_seq_lengths_key, torch.tensor([3, 5, 0], dtype=torch.int32))
-
-
-def test_sfa_dsa_cp_metadata_builder_masks_graph_padding() -> None:
-    # TP8, graph size 80 and MTP3 produce 20 four-token request slots. With
-    # nine real requests, rank 6 splits a padded slot at its local boundary.
-    builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
-    builder.dsa_cp_actual_seq_lengths_query = torch.zeros(21, dtype=torch.int32)
-    builder.dsa_cp_actual_seq_lengths_key = torch.zeros(21, dtype=torch.int32)
-    builder.dsa_cp_spec_actual_seq_lengths_query = None
-    builder.dsa_cp_spec_actual_seq_lengths_key = None
-    query_start_loc = torch.arange(0, 81, 4, dtype=torch.int32)
-    seq_lens = torch.zeros(20, dtype=torch.int32)
-    seq_lens[:9] = torch.arange(128, 137, dtype=torch.int32)
-    common = SimpleNamespace(
-        num_reqs=20,
-        num_input_tokens=80,
-        num_actual_tokens=36,
-        query_start_loc=query_start_loc,
-    )
-    tp_group = SimpleNamespace(world_size=8, rank_in_group=6)
-
-    with patch(
-        "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
-        return_value=tp_group,
-    ):
-        _, _, _, extra = builder._prepare_parallel_metadata(
-            common,
-            torch.zeros(80, 1, 1, 64),
-            torch.zeros(80, 1, 1, 64),
-            torch.arange(80, dtype=torch.int64),
-            query_start_loc[1:],
-            seq_lens,
-            draft_index=None,
-        )
-
-    local_seq_lens = extra["dsa_cp_context"].actual_seq_lengths_key
-    assert local_seq_lens[17].item() == 0
-    assert torch.all(local_seq_lens >= 0)
+        impl.o_proj.quant_method.all_gather_weight.assert_not_called()
 
 
 def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None:
@@ -1523,28 +1458,6 @@ def test_sfa_dcp_builds_replicated_block_table_view() -> None:
     )
 
 
-def test_sfa_dcp_updates_dsa_cp_local_slot_mapping_with_padding() -> None:
-    builder = AscendSFADSADCPMetadataBuilder.__new__(AscendSFADSADCPMetadataBuilder)
-    dsa_cp_context = SimpleNamespace(
-        num_tokens_pad=6,
-        local_start=2,
-        local_end_with_pad=5,
-        slot_mapping_cp=None,
-    )
-    metadata = SimpleNamespace(dsa_cp_context=dsa_cp_context)
-
-    builder._update_parallel_slot_mapping(
-        metadata,
-        slot_mapping=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
-        num_input_tokens=4,
-    )
-
-    torch.testing.assert_close(
-        dsa_cp_context.slot_mapping_cp,
-        torch.tensor([12, 13, -1], dtype=torch.int32),
-    )
-
-
 @pytest.mark.parametrize(
     "is_consumer,is_producer,recompute", [(True, False, True), (True, False, False), (False, True, True)]
 )
@@ -1587,7 +1500,6 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
         patch.object(builder, "_build_block_table_replicated_view", return_value=blocks),
         patch.object(builder, "_build_slot_mapping_replicated_view", return_value=slots),
         patch.object(builder, "_build_compact_kv_gather_metadata", return_value=(torch.arange(4), blocks)) as gather,
-        patch.object(builder, "_update_parallel_slot_mapping"),
     ):
         result = builder._build_with_metadata_view(common, lambda: metadata)
     num_decodes = sum(q <= 3 for q in query_lens) if is_consumer and not is_producer and recompute else 0
@@ -1601,6 +1513,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
 
 def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.qk_rope_head_dim = 64
     impl.enable_sparse_sfa_turboquant = False
     impl.dcp_group = Mock()
     packed = torch.randn(2, 128, 1, 576)
@@ -1629,7 +1542,6 @@ def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     [
         (AscendSFADCPImpl, False, False, False),
         (AscendSFADCPImpl, True, False, False),
-        (AscendSFADSADCPImpl, True, False, False),
         (AscendSFAPCPDCPImpl, False, False, False),
         (AscendSFAPCPDCPImpl, True, False, True),
         (AscendSFAPCPDCPImpl, False, True, True),
@@ -2063,20 +1975,53 @@ def test_sfa_pcp_dcp_builder_preserves_causal_multi_token_support(dcp_size):
     assert builder.pcp_indexer_slot_mapping_buf.shape == (256,)
 
 
-@pytest.mark.parametrize("has_prefill", [False, True])
-@pytest.mark.parametrize("has_handle", [False, True])
-def test_dsa_dcp_indexer_attn_q_gather_handle(has_prefill, has_handle):
-    impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
-    handle = Mock() if has_handle else None
-    metadata = SimpleNamespace(dcp_context=SimpleNamespace(gather_context=SimpleNamespace(handle=handle)))
-    with patch.object(impl, "_has_prefill", return_value=has_prefill):
-        result = impl._get_indexer_attn_q_gather_handle(metadata)
-    assert result is (None if has_prefill else handle)
-    if handle is not None:
-        handle.wait.assert_not_called()
-
-
-@pytest.mark.parametrize("impl_cls", [AscendSFAImpl, AscendSFADSACPImpl, AscendSFADCPImpl, AscendSFAPCPDCPImpl])
-def test_other_sfa_layouts_have_no_indexer_attn_q_gather_handle(impl_cls):
+@pytest.mark.parametrize("impl_cls", [AscendSFAPCPImpl, AscendSFAPCPDCPImpl])
+@pytest.mark.parametrize("mode", ["prefill", "mixed", "sharded_decode", "replicated_decode"])
+def test_sfa_pcp_nope_gathers_latent_kv_without_rope(impl_cls, mode):
     impl = impl_cls.__new__(impl_cls)
-    assert impl._get_indexer_attn_q_gather_handle(Mock()) is None
+    impl.is_pcp_decode_sharded = mode == "sharded_decode"
+    impl.qk_rope_head_dim = 0
+    impl.kv_lora_rank = 2
+    impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.kv_a_layernorm = lambda value: value * 2
+    inputs = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    peer_inputs = inputs + 10
+    has_prefill = mode in {"prefill", "mixed"}
+    num_decodes = 0 if mode == "prefill" else (2 if mode == "replicated_decode" else 1)
+    slots = torch.tensor([0, 1, -1, 2] if mode == "mixed" else [0, 1, 2, -1])
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.uses_pcp_sharded_layout = True
+    metadata.num_input_tokens = inputs.shape[0]
+    metadata.pcp_slot_mapping = slots
+    metadata.num_decode_tokens = num_decodes
+    metadata.num_prefills = int(has_prefill)
+    metadata.pcp_has_global_prefill = has_prefill
+    metadata.dcp_context = SimpleNamespace(slot_mapping=slots)
+    group = SimpleNamespace(all_gather=Mock(side_effect=lambda values, dim: torch.cat((values, values + 10), dim)))
+    group.world_size = 2
+    cache = torch.full((1, 5, 1, 2), -99.0)
+
+    def scatter(target, indices, values):
+        valid = indices[:, 0] >= 0
+        target[indices[valid, 0]] = values[valid]
+        return target
+
+    with (
+        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch("torch_npu.npu_scatter_nd_update_", side_effect=scatter),
+    ):
+        assert impl.exec_kv(inputs, None, None, (cache,), slots, metadata) == (None, None)
+
+    expected = torch.full((5, 2), -99.0)
+    expected[:2] = inputs * 2
+    if mode == "mixed":
+        expected[2] = peer_inputs[1] * 2
+    elif mode != "replicated_decode":
+        expected[2] = peer_inputs[0] * 2
+    torch.testing.assert_close(cache.view(5, 2), expected)
+    if mode == "replicated_decode":
+        group.all_gather.assert_not_called()
+    else:
+        group.all_gather.assert_called_once()
+        gathered_input = inputs[1:] if mode == "mixed" else inputs
+        torch.testing.assert_close(group.all_gather.call_args.args[0], gathered_input)

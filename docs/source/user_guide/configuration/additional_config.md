@@ -130,10 +130,10 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`. Values `0` and `1` disable O-projection TP; values greater than `1` enable sharding.     |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
+| `oproj_tensor_parallel_size`     | int  | `1` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 

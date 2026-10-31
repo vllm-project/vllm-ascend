@@ -278,28 +278,6 @@ class ModelWithContext(nn.Module):
     def get_original_model(self):
         return self.original_model
 
-    def compute_logits(self, hidden_states: torch.Tensor):
-        # draft model has `compute_logits`, which is not in ModelWithContext
-        return self.original_model.compute_logits(hidden_states)
-
-    def compute_draft_logits(self, hidden_states: torch.Tensor):
-        return self.original_model.compute_draft_logits(hidden_states)
-
-    def markov_embed(self, token_ids: torch.Tensor):
-        return self.original_model.markov_embed(token_ids)
-
-    def markov_bias(self, markov_embed: torch.Tensor):
-        return self.original_model.markov_bias(markov_embed)
-
-    def map_draft_to_target(self, draft_ids: torch.Tensor):
-        return self.original_model.map_draft_to_target(draft_ids)
-
-    def embed_input_ids(self, *args, **kwargs):
-        return self.original_model.embed_input_ids(*args, **kwargs)
-
-    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
-        return self.original_model.compute_confidence(head_hidden, markov_embed)
-
     def __getattr__(self, name: str):
         # vLLM #57632 moved the draft context-K/V precompute into the
         # capture path, which reaches model methods through this wrapper.

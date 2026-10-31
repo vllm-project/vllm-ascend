@@ -498,7 +498,6 @@ class SFAForwardContext:
     actual_seq_lengths_key: torch.Tensor
     kv_slot_mapping: torch.Tensor
     topk_num_tokens: int
-    gather_full_o_proj: bool = False
 
 
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
@@ -546,28 +545,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
-
-    def _prepare_parallel_metadata(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        cum_query_lens: torch.Tensor,
-        seq_lens: torch.Tensor,
-        draft_index: int | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Customize metadata tensors for a parallel SFA layout."""
-        return cos, sin, slot_mapping, {}
-
-    def _update_parallel_slot_mapping(
-        self,
-        metadata: AscendSFAMetadata,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> None:
-        """Update optional parallel metadata after an outer layout wrapper."""
-        return
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -690,16 +667,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
 
-        cos, sin, slot_mapping, parallel_metadata = self._prepare_parallel_metadata(
-            common_attn_metadata,
-            cos,
-            sin,
-            slot_mapping,
-            cum_query_lens,
-            seq_lens,
-            draft_index,
-        )
-
         metadata = self.metadata_cls(  # type: ignore
             num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -723,7 +690,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
             block_size=block_size,
-            **parallel_metadata,
         )
         (
             metadata.num_decodes,
@@ -1035,10 +1001,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # PROLOG_V3 takes precedence over MLAPO and is the default fused
         # preprocessing for quantized SFA layers in every deployment (plain
-        # serving, PD KV producers and KV consumers). ``enable_dsa_cp`` is the
-        # prefill/P-node route selector: it routes to AscendSFADSACPImpl,
-        # which unconditionally disables fused preprocessing, so the two are
-        # mutually exclusive by construction. The C8 switches only select the
+        # serving, PD KV producers and KV consumers). The C8 switches select the
         # KV cache layout and are orthogonal to this choice. Unquantized
         # layers keep the NATIVE chain outside KV consumers because the
         # unquantized weight preparation transposes fused_qkv_a_proj.weight
@@ -1698,37 +1661,14 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
-    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
-        return None
-
-    def _parallel_query_gather_dim(self) -> int:
-        """Dimension restored by an outer DCP query gather."""
-        return 1
-
-    def _prepare_kv_for_parallel(
-        self,
-        k_pe: torch.Tensor | None,
-        k_nope: torch.Tensor | None,
-        knope_scale: torch.Tensor | None,
-        full_gather_o_proj_enabled: bool,
-    ) -> tuple[
-        torch.Tensor | None,
-        list[torch.distributed.Work],
-    ]:
-        """Prepare native KV tensors for an optional parallel layout."""
-        return None, []
-
     def _store_parallel_kv(
         self,
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
-        fused_kv_no_split: torch.Tensor | None,
-        kv_ag_handles: list[torch.distributed.Work],
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
-        full_gather_o_proj_enabled: bool,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1772,18 +1712,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens=num_input_tokens or hidden_states.shape[0],
         )
 
-    def _prepare_native_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: M,
-    ) -> torch.Tensor:
-        return hidden_states
-
     def _finalize_o_proj(
         self,
         attn_output: torch.Tensor,
         output: torch.Tensor,
-        gather_full_o_proj: bool,
     ) -> torch.Tensor:
         output[...] = self.o_proj(attn_output)[0]
         return output
@@ -1896,7 +1828,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def forward(
         self,
         layer_name,
-        hidden_states: torch.Tensor,  # query in unified attn
+        hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
@@ -1913,7 +1845,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
-                num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
+                if self.vllm_config.parallel_config.prefill_context_parallel_size > 1 and needs_pcp_kv_gather(
+                    attn_metadata, self.is_pcp_decode_sharded
+                ):
+                    # Empty and uneven PCP ranks must keep the same padded
+                    # rows for KV gathers and O-projection collectives.
+                    num_tokens = min(num_tokens, attn_metadata.num_input_tokens)
+                else:
+                    num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
                 return output.zero_()
             hidden_states = hidden_states[:num_tokens]
@@ -1956,11 +1895,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if gate_hidden_states is not None:
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
-        if fused_type == PreprocessType.NATIVE:
-            # Trim in the input layout before CP adds padding and shards it.
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
-            if gate_hidden_states is not None:
-                gate_hidden_states = hidden_states
+        if fused_type == PreprocessType.NATIVE and gate_hidden_states is not None:
+            gate_hidden_states = hidden_states
 
         if fused_type != PreprocessType.NATIVE:
             # Keep the raw hidden states for the indexer's k path: the fused
@@ -2047,16 +1983,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            # k_li no longer exists at this point: it is computed by
-            # indexer.forward_k below and gathered at cache-write time, so
-            # the fused gather below only carries the main KV.
-            fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
-                k_pe,
-                k_nope,
-                knope_scale,
-                parallel_context.gather_full_o_proj,
-            )
-
             if (
                 not kpool_hidden_prepared
                 and self.runtime_has_indexer
@@ -2081,12 +2007,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_pe,
                 k_nope,
                 knope_scale,
-                fused_kv_no_split,
-                kv_ag_handles,
                 kv_cache,
                 self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
-                parallel_context.gather_full_o_proj,
             )
 
         # A sharded-decode PCP rank can own no request but must still write
@@ -2109,7 +2032,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk and has_local_query,
-                attn_q_gather_handle=self._get_indexer_attn_q_gather_handle(attn_metadata),
             )
             # Release the pending KPool receive buffer after its consumer.
             k_hidden_states = None
@@ -2156,7 +2078,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._finalize_o_proj(
             attn_output,
             output[:num_input_tokens],
-            parallel_context.gather_full_o_proj,
         )
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

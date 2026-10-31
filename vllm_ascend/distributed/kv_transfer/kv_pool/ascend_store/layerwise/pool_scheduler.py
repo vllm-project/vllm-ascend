@@ -104,6 +104,8 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
+            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
             return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
@@ -111,11 +113,14 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         if self.use_layerwise_transfer:
             return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
 
-        token_len = (
-            self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if self._discard_partial_chunks
-            else prompt_token_len
-        )
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
+            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+        else:
+            token_len = (
+                self._floor_to_cache_transfer_granularity(prompt_token_len)
+                if self._discard_partial_chunks
+                else prompt_token_len
+            )
         if token_len < self.cache_transfer_granularity:
             return None
         return self._get_store_lookup_hit_tokens(request, token_len, num_computed_tokens, include_layers=True)

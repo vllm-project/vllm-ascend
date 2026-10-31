@@ -12,8 +12,8 @@ the measured configuration. Other configurations are not performance-qualified.
 
 | Optimization | Behavior and fallback |
 | --- | --- |
-| KPool hidden overlap | Start ordinary PCP KPool hidden AllGather before query projections; wait at key consumption. Graph and DSA-CP paths retain synchronous behavior. |
-| Local MoE Top8 | Select complete local Top8 routes over all 288 experts, then gather 8 FP32 weights and 8 exactly representable FP32 IDs. Restore INT32 IDs afterward. Only the sigmoid router, TP1/PCP8/DP1 and a global maximum local token count of at least 1024 are eligible. LoRA, forced balancing and dynamic expert remapping retain the existing path. |
+| KPool hidden overlap | Start ordinary PCP KPool hidden AllGather before query projections; wait at key consumption. Graph and non-PCP paths retain existing behavior. |
+| Local MoE Top8 | Select complete local Top8 routes over all 288 experts, then gather 8 FP32 weights and 8 exactly representable FP32 IDs. Restore INT32 IDs afterward. Only the sigmoid router, TP1/PCP8/DP1 and a global maximum local token count of at least 1024 are eligible. LoRA, EPLB state, forced balancing and dynamic expert remapping retain the existing path. |
 | KDA output ReduceScatter | Pack the KDA output by the existing PCP token mapping and ReduceScatter instead of AllReduce followed by local row selection. Applies only to PCP prefill with `PCPRowParallelLinear`. |
 | Main KV overlap | Overlap main KV AllGather with Q projection. Restricted to eager BF16 NoPE prefill, TP1/PCP8/DCP1. Preserve padding, replicated decode prefixes and cache slot mapping. |
 | Early MoE hidden gather | Start hidden AllGather before the gate. Restricted to eager BF16 TP1/PCP8/DP1/EP8, hidden width 4096, 288 experts/Top8 and at least 1024 maximum local rows. Excludes profiling, LoRA, speculative decoding and dynamic placement. |
@@ -33,6 +33,11 @@ The measurements used all five optimizations. The branch organizes that
 prototype and removes its opt-in switches while preserving the eligibility
 conditions and tensor operations. The measurements precede this cleanup;
 the automatic-selection revision has not been benchmarked end to end again.
+Upstream main `cae7ff0290dd6c6155f71d7223e0fd4aff95c9e9` was subsequently
+merged for PR submission. This preserves its removal of legacy DSA-CP and
+its MRV2 EPLB source-row load accounting; local Top8 retains the original
+routing path whenever EPLB state is present. This integrated revision still
+needs end-to-end accuracy and performance validation.
 
 The workload uses 32 concurrent requests, 131072 input tokens and one output
 token per request, 117760 cached tokens (89.84375%), fixed token IDs and seed
@@ -81,11 +86,13 @@ wait-before-consumption. They complement the hardware evidence above and do not
 replace it.
 
 The focused tests and affected KDA, PCP, routing and prepare/finalize suites
-passed **460 tests** in an isolated CPU container using the measured runtime
+passed **750 tests** in an isolated CPU container using the measured runtime
 dependencies. Obsolete switch cases were removed, and automatic local routing
 selection and its small-batch, profiling and scoring fallbacks are covered.
 The packed-cache fixture supplies its eager configuration so the real cache
 eligibility checks exercise the synchronous fallback.
+The integrated run also includes MRV2 EPLB, fused MoE, O-proj lifecycle,
+SFA PCP precision and KDA contract regressions.
 
 Changed-file Ruff, formatting, spelling, Markdown, import and source checks
 passed, as did the staged Gitleaks scan. The full `bash format.sh ci` attempt on

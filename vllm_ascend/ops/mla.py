@@ -114,7 +114,6 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor | KPoolHiddenGather,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
-        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         return self.impl(
             hidden_states,
@@ -122,7 +121,6 @@ class IndexerWrapper(nn.Module):
             k_hidden_states,
             indexer_metadata,
             compute_topk,
-            attn_q_gather_handle=attn_q_gather_handle,
         )
 
 

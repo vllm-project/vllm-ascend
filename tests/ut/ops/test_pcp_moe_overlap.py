@@ -78,21 +78,32 @@ def test_pcp_route_gather_preserves_rows_and_waits_before_consumption(monkeypatc
 
 
 @pytest.mark.parametrize(
-    "max_rows,profiling,scoring",
-    [(1024, False, "sigmoid"), (1023, False, "sigmoid"), (1024, True, "sigmoid"), (1024, False, "softmax")],
+    "max_rows,profiling,scoring,eplb",
+    [
+        (1024, False, "sigmoid", False),
+        (1023, False, "sigmoid", False),
+        (1024, True, "sigmoid", False),
+        (1024, False, "softmax", False),
+        (1024, False, "sigmoid", True),
+    ],
 )
-def test_local_topk_selected_automatically_for_supported_batches(monkeypatch, max_rows, profiling, scoring):
+def test_local_topk_selected_automatically_for_supported_batches(monkeypatch, max_rows, profiling, scoring, eplb):
     hidden = torch.zeros(1, 4)
     logits = torch.zeros(1, 288)
     prepared = SimpleNamespace(
-        hidden_states=hidden, router_logits=logits, mc2_mask=None, padded_hidden_states_shape=None, pertoken_scale=None
+        hidden_states=hidden.repeat(8, 1),
+        router_logits=logits.repeat(8, 1),
+        mc2_mask=None,
+        padded_hidden_states_shape=None,
+        pertoken_scale=None,
     )
     weights, ids = torch.ones(1, 8), torch.zeros(1, 8, dtype=torch.int32)
     comm = routed_module.AllGatherCommImpl.__new__(routed_module.AllGatherCommImpl)
     comm.prepare = Mock(return_value=prepared)
     comm.prepare_finalize = SimpleNamespace(prepare_local_topk=Mock(return_value=(prepared, weights, ids)))
     comm.finalize = Mock(return_value=hidden)
-    router = type("AscendFusedTopKRouter", (), {"top_k": 8, "scoring_func": scoring})()
+    state = Mock(spec=routed_module.AscendEplbLayerState) if eplb else None
+    router = type("AscendFusedTopKRouter", (), {"top_k": 8, "scoring_func": scoring, "eplb_state": state})()
     layer = SimpleNamespace(
         enable_npugraph_ex_static_kernel=False,
         moe_config=SimpleNamespace(pcp_size=8, dp_size=1, is_sequence_parallel=False),
@@ -102,8 +113,10 @@ def test_local_topk_selected_automatically_for_supported_batches(monkeypatch, ma
         router=router,
         quant_type=None,
         _select_experts=Mock(return_value=(weights, ids)),
-        quant_method=SimpleNamespace(apply=Mock(return_value=SimpleNamespace(routed_out=hidden))),
-        _use_v2_model_runner=False,
+        quant_method=SimpleNamespace(
+            apply=Mock(return_value=SimpleNamespace(routed_out=hidden, expert_tokens=None, group_list_type=1))
+        ),
+        _use_v2_model_runner=True,
         return_with_event=False,
     )
     monkeypatch.setattr(routed_module, "get_forward_context", lambda: SimpleNamespace())
@@ -117,7 +130,11 @@ def test_local_topk_selected_automatically_for_supported_batches(monkeypatch, ma
     )
     result = routed_module.AscendRoutedExperts.forward_impl(layer, hidden_states=hidden, router_logits=logits)
     assert result is hidden
-    optimized = max_rows >= 1024 and not profiling and scoring == "sigmoid"
+    optimized = max_rows >= 1024 and not profiling and scoring == "sigmoid" and not eplb
     assert comm.prepare_finalize.prepare_local_topk.call_count == int(optimized)
     assert comm.prepare.call_count == int(not optimized)
     assert layer._select_experts.call_count == int(not optimized)
+    if eplb:
+        state.record_load.assert_called_once()
+        assert state.record_load.call_args.kwargs["num_source_tokens"] == hidden.shape[0]
+        assert state.record_load.call_args.kwargs["prepare_finalize"] is comm.prepare_finalize
