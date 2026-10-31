@@ -4,3 +4,5 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 
 - [KVPP: KV Cache Layer Parallelism](kvpp.md) — Physical cache placement, full-layer broadcast, and test design.
 - [Persistent Incremental Csrc Build Cache](persistent_csrc_build_cache.md) — Fine-grained native build reuse, correctness identity, concurrency, and CI integration.
+
+- [Experimental Dynamic PP Prefill](dynamic_pp_prefill.md) — Shared MRv2 runtime, overlapping layers, and completed-device feedback.

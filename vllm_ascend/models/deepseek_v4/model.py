@@ -876,6 +876,31 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        self.pp_prefill_execution_range = self.start_layer, self.end_layer
+        self._pp_boundary_controller = None
+        self._pp_moe_layer_names = None
+        self._pp_layer_prefix = f"{prefix}.layers"
+        values = (vllm_config.additional_config or {}).get("dynamic_pp_config", {})
+        if values.get("enabled", False):
+            from vllm.v1.worker.pp.boundary import DynamicPPConfig, PPBoundaryController
+
+            dynamic = DynamicPPConfig.from_mapping(values)
+            dynamic.validate_runtime(vllm_config, get_ascend_config().pp_send_buffer_size)
+            rank = get_pp_group().rank_in_group
+            base = self.end_layer if rank == 0 else self.start_layer
+            minimum = getattr(config, "num_hash_layers", getattr(config, "mlp_layer_types", ()).count("hash_moe"))
+            controller = PPBoundaryController(dynamic, base, config.num_hidden_layers, minimum)
+            self._pp_boundary_controller = controller
+            loaded_start, loaded_end = controller.loaded_range(rank)
+            for layer_idx in range(loaded_start, loaded_end):
+                if isinstance(self.layers[layer_idx], PPMissingLayer):
+                    self.layers[layer_idx] = DeepseekV4DecoderLayer(
+                        vllm_config,
+                        prefix=f"{prefix}.layers.{layer_idx}",
+                        topk_indices_buffer=topk_indices_buffer,
+                    )
+            self._pp_moe_layer_names = tuple(vllm_config.compilation_config.static_all_moe_layers)
+
         # Decoder layers run in order, so their OTP collectives can reuse the
         # same address-stable scratch storage during profiling and graph replay.
         self._oproj_buffer_pool = OProjBufferPool()
@@ -1002,7 +1027,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if pp_group.is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        start_layer, end_layer = self.pp_prefill_execution_range
+        if self._pp_moe_layer_names is not None and is_forward_context_available():
+            from vllm.v1.worker.pp.boundary import select_pp_moe_layer_names
+
+            context = get_forward_context()
+            if context.all_moe_layers is not None:
+                context.all_moe_layers = select_pp_moe_layer_names(
+                    self._pp_moe_layer_names, self._pp_layer_prefix, start_layer, end_layer
+                )
+                context.moe_layer_index = 0
+        for layer in islice(self.layers, start_layer, end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -1150,6 +1185,25 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
+
+    def get_dynamic_pp_layer_spec(self):
+        from vllm.v1.worker.pp.interface import PPLayerSpec
+
+        pp = get_pp_group()
+        return PPLayerSpec(
+            self.model.end_layer if pp.is_first_rank else self.model.start_layer,
+            self.config.num_hidden_layers,
+            getattr(self.config, "num_hash_layers", getattr(self.config, "mlp_layer_types", ()).count("hash_moe")),
+        )
+
+    def set_dynamic_pp_layer_range(self, start: int, end: int) -> None:
+        controller = self.model._pp_boundary_controller
+        if controller is None:
+            raise ValueError("Dynamic PP replicas were not loaded")
+        loaded_start, loaded_end = controller.loaded_range(get_pp_group().rank_in_group)
+        if not loaded_start <= start < end <= loaded_end:
+            raise ValueError("Dynamic PP execution range exceeds loaded replicas")
+        self.model.pp_prefill_execution_range = start, end
 
     def compute_logits(
         self,
