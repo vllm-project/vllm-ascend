@@ -5,13 +5,7 @@ import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
-
-from vllm_ascend.distributed.eplb.tensor_ops import (  # isort: skip
-    EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
-    build_expert_replica_routing_table as build_expert_replica_routing_table,
-    count_allgather_tokens as count_allgather_tokens,
-    make_allgather_mask as make_allgather_mask,
-)
+from vllm_ascend.distributed.eplb.tensor_ops import EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
 
 
 def use_allgather_eplb(enabled: bool) -> bool:

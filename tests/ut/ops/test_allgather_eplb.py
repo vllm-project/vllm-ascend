@@ -12,15 +12,13 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
-from vllm_ascend.ops.fused_moe import eplb as eplb_ops
-from vllm_ascend.ops.fused_moe import routed_experts as routed_module
-from vllm_ascend.ops.fused_moe.eplb import (
+from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
     count_allgather_tokens,
     make_allgather_mask,
-    map_to_physical,
-    record_expert_tokens,
 )
+from vllm_ascend.ops.fused_moe import routed_experts as routed_module
+from vllm_ascend.ops.fused_moe.eplb import map_to_physical, record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -288,13 +286,12 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
         dp_group=SimpleNamespace(all_gather=lambda rows, dim: torch.cat([rows, torch.zeros_like(rows)])),
     )
     prepare = PrepareAndFinalizeWithAllGather(config)
-    make_mask = eplb_ops.make_allgather_mask
     gather_mask = prepare.all_gather_eplb_mask
 
     def source_mask(*args, **kwargs):
         events.append("source_mask")
         assert args[0] == 4
-        return make_mask(*args, **kwargs)
+        return make_allgather_mask(*args, **kwargs)
 
     def prepare_inputs(**kwargs):
         events.append("prepare")
