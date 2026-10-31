@@ -217,9 +217,9 @@ def test_registered_operator_forwards_group_and_fake_keeps_shape():
 
 
 def test_attention_forwards_its_group_without_scheduler_config():
-    source = ROOT / "vllm_ascend/attention/context_parallel/sfa_cp.py"
+    source = ROOT / "vllm_ascend/attention/sfa_v1.py"
     cls = next(
-        n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "AscendSFADCPImpl"
+        n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "AscendSFAImpl"
     )
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_merge_dcp_outputs")
     calls = []
@@ -243,34 +243,32 @@ def test_attention_forwards_its_group_without_scheduler_config():
 
 
 @pytest.mark.parametrize(
-    "tokens,decode,prepared,pcp_size",
+    "tokens,prepared,pcp_size",
     [
-        (1, True, True, 1),
-        (6, True, True, 1),
-        (12, True, True, 1),
-        (13, True, True, 1),
-        (6, False, False, 1),
-        (6, True, False, 2),
-        (6, True, False, 8),
+        (1, True, 1),
+        (6, True, 1),
+        (12, True, 1),
+        (13, True, 1),
+        (6, False, 2),
+        (6, False, 8),
     ],
 )
 @pytest.mark.parametrize("keep_view", [False, True])
 @pytest.mark.parametrize("layout", ["native", "fp16", "fp32", "other_width", "non_power_two"])
 @pytest.mark.parametrize("ranks", [2, 4, 8, 16])
 def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
-    tokens, decode, prepared, pcp_size, ranks, layout, keep_view
+    tokens, prepared, pcp_size, ranks, layout, keep_view
 ):
     if pcp_size > ranks:
         pytest.skip("PCP must divide the DCP group")
-    source = ROOT / "vllm_ascend/attention/context_parallel/sfa_cp.py"
+    source = ROOT / "vllm_ascend/attention/sfa_v1.py"
     tree = ast.parse(source.read_text())
     context_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DCPGatherContext")
-    impl = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSFADCPImpl")
+    impl = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSFAImpl")
     methods = [
         n
         for n in impl.body
-        if isinstance(n, ast.FunctionDef)
-        and n.name in ("_start_dcp_query_gather", "_finish_dcp_gather", "_record_query_gather_context")
+        if isinstance(n, ast.FunctionDef) and n.name in ("_start_dcp_query_gather", "_finish_dcp_gather")
     ]
     for method in methods:
         method.decorator_list = []
@@ -296,8 +294,6 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
 
     namespace = {
         "torch": torch,
-        "M": object,
-        "AscendSFADCPMetadata": SimpleNamespace,
         "NamedTuple": NamedTuple,
         "all_gather_async": gather,
         "get_pcp_group": lambda: SimpleNamespace(world_size=pcp_size),
@@ -318,20 +314,13 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
         dcp_size=ranks,
         dcp_group=group,
         _start_dcp_gather=legacy,
-        _has_prefill=lambda metadata: metadata.num_prefills > 0,
     )
-    state._start_dcp_query_gather = lambda *args, **kwargs: namespace["_start_dcp_query_gather"](state, *args, **kwargs)
     dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(layout, torch.bfloat16)
     nope_dim = {"other_width": 256, "non_power_two": 496}.get(layout, 512)
     prepared = prepared and layout != "non_power_two"
     qn = torch.arange(tokens * 8 * nope_dim).to(dtype).view(8, tokens, nope_dim).transpose(0, 1)
     qr = torch.ones(tokens, 8, 64, dtype=dtype)
-    metadata = SimpleNamespace(num_prefills=0 if decode else 1, dcp_context=SimpleNamespace(gather_context=None))
-    namespace["_record_query_gather_context"](state, qn, qr, metadata)
-    context = metadata.dcp_context.gather_context
-    if not decode:
-        assert context is None and not events
-        return
+    context = namespace["_start_dcp_query_gather"](state, qn, qr)
     assert context.query_prepared is prepared
     assert "wait" not in events
     result = namespace["_finish_dcp_gather"](context, keep_view=keep_view)

@@ -156,7 +156,7 @@ class AscendMLAAttention(MLAAttention):
     False) inside ``__init__``, so the Ascend opt-in must live on the class
     (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
     onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
-    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAImpl) selected
     by the Ascend backends.
     """
 

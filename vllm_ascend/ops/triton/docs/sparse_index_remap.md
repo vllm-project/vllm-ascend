@@ -37,7 +37,7 @@
 
 ## Origin and Differences
 
-- **Origin**: Developed from scratch as a Triton replacement of the torch remap in `vllm_ascend/attention/context_parallel/sfa_cp.py` (`AscendSFADCPImpl._remap_sparse_indices`), whose fp32 torch implementation was introduced with the replicate-indexer SFA DCP feature (PR #11443).
+- **Origin**: Developed from scratch as a Triton replacement of the torch remap in `vllm_ascend/attention/sfa_v1.py` (`AscendSFAImpl._remap_sparse_indices`), whose fp32 torch implementation was introduced with the replicate-indexer SFA DCP feature (PR #11443).
 - **Differences**:
     - NPU adaptation: fuses remap, per-chunk compaction and tail pre-fill into one kernel plus a gather kernel, rather than dispatching the separate Torch cast/divide/select/sort/gather expressions;
     - Exactness repair: avoids backend vector integer division that can lose boundaries above `2**24`; the bitwise route and INT64 fallback preserve owner selection and stable top-k order. Serial compaction is retained for compiler reliability (see Constraints).

@@ -22,8 +22,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from torch import nn
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.ops import rope_dsv4, rotary_embedding
 
 
@@ -163,8 +163,8 @@ def test_sfa_indexer_hadamard_survives_level2_sleep() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_dcp_impl(owner: nn.Module | None) -> AscendSFADCPImpl:
-    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+def _make_dcp_impl(owner: nn.Module | None) -> AscendSFAImpl:
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.dcp_size = 2
     impl.dcp_rank = 0
