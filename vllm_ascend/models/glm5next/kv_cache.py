@@ -90,6 +90,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"and {compress_ratio}."
             )
         self.head_dim = head_dim
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"GLM KPool cache requires BF16 or FP8, got {dtype}.")
         self.dtype = dtype
         self.cache_role = cache_role
         self.cache_config = cache_config
@@ -110,6 +112,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            scale_dim=1 if self.dtype == torch.float8_e4m3fn else 0,
+            scale_dtype=torch.float32 if self.dtype == torch.float8_e4m3fn else torch.int8,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
