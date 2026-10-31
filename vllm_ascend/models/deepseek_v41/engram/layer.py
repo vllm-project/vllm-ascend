@@ -38,7 +38,19 @@ class AscendEngram(nn.Module):
         token_mask: torch.Tensor,
         rotation: torch.Tensor | None,
     ) -> torch.Tensor:
-        kv = self.wkv(rows)
+        return self.apply_gate(hidden_states, self.project(rows), token_mask, rotation)
+
+    def project(self, rows: torch.Tensor) -> torch.Tensor:
+        """Use the original projection backend and precision unchanged."""
+        return self.wkv(rows)
+
+    def apply_gate(
+        self,
+        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
+        token_mask: torch.Tensor,
+        rotation: torch.Tensor | None,
+    ) -> torch.Tensor:
         if (
             rotation is None
             and hidden_states.device.type == "npu"

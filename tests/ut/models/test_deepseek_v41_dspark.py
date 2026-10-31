@@ -101,6 +101,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         layers=[Layer(i) for i in range(3)],
         norm=lambda hidden: hidden,
     )
+    model._create_windowed_engram_projection = DeepseekV41Model._create_windowed_engram_projection.__get__(model)
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     output, aux = DeepseekV41Model.forward(
         model,

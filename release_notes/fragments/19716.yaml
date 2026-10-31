@@ -1,0 +1,9 @@
+pr: 19716
+entries:
+  - category: performance
+    text: >-
+      Added an experimental, default-off multistream_engram_wkv_overlap option
+      to overlap DeepSeek-V4.1-Flash Engram projections with MoE work during
+      FULL ACL Graph execution with sequence parallelism.
+    model: deepseek-v4.1-flash
+    hardware: [A3]
