@@ -298,6 +298,44 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_lightning_indexer_v2_metadata_meta(int64_t numHeadsQ, int64_t numHeadsK, int64_t headDim, int64_t topk,
+                                    const c10::optional<at::Tensor>& cuSeqlensQ,
+                                    const c10::optional<at::Tensor>& cuSeqlensK,
+                                    const c10::optional<at::Tensor>& sequsedQ,
+                                    const c10::optional<at::Tensor>& sequsedK,
+                                    const c10::optional<at::Tensor>& cmpResidualK, int64_t batchSize,
+                                    int64_t maxSeqlenQ, int64_t maxSeqlenK, c10::string_view layoutQ,
+                                    c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio)
+{
+    return at::empty({2048}, at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& w, int64_t topk,
+    const c10::optional<at::Tensor>& cuSeqlensQ, const c10::optional<at::Tensor>& cuSeqlensK,
+    const c10::optional<at::Tensor>& sequsedQ, const c10::optional<at::Tensor>& sequsedK,
+    const c10::optional<at::Tensor>& cmpResidualK, const c10::optional<at::Tensor>& blockTable,
+    const c10::optional<at::Tensor>& outputIdxOffset, const c10::optional<at::Tensor>& metadata, int64_t maxSeqlenQ,
+    c10::string_view layoutQ, c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio, int64_t returnValue)
+{
+    TORCH_CHECK(returnValue == 0 || returnValue == 1, "return_value must be 0 or 1");
+    TORCH_CHECK(layoutQ == "TND" || layoutQ == "BSND", "Unsupported query layout");
+    TORCH_CHECK(layoutK == "TND" || layoutK == "BSND" || layoutK == "PA_BBND", "Unsupported key layout");
+    TORCH_CHECK(q.dim() == (layoutQ == "TND" ? 3 : 4), "Invalid query rank");
+    TORCH_CHECK(k.dim() == (layoutK == "TND" ? 3 : 4), "Invalid key rank");
+    TORCH_CHECK(topk > 0, "topk must be positive");
+    auto heads = k.sym_size(layoutK == "TND" ? 1 : 2);
+    c10::SymDimVector shape{q.sym_size(0)};
+    if (layoutQ == "BSND") shape.push_back(q.sym_size(1));
+    shape.push_back(heads);
+    shape.push_back(c10::SymInt(topk));
+    auto indices = at::empty_symint(shape, q.options().dtype(at::kInt).device(c10::kMeta));
+    auto values = returnValue
+        ? at::empty_symint(shape, q.options().dtype(at::kFloat).device(c10::kMeta))
+        : at::empty({0}, q.options().dtype(at::kFloat).device(c10::kMeta));
+    return {indices, values};
+}
+
 at::Tensor npu_generic_block_sparse_attention_metadata_meta(
     const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
     int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
@@ -1871,6 +1909,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_lightning_indexer_v2_metadata_meta);
+    ops.impl("npu_lightning_indexer_v2", &vllm_ascend::meta::npu_lightning_indexer_v2_meta);
     ops.impl("npu_generic_block_sparse_attention_metadata",
              &vllm_ascend::meta::npu_generic_block_sparse_attention_metadata_meta);
     ops.impl("npu_generic_block_sparse_attention",
