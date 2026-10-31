@@ -1,0 +1,162 @@
+# ==========================================
+# Single-Node PD Disaggregation: Qwen3-30B-A3B W8A8 on Atlas 800I A3
+# ==========================================
+# One A3 machine (16 chips), split 8+8:
+#   Prefill: chips 0-7,  DP=2 TP=4,  kv_producer,  port 7100
+#   Decode:  chips 8-15, DP=2 TP=4,  kv_consumer,  port 7200
+#   Proxy:   CPU (load_balance_proxy_server_example.py)
+# Requires Mooncake v0.3.9+ (USE_ASCEND_DIRECT=ON)
+# ==========================================
+
+test_name: "Qwen3-30B-A3B-W8A8-PD-single-node"
+model: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7200
+    dp_rpc_port: 12322
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  LD_LIBRARY_PATH: "/usr/local/lib64/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH}"
+  VLLM_MOONCAKE_CONNECTOR_TIMEOUT: "1800"
+  VLLM_USE_V1: "1"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "256"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1024"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "100"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-enable-prefix-caching
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_buffer_device": "npu", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 4}, "decode": {"dp_size": 2, "tp_size": 4}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+      ASCEND_RT_VISIBLE_DEVICES: "8,9,10,11,12,13,14,15"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "100"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-enable-prefix-caching
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_buffer_device": "npu", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 4}, "decode": {"dp_size": 2, "tp_size": 4}}}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1500
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
