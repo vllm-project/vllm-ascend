@@ -70,14 +70,12 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
-    memcache_dp_init_barrier: bool = True,
 ) -> KVPoolWorker:
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
     return worker_class(
         vllm_config,
         use_layerwise,
         kv_cache_config,
-        memcache_dp_init_barrier=memcache_dp_init_barrier,
     )
 
 
@@ -131,7 +129,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
-        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
@@ -183,7 +180,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
-                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:

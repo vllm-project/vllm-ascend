@@ -54,26 +54,6 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
     fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
 
 
-@patch("torch.ops.vllm.dcp_a2a_fused")
-def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
-    impl = _make_impl(rank=1)
-    impl.dcp_group = SimpleNamespace(unique_name="dcp:0")
-    output = torch.empty(4, 2, 8)
-    lse = torch.empty(4, 2, 1, dtype=torch.float32)
-    expected = torch.empty(2, 2, 8)
-    fused_a2a.return_value = expected
-    dsa_cp_context = SimpleNamespace(
-        num_tokens_pad=4,
-        local_start=2,
-        local_end_with_pad=4,
-    )
-
-    actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
-
-    assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0")
-
-
 @pytest.mark.parametrize("scatter_dim", [0, 1])
 @pytest.mark.parametrize(
     "dtype,return_lse",
@@ -155,8 +135,8 @@ def test_replicated_pcp_query_heads_and_output_merge(impl_type, dcp_size, total_
         merge.assert_called_once_with(output, lse, 4 if dcp_size == 16 else 1, 1, "tp:0", "pcp:0")
 
 
-@pytest.mark.parametrize("gather_dim,pcp_size", [(1, 1), (0, 1), (0, 4)])
-def test_dcp_query_gather_preserves_distinct_head_or_token_shards(gather_dim, pcp_size):
+def test_dcp_query_gather_preserves_distinct_head_shards():
+    gather_dim, pcp_size = 1, 1
     from vllm_ascend.attention.context_parallel import sfa_cp
 
     impl = _make_impl(rank=0)
@@ -167,12 +147,16 @@ def test_dcp_query_gather_preserves_distinct_head_or_token_shards(gather_dim, pc
     send = packed.transpose(0, 1).contiguous() if gather_dim == 1 else packed
     gathered = torch.cat((send, send + 1000), dim=0)
     with (
-        patch.object(impl, "_parallel_query_gather_dim", return_value=gather_dim),
         patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=pcp_size)),
+        patch.object(
+            sfa_cp,
+            "prepare_query_head_major",
+            side_effect=lambda q, rope: torch.cat((q, rope), dim=-1).transpose(0, 1).contiguous(),
+        ),
         patch.object(sfa_cp, "all_gather_async", return_value=(gathered, None)) as gather,
     ):
         context = impl._start_dcp_query_gather(q, rope)
-        result_q, result_rope = impl._finish_dcp_gather(context)
+        result_q, result_rope = impl._finish_dcp_gather(context, keep_view=True)
     assert gather.call_args.args[1] is impl.dcp_group
     torch.testing.assert_close(gather.call_args.args[0], send)
     torch.testing.assert_close(result_q, torch.cat((q, q + 1000), dim=gather_dim))

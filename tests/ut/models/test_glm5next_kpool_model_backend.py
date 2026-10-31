@@ -12,12 +12,15 @@ from torch import nn
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
+import vllm_ascend.ops.linear as linear_module
+import vllm_ascend.utils as utils_module
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolMetadata,
-    AscendIndexerKPoolQueryMetadata,
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 with patch.dict(
     "sys.modules",
@@ -157,6 +160,74 @@ def test_kpool_cache_backends_support_pcp() -> None:
     assert backend_module.AscendIndexerKPoolTailBackend.supports_pcp()
 
 
+@pytest.mark.parametrize("weight_nz_mode", [0, 1, 2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weight_nz_mode, dtype):
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    for module in (backend_module, linear_module, utils_module):
+        monkeypatch.setattr(module, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(utils_module, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=weight_nz_mode))
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
+
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=2,
+        head_dim=4,
+        topk_tokens=8,
+        q_lora_rank=4,
+        index_kpool=4,
+        wq_b=nn.Linear(4, 8, bias=False, dtype=dtype),
+        wk_weights_proj=nn.Linear(8, 6, bias=False, dtype=dtype),
+        k_norm=nn.LayerNorm(4, dtype=dtype),
+        softmax_scale=0.5,
+        index_kpool_compress_ape=nn.Parameter(torch.zeros(4, 4, dtype=dtype)),
+        index_kpool_compress_gate=nn.Parameter(torch.randn(4, 8, dtype=dtype)),
+        k_cache=SimpleNamespace(prefix="indexer.k_cache"),
+        tail_cache=SimpleNamespace(prefix="indexer.tail"),
+        topk_indices_buffer=None,
+    )
+    source.wk_weights_proj.prefix = "model.layers.0.indexer.wk_weights_proj"
+    source.wq_b.prefix = "model.layers.0.indexer.wq_b"
+    backend = Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    original_weight = source.wk_weights_proj.weight.detach().clone()
+    nz_weights = []
+
+    def format_cast(weight, fmt, **kwargs):
+        # Fail at the device boundary if Linear tries to convert the source
+        # before KPool can derive its FP32 head weights (the A5 failure path).
+        if weight.data_ptr() == source.wk_weights_proj.weight.data_ptr():
+            raise AssertionError("KPool source converted to NZ before FP32 head-weight extraction")
+        nz_weights.append(weight.data_ptr())
+        return weight
+
+    monkeypatch.setattr(utils_module.torch_npu, "npu_format_cast", format_cast)
+    method = linear_module.AscendUnquantizedLinearMethod()
+    # Match the loader's ordering: Linear hooks first, then attention hooks.
+    for layer in (source.wk_weights_proj, source.wq_b):
+        method.process_weights_after_loading(layer)
+    expected_nz_weights = [source.wq_b.weight.data_ptr()] if weight_nz_mode == 2 else []
+    assert nz_weights == expected_nz_weights
+
+    # Repeated post-processing must not encounter an NZ source on the next cast.
+    for _ in range(2):
+        backend.process_weights_after_loading()
+        # CANN key weights and FP32 head weights must stay in ND, including
+        # when post-processing is repeated.
+        assert nz_weights == expected_nz_weights
+        assert backend._key_weight.dtype == dtype
+        assert backend._head_weight_f32.dtype == torch.float32
+        assert backend._key_weight.is_contiguous()
+        assert backend._head_weight_f32.is_contiguous()
+        torch.testing.assert_close(backend._key_weight, original_weight[: source.head_dim])
+        torch.testing.assert_close(backend._head_weight_f32, original_weight[source.head_dim :].float())
+        torch.testing.assert_close(backend._gate_weight, source.index_kpool_compress_gate.detach())
+        torch.testing.assert_close(backend._norm_weight_f32, source.k_norm.weight.detach().float())
+        torch.testing.assert_close(backend._norm_bias_f32, source.k_norm.bias.detach().float())
+    torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
+
+
 @pytest.mark.parametrize("compute_topk", [False, True])
 def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute_topk):
     compress = MagicMock()
@@ -259,13 +330,10 @@ class _RecordingKPool(nn.Module):
 
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-@pytest.mark.parametrize("dsa_cp", [False, True])
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
     graph_mode,
-    dsa_cp,
 ) -> None:
-    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -312,19 +380,6 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     metadata.positions = torch.zeros(64, dtype=torch.int64)
     metadata.slot_mapping = torch.full((64,), -1, dtype=torch.int64)
 
-    if dsa_cp:
-        metadata.query_metadata = backend_module.AscendIndexerKPoolQueryMetadata(
-            positions=metadata.positions,
-            cum_query_lens=metadata.cum_query_lens,
-            num_actual_tokens=metadata.num_actual_tokens,
-            seq_lens=metadata.seq_lens,
-            pool_tail=torch.zeros(8, dtype=torch.int64),
-        )
-        metadata.positions = torch.zeros(128, dtype=torch.int64)
-        monkeypatch.setattr(
-            backend_module, "get_tp_group", lambda: SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x)))
-        )
-
     result = backend.forward(
         hidden,
         normalized_q_c,
@@ -336,13 +391,10 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert result is not None
     assert recorder.args is not None
     assert recorder.kwargs is not None
-    expected_rows = 64 if dsa_cp or graph_mode == CUDAGraphMode.FULL else 8
+    expected_rows = 64 if graph_mode == CUDAGraphMode.FULL else 8
     assert result.shape[0] == expected_rows
     torch.testing.assert_close(recorder.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2))
-    if dsa_cp:
-        torch.testing.assert_close(recorder.args[0], torch.cat((hidden + 3, hidden + 3)))
-    else:
-        torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
+    torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
     torch.testing.assert_close(backend._key_weight, backend.wk_weights_proj.weight[:2])
     torch.testing.assert_close(backend._norm_weight_f32, backend.k_norm.weight.float())
     expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
@@ -351,45 +403,6 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     torch.testing.assert_close(recorder.args[2], expected_weights)
     assert recorder.args[-1] is tail_metadata
     assert recorder.kwargs["compute_topk"] is True
-
-
-def test_dsacp_kpool_compresses_global_tokens_and_selects_local_queries(monkeypatch):
-    metadata = _indexer_metadata()
-    local_positions = metadata.positions[4:]
-    query_metadata = AscendIndexerKPoolQueryMetadata(
-        positions=local_positions,
-        cum_query_lens=torch.tensor([0, 4], dtype=torch.int32),
-        num_actual_tokens=3,
-        seq_lens=metadata.seq_lens,
-        pool_tail=torch.zeros(2, dtype=torch.int64),
-    )
-    compress = MagicMock()
-    select = MagicMock(return_value=torch.zeros((4, 1, 7), dtype=torch.int32))
-    monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
-    monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
-    result = SparseAttnIndexerKpool(4, 2)(
-        torch.zeros(8, 2),
-        torch.zeros(4, 1, 2, dtype=torch.bfloat16),
-        torch.ones(4, 1, dtype=torch.bfloat16),
-        metadata.positions,
-        torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
-        torch.zeros(2, 2, 4, 2),
-        metadata,
-        _tail_metadata(),
-        gate_score=torch.zeros(8, 2),
-        compress_ape=torch.zeros(4, 2),
-        index_kpool=4,
-        max_pool_seq_len=1,
-        compute_topk=True,
-        query_metadata=query_metadata,
-    )
-    assert compress.call_args.args[2].shape[0] == 8
-    assert compress.call_args.args[6] is metadata.cum_query_lens
-    assert select.call_args.args[3] is query_metadata.cum_query_lens
-    assert select.call_args.args[6] is local_positions
-    assert result.shape[0] == 4
-    assert torch.all(result[3] == -1)
-    torch.testing.assert_close(result[:3, 0, 0], torch.tensor([0, 0, 0], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("missing", ["cann_ops_transformer", "vllm_ascend.ops.triton.glm5_next_cann_keypool"])
@@ -408,22 +421,22 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 
 @pytest.mark.parametrize("compute_topk", [False, True])
 @pytest.mark.parametrize(
-    "dsa_cp,actual_query_tokens,runtime_mode,query_rows",
+    "actual_query_tokens,runtime_mode,query_rows",
     [
-        (False, 8, CUDAGraphMode.NONE, 8),
-        (True, 4, CUDAGraphMode.NONE, 4),
-        (True, 3, CUDAGraphMode.NONE, 4),
-        (True, 0, CUDAGraphMode.NONE, 4),
-        (True, 0, CUDAGraphMode.PIECEWISE, 4),
-        (True, 0, CUDAGraphMode.FULL, 4),
-        (True, 0, CUDAGraphMode.NONE, 0),
-        (True, 0, CUDAGraphMode.FULL, 0),
+        (8, CUDAGraphMode.NONE, 8),
+        (4, CUDAGraphMode.NONE, 4),
+        (3, CUDAGraphMode.NONE, 4),
+        (0, CUDAGraphMode.NONE, 4),
+        (0, CUDAGraphMode.PIECEWISE, 4),
+        (0, CUDAGraphMode.FULL, 4),
+        (0, CUDAGraphMode.NONE, 0),
+        (0, CUDAGraphMode.FULL, 0),
     ],
 )
 @pytest.mark.parametrize("reuse_output", [False, True])
 @pytest.mark.parametrize("pcp", [False, True])
 def test_cann_indexer_writes_caches_before_optional_selection(
-    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, query_rows, reuse_output, pcp
+    monkeypatch, compute_topk, actual_query_tokens, runtime_mode, query_rows, reuse_output, pcp
 ):
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
@@ -467,15 +480,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             keypool_state_table=torch.empty(1, 3, dtype=torch.int32),
         )
     cache_metadata = metadata.write_metadata or metadata
-    if dsa_cp:
-        metadata.query_metadata = AscendIndexerKPoolQueryMetadata(
-            positions=metadata.positions[4 : 4 + query_rows],
-            cum_query_lens=torch.tensor([0, actual_query_tokens], dtype=torch.int64),
-            num_actual_tokens=actual_query_tokens,
-            seq_lens=torch.tensor([0, int(actual_query_tokens > 0)], dtype=torch.int64),
-            pool_tail=torch.zeros(2, dtype=torch.int64),
-        )
-    query_metadata = metadata.query_metadata or metadata
+    metadata.positions = metadata.positions[:query_rows]
+    metadata.num_actual_tokens = actual_query_tokens
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
     cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
@@ -519,10 +525,10 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
         assert op._pool_key_indexer.call_args.args[1] is cache
         assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is query_metadata.cum_query_lens
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
-        assert op._pool_key_indexer.call_args.args[3] is query_metadata.pool_tail
-        assert op._pack_keypool_indices.call_args.args[1] is query_metadata
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is metadata.cum_query_lens
+        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is metadata.seq_lens
+        assert op._pool_key_indexer.call_args.args[3] is metadata.pool_tail
+        assert op._pack_keypool_indices.call_args.args[1] is metadata
     else:
         assert result is None
         op._pool_key_indexer.assert_not_called()

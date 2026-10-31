@@ -1,0 +1,4 @@
+pr: 20321
+entries:
+  - category: bugfix
+    text: Fixed AscendStore bulk and layerwise worker initialization errors caused by stale Memcache barrier arguments.

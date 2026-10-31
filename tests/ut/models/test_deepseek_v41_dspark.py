@@ -116,8 +116,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
     torch.testing.assert_close(output, hidden + 6)
 
 
-@pytest.mark.parametrize("cp", [False, True])
-def test_v41_draft_routes_to_v41(cp):
+def test_v41_draft_routes_to_v41():
     from vllm_ascend.models.deepseek_v41.model import DeepseekV41SWAAttention
 
     draft_backend = SimpleNamespace()
@@ -128,13 +127,11 @@ def test_v41_draft_routes_to_v41(cp):
         instance.scale = 512**-0.5
         instance.dsa_attn = SimpleNamespace(dsa_attn=SimpleNamespace(impl=draft_backend))
 
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
-        patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,
             "get_dsv41_packed_cache_ops",
@@ -142,7 +139,7 @@ def test_v41_draft_routes_to_v41(cp):
         ),
     ):
         draft = DeepseekV41DSparkAttention(vllm_config=config, prefix="mtp.0.self_attn")
-    assert type(draft.v41_impl) is (AscendDSAV41CPImpl if cp else AscendDSAV41Impl)
+    assert type(draft.v41_impl) is AscendDSAV41Impl
     assert config.compilation_config.static_forward_context[draft.v41_layer_name] is draft
     assert draft.packed_cache_ops is draft_backend
     assert draft.softmax_scale == 512**-0.5

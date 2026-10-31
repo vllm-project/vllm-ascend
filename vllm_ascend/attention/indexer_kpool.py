@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_pcp_group, get_tp_group
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,7 +31,6 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
-from vllm_ascend.utils import _round_up, enable_dsa_cp
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -49,17 +48,6 @@ def _get_kpool_pcp_global_metadata(
 
 
 @dataclass
-class AscendIndexerKPoolQueryMetadata:
-    """Token-local query addressing over the pool cache."""
-
-    positions: torch.Tensor
-    cum_query_lens: torch.Tensor
-    num_actual_tokens: int
-    seq_lens: torch.Tensor
-    pool_tail: torch.Tensor
-
-
-@dataclass
 class AscendIndexerKPoolMetadata:
     """Metadata for compressed indexer cache writes and top-k reads."""
 
@@ -74,7 +62,6 @@ class AscendIndexerKPoolMetadata:
     raw_seq_lens: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
     num_actual_tokens: int = 0
-    query_metadata: AscendIndexerKPoolQueryMetadata | None = None
     query_start_loc: torch.Tensor | None = None
     start_pos: torch.Tensor | None = None
     pool_tail: torch.Tensor | None = None
@@ -148,42 +135,16 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # MTP tables count expanded kernel pages.
         self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         scheduler_config = vllm_config.scheduler_config
-        self.use_dsa_cp = enable_dsa_cp()
-        self.dsa_cp_size = get_tp_group().world_size if self.use_dsa_cp else 1
-        self.dsa_cp_rank = get_tp_group().rank_in_group if self.use_dsa_cp else 0
-        self._max_num_batched_tokens = _round_up(scheduler_config.max_num_batched_tokens, self.dsa_cp_size)
+        self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
         # FULL draft graphs can pad requests beyond max_num_seqs.
         self._max_num_metadata_reqs = max(scheduler_config.max_num_seqs, self._max_num_batched_tokens)
         self._max_num_write_tokens = self._max_num_batched_tokens * self.pcp_size
         # Keep captured storage isolated between MTP draft steps.
         self._metadata_buffers: dict[int, _KPoolMetadataBuffers] = {}
         self._write_metadata_buffers: dict[int, _KPoolMetadataBuffers] = {}
-        self._dsa_cp_query_buffers: dict[int, torch.Tensor] = {}
         self._captured_state_tables: dict[tuple[int, int, int], torch.Tensor] = {}
         self._state_table_scratch: dict[int, torch.Tensor] = {}
         self._state_table_shapes: dict[int, tuple[int, int]] = {}
-
-    def _build_query_metadata(
-        self, common: CommonAttentionMetadata, positions: torch.Tensor
-    ) -> AscendIndexerKPoolQueryMetadata | None:
-        if not self.use_dsa_cp:
-            return None
-        local_tokens = positions.shape[0] // self.dsa_cp_size
-        local_start = self.dsa_cp_rank * local_tokens
-        local_end = local_start + local_tokens
-        key = common.slot_mapping.data_ptr()
-        if key not in self._dsa_cp_query_buffers:
-            self._dsa_cp_query_buffers[key] = torch.empty(
-                3, self._max_num_metadata_reqs, dtype=torch.int64, device=self.device
-            )
-        query_lens, seq_lens, pool_tail = self._dsa_cp_query_buffers[key][:, : common.num_reqs]
-        return AscendIndexerKPoolQueryMetadata(
-            positions=positions[local_start:local_end],
-            cum_query_lens=query_lens,
-            num_actual_tokens=max(min(local_end, common.num_actual_tokens) - local_start, 0),
-            seq_lens=seq_lens,
-            pool_tail=pool_tail,
-        )
 
     def _get_metadata_buffers(
         self, common_attn_metadata: CommonAttentionMetadata, *, write: bool = False, step_key: int | None = None
@@ -279,7 +240,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         buffers = self._get_metadata_buffers(common_attn_metadata, write=write, step_key=step_key)
-        num_cache_tokens = _round_up(num_input_tokens, self.dsa_cp_size)
+        num_cache_tokens = num_input_tokens
         if num_cache_tokens > buffers.positions.numel():
             raise RuntimeError("KPool metadata token count exceeds its persistent buffer capacity.")
         num_source_tokens = min(
@@ -290,9 +251,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         from vllm_ascend.ops.triton.glm5_next_cann_keypool import build_keypool_metadata  # type: ignore[import-untyped]
 
         state_table = self._get_state_table(common_attn_metadata, graph_capture, buffers.slot_mapping.data_ptr())
-        query_metadata = (
-            None if write else self._build_query_metadata(common_attn_metadata, buffers.positions[:num_cache_tokens])
-        )
         (
             positions,
             slot_mapping,
@@ -309,8 +267,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             num_source_tokens,
             self.logical_block_size,
             self.compress_ratio,
-            query_metadata=query_metadata,
-            local_start=self.dsa_cp_rank * (num_cache_tokens // self.dsa_cp_size),
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         return AscendIndexerKPoolMetadata(
@@ -331,7 +287,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             ],
             keypool_state_table=state_table,
             keypool_start_offsets=buffers.start_offsets[:num_reqs],
-            query_metadata=query_metadata,
         )
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata) -> AscendIndexerKPoolMetadata:
@@ -591,6 +546,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.index_kpool: int = vllm_indexer.index_kpool
         self.wq_b = vllm_indexer.wq_b
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
+        # Linear post-processing runs before the attention backend's hook.
+        # Keep the fused source in ND for slicing and FP32 head-weight casts:
+        # ACLNN-only devices cannot cast NZ weights to FP32. The key slice is
+        # consumed directly by CANN key_pool, rather than the linear method.
+        self.wk_weights_proj.skip_weight_nz_conversion = True
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         self.index_kpool_compress_ape = vllm_indexer.index_kpool_compress_ape
@@ -652,7 +612,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: Any,
         compute_topk: bool = True,
-        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         if not isinstance(indexer_metadata, AscendIndexerKPoolMetadata):
             raise TypeError("GLM KPool backend requires AscendIndexerKPoolMetadata.")
@@ -664,7 +623,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError("GLM KPool backend requires tail-cache metadata.")
 
         num_tokens = hidden_states.shape[0]
-        if indexer_metadata.query_metadata is None and context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
@@ -682,8 +641,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
-        if indexer_metadata.query_metadata is not None:
-            k_hidden = get_tp_group().all_gather(k_hidden, dim=0)
         restore_indices = indexer_metadata.pcp_hidden_restore_indices
         if restore_indices is not None:
             padding = indexer_metadata.pcp_local_token_count - k_hidden.shape[0]
@@ -736,9 +693,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         *,
         compute_topk: bool,
     ) -> torch.Tensor | None:
-        query_metadata = indexer_metadata.query_metadata or indexer_metadata
         cache_metadata = indexer_metadata.write_metadata or indexer_metadata
-        num_tokens = q_values.shape[0] if q_values is not None else query_metadata.positions.shape[0]
+        num_tokens = q_values.shape[0] if q_values is not None else indexer_metadata.positions.shape[0]
         output_width = self.topk_tokens + self.index_kpool - 1
         if compute_topk and self.topk_indices_buffer is not None:
             if (
@@ -826,10 +782,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
             return None
-        # Empty DSA-CP shards must update caches but skip CANN's unsafe no-work path.
+        # Empty batches must update caches but skip CANN's unsafe no-work path.
         # FULL capture retains selection because replay may have live queries.
         if num_tokens == 0 or (
-            query_metadata.num_actual_tokens == 0 and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+            indexer_metadata.num_actual_tokens == 0
+            and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
         ):
             if self.topk_indices_buffer is not None:
                 output = self.topk_indices_buffer[:num_tokens]
@@ -842,9 +799,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             query,
             indexer_cache,
             weights.to(torch.bfloat16),
-            query_metadata.pool_tail,
-            actual_seq_q=query_metadata.cum_query_lens,
-            actual_seq_k=query_metadata.seq_lens,
+            indexer_metadata.pool_tail,
+            actual_seq_q=indexer_metadata.cum_query_lens,
+            actual_seq_k=indexer_metadata.seq_lens,
             block_table=indexer_metadata.block_table,
             layout_q="TND",
             layout_k="PA_BBND",
@@ -853,5 +810,5 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             mask_mode=3,
         )
         return self._pack_keypool_indices(
-            indices, query_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
+            indices, indexer_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
         )

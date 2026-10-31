@@ -31,8 +31,8 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 | Weight Version                                       | Hardware Requirements | KV Cache Selection | Download Links |
 |------------------------------------------------------|-----------------------|--------------------|----------------|
 | `Qwen3.5-397B-A17B` (BF16 version)                   | 2 950DT Products (96 GB x 8) nodes or 2 Atlas 800I A3 (64 GB x 16) nodes or 4 Atlas 800I A2 (64 GB x 8) nodes | `auto` for the baseline | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
-| `Qwen3.5-397B-A17B-w8a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
-| `Qwen3.5-397B-A17B-w4a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
+| `Qwen3.5-397B-A17B-w8a8-mtp` (quantized version)     | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
+| `Qwen3.5-397B-A17B-w4a8-mtp` (quantized version)     | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
 | `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
 | `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 | `Qwen3.5-397B-A17B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96 GB x 8) node | `mxfp8` for the supported C8 recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8c8-mxfp8) |
@@ -62,6 +62,16 @@ Select an image for your hardware and start a container on each node. Refer to [
 
 For PD deployment, use the same vLLM-Ascend release image and dependency versions on P and D.
 
+Run the following commands as root on the **host** before starting the container. Do not run them inside the serving container: the container mounts `/sys` and `/proc/sys` read-only, so the CPU governor write fails and `sysctl` is silently ignored (it still returns 0), which makes the tuning appear to succeed without taking effect.
+
+```bash
+# Host CPU governor and kernel tuning (run on the host, not in the container).
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+```
+
 === "950DT Products"
 
     Start a Docker container on each node.
@@ -73,7 +83,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -111,7 +122,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -152,7 +164,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -173,6 +186,12 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
+
+!!! note
+
+    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1g shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
+
+    The CPU governor and `sysctl` tuning commands must run on the host before starting the container; see the host preparation block at the top of this section. Do not run them inside the serving container, where `/sys` and `/proc/sys` are read-only.
 
 After entering the actual serving container on each node, check the executables, versions, and imported paths:
 
@@ -265,11 +284,6 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_USE_V2_MODEL_RUNNER=0
-
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
 
     # Ensure the model path matches the directory recorded during download
     MODEL_PATH="Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
@@ -446,7 +460,7 @@ Common Issues Tip: If Ray workers cannot discover each other, check Ray cluster 
 
 ### 5.4 Prefill-Decode Disaggregation (A3)
 
-PD disaggregation separates Prefill and Decode into different service groups. This performance-oriented example deploys 1P1D on one 16-NPU Atlas 800I A3 host with the `Qwen3.5-397B-A17B-w4a8` checkpoint. In this section, 1P1D describes two service groups; it does not mean that P and D must occupy separate hosts.
+PD disaggregation separates Prefill and Decode into different service groups. This performance-oriented example deploys 1P1D on one 16-NPU Atlas 800I A3 host with the `Qwen3.5-397B-A17B-w4a8-mtp` checkpoint. In this section, 1P1D describes two service groups; it does not mean that P and D must occupy separate hosts.
 
 The 16 NPUs are divided into two non-overlapping device sets:
 
@@ -1151,6 +1165,8 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 
 Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
 
+Prefill uses the self-contained DP1 mode and therefore does not set the DP address or RPC port. Decode explicitly sets `--data-parallel-rank`, so the launcher also supplies its DP control-plane address and RPC port. In this DP1/rank0 example, the Decode address points to the Decode host itself. The Prefill and Decode services are separate vLLM instances and do not share a DP group. Do not mistake the DP RPC port for the HTTP port; the proxy always uses the HTTP ports (argument 2), never the DP RPC port.
+
 ```shell
 # On P:
 bash run_p.sh 0,1,2,3,4,5,6,7 30060 1 0 "<P_SERVICE_IP>" 6884 8
@@ -1300,7 +1316,7 @@ ais_bench --models vllm_api_general_chat \
   --datasets gpqa_gen_0_shot_cot_chat_prompt --debug
 ```
 
-The following result for `Qwen3.5-397B-A17B-w8a8` on `vLLM-Ascend v0.30.0 release` is provided for reference only.
+The following result for `Qwen3.5-397B-A17B-w8a8-mtp` on `vLLM-Ascend v0.30.0 release` is provided for reference only.
 
 | dataset | version | metric   | mode | vllm-api-general-chat |
 | ------- | ------- | -------- | ---- | --------------------- |
@@ -1313,12 +1329,19 @@ Record software and checkpoint versions, and keep the dataset, prompt, chat temp
 Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. For single-node or MP deployment, set `base_url` to the serving API endpoint; for PD deployment, use the proxy endpoint. Replace `127.0.0.1:8000` below with the IP and HTTP port reachable from the evaluation client, and ensure that `model` matches `--served-model-name`.
 
 ```shell
+# Point MODEL_PATH to the local model directory recorded in Section 3.1.
+# lm_eval/Transformers resolve `tokenizer` as a local path or a Hugging Face
+# style model id, so use a local directory rather than a ModelScope repo id.
+MODEL_PATH="/mnt/weight/Qwen3.5-397B-A17B-w8a8-mtp"
+
 lm_eval \
   --model local-completions \
-  --model_args model=qwen3.5,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=qwen3.5,tokenizer="${MODEL_PATH}",base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
+
+In `--model_args`, `model=qwen3.5` is the served model name used to select the model on the serving side (it must match `--served-model-name`), while `tokenizer` is the path or identifier used by lm_eval to load the tokenizer. Do not use the served model name for `tokenizer`: lm_eval tries to resolve it as a tokenizer identifier and fails if it is neither a local folder nor a valid model id. Point `tokenizer` at the local model directory recorded in [Section 3.1](#31-model-weight) so that the tokenizer matches the checkpoint used by the service. A ModelScope repo id such as `Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp` is not resolved the same way by lm_eval/Transformers, so prefer the local directory. If the machine has no direct access to the model hub, configure the Hugging Face mirror or an offline cache (`HF_ENDPOINT`, `HF_HUB_OFFLINE=1`) so that both the tokenizer and the model files resolve from the same location.
 
 ## 8 Performance Evaluation
 

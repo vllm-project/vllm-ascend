@@ -7,7 +7,7 @@
 - **Python entry point**: `sampling_mask_from_logits_npu` in
   `vllm_ascend/ops/triton/v2/sample/sampling_mask.py`.
 - **Triton kernel**: `_pack_sampling_mask_kernel_ascend`.
-- **Integration**: `vllm_ascend/patch/worker/patch_v2/patch_triton.py` binds the
+- **Integration**: `vllm_ascend/patch/worker/patch_triton.py` binds the
   wrapper directly as `SamplingMaskTensors.from_logits`.
 
 For request row `r` and vocabulary index `i`, the keep condition is:

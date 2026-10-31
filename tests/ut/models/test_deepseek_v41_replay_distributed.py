@@ -85,7 +85,6 @@ def _distributed_replay_worker(rank, init_method):
             patch.setattr(replay_mod, "should_skip_allreduce_across_dp_group", lambda _: False)
             patch.setattr(replay_mod, "should_skip_dp_coordination", lambda: False)
             patch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
-            patch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
             config = SimpleNamespace(
                 scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=16),
                 parallel_config=SimpleNamespace(
