@@ -432,6 +432,72 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         self.assertEqual(out, "final_out")
         self.assertEqual(mock_gmm.call_args.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
 
+    def test_apply_gmm1_skips_lora_injection_when_no_adapter_selected(self):
+        method = self._make_method()
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True))
+        method.lora_context = lora_context
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(2, 8, 16),
+            w2_weight=torch.randn(2, 16, 8),
+            w13_bias=None,
+            w2_bias=None,
+        )
+        mlp_compute_input = _mlp_compute_input(
+            layer=layer,
+            lora_context=lora_context,
+            expanded_row_idx=torch.arange(4, dtype=torch.int32),
+            topk_ids=torch.zeros(4, 1, dtype=torch.int32),
+        )
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+            ),
+            patch("torch_npu.npu_grouped_matmul", return_value=["gate_up_out"], create=True),
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as mock_apply_w13,
+            patch("vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather") as mock_recover,
+        ):
+            out = method.apply_gmm1(mlp_compute_input)
+
+        self.assertEqual(out, "gate_up_out")
+        mock_apply_w13.assert_not_called()
+        mock_recover.assert_not_called()
+        self.assertIsNone(method._lora_routing)
+
+    def test_apply_gmm1_injects_lora_deltas_when_adapter_selected(self):
+        method = self._make_method()
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+        method.lora_context = lora_context
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(2, 8, 16),
+            w2_weight=torch.randn(2, 16, 8),
+            w13_bias=None,
+            w2_bias=None,
+        )
+        mlp_compute_input = _mlp_compute_input(
+            layer=layer,
+            lora_context=lora_context,
+            expanded_row_idx=torch.arange(4, dtype=torch.int32),
+            topk_ids=torch.zeros(4, 1, dtype=torch.int32),
+        )
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+            ),
+            patch("torch_npu.npu_grouped_matmul", return_value=["gate_up_out"], create=True),
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as mock_apply_w13,
+            patch(
+                "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
+                return_value=("expert_ids", "lora_slots"),
+            ),
+        ):
+            out = method.apply_gmm1(mlp_compute_input)
+
+        self.assertEqual(out, "gate_up_out")
+        mock_apply_w13.assert_called_once()
+        self.assertEqual(method._lora_routing, ("expert_ids", "lora_slots"))
+
 
 class TestApplyMoeMlp(unittest.TestCase):
     def _quant_method(self, fused: bool):

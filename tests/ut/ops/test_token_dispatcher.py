@@ -1073,6 +1073,62 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
 
+    def test_lora_context_without_adapter_skips_lora_index_collectives(self):
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True),
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(8, 16, dtype=torch.bfloat16),
+            topk_weights=torch.rand(8, 4),
+            topk_ids=torch.randint(0, 4, (8, 2)).long(),
+            expert_map=torch.tensor([0, 1, 2, 3]),
+            quant_type=QuantType.NONE,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_preprocess,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_postprocess,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input)
+
+        mock_preprocess.assert_not_called()
+        mock_all2all.assert_not_called()
+        mock_postprocess.assert_not_called()
+
+    def test_lora_context_with_active_adapter_runs_lora_index_collectives(self):
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False),
+                split_lora_indices=torch.zeros(8, dtype=torch.long),
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(8, 16, dtype=torch.bfloat16),
+            topk_weights=torch.rand(8, 4),
+            topk_ids=torch.randint(0, 4, (8, 2)).long(),
+            expert_map=torch.tensor([0, 1, 2, 3]),
+            quant_type=QuantType.NONE,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_preprocess,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_postprocess,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input)
+
+        mock_preprocess.assert_called_once()
+        mock_all2all.assert_called_once()
+        mock_postprocess.assert_called_once()
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
         hidden_states = torch.randn(16, 16)

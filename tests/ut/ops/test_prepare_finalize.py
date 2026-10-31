@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -218,6 +219,21 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_prepare_lora_indices_follows_active_adapter(self, mock_forward_context, mock_tp_rank, mock_tp_size):
+        # A published lora_context alone (LoRA served, but this batch runs the
+        # base model) must not build per-token LoRA indices.
+        for no_lora in (True, False):
+            with self.subTest(no_lora=no_lora):
+                layer = PrepareAndFinalizeWithAll2All(self.moe_config)
+                layer.set_lora_context(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=no_lora)))
+                with patch("vllm_ascend.ops.fused_moe.prepare_finalize.prepare_lora_indices") as mock_prepare:
+                    layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
+
+                self.assertEqual(mock_prepare.called, not no_lora)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")

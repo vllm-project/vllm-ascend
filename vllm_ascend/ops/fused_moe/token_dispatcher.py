@@ -548,7 +548,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             all2all_lora_indices(
                 self.lora_context,
                 output_splits=output_splits,
@@ -622,7 +622,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_out_tokens=num_out_tokens,
         )
 
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             preprocess_lora_indices(
                 self.lora_context,
                 topk_ids=topk_ids,
@@ -717,7 +717,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 global_input_tokens, global_input_tokens_local_experts_indices
             )
-        if self.lora_context is not None:
+        if has_lora(self.lora_context):
             postprocess_lora_indices(
                 self.lora_context,
                 reversed_permutation_mapping=reversed_global_input_permutation_mapping,

@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.lora.fused_moe import prepare_lora_indices
+from vllm_ascend.lora.fused_moe import has_lora, prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
@@ -150,7 +150,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
-            if self.lora_context is not None:
+            if has_lora(self.lora_context):
                 prepare_lora_indices(
                     self.lora_context,
                     num_tokens=self.num_tokens,

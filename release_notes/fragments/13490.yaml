@@ -1,0 +1,4 @@
+pr: 13490
+entries:
+  - category: bugfix
+    text: Skip unquantized MoE LoRA routing and delta injection when a published LoRA context has no active adapter in the batch.
