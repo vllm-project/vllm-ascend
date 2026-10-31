@@ -125,7 +125,11 @@ Prefill KV cache directly into the Decode-side storage.
 - Model Runner V1 is required.
 - Install MemFabric Hybrid release 1.2. The current version requires NPU driver
   `25.5.1` or later.
-- Install Clang and OpenMP if they are not already available in the image.
+- The Sparse KV offload CPU helpers are compiled into the vLLM Ascend native
+  extension when the package is built; Decode does not compile them again at
+  service startup. A3 source builds require the matching OpenMP development
+  package, while prebuilt installations require only the corresponding OpenMP
+  runtime library.
 
 If MemFabric Hybrid 1.2 is not already installed in the image:
 
