@@ -40,6 +40,7 @@ from .helpers import (
     make_sliding_spec,
     make_transfer_metadata,
 )
+from .test_kda_transfer import geometry, metadata
 
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
@@ -1014,6 +1015,68 @@ def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     thread.engine.batch_transfer_sync_read.return_value = -1
     with pytest.raises(RuntimeError, match="transfer failed"):
         thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+
+
+def test_kda_native_pcp_handoff_submits_only_base_state_with_independent_strides() -> None:
+    name = "model.layers.0.linear_attn"
+    local_meta, remote_meta = metadata(1, recover=True), metadata(1, 2)
+    ls, ll, lst = geometry(local_meta)
+    rs, rl, rst = geometry(remote_meta)
+    local = replace(make_transfer_metadata(layer_names=[name]), kda_state_metadata={name: local_meta})
+    remote = replace(
+        make_pp_metadata(
+            layer_names=[name],
+            block_shapes=[rs],
+            block_lens=[rl],
+            block_strides=[rst],
+            pcp_tp_base_addrs={0: {0: [[10000, 20000]]}, 1: {0: [[30000, 40000]]}},
+        ),
+        kda_state_metadata={name: remote_meta},
+    )
+    thread = make_thread(
+        engine=MagicMock(),
+        layer_names=[name],
+        local_metadata=local,
+        kv_caches_base_addr=[[1000, 3000, 5000, 7000]],
+        block_shapes=[ls],
+        block_lens=[ll],
+        block_strides=[lst],
+        kv_cache_specs=[
+            replace(
+                make_mamba_spec(),
+                shapes=tuple(ls),
+                dtypes=(torch.bfloat16, torch.float32, torch.float32, torch.bfloat16),
+            )
+        ],
+    )
+    groups = make_metadata_groups(pcp_size=2, pp_metadata=remote)
+    mapping, pairs = thread._build_remote_transfer_layout(groups)
+    assert mapping == {0: {(0, 0): [[0], [1]]}}
+    assert pairs == {0: [(0, 0)]}
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    thread._execute_tp_transfer_bucket(0, 1, 0, 2, 1, 1, remote, {0: {(0, 0): [("req", [1], [2])]}})
+    session, local_addrs, remote_addrs, lengths = thread.engine.batch_transfer_sync_read.call_args.args
+    assert session == "10.1.0.1:9100"
+    assert len(lengths) == 4
+    # D receives P shard 1 in the second half of Q, K, V and recurrent state.
+    projection_bytes = ll[0] // 3
+    half_projection_bytes = projection_bytes // 2
+    assert local_addrs == [
+        1000 + lst[0] + projection * projection_bytes + half_projection_bytes for projection in range(3)
+    ] + [3000 + lst[1] + ll[1] // 2]
+    assert remote_addrs == [30000 + 2 * rst[0] + projection * half_projection_bytes for projection in range(3)] + [
+        40000 + 2 * rst[1]
+    ]
+    assert lengths == [half_projection_bytes] * 3 + [ll[1] // 2]
+
+
+def test_kda_handshake_requires_explicit_contract_from_both_sides() -> None:
+    name = "model.layers.0.self_attn"
+    thread = make_thread(
+        local_metadata=replace(make_transfer_metadata(), kda_state_metadata={name: metadata(recover=True)})
+    )
+    with pytest.raises(ValueError, match="upgrade both sides"):
+        thread._build_remote_transfer_layout(make_metadata_groups())
 
 
 def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:

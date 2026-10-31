@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.logger import logger
+from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,12 +22,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.models.glm5next.recoverssm_config import is_glm_recoverssm_model
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -87,14 +90,26 @@ class MooncakeBaseConnectorScheduler:
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
-        # Remove this restriction once the backend supports joint PCP/TP sharding.
+        # GLM producers publish explicit KDA head ownership, including PCP
+        # replicas when TP>1. Keep other serving layouts restricted.
         if (
             self.pcp_size > 1
             and self.tp_size > 1
             and any(isinstance(spec, MambaSpec) for specs in self.group_unique_specs for spec in specs)
+            and not (
+                self.kv_transfer_config.is_kv_producer
+                and getattr(vllm_config.model_config, "hf_text_config", None) is not None
+                and is_glm_recoverssm_model(vllm_config)
+            )
         ):
             raise ValueError("Mooncake Mamba requires PCP=1 or TP=1 on both producer and consumer")
         self.need_truncate = self._needs_prefill_token_truncation()
+        self._force_known_prompt_tail = (
+            self.kv_transfer_config.is_kv_producer
+            and self.num_speculative_tokens > 0
+            and getattr(vllm_config.model_config, "hf_text_config", None) is not None
+            and is_glm_recoverssm_model(vllm_config)
+        )
         self._logged_mamba_allocation = False
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -203,7 +218,25 @@ class MooncakeBaseConnectorScheduler:
             return
 
         if request.prompt_token_ids is not None:
-            request.prompt_token_ids.pop()
+            tail_token = request.prompt_token_ids.pop()
+            if self._force_known_prompt_tail:
+                # MTP shifts prompt embeddings by one. Its final KV entry
+                # must use the known prompt tail, not a sampled substitute.
+                # This P-side output is internal; D retains the user's
+                # sampling constraints and consumes the original prompt.
+                original = request.sampling_params
+                request.sampling_params = SamplingParams(
+                    temperature=0, max_tokens=1, ignore_eos=True,
+                    allowed_token_ids=[tail_token], seed=original.seed,
+                    logprobs=original.logprobs, prompt_logprobs=original.prompt_logprobs,
+                    detokenize=original.detokenize,
+                    skip_special_tokens=original.skip_special_tokens,
+                    spaces_between_special_tokens=original.spaces_between_special_tokens,
+                    output_kind=original.output_kind,
+                )
+                if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+                    request.status = RequestStatus.WAITING
+                request.structured_output_request = None
         elif request.prompt_embeds is not None:
             request.prompt_embeds = request.prompt_embeds[:-1]
         else:

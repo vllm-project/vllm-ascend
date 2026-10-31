@@ -973,8 +973,61 @@ checkpoints. To disable prefix caching, use `--no-enable-prefix-caching`;
 vLLM then selects Mamba cache mode `none`.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector`. GLM supports an experimental native-KDA producer
+(`--use-replayssm` omitted) feeding a RecoverSSM consumer (`--use-replayssm`).
+The producer may use PCP; the consumer retains the RecoverSSM restriction
+`PCP=1`. Both peers must run this connector version and use matching model
+weights, base state dtypes, speculative windows, Mamba cache modes, Mamba
+state block sizes, and convolution layouts. RecoverSSM-to-native handoff is
+not supported by this path.
+
+TP sizes may differ when the actual KDA head-shard counts have an integer
+ratio. With `TP=1`, GLM shards its KDA heads over PCP; with `TP>1`, it shards
+over TP and treats PCP workers with the same TP rank as state replicas.
+This mapping applies to KDA state; attention KV continues to follow its own
+connector mapping and restrictions. Native GLM producers with this state
+contract may combine `TP>1` and `PCP>1`; other Mamba layouts retain the
+existing scheduler restriction. PCP KDA executes through a custom op so the
+prefill gather/restore decisions read the current request metadata instead
+of the warmup metadata captured by Dynamo. Use a fresh `VLLM_CACHE_ROOT`
+when upgrading from the previous PCP graph. Use the same effective Mamba
+state block size on both peers. In this revision, cache mode `none` derives
+that size from `--max-model-len`, so both peers need the same context limit
+even when an explicit `--mamba-block-size` is supplied. The A3 validation
+setup uses `--mamba-block-size 1280` on both peers for cache planning.
+The joint `TP4/PCP2` producer configuration hit an AllGather timeout during
+an A3 concurrency run with a 4096-token batch budget; it has not passed
+stability validation. The alternative eight-NPU producer uses `TP1/PCP8`.
+Cross-TP runs can produce
+different token streams. Validate model accuracy and the actual total accepted
+and proposed draft-token counts against standalone D. Treat this path as
+experimental.
+
+For fewer transfer ranges, set the existing upstream environment variable
+`VLLM_SSM_CONV_STATE_LAYOUT=DS` on both peers. The connector reuses upstream
+NIXL's convolution sub-projection geometry to transfer three contiguous
+Q/K/V slices and one recurrent-state slice per layer, state block and
+participating producer shard. The default SD layout also works, using
+row-wise convolution slices. DS can require staging in AscendC convolution;
+measure end-to-end latency before choosing a layout for production.
+
+For token-ID prompts with MTP, the producer emits the known final prompt
+token internally after truncation. This supplies the correct shifted embedding
+for its last draft-prefill KV entry. User sampling constraints still apply to
+D's generated continuation.
+
+The first D forward after remote KV loading processes the remaining prompt
+token before normal speculative decoding. Unproposed draft placeholders from
+the load step are removed before execution, so they cannot enter MTP prefill
+or the acceptance counters.
+
+Only committed convolution and recurrent state are transferred. The D-side
+RecoverSSM verify writes its correction and key/gate records before commit;
+these records are local scratch and are not transferred from P. Each side's
+page stride is respected independently. A peer without GLM state metadata,
+or with incompatible geometry, is rejected rather than guessed from tensor
+counts. Different speculative windows and state block sizes need additional
+conversion and are not supported by this first implementation.
 
 !!! warning
 

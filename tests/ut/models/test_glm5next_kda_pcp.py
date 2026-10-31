@@ -175,3 +175,35 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypat
 def test_pcp_head_count_must_be_divisible(monkeypatch, parallel_groups):
     with pytest.raises(AssertionError):
         model_kda.PCPColumnParallelLinear(3, 6, bias=False)
+
+
+def test_compiled_pcp_layer_reads_request_context_after_warmup(monkeypatch):
+    prefix = "pcp_compile_regression"
+    context = SimpleNamespace(no_compile_layers={}, prefill=False)
+    layer = SimpleNamespace(pcp_size=2, prefix=prefix)
+    layer._forward_impl = lambda hidden, positions: hidden * 2 if context.prefill else hidden + 1
+    context.no_compile_layers[prefix] = layer
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    lib = None
+    if not torch._C._dispatch_has_kernel_for_dispatch_key("vllm::glm5next_kda_pcp_layer", "CPU"):
+        lib = torch.library.Library("vllm", "IMPL", "CPU")
+        lib.impl("glm5next_kda_pcp_layer", model_kda.glm5next_kda_pcp_layer)
+    graphs = []
+
+    def backend(graph, inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    def forward(hidden, positions):
+        return model_kda.Glm5NextLinearAttention.forward(layer, hidden, positions)
+
+    compiled = torch.compile(forward, backend=backend, fullgraph=True)
+    hidden = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    positions = torch.arange(2)
+    torch.testing.assert_close(compiled(hidden, positions), hidden + 1)
+    context.prefill = True
+    torch.testing.assert_close(compiled(hidden, positions), hidden * 2)
+    context.prefill = False
+    torch.testing.assert_close(compiled(hidden, positions), hidden + 1)
+    assert len(graphs) == 1
+    assert "glm5next_kda_pcp_layer" in str(graphs[0].graph)
