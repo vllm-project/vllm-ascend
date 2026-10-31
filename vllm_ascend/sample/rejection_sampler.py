@@ -155,6 +155,7 @@ class AscendRejectionSampler(RejectionSampler):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -225,8 +226,15 @@ class AscendRejectionSampler(RejectionSampler):
         # `apply_sampling_constraints` function.
         target_logits = apply_sampling_constraints(target_logits, metadata.cu_num_draft_tokens, sampling_metadata)
 
+        draft_token_ids = metadata.draft_token_ids
+        if invalid_drafts is not None:
+            # A grammar mask row after the last real draft is all-permissive.
+            # Placeholder draft IDs make the verifier fail closed and recover
+            # from the target distribution without changing output bookkeeping.
+            draft_token_ids = draft_token_ids.masked_fill(invalid_drafts, PLACEHOLDER_TOKEN_ID)
+
         output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
+            draft_token_ids,
             metadata.num_draft_tokens,
             metadata.max_spec_len,
             metadata.cu_num_draft_tokens,
