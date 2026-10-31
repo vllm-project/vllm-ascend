@@ -124,16 +124,23 @@ def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     key = torch.randn(2, 3, 4).transpose(0, 1)
     value = torch.randn(2, 3, 4).transpose(0, 1)
     slot_mapping = torch.arange(8, dtype=torch.int32)[::2]
-    key_cache = object()
-    value_cache = object()
+    cache = torch.empty(4, 2, 8, 3, 4)
+    key_cache = cache[:, 0]
+    value_cache = cache[:, 1]
 
     assert not key.is_contiguous()
     assert not value.is_contiguous()
     assert not slot_mapping.is_contiguous()
+    assert not key_cache.is_contiguous()
+    assert not value_cache.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_scatter:
+    with (
+        mock.patch.object(torch.ops._C_ascend, "npu_scatter_pa_kv_cache", create=True) as mock_scatter,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_public_scatter,
+    ):
         BaseDeviceAdaptor.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
 
+    mock_public_scatter.assert_not_called()
     mock_scatter.assert_called_once()
     call_kwargs = mock_scatter.call_args.kwargs
     assert call_kwargs["key"] is not key
@@ -148,6 +155,7 @@ def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     assert call_kwargs["key_cache"] is key_cache
     assert call_kwargs["value_cache"] is value_cache
     assert call_kwargs["cache_mode"] == "Norm"
+    assert call_kwargs["scatter_mode"] == "None"
 
 
 def test_base_reshape_and_cache_uses_custom_scatter_for_bnsd():
@@ -206,15 +214,17 @@ def test_a5_reshape_and_cache_uses_bsnd_view_for_bnsd():
             use_bnsd=True,
         )
 
-    mock_custom_scatter.assert_not_called()
-    mock_public_scatter.assert_called_once()
-    call_kwargs = mock_public_scatter.call_args.kwargs
+    mock_public_scatter.assert_not_called()
+    mock_custom_scatter.assert_called_once()
+    call_kwargs = mock_custom_scatter.call_args.kwargs
     assert call_kwargs["key_cache"].shape == (4, 128, 8, 64)
     assert call_kwargs["value_cache"].shape == (4, 128, 8, 64)
     assert not call_kwargs["key_cache"].is_contiguous()
     assert not call_kwargs["value_cache"].is_contiguous()
     assert call_kwargs["key_cache"].data_ptr() == key_cache.data_ptr()
     assert call_kwargs["value_cache"].data_ptr() == value_cache.data_ptr()
+    assert call_kwargs["cache_mode"] == "Norm"
+    assert call_kwargs["scatter_mode"] == "None"
 
 
 def test_kv_cache_load_makes_seq_lens_contiguous():

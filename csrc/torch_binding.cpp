@@ -80,6 +80,12 @@
 #include <unordered_map>
 #include <vector>
 
+namespace vllm_ascend::aclnn_adapter {
+// Required by the legacy adapter's EXEC_NPU_CMD hash helpers.
+thread_local char g_hashBuf[kHashBufSize];
+thread_local int g_hashOffset = 0;
+}
+
 namespace vllm_ascend {
 
 c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
@@ -135,10 +141,6 @@ int64_t get_physical_device_id(int64_t user_device_id)
                        "Upgrade CANN and rebuild vllm-ascend.");
 #endif
 }
-
-// Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
-thread_local char g_hashBuf[kHashBufSize];
-thread_local int g_hashOffset = 0;
 
 namespace {
 
@@ -773,6 +775,15 @@ void transpose_kv_cache_by_block(
     }
 }
 
+void scatter_pa_kv_cache_cached(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& key_cache,
+    at::Tensor& value_cache,
+    const at::Tensor& slot_mapping,
+    c10::string_view cache_mode,
+    c10::string_view scatter_mode);
+
 void npu_scatter_pa_kv_cache(
     const at::Tensor& key,
     const at::Tensor& value,
@@ -782,30 +793,8 @@ void npu_scatter_pa_kv_cache(
     c10::string_view cache_mode,
     c10::string_view scatter_mode)
 {
-    std::string cache_mode_str(cache_mode);
-    std::string scatter_mode_str(scatter_mode);
-    char* cache_mode_ptr = const_cast<char*>(cache_mode_str.c_str());
-    char* scatter_mode_ptr = const_cast<char*>(scatter_mode_str.c_str());
-
-    c10::optional<at::Tensor> optional_tensor = c10::nullopt;
-    c10::optional<at::IntArrayRef> optional_int_array = c10::nullopt;
-
-    // aclnnScatterPaKvCache uses a different argument order from the public
-    // torch_npu wrapper. Call it directly so scatter_mode (for example,
-    // NHSD) is forwarded instead of being fixed to None by op-plugin.
-    EXEC_NPU_CMD(aclnnScatterPaKvCache,
-                 key,
-                 key_cache,
-                 slot_mapping,
-                 value,
-                 value_cache,
-                 optional_tensor,
-                 optional_tensor,
-                 optional_tensor,
-                 cache_mode_ptr,
-                 scatter_mode_ptr,
-                 optional_int_array,
-                 optional_int_array);
+    vllm_ascend::scatter_pa_kv_cache_cached(
+        key, value, key_cache, value_cache, slot_mapping, cache_mode, scatter_mode);
 }
 
 void device_print(c10::string_view msg)
