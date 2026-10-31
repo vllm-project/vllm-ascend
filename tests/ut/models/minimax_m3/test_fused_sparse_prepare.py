@@ -17,6 +17,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 def make_layer():
     norm = SimpleNamespace(variance_epsilon=1e-6, weight=torch.zeros(128))
     return SimpleNamespace(
+        use_dspark=False,
         indexer_proj=None,
         head_dim=128,
         idx_head_dim=128,
@@ -32,8 +33,12 @@ def make_layer():
     "unsupported",
     [None, "dtype", "cpu", "positions", "heads", "rope", "eps", "triton", "large_batch", "cache_dtype"],
 )
-def test_fusion_guard(unsupported):
+@pytest.mark.parametrize("use_dspark", [False, True])
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_fusion_guard(unsupported, use_dspark, cache_dtype):
     layer = make_layer()
+    layer.use_dspark = use_dspark
+    layer.kv_cache_torch_dtype = cache_dtype
     hidden = SimpleNamespace(device=SimpleNamespace(type="npu"), dtype=torch.bfloat16, shape=(4, 128))
     positions = torch.zeros(4, dtype=torch.int64)
     if unsupported == "dtype":
@@ -145,8 +150,10 @@ def test_fused_op_routes_to_layer_and_fake_has_no_side_effects():
     assert torch.all(output == 1)
 
 
-def test_fused_cache_insert_precedes_indexer_and_attention():
+@pytest.mark.parametrize("use_dspark", [False, True])
+def test_fused_cache_insert_precedes_indexer_and_attention(use_dspark):
     layer = make_layer()
+    layer.use_dspark = use_dspark
     layer.layer_name = "main"
     layer.num_heads, layer.num_kv_heads, layer.num_idx_heads = 8, 1, 1
     layer.kv_cache = torch.empty(2, 4, 16, 1, 128)

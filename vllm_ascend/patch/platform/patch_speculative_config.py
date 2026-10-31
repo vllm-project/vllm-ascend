@@ -1,7 +1,13 @@
+import ast
+import inspect
 import math
+import textwrap
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
+from functools import partial
+from pathlib import Path
+from types import CodeType
 from typing import Literal, get_args
 
 import vllm.config.speculative as speculative_config
@@ -14,6 +20,52 @@ from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
+
+# Standalone MiniMax DSpark draft architecture. The adapter, its checkpoint
+# contract and ``draft_hf_override`` live in
+# ``vllm_ascend.models.minimax_m3.minimax_m3_dspark``.
+_MINIMAX_DRAFT_ARCHITECTURE = "DSparkMiniMaxDraftModel"
+
+
+def _allow_minimax_draft(post_init):
+    # Keep references captured by Ascend's existing __post_init__ wrapper valid.
+    # Remove this shim once upstream recognizes this standalone architecture.
+    if _MINIMAX_DRAFT_ARCHITECTURE in post_init.__code__.co_consts:
+        return
+    tree = ast.parse(textwrap.dedent(inspect.getsource(post_init)))
+    matches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.And):
+            continue
+        for condition in node.values:
+            if (
+                isinstance(condition, ast.Compare)
+                and isinstance(condition.left, ast.Constant)
+                and condition.left.value == "K3DSparkModel"
+                and len(condition.ops) == 1
+                and isinstance(condition.ops[0], ast.NotIn)  # codespell:ignore
+                and ast.unparse(condition.comparators[0]) == "self.draft_model_config.architectures"
+            ):
+                matches.append((node, condition))
+    if len(matches) != 1 or post_init.__closure__:
+        raise RuntimeError("Core version changed: review the MiniMax DSpark architecture guard")
+    node, condition = matches[0]
+    addition = ast.Compare(
+        left=ast.Constant(value=_MINIMAX_DRAFT_ARCHITECTURE),
+        ops=[condition.ops[0]],
+        comparators=[condition.comparators[0]],
+    )
+    node.values.append(ast.copy_location(addition, condition))
+    ast.fix_missing_locations(tree)
+    ast.increment_lineno(tree, post_init.__code__.co_firstlineno - 1)
+    module_code = compile(tree, post_init.__code__.co_filename, "exec")
+    method_code = next(
+        code for code in module_code.co_consts if isinstance(code, CodeType) and code.co_name == post_init.__name__
+    )
+    post_init.__code__ = method_code
+
+
+_allow_minimax_draft(_orig_post_init)
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
 # DeepseekV2Config. K3 MLA has independent projection/head dimensions (e.g.
@@ -192,10 +244,39 @@ def _temporarily_disable_dspark_dcp(self: SpeculativeConfig):
         self.target_parallel_config = target_parallel_config
 
 
+def _minimax_draft_hf_override(hf_config, *, model_root):
+    # This callable rides on hf_overrides into spawned workers, so it is
+    # pickled by reference. Keep it in this light patch module: importing the
+    # model package during unpickling would be a fresh child's first
+    # vllm_ascend import and trips the latent device_op <-> ops.fused_moe
+    # cycle. By the time this runs, the normal startup imports are complete.
+    from vllm_ascend.models.minimax_m3.minimax_m3_dspark import draft_hf_override
+
+    return draft_hf_override(hf_config, model_root=model_root)
+
+
 def _dspark_post_init(self):
     # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
-    with _temporarily_disable_dspark_dcp(self):
-        _orig_post_init(self)
+    original_target = getattr(self, "target_model_config", None)
+    draft_root = _minimax_dspark_root(self)
+    if draft_root is not None:
+        self.model = str(draft_root)
+        self.target_model_config = copy(original_target)
+        self.target_model_config.hf_overrides = partial(_minimax_draft_hf_override, model_root=str(draft_root))
+    try:
+        with _temporarily_disable_dspark_dcp(self):
+            _orig_post_init(self)
+    finally:
+        if draft_root is not None:
+            self.target_model_config = original_target
+    if draft_root is not None:
+        # v0.30's DefaultModelLoader reads model directly. Resolve the draft
+        # weights after constructing its config from the parent checkpoint.
+        self.draft_model_config.model = str(draft_root / "dspark")
+        self.draft_model_config.model_weights = str(draft_root / "dspark")
+        self.draft_model_config.quantization = (
+            "ascend" if getattr(self.draft_model_config.hf_config, "quantization_config", None) else None
+        )
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
@@ -207,6 +288,23 @@ def _dspark_post_init(self):
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
         _normalize_glm_mla_dspark(self)
+
+
+def _minimax_dspark_root(self):
+    target = getattr(self, "target_model_config", None)
+    hf_config = getattr(target, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if getattr(self, "method", None) != "dspark" or not any(
+        name in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration") for name in architectures
+    ):
+        return None
+    root = Path(target.model).resolve()
+    requested = getattr(self, "model", None)
+    if requested is not None and Path(requested).resolve() not in (root, root / "dspark"):
+        return None
+    if not (root / "dspark").is_dir():
+        raise ValueError(f"MiniMax BF16 DSpark weights are missing from {root / 'dspark'}")
+    return root
 
 
 def _normalize_glm_mla_dspark(self):

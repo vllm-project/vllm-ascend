@@ -37,7 +37,7 @@ def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="generate"),
+        model_config=SimpleNamespace(runner_type="generate", hf_config=SimpleNamespace(architectures=["DFlash2Model"])),
         speculative_config=SimpleNamespace(
             method="dflash",
             target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
