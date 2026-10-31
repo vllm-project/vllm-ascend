@@ -425,9 +425,9 @@ def test_dspark_prepare_matches_unfused_a5_chain(tokens, cache_dtype):
         packed, cs, positions, *weights, key, value, index, slots, index_slots, actual, qh, kh, ih, 1e-6
     )
     parts = list(packed.split([qh * hd, kh * hd, kh * hd, ih * hd, hd], -1))
-    for part, weight in zip([0, 1, 3, 4], weights):
-        x = parts[part].reshape(-1, hd).contiguous()
-        parts[part] = torch_npu.npu_rms_norm(x, 1.0 + weight, 1e-6)[0].reshape(tokens, -1)
+    for idx, weight in zip([0, 1, 3, 4], weights):
+        x = parts[idx].reshape(-1, hd).contiguous()
+        parts[idx] = torch_npu.npu_rms_norm(x, 1.0 + weight, 1e-6)[0].reshape(tokens, -1)
     parts[0], parts[1] = rope_forward_oot(positions, parts[0], parts[1], cs, hd, 64, True)
     parts[3], parts[4] = rope_forward_oot(
         positions,
