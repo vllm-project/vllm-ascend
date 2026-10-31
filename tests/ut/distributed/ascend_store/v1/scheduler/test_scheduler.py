@@ -9,6 +9,7 @@ import pytest
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
+from tests.ut.distributed.ascend_store.v1.align_state_fixtures import make_sparse_group_topology
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
 )
@@ -57,6 +58,31 @@ class _RefCountBlockPool(FakeBlockPool):
             block.ref_cnt -= 1
 
 
+@pytest.mark.parametrize("eagle,physical_end", ((False, 128), (True, 112)))
+def test_sliding_load_uses_scheduler_physical_frontier_without_another_eagle_drop(eagle, physical_end) -> None:
+    window = replace(make_sparse_group_topology(block_size=16, sliding_window=33).transfer_groups[1], group_id=0)
+    config = replace(make_config(granularity=16, eagle=eagle), hash_block_size=16, group_specs=(window.kv_cache_spec,))
+    coordinator = Coordinator((window,), 16, 16, 256, use_eagle=eagle)
+    scheduler = SynchronousScheduler(config, FakeLookupClient(128))
+    request = make_request(prompt_tokens=128, hashes=8)
+    blocks = list(range(1, 9))
+    try:
+        matched_tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+        scheduler.confirm_allocation(request, FakeBlocks(blocks), matched_tokens)
+        (load,) = scheduler.build_step(
+            make_output(
+                new=(new_request_data("request", (blocks,), matched_tokens),),
+                scheduled_tokens={"request": 128 - matched_tokens},
+            )
+        ).load_commands
+        assert load.end_token == physical_end
+        assert coordinator.select_for_load(load.block_hashes, load.end_token) == (
+            (False,) * (physical_end // 16 - 2) + (True, True),
+        )
+    finally:
+        scheduler.close()
+
+
 def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
     for scheduler_type, is_deferred in ((SynchronousScheduler, False), (AsynchronousScheduler, True)):
         lookup = FakeLookupClient(12)
@@ -85,6 +111,285 @@ def test_load_publication_requires_allocation_and_is_exactly_once() -> None:
             assert scheduler.build_step(make_output()).load_commands == ()
 
         assert (published.load_commands[0].start_token, published.load_commands[0].end_token) == (0, 12)
+
+
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler))
+def test_emitted_commands_keep_their_snapshots_when_request_progress_advances(scheduler_type) -> None:
+    scheduler = scheduler_type(make_config(store=True, save_decode=True), FakeLookupClient(4))
+    request = make_request(prompt_tokens=8)
+    block_ids = [1, 2]
+    original_hashes = tuple(request.block_hashes)
+    try:
+        scheduler.get_num_new_matched_tokens(request, 0)
+        scheduler.confirm_allocation(request, FakeBlocks(block_ids), 4)
+        allocated = scheduler.build_step(make_output())
+        initial = scheduler.build_step(
+            make_output(new=(new_request_data("request", (block_ids,), 4),), scheduled_tokens={"request": 4})
+        )
+        (load,) = allocated.load_commands + initial.load_commands
+        (store,) = initial.store.commands
+
+        block_ids[0] = 99
+        request.num_tokens = 12
+        request.block_hashes.append(b"next")
+        running = scheduler.build_step(make_output(cached=(("request", ([3],), 8),), scheduled_tokens={"request": 4}))
+        (next_store,) = running.store.commands
+
+        assert load.block_ids_by_group == store.block_ids_by_group == ((1, 2),)
+        assert load.block_hashes == store.block_hashes == original_hashes
+        assert (store.start_token, store.end_token) == (4, 8)
+        assert (next_store.start_token, next_store.end_token) == (8, 12)
+        assert next_store.block_ids_by_group == ((1, 2, 3),)
+        assert next_store.block_hashes == (*original_hashes, b"next")
+        assert not running.load_commands
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize("change", ("append", "replace"))
+def test_hash_snapshots_refresh_without_changing_earlier_queries_or_commands(change) -> None:
+    lookup = FakeLookupClient(4)
+    scheduler = SynchronousScheduler(make_config(), lookup)
+    request = make_request()
+    original = tuple(request.block_hashes)
+    try:
+        scheduler.get_num_new_matched_tokens(request, 0)
+        if change == "append":
+            request.num_tokens += 4
+            request.block_hashes.append(b"new")
+        else:
+            request.block_hashes = [b"replacement", request.block_hashes[1]]
+        expected = tuple(request.block_hashes)
+        scheduler.get_num_new_matched_tokens(request, 0)
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3]), 4)
+        (load,) = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2, 3],), 4),), scheduled_tokens={"request": 4})
+        ).load_commands
+        request.num_tokens += 4
+        request.block_hashes.append(b"later")
+
+        assert lookup.queries[0][2] == original
+        assert lookup.queries[1][2] == expected
+        assert load.block_hashes == expected
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize("mode", ("bulk", "layerwise", "async"))
+def test_unselected_load_only_route_keeps_empty_steps_and_request_release(mode) -> None:
+    config = replace(make_config(), use_layerwise=mode == "layerwise", load_async=mode == "async")
+    scheduler_type = AsynchronousScheduler if mode == "async" else SynchronousScheduler
+    scheduler = scheduler_type(config, FakeLookupClient(4))
+    request = make_request()
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (4, mode == "async")
+        # Another connector won the match; real local blocks do not authorize a Load.
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
+        initial = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 4})
+        )
+        request.num_tokens = 12
+        request.block_hashes.append(b"next")
+        running = scheduler.build_step(make_output(cached=(("request", ([3],), 4),), scheduled_tokens={"request": 4}))
+        released = scheduler.build_step(make_output(preempted=("request",)))
+        scheduler.confirm_allocation(request, FakeBlocks([4, 5, 6]), 0)
+        resumed = scheduler.build_step(
+            make_output(cached=(("request", ([4, 5, 6],), 0),), resumed=("request",), scheduled_tokens={"request": 4})
+        )
+        for step in (initial, running, resumed):
+            assert step.load_commands == step.store.commands == ()
+        assert released.released_request_ids == frozenset({"request"})
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize("entry", ("new", "resumed"))
+def test_admission_rejects_unconfirmed_block_tables_without_consuming_load(entry) -> None:
+    scheduler = SynchronousScheduler(make_config(), FakeLookupClient(4))
+    request = make_request(prompt_tokens=8)
+    scheduler.get_num_new_matched_tokens(request, 0)
+    scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 4)
+    try:
+        for block_ids, valid in (([9, 10], False), ([1, 2], True)):
+            output = (
+                make_output(new=(new_request_data("request", (block_ids,), 4),), scheduled_tokens={"request": 4})
+                if entry == "new"
+                else make_output(
+                    cached=(("request", (block_ids,), 4),), resumed=("request",), scheduled_tokens={"request": 4}
+                )
+            )
+            if not valid:
+                with pytest.raises(ValueError, match="does not match its confirmed allocation"):
+                    scheduler.build_step(output)
+                continue
+            (load,) = scheduler.build_step(output).load_commands
+            assert load.block_ids_by_group == ((1, 2),)
+            assert (load.start_token, load.end_token) == (0, 4)
+        assert not scheduler.build_step(make_output()).load_commands
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler))
+def test_rejected_allocation_keeps_lookup_candidate_for_valid_confirmation(scheduler_type) -> None:
+    scheduler = scheduler_type(make_config(), FakeLookupClient(4))
+    request = make_request()
+    try:
+        scheduler.get_num_new_matched_tokens(request, 0)
+        with pytest.raises(ValueError, match="expected either 0 or 4"):
+            scheduler.confirm_allocation(request, FakeBlocks([9, 10]), 3)
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 4)
+        step = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2],), 4),), scheduled_tokens={"request": 4})
+        )
+        (load,) = step.load_commands
+        assert (load.start_token, load.end_token) == (0, 4)
+        assert load.block_ids_by_group == ((1, 2),)
+        assert not scheduler.build_step(make_output()).load_commands
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler))
+def test_failed_step_keeps_every_requests_pending_load_and_store_progress(scheduler_type) -> None:
+    scheduler = scheduler_type(make_config(store=True, recycling=True), FakeLookupClient(4))
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    sources = [pool.blocks[index] for index in (1, 2, 3, 4)]
+    pool.touch(sources)
+    for request_id, blocks in (("first", [1, 2]), ("second", [3, 4])):
+        request = make_request(request_id)
+        scheduler.get_num_new_matched_tokens(request, 0)
+        scheduler.confirm_allocation(request, FakeBlocks(blocks), 4)
+    try:
+        with pytest.raises(ValueError, match="does not match its confirmed allocation"):
+            scheduler.build_step(
+                make_output(
+                    new=(new_request_data("first", ([1, 2],), 4), new_request_data("second", ([9, 10],), 4)),
+                    scheduled_tokens={"first": 4, "second": 4},
+                )
+            )
+        assert [block.ref_cnt for block in sources] == [1, 1, 1, 1]
+        assert not scheduler.has_pending_push_work()
+
+        step = scheduler.build_step(
+            make_output(
+                new=(new_request_data("first", ([1, 2],), 4), new_request_data("second", ([3, 4],), 4)),
+                scheduled_tokens={"first": 4, "second": 4},
+            )
+        )
+        assert [(command.request_id, command.start_token, command.end_token) for command in step.load_commands] == [
+            ("first", 0, 4),
+            ("second", 0, 4),
+        ]
+        assert [(command.start_token, command.end_token) for command in step.store.source_pending_commands] == (
+            [(4, 8), (4, 8)] if scheduler_type is SynchronousScheduler else []
+        )
+        scheduler.accept_worker_metadata(
+            StoreSourceReleaseMetadata(
+                {command.store_job_id: 1 for command in step.store.commands if command.store_job_id is not None}
+            )
+        )
+        assert [block.ref_cnt for block in sources] == [1, 1, 1, 1]
+        assert not scheduler.build_step(make_output()).load_commands
+    finally:
+        scheduler.close()
+
+
+def test_failed_publication_rolls_back_new_leases_and_keeps_finished_checkpoints() -> None:
+    config = make_config(groups=(0, 1), align_groups=frozenset((1,)), load=False, store=True, workers=2, recycling=True)
+    scheduler = SynchronousScheduler(config, FakeLookupClient())
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    old_sources = [pool.blocks[index] for index in (1, 2, 10, 11)]
+    new_sources = [pool.blocks[index] for index in (4, 5, 12, 13)]
+    pool.touch(old_sources + new_sources)
+    finished_request = make_request("finished")
+    scheduler.confirm_allocation(finished_request, FakeBlocks([1, 2], [10, 11]), 0)
+    initial = scheduler.build_step(
+        make_output(new=(new_request_data("finished", ([1, 2], [10, 11]), 0),), scheduled_tokens={"finished": 8})
+    )
+    initial_job = initial.store.commands[0].store_job_id
+    assert initial_job is not None
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({initial_job: 2}))
+    assert not scheduler.register_finished_partial_tail(finished_request, ([1, 2], [10, 11]), [(1, 10, 8)])
+    pool.free_blocks(old_sources)
+    assert pool.blocks[10].ref_cnt == 1
+
+    request = make_request("new")
+    scheduler.confirm_allocation(request, FakeBlocks([4, 5], [12, 13]), 0)
+    with pytest.raises(IndexError):
+        scheduler.build_step(
+            make_output(
+                finished=("finished",),
+                new=(new_request_data("new", ([4, 5], [12, 13]), 0),),
+                scheduled_tokens={"new": 8},
+                checkpoints={"new": [(1, 1000, 8)]},
+            )
+        )
+    assert [block.ref_cnt for block in new_sources] == [1, 1, 1, 1]
+    assert pool.blocks[10].ref_cnt == 1
+    assert scheduler.has_pending_push_work()
+
+    step = scheduler.build_step(
+        make_output(
+            new=(new_request_data("new", ([4, 5], [12, 13]), 0),),
+            scheduled_tokens={"new": 8},
+            checkpoints={"new": [(1, 12, 8)]},
+        )
+    )
+    (store,) = step.store.source_pending_commands
+    assert (store.start_token, store.end_token) == (0, 8)
+    assert [command.sources for command in step.store.source_ready_commands] == [
+        (StateCheckpointSource(1, 12, 8),),
+        (StateCheckpointSource(1, 10, 8),),
+    ]
+    scheduler.accept_worker_metadata(
+        StoreSourceReleaseMetadata(
+            {command.store_job_id: 2 for command in step.store.commands if command.store_job_id is not None}
+        )
+    )
+    assert [block.ref_cnt for block in new_sources] == [1, 1, 1, 1]
+    assert pool.blocks[10].ref_cnt == 0
+    assert not scheduler.has_pending_push_work()
+    assert not scheduler.build_step(make_output()).store.commands
+    scheduler.close()
+
+
+def test_publication_failure_keeps_async_load_without_a_scheduled_forward() -> None:
+    config = make_config(groups=(0, 1), align_groups=frozenset((1,)), store=True, recycling=True)
+    scheduler = AsynchronousScheduler(config, FakeLookupClient(4))
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    sources = [pool.blocks[index] for index in (3, 4, 12, 13)]
+    pool.touch(sources)
+    load_request = make_request("load")
+    scheduler.get_num_new_matched_tokens(load_request, 0)
+    scheduler.confirm_allocation(load_request, FakeBlocks([1, 2], [10, 11]), 4)
+    cancelled = make_request("cancelled")
+    scheduler.get_num_new_matched_tokens(cancelled, 0)
+    scheduler.confirm_allocation(cancelled, FakeBlocks([5, 6], [14, 15]), 4)
+    scheduler.confirm_allocation(make_request("store"), FakeBlocks([3, 4], [12, 13]), 0)
+
+    with pytest.raises(IndexError):
+        scheduler.build_step(
+            make_output(
+                preempted=("cancelled",),
+                new=(new_request_data("store", ([3, 4], [12, 13]), 0),),
+                scheduled_tokens={"store": 8},
+                checkpoints={"store": [(1, 1000, 8)]},
+            )
+        )
+    assert [block.ref_cnt for block in sources] == [1, 1, 1, 1]
+    assert not scheduler.has_pending_push_work()
+
+    # Cancellation stays effective; only the other allocation-ready Load survives the failed step.
+    (load,) = scheduler.build_step(make_output()).load_commands
+    assert load.request_id == "load"
+    assert (load.start_token, load.end_token) == (0, 4)
+    assert load.block_ids_by_group == ((1, 2), (10, 11))
+    assert not scheduler.build_step(make_output()).load_commands
+    scheduler.close()
 
 
 @pytest.mark.parametrize("scheduler_type", (SynchronousScheduler, AsynchronousScheduler, SynchronousScheduler))
@@ -286,6 +591,35 @@ def test_step_checkpoint_is_source_ready_and_preserves_exact_source() -> None:
     assert checkpoint.block_hashes == tuple(request.block_hashes)
 
 
+def test_decode_checkpoint_keeps_unchanged_groups_when_only_state_blocks_are_appended() -> None:
+    scheduler = SynchronousScheduler(
+        make_config(groups=(0, 1), align_groups=frozenset((1,)), load=False, store=True), FakeLookupClient()
+    )
+    scheduler.bind_gpu_block_pool(FakeBlockPool())
+    request = make_request(prompt_tokens=8, tokens=12)
+    try:
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2, 3], [10, 11]), 0)
+        scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2, 3], [10, 11]), 0),), scheduled_tokens={"request": 8})
+        )
+        step = scheduler.build_step(
+            make_output(
+                cached=(("request", ([], [12]), 8),),
+                scheduled_tokens={"request": 4},
+                checkpoints={"request": [(1, 12, 12)]},
+            )
+        )
+        assert not step.store.source_pending_commands
+        (checkpoint,) = step.store.source_ready_commands
+        assert checkpoint.block_ids_by_group == ((1, 2, 3), (10, 11, 12))
+        assert checkpoint.block_hashes == tuple(request.block_hashes)
+        assert checkpoint.sources == (StateCheckpointSource(1, 12, 12),)
+        assert checkpoint.store_job_id is not None
+        scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({checkpoint.store_job_id: 1}))
+    finally:
+        scheduler.close()
+
+
 def test_finished_and_preempted_cancel_unpublished_load() -> None:
     for stage in ("lookup", "sync", "async"):
         for terminated_field in ("finished", "preempted"):
@@ -344,6 +678,47 @@ def test_released_request_blocks_remain_leased_until_all_workers_ack(terminated_
     assert not scheduler.has_pending_push_work()
     assert not scheduler.has_pending_block_frees()
     assert [block.ref_cnt for block in blocks] == [0, 0]
+
+
+@pytest.mark.parametrize("entry", ("new", "resumed"))
+def test_old_store_release_cannot_release_reallocated_request_sources(entry) -> None:
+    scheduler = SynchronousScheduler(make_config(load=False, store=True, workers=2, recycling=True), FakeLookupClient())
+    pool = _RefCountBlockPool()
+    scheduler.bind_gpu_block_pool(pool)
+    request = make_request()
+    old_sources = [pool.blocks[index] for index in (1, 2)]
+    new_sources = [pool.blocks[index] for index in (4, 5)]
+    pool.touch(old_sources)
+    scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
+    old_step = scheduler.build_step(
+        make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 8})
+    )
+    old_job = old_step.store.commands[0].store_job_id
+    assert old_job is not None
+    pool.free_blocks(old_sources)
+    scheduler.build_step(make_output(preempted=("request",)))
+
+    pool.touch(new_sources)
+    scheduler.confirm_allocation(request, FakeBlocks([4, 5]), 0)
+    output = (
+        make_output(new=(new_request_data("request", ([4, 5],), 0),), scheduled_tokens={"request": 8})
+        if entry == "new"
+        else make_output(cached=(("request", ([4, 5],), 0),), resumed=("request",), scheduled_tokens={"request": 8})
+    )
+    (store,) = scheduler.build_step(output).store.commands
+    assert (store.start_token, store.end_token) == (0, 8)
+    assert store.block_ids_by_group == ((4, 5),)
+    assert store.store_job_id is not None
+    assert store.store_job_id != old_job
+
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({old_job: 2}))
+    assert [block.ref_cnt for block in old_sources] == [0, 0]
+    assert [block.ref_cnt for block in new_sources] == [2, 2]
+    assert scheduler.has_pending_push_work()
+    scheduler.accept_worker_metadata(StoreSourceReleaseMetadata({store.store_job_id: 2}))
+    assert [block.ref_cnt for block in new_sources] == [1, 1]
+    assert not scheduler.has_pending_push_work()
+    scheduler.close()
 
 
 def test_pending_block_frees_counts_duplicate_job_refs_not_worker_acknowledgements() -> None:
@@ -631,7 +1006,7 @@ def test_scheduler_close_rejects_active_store_source_leases() -> None:
     scheduler.close()
 
 
-def test_nontransferred_align_state_does_not_keep_decode_snapshots():
+def test_private_align_checkpoints_do_not_publish_decode_stores():
     config = make_config(groups=(0,), align_groups=frozenset((1,)), private=True, load=False, store=True)
     scheduler = SynchronousScheduler(config, FakeLookupClient())
     scheduler.bind_gpu_block_pool(FakeBlockPool())
@@ -640,7 +1015,6 @@ def test_nontransferred_align_state_does_not_keep_decode_snapshots():
     scheduler.build_step(
         make_output(new=(new_request_data("request", ([1], [10]), 0),), scheduled_tokens={"request": 4})
     )
-    progress = scheduler._request_progress["request"]
     request.num_tokens = 8
     request.block_hashes.append(b"decode")
     step = scheduler.build_step(
@@ -651,5 +1025,6 @@ def test_nontransferred_align_state_does_not_keep_decode_snapshots():
         )
     )
     assert step.store.commands == ()
-    assert scheduler._request_progress["request"] is progress
+    assert not step.load_commands
+    assert not scheduler.has_pending_push_work()
     scheduler.close()

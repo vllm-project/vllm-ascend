@@ -15,7 +15,7 @@ from ...infrastructure.collective import CollectiveGroup, GroupCompletion
 from ...infrastructure.coordinator import Coordinator, checkpoint_companion_indices
 from ...infrastructure.mapping import BlockPair
 from ...protocol.messages import CheckpointStoreCommand, StoreCommand
-from ...protocol.results import DrainResult, StoreResult
+from ...protocol.outcomes import DrainResult, StoreResult
 from ..data.batch import StoreBatch
 from ..data.context import TransferContext
 from ..data.selection import StoreSelection
@@ -416,7 +416,7 @@ class StoreService:
                         block_ids[index],
                     )
                     for index in checkpoint_companion_indices(
-                        boundary, command.published_store_end_token, block_size, len(block_ids)
+                        boundary, command.store_planned_end_token, block_size, len(block_ids)
                     )
                     if block_ids[index] >= 0
                 )

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1016" role="img" aria-labelledby="scheduler_flow-title scheduler_flow-desc">
+<title id="scheduler_flow-title">Scheduler · 从请求事实到整步交付</title>
+<desc id="scheduler_flow-desc">先准备命令，再保护来源，最后采用进度；请求状态与 Store 源引用分别管理。</desc>
+<defs>
+<marker id="scheduler_flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}</style>
+</defs>
+<rect width="1280" height="1016" fill="#fff"/>
+<text x="48" y="60" class="title">Scheduler · 从请求事实到整步交付</text>
+<text x="48" y="88" class="muted">先准备命令，再保护来源，最后采用进度；请求状态与 Store 源引用分别管理。</text>
+<path d="M 544,188 H 592" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 912,240 V 320" fill="none" stroke="#526a76" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 544,384 H 592" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 544,548 H 560 Q 568,548 568,540 V 472 Q 568,464 576,464 H 624 Q 632,464 632,456 V 448" fill="none" stroke="#526a76" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 912,448 V 512" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 912,600 V 664" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 912,776 V 784 Q 912,792 904,792 H 760 Q 752,792 752,800 V 840" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<path d="M 912,888 H 960" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#scheduler_flow-arrow)"/>
+<g data-node="admission">
+<rect x="48" y="136" width="496" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="163" class="name">查询与分配确认</text>
+<text x="64" y="187" class="muted">Lookup 候选 → vLLM 决定是否采用</text>
+<text x="64" y="211" class="muted">确认块表与 Hash；不加载且不保存时提前退出</text>
+</g>
+<g data-node="request-state">
+<rect x="592" y="136" width="640" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="608" y="163" class="name">RequestState · 请求唯一状态</text>
+<text x="608" y="187" class="muted">Lookup 候选 · 确认分配 · 待发 Load · 运行进度</text>
+<text x="608" y="211" class="muted">块表 / Hash 使用不可变快照；已发命令保留原版本</text>
+</g>
+<g data-node="scheduler-output">
+<rect x="48" y="320" width="496" height="128" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="347" class="name">vLLM · 本步调度输入</text>
+<text x="64" y="371" class="muted">NEW / RESUMED：完整块表与预填充终点</text>
+<text x="64" y="395" class="muted">RUNNING：新增块与计算进度</text>
+<text x="64" y="419" class="muted">结束 / 抢占：先移除请求状态与待发索引</text>
+</g>
+<g data-node="prepare-step">
+<rect x="592" y="320" width="640" height="128" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="608" y="347" class="name">01  校验并准备整步命令</text>
+<text x="608" y="371" class="muted">LoadCommand + StorePlanner（区间 / 检查点 / 事件）</text>
+<text x="608" y="395" class="muted">新进度暂存，待发 Load 尚未消费</text>
+<text x="608" y="419" class="muted">同步随请求调度；异步 Bulk 可在无 forward 的 Step 发 Load</text>
+</g>
+<g data-node="finished-checkpoint">
+<rect x="48" y="512" width="496" height="144" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="539" class="name">结束钩子 · 检查点</text>
+<text x="64" y="563" class="muted">StorePlanner 形成最终状态命令</text>
+<text x="64" y="587" class="muted">立即保护源块，再允许 vLLM 释放请求</text>
+<text x="64" y="611" class="muted">命令排队，汇入后续 Step</text>
+</g>
+<g data-node="acquire-sources">
+<rect x="592" y="512" width="640" height="88" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="608" y="539" class="name">02  申请本步源引用 · StoreSourceLeases</text>
+<text x="608" y="563" class="muted">为需要额外保护的 Store 来源持有引用；沿用结束钩子已持有的引用</text>
+</g>
+<g data-node="publish-step">
+<rect x="592" y="664" width="640" height="112" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="608" y="691" class="name">03  统一采用并交付</text>
+<text x="608" y="715" class="muted">更新请求进度 · 消费本步待发 Load</text>
+<text x="608" y="739" class="muted">KVTransferStep → Connector → Worker</text>
+</g>
+<g data-node="worker-release">
+<rect x="592" y="840" width="320" height="96" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="608" y="867" class="name">Worker · 源释放回执</text>
+<text x="608" y="891" class="muted">确认已停止读源</text>
+<text x="608" y="915" class="muted">可跨 Step 返回</text>
+</g>
+<g data-node="release-sources">
+<rect x="960" y="840" width="272" height="96" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="976" y="867" class="name">StoreSourceLeases</text>
+<text x="976" y="891" class="muted">所需 Worker 回执齐全后</text>
+<text x="976" y="915" class="muted">按 job 归还额外源引用</text>
+</g>
+<text x="48" y="120" class="name">请求事实 · 跨 Step 保留</text>
+<text x="48" y="304" class="name">每步规划 · build_step</text>
+<text x="928" y="284" class="muted">已确认快照与待发 Load</text>
+<path d="M 48,704 V 812" fill="none" stroke="#b9683f" stroke-width="2"/>
+<text x="64" y="727" class="name">准备或引用申请失败</text>
+<text x="64" y="755" class="muted">保留原进度与待发 Load</text>
+<text x="64" y="779" class="muted">仅归还本次新增、尚未交付的引用</text>
+<text x="64" y="803" class="muted">结束钩子已持有的引用继续保留</text>
+<text x="48" y="867" class="name">源引用独立于请求生命周期</text>
+<text x="48" y="895" class="muted">请求结束或 Store 已完成，不会提前归还源引用</text>
+<path d="M 48,964 H 1232" fill="none" stroke="#c8d4d9" stroke-width="1"/>
+<text x="48" y="992" class="muted">实线：命令与结果推进；虚线：跨 Step 保留的数据输入。</text>
+</svg>

@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from ...backend import GVARegion
 from ...infrastructure.mapping import PartitionId
 from ...protocol.messages import StoreCommand
-from ...protocol.results import LoadFailureLocation, LoadResult, StoreResult
+from ...protocol.outcomes import LoadFailureLocation, LoadResult, StoreResult
 from .selection import CachePartition, LoadSelection, StoreSelection
 
 

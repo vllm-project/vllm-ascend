@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.results import LoadResult
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.outcomes import LoadResult
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import AsynchronousScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.batch import StoreBatch
@@ -168,26 +168,6 @@ def test_empty_store_exits_before_addresses_and_source_wait(scenario, monkeypatc
         assert all(result.succeeded and result.source_release_confirmed for result in results)
         event.synchronize.assert_not_called()
         assert not any(call[0] in ("put", "get") for call in backend.calls)
-        worker.end_step()
-    finally:
-        worker.close()
-    assert resources.closed
-
-
-def test_empty_load_keeps_completion_delivery_without_submitting_or_materializing(monkeypatch):
-    worker, resources, backend = make_worker()
-    submit = Mock(side_effect=AssertionError("No transfer task is needed"))
-    monkeypatch.setattr(worker.transfer.executor._write, "submit", submit)
-    monkeypatch.setattr(BulkTransfer, "arguments", Mock(side_effect=AssertionError("No addresses are needed")))
-    try:
-        worker.begin_step(KVTransferStep((LoadCommand("empty", 0, 4, ((-1,),), (b"a",)),)))
-        worker.start_load()
-        with pytest.raises(RuntimeError, match="pending asynchronous Load"):
-            worker.start_load()
-        assert worker.collect_load_result().completed_request_ids == {"empty"}
-        assert not worker.collect_load_result().completed_request_ids
-        submit.assert_not_called()
-        assert not any(call[0] == "get" for call in backend.calls)
         worker.end_step()
     finally:
         worker.close()

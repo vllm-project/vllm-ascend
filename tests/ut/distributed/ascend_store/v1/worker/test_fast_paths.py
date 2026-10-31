@@ -50,21 +50,33 @@ def test_known_empty_or_failed_preparation_needs_no_source_event(mode, failure, 
 
 
 @pytest.mark.parametrize("mode", ("bulk", "key_range", "gva"))
-def test_empty_load_reports_completion_without_queue_or_backend_work(mode, monkeypatch):
-    worker, _, _ = (
+@pytest.mark.parametrize("selection", ("empty_range", "null_blocks"))
+def test_empty_load_keeps_admission_and_delivers_completion_once_without_backend_io(mode, selection):
+    worker, resources, backend = (
         make_bulk() if mode == "bulk" else make_layerwise(backend=FakeGVABackend() if mode == "gva" else None)
     )
+    command = (
+        LoadCommand("r", 0, 0, ((),), ()) if selection == "empty_range" else LoadCommand("r", 0, 4, ((-1,),), (b"a",))
+    )
     try:
-        worker.begin_step(KVTransferStep((LoadCommand("r", 0, 0, ((),), ()),)))
-        with monkeypatch.context() as patch:
-            submit = Mock(side_effect=AssertionError("empty load must not enqueue work"))
-            patch.setattr(worker.transfer.executor._write, "submit", submit)
+        worker.begin_step(KVTransferStep((command,)))
+        worker.start_load()
+        with pytest.raises(RuntimeError, match="pending asynchronous Load"):
             worker.start_load()
-            assert worker.collect_load_result().completed_request_ids == {"r"}
-            submit.assert_not_called()
+        result = worker.collect_load_result()
+        assert result.completed_request_ids == {"r"} and not result.failed_request_ids
+        assert not result.failed_block_ids
+        assert not worker.collect_load_result().completed_request_ids
+        assert not any(
+            call[0] in ("exists", "get", "put", "batch_copy_get", "batch_copy_put") for call in backend.calls
+        )
+        if mode == "gva":
+            assert not backend.native_store.calls
+        worker.finish_step()
         worker.end_step()
     finally:
         worker.close()
+    assert resources.closed
 
 
 def test_store_keeps_source_positions_when_exists_filters_objects(monkeypatch):

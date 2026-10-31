@@ -395,13 +395,13 @@ def store_block_range(start_token: int, end_token: int, block_size: int, hash_co
 
 
 def checkpoint_companion_indices(
-    boundary_token: int, published_store_end_token: int, block_size: int, block_count: int
+    boundary_token: int, store_planned_end_token: int, block_size: int, block_count: int
 ) -> range:
-    """Locate the unpublished attention pages and the checkpoint's boundary page."""
+    """Locate attention pages not covered by earlier commands and the checkpoint's boundary page."""
 
     logical_count = -(-boundary_token // block_size)
     block_offset = max(logical_count - block_count, 0)
-    first_block = max(min(published_store_end_token // block_size, logical_count - 1), block_offset)
+    first_block = max(min(store_planned_end_token // block_size, logical_count - 1), block_offset)
     return range(first_block - block_offset, logical_count - block_offset)
 
 

@@ -29,7 +29,7 @@ from .infrastructure.topology import resolve_worker_topology
 from .protocol.lookup import LookupClient, LookupServer
 from .protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
 from .protocol.observations import StoreEvents
-from .protocol.results import LoadResult
+from .protocol.outcomes import LoadResult
 from .scheduler import AsynchronousScheduler, KVPoolScheduler, SynchronousScheduler
 from .worker import Worker
 

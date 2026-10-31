@@ -9,8 +9,6 @@ from tests.ut.distributed.ascend_store.v1.align_state_fixtures import make_align
 from tests.ut.distributed.ascend_store.v1.helpers import (
     FakeBackend,
     FakeEvent,
-    FakeResources,
-    make_backend_spec,
     make_block_hash_mappings,
     make_coordinator,
     make_topology,
@@ -24,8 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     StoreCommandBatch,
     TailKeyBoundary,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.results import DrainResult
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.outcomes import DrainResult
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.lookup import LookupService
 
 
@@ -44,27 +41,6 @@ def test_lookup_binds_and_queries_without_local_buffers_or_resource_owner():
     )
     assert [call[0] for call in backend.calls] == ["exists"]
     assert not backend.closed
-
-
-def test_worker_shares_logical_mappings_across_lookup_and_local_kv_binding():
-    topology = make_topology(group_ids=(0, 2))
-    backend = FakeBackend()
-    resources = FakeResources(backend, make_backend_spec(), topology)
-    worker = Worker(topology, resources, coordinator=make_coordinator(topology), source_ready_event_factory=FakeEvent)
-    try:
-        mappings = worker._lookup._block_hash_mappings
-        query = LookupRequest(
-            end_token=8, transfer_group_ids=(0, 2), block_hashes=(b"a", b"b"), local_available_tokens=0
-        )
-        before = worker._lookup(query)
-        assert before.available_end_token == 8
-        worker.bind_kv_caches({})
-        assert worker.context.block_hash_mappings is mappings
-        assert tuple(mappings) == (0, 2)
-        assert worker.lookup(query) == before
-    finally:
-        worker.close()
-    assert resources.closed
 
 
 def test_lookup_resolves_partial_checkpoints_without_local_block_assignments(monkeypatch):

@@ -20,7 +20,7 @@ from ..infrastructure.mapping import BlockHashMapping
 from ..infrastructure.resources import Resources
 from ..infrastructure.topology import KVPoolTopology
 from ..protocol.messages import KVTransferStep, LookupRequest, LookupResult
-from ..protocol.results import DrainResult, LoadResult, StoreResult
+from ..protocol.outcomes import DrainResult, LoadResult, StoreResult
 from .data.context import bind_context
 from .service.load import LoadService
 from .service.lookup import LookupService

@@ -2,13 +2,13 @@
 
 AscendStore 将模型计算产生的 KV 缓存保存到外部存储，让后续请求按内容复用已有数据。Scheduler 根据请求进度与缓存分配形成命令，Worker 执行 Lookup、Load、Store 并交回结果。业务层组合基础设施提供的恢复点计算、映射、通信、执行和资源管理能力。
 
-本文先说明整体边界，再展开 Worker 的组合关系与三条业务数据流。地址、长度和布局示例均以字节为单位。执行器中的 **write 表示写入本地 KV，对应 Load；read 表示读取本地 KV，对应 Store**。
+本文先说明整体边界，再展开 Worker 的组合关系、三条业务数据流与 Scheduler 的命令交接。地址、长度和布局示例均以字节为单位。执行器中的 **write 表示写入本地 KV，对应 Load；read 表示读取本地 KV，对应 Store**。
 
 ## 1. 总体架构
 
 ![AscendStore v1 总体职责：Connector 直接装配 Scheduler 与 Worker，业务层组合基础设施并调用 Backend](../../assets/ascendstore_v1/architecture_layers.svg)
 
-Connector 在 Scheduler 和 Worker 进程中分别实例化。查询与缓存控制通过独立 RPC 交接；Load / Store 命令、完成与失败结果通过 vLLM Connector 元数据交接，KV 字节经 Backend 传输。
+Connector 在 Scheduler 和 Worker 进程中分别实例化。查询与缓存控制通过独立 RPC 交接；Scheduler 经 vLLM Connector 元数据下发 Load / Store 命令，Worker 向框架交回 Load 完成与失败信息，并向 Scheduler 交回需要归还的 Store 源引用回执。KV 字节经 Backend 传输。
 
 资源所有权与调用关系分开：Service / Transfer 使用 Backend，Resources 保留客户端、注册句柄及对象会话，直到业务排空并确认内存安全后才释放。
 
@@ -20,15 +20,14 @@ Connector 在 Scheduler 和 Worker 进程中分别实例化。查询与缓存控
 v1/
 ├── connector.py                 vLLM 钩子适配、配置准入与两侧实例装配
 ├── protocol/
-│   ├── messages.py              命令、查询消息、事件元数据与来源释放回执
-│   ├── results.py               Load / Store 完成与安全排空结果
+│   ├── messages.py              跨进程查询请求与应答、传输命令和来源释放回执
+│   ├── outcomes.py              本地操作完成、失败与安全排空结果
 │   ├── observations.py          跨 Worker 的缓存事件汇总
 │   └── lookup.py                查询与缓存控制的编解码、校验和应答语义
 ├── scheduler/
-│   ├── scheduler.py             命中采用、分配确认、每步命令规划
-│   ├── lookup.py                请求侧恢复候选与实际加载范围
+│   ├── scheduler.py             加载候选与范围、命中采用、分配确认、每步命令交付
 │   ├── state.py                 请求、分配与规划进度
-│   └── source_leases.py         需要额外保护的 Store 来源引用
+│   └── store.py                 StorePlanner 规划命令，StoreSourceLeases 管理源引用
 ├── worker/
 │   ├── worker.py                KV 绑定、钩子适配、业务生命周期
 │   ├── service/
@@ -117,11 +116,14 @@ Layerwise 跨层复用 Selection、成功对象计划和可共享的层参数模
 
 ### 3.6 Scheduler 与 Connector 交接
 
-请求的原始 prompt 边界用于查询，本次预填充终点用于区分重放与 Decode，保存进度记录已处理区间。抢占后的 V1 RESUMED 与 V2 NEW 入口都按确认后的新块表和本次预填充范围规划，避免将重放的 Decode 历史误当成新生成数据。
+![Scheduler 处理流程：请求事实与调度输入汇入整步准备，申请来源引用后统一交付 Worker；结束检查点提前保护来源，释放回执独立归还引用](../../assets/ascendstore_v1/scheduler_flow.svg)
 
-Store 的阶段许可在 Scheduler 生成命令前确定。Consumer 开启 `save_decode_cache` 后可以保存 Decode 区间，重放预填充仍按预填充策略处理。规划结果区分已就绪来源和本步仍在计算的来源，并为需要额外保护的来源持有引用。原始 group ID 始终表示缓存组身份，紧凑下标仅用于批次内部定位。
+- 查询使用原始 prompt 边界；Store 按本次预填充终点区分重放与 Decode。Consumer 开启 `save_decode_cache` 后可以保存 Decode 区间，重放部分仍按预填充策略处理。
+- vLLM 追加已确认的 Hash；`RequestState` 按来源和长度复用快照，增长或来源替换时重新冻结。NEW／RESUMED 核对块表后，Load 与初始 Store 复用确认后的块表。原始 group ID 表示缓存组身份，紧凑下标只用于批次内部定位。
+- Load-only 不建立 Store 进度；Decode 不保存且没有状态检查点时，在转换新增块表和 Hash 前退出。来源保护、检查点和事件各自需要的准备与扫描仍然保留。
+- `store_planned_end_token` 从 Lookup 已知的远端可用终点开始，随命令发出而推进，不代表 Backend 已完成保存。Store 命令区分来源已就绪与仍待本步计算；来源就绪、保存成功和来源可以释放分别判断。
 
-Connector 将同一份 Load 结果适配到框架字段：
+Protocol 的 `messages.py` 定义跨进程交接的数据，包括 Lookup 请求与应答、传输命令和来源释放回执；`outcomes.py` 定义 Transfer、Service、Worker 与 Connector 在本地调用中使用的操作结果。Connector 将本地 Load 结果适配到框架字段：
 
 | 框架字段 | 适用范围 | 交付内容 |
 | --- | --- | --- |
@@ -340,6 +342,7 @@ Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实
 | 逻辑 hash 与 Block ID | `worker/test_block_hash_mapping.py` | 不同粒度、加载起点、尾部边界与调用方块表 |
 | Key / Local / Remote / Layer | `infrastructure/mapping/test_mapping.py`、`test_partition_bindings.py`（同目录） | 分区、非连续 view、段序、对象偏移与预留 |
 | 三条业务的数据流 | `worker/test_data_flow.py`、`test_store_candidates.py`、`test_single_preparation.py`（同目录） | Lookup 新 Key、重复目标、writer 筛选、exists 过滤与归属保留 |
+| Scheduler 规划与来源保护 | `scheduler/test_scheduler.py`、`test_source_leases.py`（同目录） | 候选采用、快照有效期、整步发布、失败撤销、空步骤 Load 与跨请求生命周期的源引用 |
 | Scheduler / Worker 接口契约 | `test_dataflow_contracts.py` | 候选有效期、V1 / V2 恢复入口、阶段许可、分组失败交付、加载失败到 Store 来源失效及重算恢复 |
 | 实际参数与字节一致性 | `worker/test_equivalence.py`、`test_layerwise_bytes.py`（同目录） | 对照基准、整对象 / 逐层重组、KeyRange / GVA 字节 |
 | 串行队列与逐层时序 | `infrastructure/test_execution.py`、`test_layerwise_executor.py`、`test_attention_gate.py`（同目录） | 提交 / 领取分离、Gate 取消、封口、重复钩子与收尾 |
@@ -349,4 +352,4 @@ Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实
 | 注册与关闭所有权 | `infrastructure/test_resources.py`、`worker/test_worker.py` | 绑定与注册顺序、失败保留、内存安全未知时禁止释放 |
 | 共享对象发布 | `worker/test_gva_writers.py`、`infrastructure/test_collective.py` | writer 完备性、空报告、失败及分配身份分歧 |
 
-路径相对于 `tests/ut/distributed/ascend_store/v1/`。CPU 字节模拟与单元测试验证数据和状态约束；Gloo 进程测试验证集体通信顺序。原生 Backend / NPU 验证还需覆盖设备事件、注册范围、读写完成、地址保护和发布语义，不能由 CPU 结果代替。
+路径相对于 `tests/ut/distributed/ascend_store/v1/`。CPU 字节模拟与单元测试验证数据和状态约束；CollectiveGroup 的通信调用使用 mock，多 writer 汇总使用线程与屏障模拟各 rank。真实 Gloo 多进程通信、原生 Backend 和 NPU 的设备事件、注册范围、读写完成、地址保护及发布语义仍需对应环境验证，不能由这些 CPU 结果代替。

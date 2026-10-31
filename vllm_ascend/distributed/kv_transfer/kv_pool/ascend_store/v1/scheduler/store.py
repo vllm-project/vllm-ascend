@@ -1,23 +1,156 @@
-"""Scheduler ownership of block references read by asynchronous Store jobs."""
+"""Scheduler Store planning and ownership of sources read by asynchronous jobs."""
 
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, TypeVar, cast
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from ..infrastructure.configuration import KVPoolConfig
 from ..infrastructure.coordinator import checkpoint_companion_indices, store_block_range, store_group_mask
-from ..protocol.messages import CheckpointStoreCommand, StoreCommand
+from ..protocol.messages import (
+    CheckpointStoreCommand,
+    RangeStoreCommand,
+    StateCheckpointSource,
+    StoreCommand,
+    StoreCommandBatch,
+)
+from .state import RequestProgress
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.request import Request
 
 StoreCommandT = TypeVar("StoreCommandT", bound=StoreCommand)
+
+
+class StorePlanner:
+    """Derive commands and tentative progress from explicit request facts.
+
+    The Scheduler protects sources and adopts the progress only when the whole
+    step is ready to publish. This class neither holds leases nor confirms writes.
+    """
+
+    def __init__(self, config: KVPoolConfig) -> None:
+        self._config = config
+        self._event_block_sizes = (
+            tuple(sorted({config.group_specs[group_id].block_size for group_id in config.transfer_group_ids}))
+            if config.enable_kv_events
+            else ()
+        )
+
+    # ====================================
+    # Range Commands and Planning Progress
+    # ====================================
+
+    def plan_range(
+        self, request: Request, progress: RequestProgress
+    ) -> tuple[RequestProgress, RangeStoreCommand | None]:
+        if not self._config.store_enabled:
+            return progress, None
+        granularity = self._config.cache_transfer_granularity
+        available_end = min(progress.store_end_token, len(progress.block_hashes) * self._config.hash_block_size)
+        transfer_end = available_end // granularity * granularity
+        store_start = progress.store_planned_end_token
+        if not self._config.store_prefill_enabled:
+            store_start = max(store_start, progress.prefill_end_token)
+        if transfer_end <= store_start or transfer_end < cdiv(store_start + 1, granularity) * granularity:
+            return progress, None
+
+        command = RangeStoreCommand(
+            progress.request_id,
+            store_start,
+            transfer_end,
+            progress.block_ids_by_group,
+            progress.block_hashes,
+            progress.prefill_end_token,
+            event_tokens=self._event_tokens(request, store_start, transfer_end),
+        )
+        return progress.with_store_planned_end(transfer_end), command
+
+    # ====================================
+    # Ready Checkpoints and Event Snapshots
+    # ====================================
+
+    def plan_checkpoints(
+        self, request: Request, progress: RequestProgress, entries: Sequence[tuple[int, int, int]]
+    ) -> list[CheckpointStoreCommand]:
+        if not self._config.store_enabled:
+            return []
+        entries_by_boundary: dict[int, list[StateCheckpointSource]] = {}
+        for group_id, block_id, boundary_token in entries:
+            if (
+                group_id in self._config.transfer_group_ids
+                and group_id in self._config.align_state_group_ids
+                and block_id > 0
+                and 0 < boundary_token <= progress.request_token_len
+            ):
+                entries_by_boundary.setdefault(boundary_token, []).append(
+                    StateCheckpointSource(group_id, block_id, boundary_token)
+                )
+        return [
+            CheckpointStoreCommand(
+                progress.request_id,
+                progress.block_ids_by_group,
+                progress.block_hashes,
+                progress.store_planned_end_token,
+                tuple(sources),
+                event_tokens=self._event_tokens(
+                    request, min(progress.store_planned_end_token, boundary_token - 1), boundary_token
+                ),
+            )
+            for boundary_token, sources in sorted(entries_by_boundary.items())
+        ]
+
+    def plan_finished_checkpoint(
+        self,
+        request: Request,
+        progress: RequestProgress,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: Sequence[tuple[int, int, int]],
+    ) -> CheckpointStoreCommand | None:
+        if not self._config.store_enabled or not partial_tail_offloads or not any(block_ids):
+            return None
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("Finished state checkpoints must share one token boundary")
+        boundary = next(iter(boundaries))
+        if boundary <= 0 or boundary > progress.prefill_end_token:
+            return None
+        if (
+            boundary % self._config.hash_block_size
+            or boundary > len(request.block_hashes) * self._config.hash_block_size
+        ):
+            return None
+        sources = tuple(
+            StateCheckpointSource(group_id, block_id, boundary)
+            for group_id, block_id, boundary in partial_tail_offloads
+            if group_id in self._config.transfer_group_ids
+            and group_id in self._config.align_state_group_ids
+            and block_id > 0
+        )
+        if len(sources) != len(partial_tail_offloads):
+            return None
+        return CheckpointStoreCommand(
+            request.request_id,
+            tuple(tuple(group) for group in block_ids),
+            tuple(request.block_hashes),
+            progress.store_planned_end_token,
+            sources,
+            event_tokens=self._event_tokens(request, min(progress.store_planned_end_token, boundary - 1), boundary),
+        )
+
+    def _event_tokens(self, request: Request, start_token: int, end_token: int) -> tuple[int, tuple[int, ...]] | None:
+        if not self._event_block_sizes:
+            return None
+        start = min(start_token // block_size * block_size for block_size in self._event_block_sizes)
+        return start, tuple(request.all_token_ids[start:end_token])
 
 
 class StoreSourceLeases:
@@ -84,6 +217,30 @@ class StoreSourceLeases:
         self._leases[store_job_id] = (block_ids, self._expected_worker_count, command.request_id)
         return cast(StoreCommandT, replace(command, store_job_id=store_job_id))
 
+    def acquire_step(self, commands: StoreCommandBatch) -> StoreCommandBatch:
+        """Protect a prepared step, rolling back only newly acquired, unpublished jobs.
+
+        Finish-time checkpoints already have leases before vLLM releases their
+        sources. Their job IDs predate this call and remain owned on failure.
+        """
+        if not commands.source_pending_commands and not commands.source_ready_commands:
+            return commands
+        first_job_id = self._next_job_id
+        try:
+            return StoreCommandBatch(
+                tuple(self.acquire(command) for command in commands.source_pending_commands),
+                tuple(self.acquire(command) for command in commands.source_ready_commands),
+            )
+        except BaseException:
+            for job_id in range(first_job_id, self._next_job_id):
+                lease = self._leases.get(job_id)
+                if lease is not None:
+                    assert self._block_pool is not None
+                    block_ids, _, _ = lease
+                    self._block_pool.free_blocks(self._block_pool.blocks[block_id] for block_id in reversed(block_ids))
+                    del self._leases[job_id]
+            raise
+
     def release(self, released_store_jobs: dict[int, int]) -> None:
         for store_job_id, count in released_store_jobs.items():
             lease = self._leases.get(store_job_id)
@@ -139,7 +296,7 @@ class StoreSourceLeases:
                         continue
                     block_ids = command.block_ids_by_group[group_id]
                     indices = checkpoint_companion_indices(
-                        boundary, command.published_store_end_token, block_size, len(block_ids)
+                        boundary, command.store_planned_end_token, block_size, len(block_ids)
                     )
                     source_ids.extend(block_ids[index] for index in indices)
         else:

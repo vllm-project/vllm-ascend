@@ -13,7 +13,7 @@ import numpy as np
 from ...backend import GVABackend, GVAObjectSessions, KeyRangeBackend, LayerwiseAccessKind, ObjectSessions
 from ...infrastructure.executor import LayerwiseExecutor
 from ...infrastructure.mapping import PartitionId, local_addresses
-from ...protocol.results import LoadResult, StoreResult
+from ...protocol.outcomes import LoadResult, StoreResult
 from ..data.batch import LayerTransferPlan, LoadBatch, StoreBatch
 from ..data.context import TransferContext
 from ..data.selection import CachePartition, LoadSelection, StoreSelection

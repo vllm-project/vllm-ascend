@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
@@ -15,14 +15,13 @@ from ..protocol.messages import (
     KVTransferStep,
     LoadCommand,
     LookupRequest,
+    LookupResult,
     RangeStoreCommand,
-    StateCheckpointSource,
     StoreCommandBatch,
     StoreSourceReleaseMetadata,
 )
-from .lookup import resolve_load_candidate
-from .source_leases import StoreSourceLeases
-from .state import LoadCandidate, RequestAllocation, RequestProgress
+from .state import LoadCandidate, RequestAllocation, RequestProgress, RequestState
+from .store import StorePlanner, StoreSourceLeases
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
@@ -40,98 +39,143 @@ class KVPoolScheduler:
     def __init__(self, config: KVPoolConfig, lookup_client: LookupClient) -> None:
         self._config = config
         self._lookup_client = lookup_client
-        self._pending_lookups: dict[str, LoadCandidate] = {}
-        self._confirmed_loads: dict[str, LoadCandidate] = {}
-        self._requests: dict[str, Request] = {}
-        self._allocations: dict[str, RequestAllocation] = {}
-        self._request_progress: dict[str, RequestProgress] = {}
+        self._request_states: dict[str, RequestState] = {}
+        # An ordered publication index; candidates and allocation facts live only in RequestState.
+        self._ready_loads: dict[str, RequestState] = {}
         self._finished_checkpoint_stores: list[CheckpointStoreCommand] = []
+        self._store_planner = StorePlanner(config)
         self._source_leases = StoreSourceLeases(config)
+        self._has_state_checkpoints = config.store_enabled and not config.align_state_group_ids.isdisjoint(
+            config.transfer_group_ids
+        )
 
     # ================================
     # Lookup and Allocation
     # ================================
 
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
-        self._pending_lookups.pop(request.request_id, None)
-        if not self._config.load_enabled:
-            return 0, False
-
+        state = self._request_states.get(request.request_id)
+        if state is not None:
+            state.pending_lookup = None
         query_end = request.num_prompt_tokens
         query_end -= query_end % self._config.cache_transfer_granularity
-        minimum_query_tokens = self._config.cache_transfer_granularity
-        if query_end < minimum_query_tokens:
-            return 0, False
         local_available = min(num_computed_tokens, query_end)
-        if local_available >= query_end:
+        if (
+            not self._config.load_enabled
+            or query_end < self._config.cache_transfer_granularity
+            or local_available >= query_end
+        ):
+            if state is not None and state.allocation is None:
+                self._discard_request(request.request_id)
             return 0, False
+        if state is None:
+            state = self._request_states[request.request_id] = RequestState(request)
 
         result = self._lookup_client.lookup(
-            LookupRequest(local_available, query_end, self._config.transfer_group_ids, tuple(request.block_hashes))
+            LookupRequest(
+                local_available, query_end, self._config.transfer_group_ids, state.snapshot_hashes(request.block_hashes)
+            )
         )
-        candidate = resolve_load_candidate(
-            self._config,
+        candidate = self._resolve_load_candidate(
             result,
             query_end_token=query_end,
             local_cached_tokens=num_computed_tokens,
             request_token_count=request.num_tokens,
         )
         if candidate is None:
-            self._pending_lookups.pop(request.request_id, None)
             return 0, False
-        self._pending_lookups[request.request_id] = candidate
+        state.pending_lookup = candidate
         num_new_matched_tokens = candidate.num_new_matched_tokens
         return num_new_matched_tokens, self.load_is_deferred and num_new_matched_tokens > 0
 
     def confirm_allocation(self, request: Request, blocks: KVCacheBlocks, allocated_external_tokens: int) -> None:
         request_id = request.request_id
+        state = self._request_states.get(request_id)
+        candidate = None if state is None else state.pending_lookup
+        selected_for_load = False
+        if candidate is not None:
+            expected_external_tokens = candidate.num_new_matched_tokens
+            if allocated_external_tokens not in (0, expected_external_tokens):
+                raise ValueError(
+                    f"Allocation confirmed {allocated_external_tokens} external tokens for request {request_id}; "
+                    f"expected either 0 or {expected_external_tokens}"
+                )
+            selected_for_load = expected_external_tokens > 0 and allocated_external_tokens == expected_external_tokens
+
+        if not self._config.store_enabled and not selected_for_load and (state is None or state.pending_load is None):
+            self._discard_request(request_id)
+            return
         block_ids_by_group = _freeze_block_ids(blocks.get_block_ids())
-        block_hashes = tuple(request.block_hashes)
-        candidate = self._pending_lookups.pop(request_id, None)
-        previous = self._allocations.get(request_id)
-        if candidate is None and previous is not None:
-            self._requests[request_id] = request
-            self._allocations[request_id] = RequestAllocation(
-                block_ids_by_group,
-                block_hashes,
-                previous.store_skip_end_token,
-            )
-            return
-
-        store_skip_end = 0 if candidate is None else candidate.store_skip_end_token
-        self._requests[request_id] = request
-        self._allocations[request_id] = RequestAllocation(
-            block_ids_by_group,
-            block_hashes,
-            store_skip_end,
-        )
-        if candidate is None:
-            return
-
-        expected_external_tokens = candidate.num_new_matched_tokens
-        if allocated_external_tokens not in (0, expected_external_tokens):
-            raise ValueError(
-                f"Allocation confirmed {allocated_external_tokens} external tokens for request {request_id}; "
-                f"expected either 0 or {expected_external_tokens}"
-            )
-        selected_for_load = expected_external_tokens > 0 and allocated_external_tokens == expected_external_tokens
-        self._confirm_load_candidate(request_id, candidate, selected_for_load=selected_for_load)
-
-    def _confirm_load_candidate(
-        self,
-        request_id: str,
-        candidate: LoadCandidate,
-        *,
-        selected_for_load: bool,
-    ) -> None:
+        if state is None:
+            state = self._request_states[request_id] = RequestState(request)
+        block_hashes = state.snapshot_hashes(request.block_hashes)
+        previous = state.allocation
+        if candidate is not None:
+            store_skip_end = candidate.store_skip_end_token
+        else:
+            store_skip_end = 0 if previous is None else previous.store_skip_end_token
+        state.request = request
+        state.allocation = RequestAllocation(block_ids_by_group, block_hashes, store_skip_end)
+        state.pending_lookup = None
         if selected_for_load:
-            self._confirmed_loads[request_id] = candidate
+            state.pending_load = candidate
+            self._ready_loads[request_id] = state
+
+    def _resolve_load_candidate(
+        self,
+        lookup_result: LookupResult,
+        *,
+        query_end_token: int,
+        local_cached_tokens: int,
+        request_token_count: int,
+    ) -> LoadCandidate | None:
+        """Derive readable, Store-skip, and Scheduler-safe prefix frontiers."""
+        config = self._config
+        readable_end = lookup_result.available_end_token
+        if readable_end == 0 or readable_end <= local_cached_tokens:
+            return None
+        if readable_end > query_end_token:
+            raise ValueError(f"Lookup returned token {readable_end} beyond query end {query_end_token}")
+
+        store_skip_end = readable_end
+        safe_load_end = readable_end
+        granularity = config.cache_transfer_granularity
+        if config.use_eagle and request_token_count > 0:
+            final_block_start = (request_token_count - 1) // granularity * granularity
+            if safe_load_end > final_block_start:
+                safe_load_end = max(local_cached_tokens, safe_load_end - granularity)
+        if safe_load_end == request_token_count:
+            safe_load_end -= 1
+        if config.has_private_state:
+            safe_load_end = safe_load_end // granularity * granularity
+        safe_load_end = max(local_cached_tokens, safe_load_end)
+
+        physical_load_end = min(readable_end, cdiv(safe_load_end, granularity) * granularity)
+        load_start = local_cached_tokens
+        if physical_load_end < load_start:
+            physical_load_end = load_start
+        # Lookup may select a longer Attention object in the same physical tail page.
+        # Its identity remains valid unless the physical Load frontier changes.
+        tail_boundaries = lookup_result.tail_key_boundaries
+        if physical_load_end != readable_end:
+            tail_boundaries = tuple(
+                boundary for boundary in tail_boundaries if boundary.boundary_token <= physical_load_end
+            )
+        return LoadCandidate(
+            local_cached_tokens,
+            store_skip_end,
+            safe_load_end,
+            load_start,
+            physical_load_end,
+            tail_boundaries,
+        )
 
     # ================================
     # Scheduler Step Publication
     # ================================
 
     def build_step(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
+        # Termination is already a vLLM fact, even if preparing this step later fails.
         finished_request_ids = frozenset(scheduler_output.finished_req_ids)
         preempted_request_ids = frozenset(scheduler_output.preempted_req_ids or ())
         for request_id in finished_request_ids | preempted_request_ids:
@@ -140,17 +184,27 @@ class KVPoolScheduler:
         load_commands: list[LoadCommand] = []
         source_pending_commands: list[RangeStoreCommand] = []
         source_ready_commands: list[CheckpointStoreCommand] = []
+        progress_updates: dict[str, RequestProgress] = {}
+        load_request_ids: set[str] = set()
 
+        # Prepare final commands and tentative progress without consuming any pending Load.
         for scheduled in scheduler_output.scheduled_new_reqs:
-            load_command, store_command = self._plan_new_request(
-                scheduled.req_id,
-                _freeze_block_ids(scheduled.block_ids),
+            if not self._config.store_enabled and scheduled.req_id not in self._ready_loads:
+                continue
+            state = self._allocated_request(scheduled.req_id)
+            progress, load_command, store_command = self._plan_admitted_request(
+                state,
+                scheduled.block_ids,
                 scheduled.num_computed_tokens,
                 scheduler_output.num_scheduled_tokens[scheduled.req_id],
                 len(scheduled.prefill_token_ids)
                 if getattr(scheduled, "prefill_token_ids", None) is not None
-                else self._requests[scheduled.req_id].num_prompt_tokens,
+                else state.request.num_prompt_tokens,
             )
+            if progress is not None:
+                progress_updates[scheduled.req_id] = progress
+            if state.pending_load is not None:
+                load_request_ids.add(scheduled.req_id)
             if load_command is not None:
                 load_commands.append(load_command)
             if store_command is not None:
@@ -159,115 +213,131 @@ class KVPoolScheduler:
         cached = scheduler_output.scheduled_cached_reqs
         resumed_request_ids = frozenset(cached.resumed_req_ids)
         for index, request_id in enumerate(cached.req_ids):
-            block_ids = None if cached.new_block_ids[index] is None else _freeze_block_ids(cached.new_block_ids[index])
+            if not self._config.store_enabled and request_id not in self._ready_loads:
+                continue
+            block_ids = cached.new_block_ids[index]
             if request_id in resumed_request_ids:
-                load_command, store_command = self._plan_resumed_request(
-                    request_id,
+                if block_ids is None:
+                    raise ValueError(f"Scheduled RESUMED request {request_id} has no replacement block table")
+                state = self._allocated_request(request_id)
+                progress, load_command, store_command = self._plan_admitted_request(
+                    state,
                     block_ids,
                     cached.num_computed_tokens[index],
                     scheduler_output.num_scheduled_tokens[request_id],
+                    state.request.num_tokens,
                 )
+                if state.pending_load is not None:
+                    load_request_ids.add(request_id)
             else:
-                load_command, store_command = self._plan_running_request(
+                running_progress, store_command = self._plan_running_request(
                     request_id,
                     block_ids,
                     cached.num_computed_tokens[index],
                     scheduler_output.num_scheduled_tokens[request_id],
                 )
+                if running_progress is None:
+                    continue
+                progress = running_progress
+                load_command = None
+            if progress is not None:
+                progress_updates[request_id] = progress
             if load_command is not None:
                 load_commands.append(load_command)
             if store_command is not None:
                 source_pending_commands.append(store_command)
 
-        load_commands.extend(self._take_allocation_ready_loads())
-        source_ready_commands.extend(self._plan_step_checkpoint_stores(scheduler_output.kv_connector_block_state))
+        # Deferred Loads can publish without a scheduled forward, including on an empty step.
+        if self.load_is_deferred:
+            for request_id, state in self._ready_loads.items():
+                if request_id in load_request_ids:
+                    continue
+                command = self._make_load_command(state)
+                load_request_ids.add(request_id)
+                if command is not None:
+                    load_commands.append(command)
+
+        block_state = scheduler_output.kv_connector_block_state
+        if self._config.store_enabled and block_state is not None:
+            for request_id, entries in block_state.boundary_state_offloads.items():
+                checkpoint_state = self._request_states.get(request_id)
+                if checkpoint_state is None:
+                    continue
+                checkpoint_progress = progress_updates.get(request_id, checkpoint_state.progress)
+                if checkpoint_progress is not None:
+                    source_ready_commands.extend(
+                        self._store_planner.plan_checkpoints(checkpoint_state.request, checkpoint_progress, entries)
+                    )
         source_ready_commands.extend(self._finished_checkpoint_stores)
-        self._finished_checkpoint_stores.clear()
-        return KVTransferStep(
+
+        # Acquire source ownership last; failure leaves plans and existing checkpoint leases pending.
+        store = self._source_leases.acquire_step(
+            StoreCommandBatch(tuple(source_pending_commands), tuple(source_ready_commands))
+        )
+        step = KVTransferStep(
             tuple(load_commands),
-            StoreCommandBatch(tuple(source_pending_commands), tuple(source_ready_commands)),
+            store,
             finished_request_ids | preempted_request_ids,
         )
+        for request_id, progress in progress_updates.items():
+            self._request_states[request_id].progress = progress
+        for request_id in load_request_ids:
+            self._request_states[request_id].pending_load = None
+            self._ready_loads.pop(request_id, None)
+        self._finished_checkpoint_stores.clear()
+        return step
 
-    def _plan_new_request(
+    def _plan_admitted_request(
         self,
-        request_id: str,
-        block_ids_by_group: tuple[tuple[int, ...], ...],
+        state: RequestState,
+        block_ids_by_group: Sequence[Sequence[int]],
         num_computed_tokens: int,
         num_scheduled_tokens: int,
         prefill_end_token: int,
-    ) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
-        request, allocation = self._allocated_request(request_id)
-        if block_ids_by_group != allocation.block_ids_by_group:
-            raise ValueError(f"Scheduled NEW request {request_id} does not match its confirmed allocation")
+    ) -> tuple[RequestProgress | None, LoadCommand | None, RangeStoreCommand | None]:
+        request = state.request
+        allocation = state.allocation
+        assert allocation is not None
+        request_id = request.request_id
+        if len(block_ids_by_group) != len(allocation.block_ids_by_group) or any(
+            tuple(actual) != confirmed
+            for actual, confirmed in zip(block_ids_by_group, allocation.block_ids_by_group, strict=True)
+        ):
+            raise ValueError(f"Scheduled request {request_id} does not match its confirmed allocation")
+        load_command = self._make_load_command(state)
+        if not self._config.store_enabled:
+            return None, load_command, None
         scheduled_end = num_computed_tokens + num_scheduled_tokens
         progress = RequestProgress(
             request_id,
             scheduled_end,
-            block_ids_by_group,
-            tuple(request.block_hashes),
+            allocation.block_ids_by_group,
+            state.snapshot_hashes(request.block_hashes),
             prefill_end_token,
             allocation.store_skip_end_token,
             min(scheduled_end, request.num_tokens),
         )
-        self._request_progress[request_id] = progress
-        load_command = self._take_scheduled_load(request_id)
-        store_command = (
-            None
-            if load_command is not None and not self.store_with_scheduled_load
-            else self._plan_range_store(progress)
-        )
-        return load_command, store_command
-
-    def _plan_resumed_request(
-        self,
-        request_id: str,
-        replacement_block_ids: tuple[tuple[int, ...], ...] | None,
-        num_computed_tokens: int,
-        num_scheduled_tokens: int,
-    ) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
-        if replacement_block_ids is None:
-            raise ValueError(f"Scheduled RESUMED request {request_id} has no replacement block table")
-        request, allocation = self._allocated_request(request_id)
-        if replacement_block_ids != allocation.block_ids_by_group:
-            raise ValueError(f"Scheduled RESUMED request {request_id} does not match its confirmed allocation")
-        scheduled_end = num_computed_tokens + num_scheduled_tokens
-        progress = RequestProgress(
-            request_id,
-            scheduled_end,
-            replacement_block_ids,
-            tuple(request.block_hashes),
-            request.num_tokens,
-            allocation.store_skip_end_token,
-            min(scheduled_end, request.num_tokens),
-        )
-        self._request_progress[request_id] = progress
-        load_command = self._take_scheduled_load(request_id)
-        store_command = (
-            None
-            if load_command is not None and not self.store_with_scheduled_load
-            else self._plan_range_store(progress)
-        )
-        return load_command, store_command
+        store_command = None
+        if load_command is None or self.store_with_scheduled_load:
+            progress, store_command = self._store_planner.plan_range(request, progress)
+        return progress, load_command, store_command
 
     def _plan_running_request(
         self,
         request_id: str,
-        new_block_ids: tuple[tuple[int, ...], ...] | None,
+        new_block_ids: Sequence[Sequence[int]] | None,
         num_computed_tokens: int,
         num_scheduled_tokens: int,
-    ) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
-        request = self._requests.get(request_id)
-        progress = self._request_progress.get(request_id)
-        if request is None or progress is None:
+    ) -> tuple[RequestProgress | None, RangeStoreCommand | None]:
+        if not self._config.store_enabled:
+            return None, None
+        state = self._request_states.get(request_id)
+        if state is None or state.progress is None:
             raise ValueError(f"Scheduled RUNNING request {request_id} has no Scheduler progress")
+        request, progress = state.request, state.progress
 
         is_decoding = num_computed_tokens >= progress.prefill_end_token
-        if (
-            is_decoding
-            and not self._config.save_decode_cache
-            and self._config.align_state_group_ids.isdisjoint(self._config.transfer_group_ids)
-        ):
+        if is_decoding and not self._config.save_decode_cache and not self._has_state_checkpoints:
             # No decode transfer consumes these snapshots. Resumption rebuilds
             # them from the confirmed allocation; state checkpoints still need progress.
             return None, None
@@ -276,22 +346,21 @@ class KVPoolScheduler:
         progress = progress.advance(
             scheduled_end,
             new_block_ids,
-            request.block_hashes,
+            state.snapshot_hashes(request.block_hashes),
             min(scheduled_end, request.num_tokens),
         )
-        self._request_progress[request_id] = progress
-        store_command = None if is_decoding and not self._config.save_decode_cache else self._plan_range_store(progress)
-        return None, store_command
+        store_command = None
+        if not is_decoding or self._config.save_decode_cache:
+            progress, store_command = self._store_planner.plan_range(request, progress)
+        return progress, store_command
 
-    def _take_scheduled_load(self, request_id: str) -> LoadCommand | None:
-        candidate = self._confirmed_loads.pop(request_id, None)
-        return None if candidate is None else self._make_load_command(request_id, candidate)
-
-    def _take_allocation_ready_loads(self) -> list[LoadCommand]:
-        return []
-
-    def _make_load_command(self, request_id: str, candidate: LoadCandidate) -> LoadCommand | None:
-        allocation = self._allocations.get(request_id)
+    @staticmethod
+    def _make_load_command(state: RequestState) -> LoadCommand | None:
+        candidate = state.pending_load
+        if candidate is None:
+            return None
+        request_id = state.request.request_id
+        allocation = state.allocation
         if allocation is None:
             raise ValueError(f"Request {request_id} is ready for Load without a confirmed allocation")
         if candidate.load_end_token <= candidate.load_start_token:
@@ -306,71 +375,8 @@ class KVPoolScheduler:
         )
 
     # ================================
-    # Store Publication and Ownership
+    # Store Sources and Results
     # ================================
-
-    def _plan_range_store(self, progress: RequestProgress) -> RangeStoreCommand | None:
-        if not self._config.store_enabled:
-            return None
-        transfer_end = self._resolve_transfer_end(progress.store_end_token, len(progress.block_hashes))
-        store_start = progress.store_skip_end_token
-        if not self._config.store_prefill_enabled:
-            store_start = max(store_start, progress.prefill_end_token)
-        if transfer_end <= store_start:
-            return None
-        next_chunk_end = (
-            cdiv(store_start + 1, self._config.cache_transfer_granularity) * self._config.cache_transfer_granularity
-        )
-        if transfer_end < next_chunk_end:
-            return None
-
-        command = RangeStoreCommand(
-            progress.request_id,
-            store_start,
-            transfer_end,
-            progress.block_ids_by_group,
-            progress.block_hashes,
-            progress.prefill_end_token,
-            event_tokens=self._event_tokens(progress.request_id, store_start, transfer_end),
-        )
-        leased_command = self._source_leases.acquire(command)
-        self._request_progress[progress.request_id] = progress.with_store_skip_end(transfer_end)
-        return leased_command
-
-    def _plan_step_checkpoint_stores(self, block_state: Any) -> list[CheckpointStoreCommand]:
-        if not self._config.store_enabled or block_state is None:
-            return []
-
-        commands = []
-        for request_id, entries in block_state.boundary_state_offloads.items():
-            progress = self._request_progress.get(request_id)
-            if progress is None:
-                continue
-            entries_by_boundary: dict[int, list[tuple[int, int]]] = {}
-            for group_id, block_id, boundary_token in entries:
-                if (
-                    group_id in self._config.transfer_group_ids
-                    and group_id in self._config.align_state_group_ids
-                    and block_id > 0
-                    and 0 < boundary_token <= progress.request_token_len
-                ):
-                    entries_by_boundary.setdefault(boundary_token, []).append((group_id, block_id))
-            for boundary_token, boundary_entries in sorted(entries_by_boundary.items()):
-                command = CheckpointStoreCommand(
-                    request_id,
-                    progress.block_ids_by_group,
-                    progress.block_hashes,
-                    progress.store_skip_end_token,
-                    tuple(
-                        StateCheckpointSource(group_id, block_id, boundary_token)
-                        for group_id, block_id in boundary_entries
-                    ),
-                    event_tokens=self._event_tokens(
-                        request_id, min(progress.store_skip_end_token, boundary_token - 1), boundary_token
-                    ),
-                )
-                commands.append(self._source_leases.acquire(command))
-        return commands
 
     def register_finished_partial_tail(
         self,
@@ -378,56 +384,19 @@ class KVPoolScheduler:
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
-        if not self._config.store_enabled or not partial_tail_offloads:
+        state = self._request_states.get(request.request_id)
+        if state is None or state.progress is None:
             return False
-        progress = self._request_progress.get(request.request_id)
-        if progress is None or not any(block_ids):
-            return False
-        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
-        if len(boundaries) != 1:
-            raise ValueError("Finished state checkpoints must share one token boundary")
-        boundary = next(iter(boundaries))
-        if boundary <= 0 or boundary > progress.prefill_end_token:
-            return False
-        if (
-            boundary % self._config.hash_block_size
-            or boundary > len(request.block_hashes) * self._config.hash_block_size
-        ):
-            return False
-        sources = tuple(
-            StateCheckpointSource(group_id, block_id, boundary)
-            for group_id, block_id, boundary in partial_tail_offloads
-            if group_id in self._config.transfer_group_ids
-            and group_id in self._config.align_state_group_ids
-            and block_id > 0
+        command = self._store_planner.plan_finished_checkpoint(
+            request, state.progress, block_ids, partial_tail_offloads
         )
-        if len(sources) != len(partial_tail_offloads):
-            return False
-        command = CheckpointStoreCommand(
-            request.request_id,
-            _freeze_block_ids(block_ids),
-            tuple(request.block_hashes),
-            progress.store_skip_end_token,
-            sources,
-            event_tokens=self._event_tokens(
-                request.request_id, min(progress.store_skip_end_token, boundary - 1), boundary
-            ),
-        )
-        self._finished_checkpoint_stores.append(self._source_leases.acquire(command))
+        if command is not None:
+            self._finished_checkpoint_stores.append(self._source_leases.acquire(command))
         # vLLM may release its request object; the exact source blocks remain leased.
         return False
 
     def bind_gpu_block_pool(self, block_pool: BlockPool) -> None:
         self._source_leases.bind_block_pool(block_pool)
-
-    def _event_tokens(self, request_id: str, start_token: int, end_token: int) -> tuple[int, tuple[int, ...]] | None:
-        if not self._config.enable_kv_events:
-            return None
-        start = min(
-            start_token // self._config.group_specs[group_id].block_size * self._config.group_specs[group_id].block_size
-            for group_id in self._config.transfer_group_ids
-        )
-        return start, tuple(self._requests[request_id].all_token_ids[start:end_token])
 
     def accept_worker_metadata(self, metadata: Any) -> None:
         if isinstance(metadata, StoreSourceReleaseMetadata):
@@ -449,38 +418,28 @@ class KVPoolScheduler:
         """Reset only a quiescent supported route; caller must pause generation first."""
         if self._config.backend_name != "mooncake":
             return None
-        if self._config.use_layerwise or self.has_pending_push_work() or self._confirmed_loads:
+        if self._config.use_layerwise or self.has_pending_push_work() or self._ready_loads:
             return False
         # A failed reply cannot prove that the remote reset did not execute.
-        self._pending_lookups.clear()
+        for request_id, state in tuple(self._request_states.items()):
+            state.pending_lookup = None
+            if state.allocation is None:
+                del self._request_states[request_id]
         return self._lookup_client.reset()
 
     # ================================
     # Request and Scheduler Lifecycle
     # ================================
 
-    def _allocated_request(self, request_id: str) -> tuple[Request, RequestAllocation]:
-        request = self._requests.get(request_id)
-        allocation = self._allocations.get(request_id)
-        if request is None or allocation is None:
+    def _allocated_request(self, request_id: str) -> RequestState:
+        state = self._request_states.get(request_id)
+        if state is None or state.allocation is None:
             raise ValueError(f"Scheduled request {request_id} has not passed allocation confirmation")
-        return request, allocation
+        return state
 
     def _discard_request(self, request_id: str) -> None:
-        self._requests.pop(request_id, None)
-        self._allocations.pop(request_id, None)
-        self._request_progress.pop(request_id, None)
-        self._pending_lookups.pop(request_id, None)
-        self._discard_confirmed_load(request_id)
-
-    def _discard_confirmed_load(self, request_id: str) -> None:
-        self._confirmed_loads.pop(request_id, None)
-
-    def _resolve_transfer_end(self, target_token_len: int, num_block_hashes: int) -> int:
-        publish_granularity = self._config.cache_transfer_granularity
-        hash_extent = num_block_hashes * self._config.hash_block_size
-        available_end = min(target_token_len, hash_extent)
-        return available_end // publish_granularity * publish_granularity
+        self._request_states.pop(request_id, None)
+        self._ready_loads.pop(request_id, None)
 
     def close(self) -> None:
         self._lookup_client.close()
@@ -507,13 +466,3 @@ class AsynchronousScheduler(KVPoolScheduler):
     """Publish allocated Bulk Loads even before their requests are scheduled."""
 
     load_is_deferred = True
-
-    def _take_allocation_ready_loads(self) -> list[LoadCommand]:
-        ready = self._confirmed_loads
-        self._confirmed_loads = {}
-        commands = []
-        for request_id, candidate in ready.items():
-            command = self._make_load_command(request_id, candidate)
-            if command is not None:
-                commands.append(command)
-        return commands

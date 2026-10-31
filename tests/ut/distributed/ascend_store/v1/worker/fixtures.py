@@ -10,13 +10,20 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_coordinator,
     make_topology,
 )
+from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import (
+    FakeBlocks,
+    FakeLookupClient,
+    make_output,
+    make_request,
+    new_request_data,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.configuration import KVPoolConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     LoadCommand,
     LookupRequest,
     LookupResult,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.lookup import resolve_load_candidate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import SynchronousScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import Worker
 
 
@@ -47,21 +54,24 @@ def plan_load(
     block_ids_by_group: tuple[tuple[int, ...], ...],
     request_token_count: int,
 ) -> LoadCommand | None:
-    """Build a Load command for test replay without changing the installed Scheduler."""
-    candidate = resolve_load_candidate(
-        config,
-        result,
-        query_end_token=query.end_token,
-        local_cached_tokens=query.local_available_tokens,
-        request_token_count=request_token_count,
-    )
-    if candidate is None or candidate.load_end_token <= candidate.load_start_token:
-        return None
-    return LoadCommand(
-        request_id,
-        candidate.load_start_token,
-        candidate.load_end_token,
-        block_ids_by_group,
-        query.block_hashes,
-        candidate.tail_key_boundaries,
-    )
+    """Replay public Scheduler hooks to obtain a Load command for Worker tests."""
+    lookup = FakeLookupClient(result.available_end_token, tail_key_boundaries=result.tail_key_boundaries)
+    scheduler = SynchronousScheduler(replace(config, store_enabled=False), lookup)
+    request = make_request(request_id, prompt_tokens=query.end_token, tokens=request_token_count)
+    request.block_hashes = list(query.block_hashes)
+    try:
+        matched_tokens, _ = scheduler.get_num_new_matched_tokens(request, query.local_available_tokens)
+        if matched_tokens == 0:
+            return None
+        blocks = tuple(list(group) for group in block_ids_by_group)
+        scheduler.confirm_allocation(request, FakeBlocks(*blocks), matched_tokens)
+        computed_tokens = query.local_available_tokens + matched_tokens
+        step = scheduler.build_step(
+            make_output(
+                new=(new_request_data(request_id, blocks, computed_tokens),),
+                scheduled_tokens={request_id: request_token_count - computed_tokens},
+            )
+        )
+        return next(iter(step.load_commands), None)
+    finally:
+        scheduler.close()

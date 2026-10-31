@@ -13,7 +13,7 @@ from typing import Any
 from ...backend.interfaces import KVStoreBackend
 from ...infrastructure.executor import BulkExecutor
 from ...infrastructure.mapping import local_addresses
-from ...protocol.results import LoadResult, StoreResult
+from ...protocol.outcomes import LoadResult, StoreResult
 from ..data.batch import LoadBatch, StoreBatch
 from ..data.context import TransferContext
 from ..data.selection import LoadSelection, StoreSelection

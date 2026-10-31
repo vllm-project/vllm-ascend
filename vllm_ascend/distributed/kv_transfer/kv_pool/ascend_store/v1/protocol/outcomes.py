@@ -1,4 +1,4 @@
-"""Operation results independent of concrete Workers and execution resources."""
+"""Local operation completion and drain outcomes shared by Transfer, Service, Worker, and Connector."""
 
 from dataclasses import dataclass
 

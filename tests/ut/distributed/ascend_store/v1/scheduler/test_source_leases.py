@@ -19,7 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     RangeStoreCommand,
     StateCheckpointSource,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.source_leases import StoreSourceLeases
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.store import StoreSourceLeases
 
 
 @pytest.mark.parametrize("source_groups", ((0,), (1, 3), ()))
@@ -29,7 +29,8 @@ def test_stable_sources_need_neither_references_nor_release_jobs(source_groups) 
     leases.bind_block_pool(pool)
     command = RangeStoreCommand("request", 4, 8, ((1, 2, 3),) * 4, (b"a", b"b"), 8)
 
-    assert leases.acquire(command) is command
+    leased = leases.acquire(command)
+    assert leased.store_job_id is None
     assert not leases.has_pending()
     assert pool.touched == []
 
@@ -114,7 +115,8 @@ def test_unselected_recycling_rows_create_no_lease() -> None:
     # The selected source is null; neither the old prefix nor speculative suffix is read.
     command = RangeStoreCommand("request", 4, 8, ((1, 0, 3),), (b"a", b"b"), 8)
 
-    assert leases.acquire(command) is command
+    leased = leases.acquire(command)
+    assert leased.store_job_id is None
     assert not leases.has_pending()
     assert pool.touched == []
 

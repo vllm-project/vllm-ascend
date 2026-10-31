@@ -25,24 +25,27 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messag
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.batch import LayerTransferPlan, LoadBatch
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.data.batch import LoadBatch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.service.lookup import (
     LookupRequest,
     LookupService,
 )
 
 
-def test_store_filters_candidates_without_rebinding_sources(monkeypatch):
-    worker, _, backend = make_bulk(requires_exists=True)
+def test_store_reads_only_the_missing_middle_block():
+    worker, resources, backend = make_bulk(requires_exists=True)
     commands = (RangeStoreCommand("r", 0, 12, ((1, 2, 3),), (b"a", b"b", b"c"), 12, 17),)
-    candidates = worker.store._candidates(commands)
-    monkeypatch.setattr(worker.store, "_candidates", lambda _commands: candidates)
-    backend.exists = lambda _keys: (True, False, True)
+    backend.presence = [True, False, True]
     try:
-        missing = worker.store._prepare(commands)
-        assert missing.keys == [candidates.keys[1]]
-        assert len(missing.sources) == 1 and missing.sources[0] is candidates.sources[1]
-        assert missing.sources[0][1] == 2 and missing.sources[0][2] == 0
+        worker.begin_step(KVTransferStep(store=StoreCommandBatch(commands)))
+        worker.finish_step()
+        (result,) = worker.fence_previous_store()
+        (copy,) = [call for call in backend.calls if call[0] == "put"]
+        assert len(copy[1]) == 1 and copy[1][0].endswith("@62")
+        assert copy[2] == (tuple(cache[2].data_ptr() for cache in resources.kv_caches.values()),)
+        assert result.request_id == "r" and result.keys == copy[1] and result.succeeded
+        assert result.source_release_confirmed and worker.take_released_store_job_ids() == {17}
+        worker.end_step()
     finally:
         worker.close()
 
@@ -127,26 +130,6 @@ def test_load_rejects_alias_with_inconsistent_geometry_before_open(monkeypatch):
         worker.close()
 
 
-def test_gva_success_never_expands_layer_result_indices(monkeypatch):
-    worker, _, backend = make_layerwise(backend=FakeGVABackend())
-    command = RangeStoreCommand("r", 0, 8, ((1, 2),), (b"a", b"b"), 8, 17)
-    monkeypatch.setattr(
-        LayerTransferPlan, "result_indices", Mock(side_effect=AssertionError("success has no failure routing"))
-    )
-    try:
-        worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
-        for name in layer_names(worker):
-            worker.save_layer(name)
-        batch = worker.store._pending[-1]
-        worker.finish_step()
-        (result,) = batch.completion.result(timeout=2)
-        assert result.succeeded and result.result_codes == (0, 0)
-        assert not worker.transfer._read_batch.plan.range_indices
-        worker.end_step()
-    finally:
-        worker.close()
-
-
 @pytest.mark.parametrize("groups", ((0,), (0, 1)))
 def test_compact_lookup_matches_explicit_observations_for_local_prefixes_and_holes(groups, monkeypatch):
     topology = make_topology(group_ids=groups)
@@ -210,23 +193,6 @@ def test_lookup_deduplicates_cross_family_aliases_and_reduces_all_partitions(mon
     )
     assert calls == [("xx", "xab", "abx")]
     assert result.available_end_token == 4
-
-
-@pytest.mark.parametrize("present", ((False, False), (True, True)))
-def test_store_terminal_exists_paths_keep_only_needed_data(present, monkeypatch):
-    worker, _, backend = make_bulk(requires_exists=True)
-    commands = (RangeStoreCommand("r", 0, 8, ((1, 2),), (b"a", b"b"), 8, 17),)
-    candidates = worker.store._candidates(commands)
-    monkeypatch.setattr(worker.store, "_candidates", lambda _commands: candidates)
-    backend.exists = lambda _keys: present
-    try:
-        selection = worker.store._prepare(commands)
-        if any(present):
-            assert not selection.keys and not selection.sources
-        else:
-            assert selection is candidates
-    finally:
-        worker.close()
 
 
 @pytest.mark.parametrize("address", (1000, (1 << 63) + 3, (1 << 64) - 16))

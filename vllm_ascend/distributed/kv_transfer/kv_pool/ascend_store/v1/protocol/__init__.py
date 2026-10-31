@@ -1,1 +1,1 @@
-"""Shared transfer messages and Lookup business adaptation."""
+"""Cross-process messages, local operation outcomes, and Lookup business adaptation."""

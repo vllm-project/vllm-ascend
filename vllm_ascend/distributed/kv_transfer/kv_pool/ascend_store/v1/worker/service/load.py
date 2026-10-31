@@ -10,7 +10,7 @@ from queue import Empty, SimpleQueue
 from ....metrics import AscendStoreKVConnectorStats
 from ...infrastructure.coordinator import Coordinator
 from ...protocol.messages import LoadCommand
-from ...protocol.results import DrainResult, LoadFailureLocation, LoadResult
+from ...protocol.outcomes import DrainResult, LoadFailureLocation, LoadResult
 from ..data.batch import LoadBatch
 from ..data.context import TransferContext
 from ..data.keys import KeyIndex

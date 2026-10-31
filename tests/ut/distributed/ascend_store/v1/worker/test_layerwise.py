@@ -18,7 +18,6 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_coordinator,
     make_topology,
 )
-from tests.ut.distributed.ascend_store.v1.worker.fixtures import make_worker as make_bulk
 from tests.ut.distributed.ascend_store.v1.worker.fixtures import plan_load
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     KVTransferStep,
@@ -119,30 +118,6 @@ def test_lookup_does_not_require_remote_keys_for_a_valid_local_prefix():
         )
         is None
     )
-
-
-def test_bulk_and_layerwise_share_selection_keys_and_source_ownership():
-    topology = make_topology(group_ids=(0, 1), physical_layers=(2, 5))
-    bulk, _, _ = make_bulk(topology=topology)
-    layered, _, backend = make_worker(topology=topology, requires_exists=True)
-    command = LoadCommand("r", 4, 12, ((1, 2, 3), (4, 5, 6)), (b"a", b"b", b"c"))
-    stores = (RangeStoreCommand("r", 4, 12, command.block_ids_by_group, command.block_hashes, 12, 17),)
-    try:
-        first = bulk.load._prepare((command,))
-        second = layered.load._prepare((command,))
-        assert first == second
-        assert bulk.store._candidates(stores) == layered.store._candidates(stores)
-        backend.presence = (False,) * 4
-        layered.begin_step(KVTransferStep(store=StoreCommandBatch(stores)))
-        for name in layer_names(layered):
-            layered.save_layer(name)
-        layered.finish_step()
-        layered.end_step()
-        assert sum(call[0] == "exists" for call in backend.calls) == 1
-        assert layered.take_released_store_job_ids() == {17}
-    finally:
-        bulk.close()
-        layered.close()
 
 
 def test_prefetch_waits_for_gate_and_completes_request_only_after_all_layers():

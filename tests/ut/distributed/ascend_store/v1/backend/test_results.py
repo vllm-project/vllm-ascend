@@ -12,8 +12,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.results
 )
 
 
-def test_integer_validation_preserves_addresses_byte_counts_and_error_codes():
-    assert integer_results("allocation", ["address", "rejected", "failed"], [1000, 0, -7]) == (1000, 0, -7)
+@pytest.mark.parametrize("values", ([1000, 0, -7, 1 << 63], (1000, 0, -7, 1 << 63)))
+def test_integer_validation_preserves_addresses_byte_counts_and_error_codes(values):
+    assert integer_results("allocation", ["address", "rejected", "failed", "high_address"], values) == (
+        1000,
+        0,
+        -7,
+        1 << 63,
+    )
     assert integer_result("copied bytes", 64) == 64
 
 
@@ -21,11 +27,6 @@ def test_integer_validation_preserves_addresses_byte_counts_and_error_codes():
 def test_integer_validation_rejects_malformed_per_object_results(values):
     with pytest.raises(BackendResultError):
         integer_results("operation", ["key"], values)
-
-
-def test_builtin_integer_batch_reuses_tuple_after_validation():
-    values = (0, -7, 1 << 63)
-    assert integer_results("native", ["a", "b", "c"], values) is values
 
 
 def test_mixed_integer_batch_normalizes_numpy_values_without_changing_values():

@@ -15,7 +15,6 @@ from tests.ut.distributed.ascend_store.v1.align_state_fixtures import make_spars
 from tests.ut.distributed.ascend_store.v1.helpers import (
     make_topology,
 )
-from tests.ut.distributed.ascend_store.v1.scheduler.fixtures import make_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.coordinator import (
     Coordinator,
     ReachablePrefix,
@@ -26,10 +25,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     KVPoolLayerTopology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
-    LookupResult,
     TailKeyBoundary,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.lookup import resolve_load_candidate
 
 
 @pytest.mark.parametrize(
@@ -196,23 +193,6 @@ def test_checkpoint_reduction_rechecks_the_sliding_window() -> None:
         (False, False, True, True),
         (False, False, False, True),
     )
-
-
-@pytest.mark.parametrize("eagle,physical_end", ((False, 128), (True, 112)))
-def test_sliding_load_uses_scheduler_physical_frontier_without_another_eagle_drop(eagle, physical_end) -> None:
-    window = make_sparse_group_topology(block_size=16, sliding_window=33).transfer_groups[1]
-    coordinator = Coordinator((window,), 16, 16, 256, use_eagle=eagle)
-    candidate = resolve_load_candidate(
-        make_config(granularity=16, eagle=eagle),
-        LookupResult(128),
-        query_end_token=128,
-        local_cached_tokens=0,
-        request_token_count=128,
-    )
-    assert candidate is not None
-    assert candidate.load_end_token == physical_end
-    hashes = tuple(bytes([index]) for index in range(8))
-    assert coordinator.select_for_load(hashes, physical_end) == ((False,) * (physical_end // 16 - 2) + (True, True),)
 
 
 def test_chunked_local_load_can_skip_every_block_at_a_chunk_boundary() -> None:

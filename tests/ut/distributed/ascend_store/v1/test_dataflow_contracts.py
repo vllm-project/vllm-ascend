@@ -243,7 +243,12 @@ def test_cache_reset_crosses_rpc_without_closing_admission_and_discards_old_look
         assert scheduler.get_num_new_matched_tokens(request, 0) == (4, False)
         assert scheduler.reset_cache() is True
         backend.reset_cache.assert_called_once()
-        assert not scheduler._pending_lookups
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
+        step = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 4})
+        )
+        assert not step.load_commands
+        assert [(command.start_token, command.end_token) for command in step.store.commands] == [(0, 4)]
         assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
         store = RangeStoreCommand("after-reset", 0, 4, ((1,),), (b"a",), 4, 17, event_tokens=(0, (1, 2, 3, 4)))
         worker.begin_step(KVTransferStep(store=StoreCommandBatch((store,))))
@@ -277,15 +282,21 @@ def test_cache_reset_reports_unsupported_routes_without_claiming_success(monkeyp
 def test_uncertain_cache_reset_invalidates_candidates_without_fabricating_success(monkeypatch):
     lookup = FakeLookupClient(4)
     monkeypatch.setattr(lookup, "reset", lambda: False, raising=False)
-    scheduler = SynchronousScheduler(make_config(), lookup)
+    scheduler = SynchronousScheduler(make_config(store=True), lookup)
     connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
     connector.scheduler, connector.worker = scheduler, None
     connector._kv_events = StoreEvents([])
+    request = make_request()
     try:
-        assert scheduler.get_num_new_matched_tokens(make_request(), 0)[0] == 4
+        assert scheduler.get_num_new_matched_tokens(request, 0)[0] == 4
         assert connector.reset_cache() is False
-        assert not scheduler._pending_lookups
         assert connector._kv_events is None
+        scheduler.confirm_allocation(request, FakeBlocks([1, 2]), 0)
+        step = scheduler.build_step(
+            make_output(new=(new_request_data("request", ([1, 2],), 0),), scheduled_tokens={"request": 8})
+        )
+        assert not step.load_commands
+        assert [(command.start_token, command.end_token) for command in step.store.commands] == [(0, 8)]
     finally:
         scheduler.close()
 

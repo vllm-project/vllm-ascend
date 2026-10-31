@@ -1,4 +1,4 @@
-"""Messages shared by Scheduler, Worker, and the vLLM transfer hooks."""
+"""Cross-process requests, replies, commands, and release metadata exchanged by transfer hooks."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class CheckpointStoreCommand:
     request_id: str
     block_ids_by_group: tuple[tuple[int, ...], ...]
     block_hashes: tuple[BlockHash, ...]
-    published_store_end_token: int
+    store_planned_end_token: int
     sources: tuple[StateCheckpointSource, ...]
     store_job_id: int | None = None
     event_tokens: tuple[int, tuple[int, ...]] | None = None

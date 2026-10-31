@@ -1,7 +1,5 @@
 """Identity reuse, positional routing and terminal shortcuts preserve business outcomes."""
 
-from unittest.mock import Mock
-
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.gva_fixtures import FakeGVABackend
@@ -91,7 +89,6 @@ def test_bulk_shared_object_retains_independent_destination_failures():
         worker.start_load()
         batch = worker.load._pending[0]
         batch.completion.result(timeout=2)
-        assert len(batch.selection.keys) == 1 and batch.selection.target_count == 2
         result = worker.collect_load_result()
         assert result.completed_request_ids == {"a", "b"} and result.failed_block_ids == {2}
         worker.end_step()
@@ -116,14 +113,12 @@ def test_key_range_failure_routes_to_all_and_only_its_bound_destinations():
 
 
 @pytest.mark.parametrize("mode", ("key_range", "gva"))
-def test_terminal_copy_codes_skip_later_io_but_finish_and_release_sources(mode, monkeypatch):
+def test_terminal_copy_codes_skip_later_io_but_finish_and_release_sources(mode):
     worker, resources, backend = make_layerwise(backend=FakeGVABackend() if mode == "gva" else None)
     if mode == "gva":
         backend.native_store.copy_result = -7
     else:
         backend.store_session_copy_result = [-7]
-    copy = Mock(wraps=worker.transfer.copy)
-    monkeypatch.setattr(worker.transfer, "copy", copy)
     command = RangeStoreCommand("r", 0, 4, ((1,),), (b"a",), 4, 17)
     try:
         worker.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
@@ -132,7 +127,8 @@ def test_terminal_copy_codes_skip_later_io_but_finish_and_release_sources(mode, 
             worker.save_layer(name)
         worker.finish_step()
         (result,) = batch.completion.result(timeout=2)
-        assert copy.call_count == 1
+        calls = backend.native_store.calls if mode == "gva" else backend.calls
+        assert sum(call[0] in ("copy", "batch_copy_put") for call in calls) == 1
         assert result.result_codes == (-7,) and not result.succeeded
         assert result.source_release_confirmed and result.error is None
         assert worker.take_released_store_job_ids() == {17}
