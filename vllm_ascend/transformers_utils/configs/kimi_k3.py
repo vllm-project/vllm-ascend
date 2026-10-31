@@ -42,6 +42,7 @@ class KimiK3TextConfig(KimiLinearConfig):
         mla_use_output_gate: bool = False,
         mla_use_rope: bool = False,
         attn_res_block_size: int | None = None,
+        attn_res_mode: str = "fused",
         latent_moe_use_norm: bool = False,
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
@@ -55,6 +56,12 @@ class KimiK3TextConfig(KimiLinearConfig):
         # and in the attention scale, but intentionally does not rotate it.
         self.mla_use_rope = mla_use_rope
         self.attn_res_block_size = attn_res_block_size
+        # Resolve the AttnRes backend. Keep "original" available as a
+        # numerically identical single-pass fallback for A/B comparisons.
+        # "fused"/"two_phase" both use the two-phase decomposition; "fused"
+        # additionally requires the CANNBot DSL kernels and falls back to
+        # "two_phase" when they are unavailable.
+        self.attn_res_mode = attn_res_mode
         self.latent_moe_use_norm = latent_moe_use_norm
         self.activation_situ_beta = activation_situ_beta
         self.activation_situ_linear_beta = activation_situ_linear_beta
