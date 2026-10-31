@@ -221,7 +221,6 @@ def _group_owner_and_members(hot=4096, k_dim=512, v_dim=64, miss_rows=2):
     manager._lim_group_states = {}
     manager._lim_side_stream = None
     manager._lim_group_ksc_params = None
-    manager._lim_group_ksc_geometry = None
     manager.layer_name_to_offload_id = {
         "model.layers.3.self_attn.attn": 0,
         "model.layers.4.self_attn.attn": 1,
@@ -262,9 +261,28 @@ def test_configure_lim_groups_builds_state():
         manager.head_dim_k,
         manager.head_dim_v,
     ]
-    # The per-step geometry tensor starts zeroed and is filled on launch.
-    assert manager._lim_group_ksc_geometry is not None
-    assert manager._lim_group_ksc_geometry.tolist() == [0, 0]
+    # The per-step geometry tensor starts zeroed and is filled on launch;
+    # it is owned by the group, not the manager.
+    assert state.ksc_geometry is not None
+    assert state.ksc_geometry.tolist() == [0, 0]
+
+
+def test_configure_lim_groups_geometry_is_per_group():
+    """Each group owns a private geometry tensor: the side-stream kernel
+    reads it asynchronously, so a later group's launch-time fill must never
+    overwrite the values through a manager-level shared tensor while an
+    earlier group's kernel is still in flight."""
+    manager, _, _ = _group_owner_and_members()
+    with _npu_stubs(), patch(f"{_MANAGER_MODULE}._LIM_DESC_OP", lambda *a, **k: None):
+        manager.configure_lim_groups(
+            {
+                "model.layers.2.self_attn.attn": ["model.layers.3.self_attn.attn"],
+                "model.layers.0.self_attn.attn": ["model.layers.4.self_attn.attn"],
+            }
+        )
+    first = manager._lim_group_states["model.layers.2.self_attn.attn"]
+    second = manager._lim_group_states["model.layers.0.self_attn.attn"]
+    assert first.ksc_geometry.data_ptr() != second.ksc_geometry.data_ptr()
 
 
 def test_configure_lim_groups_rejects_oversized_head_dims():
@@ -284,7 +302,6 @@ def test_configure_lim_groups_empty_is_noop():
     assert manager._lim_group_states == {}
     assert manager._lim_side_stream is None
     assert manager._lim_group_ksc_params is None
-    assert manager._lim_group_ksc_geometry is None
 
 
 def test_launch_lim_group_onboard_inline_fallback_without_op():
@@ -307,7 +324,6 @@ def test_launch_lim_group_onboard_inline_fallback_without_op():
         # The launch is a safe no-op even with a bound state-like owner.
         manager.launch_lim_group_onboard(owner, metadata)
         assert manager._lim_group_ksc_params is None
-        assert manager._lim_group_ksc_geometry is None
 
 
 def test_launch_lim_group_ksc_per_member():
@@ -361,7 +377,7 @@ def test_launch_lim_group_ksc_per_member():
         metadata.copy_sfa_pool_entries.numel(),
         metadata.copy_sfa_source_block_table.shape[1],
     ]
-    assert geometry.data_ptr() == manager._lim_group_ksc_geometry.data_ptr()
+    assert geometry.data_ptr() == state.ksc_geometry.data_ptr()
 
 
 def test_launch_lim_group_onboard_bounds_kernel_by_active_count():
@@ -391,8 +407,8 @@ def test_launch_lim_group_onboard_bounds_kernel_by_active_count():
     # The stale tail is not rewritten; the kernel never reads it because the
     # geometry's row bound is the current batch count.
     assert owner.lim_misses.tolist() == [0, 0, 7, 7]
-    assert manager._lim_group_ksc_geometry.tolist() == [2, 3]
     state = manager._lim_group_states["model.layers.2.self_attn.attn"]
+    assert state.ksc_geometry.tolist() == [2, 3]
     # The launch token is the forward context, not the attention metadata
     # (owners and members get distinct metadata objects per KV cache group).
     assert state.last_launch_token is token
@@ -490,8 +506,8 @@ def test_stage_group_d2h_prefix_flush_and_step_cache():
     _len = flushed_len.tolist()
     assert _len[0:3] == [1024, 1024, 0]  # k_m0: slots 4,5 valid, -1 invalid
     assert _len[3:6] == [1024, 1024, 0]  # k_m1
-    assert _len[6:9] == [128, 128, 0]    # v_m0
-    assert _len[9:12] == [128, 128, 0]   # v_m1
+    assert _len[6:9] == [128, 128, 0]  # v_m0
+    assert _len[9:12] == [128, 128, 0]  # v_m1
 
     # Step cache: identity-keyed on the slot tensor, invalidated by writes.
     state = manager._group_d2h_step

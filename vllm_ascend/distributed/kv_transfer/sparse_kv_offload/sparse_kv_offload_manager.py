@@ -80,12 +80,23 @@ class _LIMGroupRuntime:
     and members live in different KV cache groups under
     offload_shared_indexer_only, so their builders hand out distinct
     metadata objects for the same step.
+
+    ``ksc_geometry`` is this group's private ``[active_rows,
+    block_table_width]`` tensor, filled on the main stream right before the
+    side-stream launch. It must be per group: the side-stream kernel reads
+    it asynchronously, so a shared manager-level tensor could let a later
+    group's launch-time fill overwrite the values while an earlier group's
+    in-flight kernel is still reading them. The per-member done events
+    already join the side stream before the next owner runs; the private
+    tensor keeps that guarantee local to the group instead of relying on
+    cross-group layer ordering.
     """
 
     member_names: list[str]
     plan_event: object
     done_events: dict[str, object]
     request_slots: int
+    ksc_geometry: torch.Tensor
     last_launch_token: object = None
 
 
@@ -582,7 +593,6 @@ class SparseKVOffloadManager:
         self._lim_group_states: dict[str, _LIMGroupRuntime] = {}
         self._lim_side_stream = None
         self._lim_group_ksc_params = None
-        self._lim_group_ksc_geometry = None
         self._lim_group_ksc_ready = False
         # Main-KV row dims, published by register_kv_caches and forwarded to
         # the onboarding operator through params.
@@ -1255,7 +1265,6 @@ class SparseKVOffloadManager:
         self._lim_group_states = {}
         self._lim_side_stream = None
         self._lim_group_ksc_params = None
-        self._lim_group_ksc_geometry = None
         self._lim_group_ksc_ready = _get_lim_desc_op() is not None
         if not owner_to_members:
             return
@@ -1298,9 +1307,9 @@ class SparseKVOffloadManager:
             return
         # Deployment constants, created here (before any graph capture) rather
         # than lazily during the first decode step. The per-step geometry
-        # (active request count + live block-table width) travels in the
-        # separate _lim_group_ksc_geometry tensor, so this tensor never needs
-        # to change after capture.
+        # (active request count + live block-table width) travels in each
+        # group's own ksc_geometry tensor, so this tensor never needs to
+        # change after capture.
         if self.head_dim_k <= 0 or self.head_dim_v <= 0:
             self._lim_group_ksc_ready = False
             raise RuntimeError(
@@ -1328,9 +1337,6 @@ class SparseKVOffloadManager:
             dtype=torch.int64,
             device=device,
         )
-        # [active_rows, block_table_width]; rewritten every step on the main
-        # stream before the side-stream launch.
-        self._lim_group_ksc_geometry = torch.zeros(2, dtype=torch.int64, device=device)
         for owner_name, member_names in owner_to_members.items():
             if not member_names:
                 continue
@@ -1339,6 +1345,12 @@ class SparseKVOffloadManager:
                 plan_event=torch_npu.npu.Event(),
                 done_events={name: torch_npu.npu.Event() for name in member_names},
                 request_slots=requests,
+                # [active_rows, block_table_width]; rewritten every step on the
+                # main stream before the side-stream launch. Private to the
+                # group: the side-stream kernel reads it asynchronously, so a
+                # later group's fill must never overwrite a shared tensor
+                # while this group's kernel is still in flight.
+                ksc_geometry=torch.zeros(2, dtype=torch.int64, device=device),
             )
         logger.info(
             "Sparse KV offload LIM groups: %d owners, %d shared members on the side stream.",
@@ -1400,10 +1412,11 @@ class SparseKVOffloadManager:
         # [0] active_rows bounds the kernel loop to the current batch (so stale
         # miss counts from a larger previous step are never read); [1] is the
         # live block-table row stride, so the kernel never derives it from
-        # max_model_len (which can differ from the table width). Both fills are
-        # captured into the graph per capture size and replayed with it.
-        self._lim_group_ksc_geometry[0].fill_(count)
-        self._lim_group_ksc_geometry[1].fill_(block_table_width)
+        # max_model_len (which can differ from the table width). Both fills
+        # target this group's private geometry tensor and are captured into
+        # the graph per capture size and replayed with it.
+        state.ksc_geometry[0].fill_(count)
+        state.ksc_geometry[1].fill_(block_table_width)
         torch_npu.npu.current_stream().record_event(state.plan_event)
         with torch_npu.npu.stream(self._lim_side_stream):
             self._lim_side_stream.wait_event(state.plan_event)
@@ -1418,7 +1431,7 @@ class SparseKVOffloadManager:
                     self.copy_sfa_host_bases[layer_id].view(2),
                     self.copy_sfa_device_bases[layer_id].view(2),
                     self._lim_group_ksc_params,
-                    self._lim_group_ksc_geometry,
+                    state.ksc_geometry,
                 )
                 state.done_events[member_name].record()
         # Remember which forward pass this launch belongs to: members of a

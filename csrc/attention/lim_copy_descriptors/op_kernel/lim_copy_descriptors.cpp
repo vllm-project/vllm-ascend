@@ -115,17 +115,26 @@ public:
         // cheap count test. Eager custom-op launches on this A3 stack may
         // schedule a random block subset, but graph-mode replays schedule
         // the full grid.
+        //
+        // ``b`` only changes every missStride_/used iterations, so the two
+        // per-request GM scalars (miss count, pool entry) are cached and
+        // refreshed only when ``b`` changes; without the cache the skip path
+        // would re-read them from global memory on every slot.
         const uint64_t total = activeRows_ * missStride_;
         uint64_t flat = blockIdx;
+        int64_t lastB = -1;
+        int64_t cnt = 0;
+        int64_t poolRowRaw = -1;
         while (flat < total) {
             const uint64_t b = flat / missStride_;
             const uint64_t w = flat - b * missStride_;
-            const int64_t cnt = static_cast<int64_t>(missCounts_.GetValue(b));
-            if (cnt > 0 && w < static_cast<uint64_t>(cnt)) {
-                const int64_t poolRowRaw = static_cast<int64_t>(poolEntries_.GetValue(b));
-                if (poolRowRaw >= 0) {
-                    CopyMiss(b, w, static_cast<uint64_t>(poolRowRaw));
-                }
+            if (static_cast<int64_t>(b) != lastB) {
+                lastB = static_cast<int64_t>(b);
+                cnt = static_cast<int64_t>(missCounts_.GetValue(b));
+                poolRowRaw = cnt > 0 ? static_cast<int64_t>(poolEntries_.GetValue(b)) : -1;
+            }
+            if (cnt > 0 && w < static_cast<uint64_t>(cnt) && poolRowRaw >= 0) {
+                CopyMiss(b, w, static_cast<uint64_t>(poolRowRaw));
             }
             flat += used;
         }
