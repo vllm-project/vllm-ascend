@@ -82,6 +82,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 260
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_graph_reuse.py: 420
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 170
