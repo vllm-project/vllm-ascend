@@ -477,7 +477,7 @@ private:
     uint32_t tail_copy_{0};
 };
 
-template <typename T, bool WITH_BETA, bool FastComputeMode = false>
+template <typename T, bool WITH_BETA, bool FastComputeMode = false, bool WithInnerOut = false>
 class RmsNormQuant
 {
 public:
@@ -488,7 +488,8 @@ public:
                                 AscendC::GlobalTensor<int8_t> quantOffsetGmTensor,
                                 AscendC::GlobalTensor<T> inputGmTensor, AscendC::GlobalTensor<int8_t> outputGmTensor,
                                 uint32_t stride, uint32_t num_col, float avg_factor, uint64_t gm_offset,
-                                uint64_t gm_out_offset, uint32_t row_work_, const MlaTilingData &mlaParams_)
+                                uint64_t gm_out_offset, uint32_t row_work_, const MlaTilingData &mlaParams_,
+                                GM_ADDR innerGm = nullptr)
     {
         this->gammaGmTensor = gammaGmTensor;
         this->betaGmTensor = betaGmTensor;
@@ -496,6 +497,9 @@ public:
         this->quantOffsetGmTensor = quantOffsetGmTensor;
         this->inputGmTensor = inputGmTensor;
         this->outputGmTensor = outputGmTensor;
+        if constexpr (WithInnerOut) {
+            innerGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(innerGm));
+        }
         num_col_ = num_col;
         avg_factor_ = avg_factor;
         epsilon_ = 1e-6;
@@ -619,6 +623,19 @@ public:
                      AscendC::DEFAULT_REPEAT_STRIDE});
                 AscendC::PipeBarrier<PIPE_V>();
             }
+            if constexpr (WithInnerOut) {
+                // Export the existing FP16 Q normalization result before quantization.
+                // The accumulator and following quantization arithmetic are unchanged.
+                AscendC::LocalTensor<half> inner =
+                    buf.ReinterpretCast<half>()[OFFSET_SUM * num_col_align_withStride_fp32 * 2];
+                CastFrom32To16(inner, fp32_xy, num_col_align_withStride_fp32);
+                SET_FLAG(V, MTE3, EVENT_ID0);
+                WAIT_FLAG(V, MTE3, EVENT_ID0);
+                AscendC::DataCopy(innerGmTensor[gm_out_offset_ + outOffset], inner,
+                                  AscendC::DataCopyParams(1, (num_col_ - input_stride_) / 16, 0, 0));
+                SET_FLAG(MTE3, V, EVENT_ID0);
+                WAIT_FLAG(MTE3, V, EVENT_ID0);
+            }
             Muls(fp32_xy, fp32_xy, input_scale_, REPEAT_TIME_64, num_col_align_withStride_fp32 / REPEAT_TIME_64,
                  {1, 1, AscendC::DEFAULT_REPEAT_STRIDE, AscendC::DEFAULT_REPEAT_STRIDE});
             AscendC::PipeBarrier<PIPE_V>();
@@ -662,6 +679,7 @@ private:
     AscendC::GlobalTensor<int8_t> quantOffsetGmTensor;
     AscendC::GlobalTensor<T> inputGmTensor;
     AscendC::GlobalTensor<int8_t> outputGmTensor;
+    AscendC::GlobalTensor<half> innerGmTensor;
 
     uint32_t num_col_{0};
     uint32_t row_work{0};
@@ -2062,9 +2080,13 @@ __aicore__ __force_inline__ void PpMatmulW8a8<transA, transB, withBias, swizzleD
 }
 #endif
 
-template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3>
+template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3,
+          bool DirectOutput = false, bool WithInnerOut = false>
 class MLAOperation
 {
+    static_assert(!DirectOutput || cacheMode == CACHE_MODE_KROPE_CTKV,
+                  "Direct FP16 output uses separate unquantized K and RoPE tensors");
+
     using qOutDtype = typename std::conditional_t<cacheMode == CACHE_MODE_INT8_NZCACHE, int8_t, half>;
     using kNopeDtype = typename std::conditional_t<cacheMode == CACHE_MODE_INT8_NZCACHE, int8_t, half>;
 
@@ -2093,16 +2115,18 @@ public:
         this->ropeSplitSizeTwo_ = mlaParams_.ropeSplitSizeTwo;
         this->hiddenStrideRope_ = mlaParams_.hiddenStrideRope;
         this->qkNopeHeadDim_ = mlaParams_.qkNopeHeadDim;
-        this->kv_cache_block_size_ = mlaParams_.kvCacheBlockSize == 0 ? 128U : mlaParams_.kvCacheBlockSize;
-        uint64_t defaultCacheStride0 = static_cast<uint64_t>(kv_cache_block_size_) *
-            (cacheMode == CACHE_MODE_KVCACHE ? static_cast<uint64_t>(splitSizeOne_)
-                                             : static_cast<uint64_t>(splitRmsNormSizeOne_));
-        uint64_t defaultRopeStride0 =
-            static_cast<uint64_t>(kv_cache_block_size_) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
-        this->kv_cache_stride0_ =
-            mlaParams_.kvCacheStride0 == 0 ? defaultCacheStride0 : mlaParams_.kvCacheStride0;
-        this->kv_cache_rope_stride0_ =
-            mlaParams_.kvCacheRopeStride0 == 0 ? defaultRopeStride0 : mlaParams_.kvCacheRopeStride0;
+        if constexpr (!DirectOutput) {
+            this->kv_cache_block_size_ = mlaParams_.kvCacheBlockSize == 0 ? 128U : mlaParams_.kvCacheBlockSize;
+            uint64_t defaultCacheStride0 = static_cast<uint64_t>(kv_cache_block_size_) *
+                (cacheMode == CACHE_MODE_KVCACHE ? static_cast<uint64_t>(splitSizeOne_)
+                                                 : static_cast<uint64_t>(splitRmsNormSizeOne_));
+            uint64_t defaultRopeStride0 =
+                static_cast<uint64_t>(kv_cache_block_size_) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
+            this->kv_cache_stride0_ =
+                mlaParams_.kvCacheStride0 == 0 ? defaultCacheStride0 : mlaParams_.kvCacheStride0;
+            this->kv_cache_rope_stride0_ =
+                mlaParams_.kvCacheRopeStride0 == 0 ? defaultRopeStride0 : mlaParams_.kvCacheRopeStride0;
+        }
     }
 
     __aicore__ inline void Init(GM_ADDR hiddenStateGm, GM_ADDR quantScale1Gm,
@@ -2112,7 +2136,7 @@ public:
                                 GM_ADDR slotMappingGm, GM_ADDR wuqGm, GM_ADDR bias2Gm, GM_ADDR wukGm,
                                 GM_ADDR descale1Gm, GM_ADDR descale2Gm, GM_ADDR gmCtkvScale, GM_ADDR gmQnopeScale,
                                 GM_ADDR qGm, GM_ADDR keycacheOutGm, GM_ADDR qGm2, GM_ADDR keycacheOutGm2, GM_ADDR s1Gm,
-                                GM_ADDR s2Gm, GM_ADDR s3Gm)
+                                GM_ADDR s2Gm, GM_ADDR s3Gm, GM_ADDR innerGm = nullptr)
     {
         s1GmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t *>(s1Gm));
         wdqkvGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t *>(wdqkvGm));
@@ -2140,6 +2164,10 @@ public:
         keycacheGmTensor1.SetGlobalBuffer(reinterpret_cast<__gm__ kNopeDtype *>(keycacheOutGm));
         keycacheGmTensor2.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(keycacheOutGm2));
         slotMappingGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slotMappingGm));
+        if (DirectOutput && mlaParams.writebackCapacity != 0) {
+            writebackKGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(mlaParams.writebackKBase));
+            writebackRopeGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(mlaParams.writebackRopeBase));
+        }
         wuqGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t *>(wuqGm));
         wukGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(wukGm));
         descale2gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(descale2Gm));
@@ -2179,7 +2207,8 @@ public:
         rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor, s3GmTensor,
                            s1GmTensor, splitSizeOne_, num_col_2, mlaParams.avgFactor,
                            vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
-                           vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams);
+                           vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_,
+                           row_work_, mlaParams, innerGm);
         ropeFp16.RopeInit(s2GmTensor, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);
         einSumQuant.Init(s1Gm, gmQnopeScale, qGm, mlaParams);
         ubTensor = buf.GetBuffer<BufferType::ASCEND_UB, half>(0);
@@ -2239,18 +2268,23 @@ private:
         SET_FLAG(MTE2, V, EVENT_ID1);
         WAIT_FLAG(MTE2, V, EVENT_ID1);
         Cast(gammaFp32, gammaTensor, AscendC::RoundMode::CAST_NONE, splitRmsNormSizeOne_);
-        AscendC::DataCopyPad(slotMappingTensor, slotMappingGmTensor[slotMapGmOffset],
-                             AscendC::DataCopyExtParams(1, sN * sizeof(int32_t), 0, 0, 0),
-                             AscendC::DataCopyPadExtParams<int32_t>(false, 0, 8 - sN % 8, 0));
-        SET_FLAG(MTE2, V, EVENT_ID2);
-        WAIT_FLAG(MTE2, V, EVENT_ID2);
-        SET_FLAG(MTE2, S, EVENT_ID2);
-        WAIT_FLAG(MTE2, S, EVENT_ID2);
+        if constexpr (!DirectOutput) {
+            AscendC::DataCopyPad(slotMappingTensor, slotMappingGmTensor[slotMapGmOffset],
+                                 AscendC::DataCopyExtParams(1, sN * sizeof(int32_t), 0, 0, 0),
+                                 AscendC::DataCopyPadExtParams<int32_t>(false, 0, 8 - sN % 8, 0));
+            SET_FLAG(MTE2, V, EVENT_ID2);
+            WAIT_FLAG(MTE2, V, EVENT_ID2);
+            SET_FLAG(MTE2, S, EVENT_ID2);
+            WAIT_FLAG(MTE2, S, EVENT_ID2);
+        }
         for (uint64_t loop = 0; loop < sN; ++loop) {
             uint64_t offset = vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2 + loop * mm1OutSize_;
-            int64_t slotValue = static_cast<int64_t>(slotMappingTensor.GetValue(loop));
-            if (slotValue == -1) {
-                continue;
+            int64_t slotValue = 0;
+            if constexpr (!DirectOutput) {
+                slotValue = static_cast<int64_t>(slotMappingTensor.GetValue(loop));
+                if (slotValue == -1) {
+                    continue;
+                }
             }
             AscendC::DataCopy(srcTensor, s3GmTensor[offset], splitSizeOne_);
             if (mlaParams.enableRope != 0) {
@@ -2261,9 +2295,22 @@ private:
             }
             SET_FLAG(MTE2, V, EVENT_ID0);
             uint64_t cacheSlot = static_cast<uint64_t>(slotValue);
-            uint64_t cacheStart = GetCacheOffset(cacheSlot, splitSizeOne_, kv_cache_stride0_);
-            uint64_t cacheStart1 = GetCacheOffset(cacheSlot, splitRmsNormSizeOne_, kv_cache_stride0_);
-            uint64_t cacheStart2 = GetCacheOffset(cacheSlot, splitRmsNormSizeTwo_, kv_cache_rope_stride0_);
+            uint64_t cacheStart = 0;
+            uint64_t cacheStart1 = 0;
+            uint64_t cacheStart2 = 0;
+            int64_t writebackSlot = -1;
+            if constexpr (DirectOutput) {
+                const uint64_t token = static_cast<uint64_t>(vectorBlockIdx) * row_work + loop;
+                cacheStart1 = token * splitRmsNormSizeOne_;
+                cacheStart2 = token * splitRmsNormSizeTwo_;
+                if (mlaParams.writebackCapacity != 0) {
+                    writebackSlot = static_cast<int64_t>(slotMappingGmTensor.GetValue(token));
+                }
+            } else {
+                cacheStart = GetCacheOffset(cacheSlot, splitSizeOne_, kv_cache_stride0_);
+                cacheStart1 = GetCacheOffset(cacheSlot, splitRmsNormSizeOne_, kv_cache_stride0_);
+                cacheStart2 = GetCacheOffset(cacheSlot, splitRmsNormSizeTwo_, kv_cache_rope_stride0_);
+            }
             SET_FLAG(S, MTE3, EVENT_ID0);
             /* RmsNorm start */
             WAIT_FLAG(MTE2, V, EVENT_ID0);
@@ -2384,6 +2431,15 @@ private:
                 DataCopy(keycacheGmTensor2[cacheStart2], outTmpTensor[splitRmsNormSizeOne_],
                          splitRmsNormSizeTwo_);
             }
+            if constexpr (DirectOutput) {
+                if (writebackSlot >= 0 && static_cast<uint64_t>(writebackSlot) < mlaParams.writebackCapacity) {
+                    DataCopyPad(writebackKGmTensor[writebackSlot * splitRmsNormSizeOne_], outTmpTensor,
+                                AscendC::DataCopyExtParams(1, splitRmsNormSizeOne_ * sizeof(half), 0, 0, 0));
+                    DataCopyPad(writebackRopeGmTensor[writebackSlot * splitRmsNormSizeTwo_],
+                                outTmpTensor[splitRmsNormSizeOne_],
+                                AscendC::DataCopyExtParams(1, splitRmsNormSizeTwo_ * sizeof(half), 0, 0, 0));
+                }
+            }
             SET_FLAG(MTE3, MTE2, EVENT_ID1);
             WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
         }
@@ -2435,6 +2491,8 @@ private:
     AscendC::GlobalTensor<kNopeDtype> keycacheGmTensor1;
     AscendC::GlobalTensor<half> keycacheGmTensor2;
     AscendC::GlobalTensor<int32_t> slotMappingGmTensor;
+    AscendC::GlobalTensor<half> writebackKGmTensor;
+    AscendC::GlobalTensor<half> writebackRopeGmTensor;
     AscendC::GlobalTensor<int8_t> wuqGmTensor;
     AscendC::GlobalTensor<half> wukGmTensor;
 
@@ -2459,14 +2517,16 @@ private:
 
 #ifdef __DAV_C220_VEC__
     Quant<half, true, false> Quant1;
-    RmsNormQuant<half, true, false> rmsNormQuant2;
+    RmsNormQuant<half, true, false, WithInnerOut> rmsNormQuant2;
     RopeFp16<half, half, qOutDtype, cacheMode> ropeFp16;
     EinSumQuant<half, half> einSumQuant;
 #endif
 };
 
-template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3>
-__aicore__ inline void MLAOperation<cacheMode, weightFormat1, weightFormat2, weightFormat3>::ProcessCube()
+template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3,
+          bool DirectOutput, bool WithInnerOut>
+__aicore__ inline void
+MLAOperation<cacheMode, weightFormat1, weightFormat2, weightFormat3, DirectOutput, WithInnerOut>::ProcessCube()
 {
 #ifdef __DAV_C220_CUBE__
     mm_w8a8_1.Process();
@@ -2487,8 +2547,10 @@ __aicore__ inline void MLAOperation<cacheMode, weightFormat1, weightFormat2, wei
 #endif
 }
 
-template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3>
-__aicore__ inline void MLAOperation<cacheMode, weightFormat1, weightFormat2, weightFormat3>::ProcessVector()
+template <int8_t cacheMode, DataFormat weightFormat1, DataFormat weightFormat2, DataFormat weightFormat3,
+          bool DirectOutput, bool WithInnerOut>
+__aicore__ inline void
+MLAOperation<cacheMode, weightFormat1, weightFormat2, weightFormat3, DirectOutput, WithInnerOut>::ProcessVector()
 {
 #ifdef __DAV_C220_VEC__
     if (row_work_ != 0) {
@@ -2600,6 +2662,12 @@ __aicore__ inline void MLAOperation<cacheMode, weightFormat1, weightFormat2, wei
         WaitFlagDev(EINSUMQUANT);
         einSumQuant.Process();
         PIPE_BARRIER(ALL);
+    }
+    if constexpr (DirectOutput) {
+        if (mlaParams.writebackCapacity != 0) {
+            // The kernel completion event includes the mapped-CPU MTE3 stores.
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
     }
 #endif
 }
