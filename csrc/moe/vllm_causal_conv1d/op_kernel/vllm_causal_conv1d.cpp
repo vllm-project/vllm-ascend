@@ -10,27 +10,27 @@
  */
 
 /*!
- * \file causal_conv1d.cpp
+ * \file vllm_causal_conv1d.cpp
  * \brief
  */
 
-#include "causal_conv1d_fn.h"
-#include "causal_conv1d_update.h"
+#include "vllm_causal_conv1d_fn.h"
+#include "vllm_causal_conv1d_update.h"
 
 namespace {
 
 template <typename T, uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey>
-__aicore__ inline void RunCausalConv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
+__aicore__ inline void RunVllmCausalConv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                        GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
                                        GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                       const CausalConv1dTilingData *tilingData)
+                                       const VllmCausalConv1dTilingData *tilingData)
 {
-    if constexpr (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
-        NsCausalConv1d::RunCausalConv1dFn<T, widthKey, fnPlanKey>(
+    if constexpr (runModeKey == VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
+        NsVllmCausalConv1d::RunVllmCausalConv1dFn<T, widthKey, fnPlanKey>(
             x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
             tilingData);
     } else {
-        NsCausalConv1d::RunCausalConv1dUpdate<T>(
+        NsVllmCausalConv1d::RunVllmCausalConv1dUpdate<T>(
             x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
             tilingData);
     }
@@ -39,11 +39,11 @@ __aicore__ inline void RunCausalConv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, 
 } // namespace
 
 template <uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey>
-__global__ __aicore__ void causal_conv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
+__global__ __aicore__ void vllm_causal_conv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                          GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
                                          GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
-    REGISTER_TILING_DEFAULT(CausalConv1dTilingData);
+    REGISTER_TILING_DEFAULT(VllmCausalConv1dTilingData);
     GET_TILING_DATA(tilingData, tiling);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
     GM_ADDR userWorkspace = workspace;
@@ -51,7 +51,7 @@ __global__ __aicore__ void causal_conv1d(GM_ADDR x, GM_ADDR weight, GM_ADDR bias
         userWorkspace = AscendC::GetUserWorkspace(workspace);
     }
 
-    RunCausalConv1d<DTYPE_X, runModeKey, widthKey, fnPlanKey>(
+    RunVllmCausalConv1d<DTYPE_X, runModeKey, widthKey, fnPlanKey>(
         x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y,
         userWorkspace, &tilingData);
 }
