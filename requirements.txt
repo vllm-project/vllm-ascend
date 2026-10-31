@@ -1,4 +1,7 @@
-# Should be mirrored in pyproject.toml
+# Runtime dependencies. This is NOT a copy of [build-system] requires in
+# pyproject.toml: see DependencyListConsistencyTest in
+# tests/ut/test_dependency_documentation.py for the enforced contract and for
+# the allowlist of intentional build-only / runtime-only entries.
 cmake>=3.26
 decorator
 einops
