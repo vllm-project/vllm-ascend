@@ -86,7 +86,6 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         lambda: SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH),
     )
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _config: True)
-    monkeypatch.setattr(mla_v1, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
 
     assert AscendMLAImpl._can_use_flashmla(impl)
@@ -111,6 +110,33 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     impl.num_heads = 12
     assert AscendMLAImpl._can_use_flashmla(impl)
     config.parallel_config.decode_context_parallel_size = 4
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_flashmla_dense_impl_does_not_inherit_target_sfa_gate(monkeypatch, dcp_size):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(method="dspark"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+    )
+    impl = SimpleNamespace(
+        vllm_config=config,
+        num_heads=8,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=False,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=False,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
+    assert AscendMLAImpl._can_use_flashmla(impl)
+    config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 

@@ -102,7 +102,10 @@ def context_model():
             q_lora_rank=2,
             fused_qkv_a_proj=MagicMock(return_value=(output, None)),
             rotary_emb=SimpleNamespace(cos_sin_cache=torch.arange(16).view(4, 4)),
-            attn=SimpleNamespace(impl=SimpleNamespace(exec_kv_prefill=MagicMock()), kv_cache=object()),
+            attn=SimpleNamespace(
+                impl=SimpleNamespace(exec_kv_prefill=MagicMock(), _cache_requires_prolog_v3_writer=lambda _: False),
+                kv_cache=object(),
+            ),
         )
         layers.append(SimpleNamespace(self_attn=attn))
     return SimpleNamespace(layers=layers), context

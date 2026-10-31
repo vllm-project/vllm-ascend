@@ -1011,7 +1011,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+    if not supports_component_major_mla_pd(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
@@ -1031,6 +1031,8 @@ def _uses_single_raw_mla_cache(
         # The external reader retains its fused-cache contract, including
         # DCP. Native FIA continues to follow the dependency's exclusions.
         return True
+    if enable_sfa(vllm_config):
+        return False
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 

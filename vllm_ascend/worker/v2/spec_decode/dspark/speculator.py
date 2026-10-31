@@ -70,6 +70,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        self.use_flashmla: bool = False
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -249,6 +250,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             backend = _get_graph_update_backend(self.attn_groups)
             if issubclass(backend, AscendMLABackend):
                 self.attn_architecture = "MLA"
+                # Check whether all MLA groups use FlashMLA.
+                mla_groups = [
+                    group
+                    for groups in self.attn_groups
+                    for group in groups
+                    if issubclass(group.backend, AscendMLABackend)
+                ]
+                self.use_flashmla = bool(mla_groups) and all(
+                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+                )
             elif issubclass(backend, AscendAttentionBackend):
                 self.attn_architecture = "GQA"
             else:
@@ -263,14 +274,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         if not self.use_dcp:
-            if self.attn_architecture == "MLA":
-                # FIA consumes a host list of *valid* KV lengths. The target's
-                # optimistic upper bound includes rejected/lookahead tokens;
-                # adding the draft width again exposes unwritten cache slots
-                # to the non-causal block. Read the lengths produced alongside
-                # the actual draft positions instead. One batched blocking
-                # transfer is required until FIA accepts device-side lengths;
-                # this runs before forward/graph replay, not inside capture.
+            if self.attn_architecture == "MLA" and not self.use_flashmla:
+                # FIA requires exact host lengths; FlashMLA reads device lengths.
                 seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
                 seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
                 return seq_lens_cpu, is_prefilling

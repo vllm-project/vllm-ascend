@@ -20,6 +20,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = architecture
+    spec.use_flashmla = False
     spec.use_dcp = use_dcp
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([99999], dtype=torch.int32))

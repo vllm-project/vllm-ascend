@@ -293,3 +293,42 @@ def test_dspark_sampling_uses_replicated_backbone_output(monkeypatch, replicated
 
     assert spec._run_model(3, None, None, None) is replicated
     broadcast.assert_called_once_with(local, local, 3, replicated_pcp=replicated_pcp)
+
+
+@pytest.mark.parametrize("architecture,use_flashmla", [("MLA", True), ("GQA", False), (None, False)])
+def test_non_dcp_draft_does_not_copy_lengths_to_host(architecture, use_flashmla):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = False
+    spec.attn_architecture = architecture
+    spec.use_flashmla = use_flashmla
+    spec.input_buffers = MagicMock()
+    spec.input_buffers.seq_lens.__getitem__.side_effect = AssertionError("unexpected host length access")
+    lengths, prefilling = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    assert lengths is None
+    assert prefilling.shape == (3,)
+    assert not prefilling.any()
+
+
+def test_non_dcp_fia_mla_copies_exact_lengths_and_zeros_padding():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = False
+    spec.use_flashmla = False
+    spec.attn_architecture = "MLA"
+    spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor([11, 23, 99], dtype=torch.int32))
+    lengths, prefilling = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    torch.testing.assert_close(lengths, torch.tensor([11, 23, 0], dtype=torch.int32))
+    assert not prefilling.any()
+
+
+@pytest.mark.parametrize("use_flashmla", [False, True])
+def test_mla_draft_device_lengths_do_not_bypass_dcp_manager(use_flashmla):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = True
+    spec.use_flashmla = use_flashmla
+    spec.attn_architecture = "MLA"
+    spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=object())
+    spec.max_model_len = 1024
+    spec.dcp_manager = MagicMock()
+    result = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    assert result is spec.dcp_manager.prepare_draft_dcp_metadata_inputs.return_value
+    spec.dcp_manager.prepare_draft_dcp_metadata_inputs.assert_called_once()
