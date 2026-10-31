@@ -69,7 +69,7 @@ class TestEplbWorkerDataAccess(unittest.TestCase):
             worker.do_update()
 
     def test_update_expert_map_writes_shared_dict(self):
-        shared = {}
+        shared: dict = {}
         worker = make_worker(shared)
         new_maps = torch.tensor([[[4, 5], [6, 7]]], dtype=torch.int32)
         worker.update_expert_map(new_maps)
