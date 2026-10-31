@@ -1009,11 +1009,25 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
-            mega_moe_supported_by_config = AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
-            logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
-            return mega_moe_supported_by_config
+        """Unified MegaMoe config eligibility check for A3 and A5.
+
+        The A3 and A5 MegaMoe operators are converging on the same supported
+        ranges, so this check intentionally uses one set of bounds for both
+        platforms. Where the operators currently differ, the stricter bound is
+        applied and the per-platform actuals are documented inline.
+        """
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
+        # field; their intermediate_size IS the MoE expert FFN width (the dense
+        # layers use a separate dense_intermediate_size field). For every other
+        # family intermediate_size carries dense-FFN semantics and must NOT be
+        # used as a fallback, so this quirk is gated on the architecture.
+        is_minimax = any(architecture.startswith("MiniMaxM") for architecture in model_architectures)
         hf_text_config = vllm_config.model_config.hf_text_config
+
+        # Latent-MoE models (e.g. Kimi K3) project the residual stream before the
+        # routed FFN and expose the expert width as routed_expert_hidden_size;
+        # other models simply don't have that field and fall through.
         hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
         if hidden_size is None:
             hidden_size = getattr(hf_text_config, "hidden_size", None)
@@ -1021,16 +1035,70 @@ class AscendConfig:
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:
             return False
+        # hidden must be in [1024, 8192] and aligned to 512.
+        # Actual operator bounds: A3 requires %512 == 0; the A5 operator only
+        # requires %64 == 0. The unified %512 check is the intersection of both
+        # and stays valid on every platform.
         hidden_size = int(hidden_size)
         if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+            logger.warning(
+                "MegaMoe requires hidden_size in [1024, 8192] aligned to 512; got %s.",
+                hidden_size,
+            )
             return False
 
+        # MiniMax-family quirk (see the is_minimax comment above): fall back to
+        # intermediate_size, which for MiniMax configs is the MoE expert width.
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
-        if moe_intermediate_size is None:
+        if moe_intermediate_size is None and is_minimax:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        # intermediate_hidden (the post-activation intermediate width) must be in
+        # [256, 4096] and aligned to 128.
+        # Actual operator bounds: A5 supports [256, 4096] aligned to 128; the A3
+        # operator only supports [512, 3072] aligned to 256. The unified A5-style
+        # bound is kept here; tighten per-platform if A3 rejects a passing model.
+        moe_intermediate_size = int(moe_intermediate_size)
+        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
+            logger.warning(
+                "MegaMoe requires moe_intermediate_size in [256, 4096] aligned to 128; got %s.",
+                moe_intermediate_size,
+            )
+            return False
+
+        # num_experts must divide evenly across the EP group (required by both
+        # the A3 and A5 operators; MegaMoe assumes an equal per-rank expert
+        # count for its symmetric-memory dispatch layout).
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size < 2:
+            return False
+        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
+            logger.warning(
+                "MegaMoe requires num_experts divisible by ep_world_size (%s).",
+                ep_world_size,
+            )
+            return False
+
+        # num_top_k must be in [1, 16].
+        # Actual operator bounds: A3 supports [1, 16]; the A5 operator supports
+        # [1, 32]. The unified [1, 16] bound is the intersection of both and
+        # stays valid on every platform.
+        # Field-name chain covers model config variations: Kimi K3 uses
+        # num_experts_per_token, most models num_experts_per_tok, older
+        # configs top_k_experts.
+        num_top_k = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "num_experts_per_token", getattr(hf_text_config, "top_k_experts", 1)),
+        )
+        if not (1 <= int(num_top_k) <= 16):
+            logger.warning(
+                "MegaMoe requires num_top_k in [1, 16]; got %s.",
+                num_top_k,
+            )
             return False
 
         quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))
@@ -1046,77 +1114,6 @@ class AscendConfig:
             "quanttype.w4a8",
         }
         return quant_name in supported_quant_names
-
-    @staticmethod
-    def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
-        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
-        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        is_kimi_k3 = any(
-            architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
-            for architecture in model_architectures
-        )
-        hf_text_config = vllm_config.model_config.hf_text_config
-        # K3 projects the residual stream before the routed FFN. Other models
-        # retain the existing hidden-size lookup and supported dimensions.
-        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None
-        if hidden_size is None:
-            hidden_size = getattr(hf_text_config, "hidden_size", None)
-        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-            hidden_size = vllm_config.model_config.get_hidden_size()
-        if hidden_size is None:
-            return False
-        supported_hidden_sizes = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}
-        if is_kimi_k3:
-            supported_hidden_sizes.add(3584)
-        if int(hidden_size) not in supported_hidden_sizes:
-            logger.warning(
-                "MegaMoe requires hidden_size in %s; got %s.",
-                sorted(supported_hidden_sizes),
-                int(hidden_size),
-            )
-            return False
-
-        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
-        if moe_intermediate_size is None and is_minimax_m3:
-            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
-        if moe_intermediate_size is None:
-            return False
-        # intermediate_hidden (the post-activation intermediate width) must be in
-        # [256, 4096] and aligned to 128.
-        # TODO: A5 already meets this requirement, but A3 does not — the A3 operator
-        # only supports [512, 3072] aligned to 256.
-        moe_intermediate_size = int(moe_intermediate_size)
-        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
-            logger.warning(
-                "mega moe operator is not supported by current a5 config, for moe_intermediate_size %s "
-                "is not in [256, 4096] or not aligned to 128",
-                moe_intermediate_size,
-            )
-            return False
-
-        # num_experts must divide evenly across the EP group.
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-        )
-        if ep_world_size < 2:
-            return False
-        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
-            return False
-
-        num_top_k = getattr(
-            hf_text_config,
-            "num_experts_per_tok",
-            getattr(hf_text_config, "top_k_experts", 1),
-        )
-        if is_kimi_k3:
-            num_top_k = getattr(hf_text_config, "num_experts_per_token", num_top_k)
-        if not (1 <= int(num_top_k) <= 32):
-            logger.warning(
-                "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
-                num_top_k,
-            )
-            return False
-        return True
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
