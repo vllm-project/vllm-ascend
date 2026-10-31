@@ -74,4 +74,4 @@ def vit_mrope_setup(
 mrope_vit_setup.vit_mrope_setup = vit_mrope_setup
 # Update the existing model alias if loaded; later imports see the patched module.
 if "vllm.models.minimax_m3.common.vision_tower" in sys.modules:
-    sys.modules["vllm.models.minimax_m3.common.vision_tower"].vit_mrope_setup = vit_mrope_setup
+    vars(sys.modules["vllm.models.minimax_m3.common.vision_tower"])["vit_mrope_setup"] = vit_mrope_setup
