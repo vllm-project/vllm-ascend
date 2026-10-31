@@ -1,0 +1,4 @@
+pr: 19851
+entries:
+  - category: feature
+    text: Added full-TP DCP Prefill support to SfaRemoteD2HConnector with MemFabric direct main-KV transfer to the Decode host pool. The DCP path requires fused-overlap offload and matching physical block layouts.
