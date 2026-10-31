@@ -95,12 +95,17 @@ def _fake_manager_factory(**kwargs):
     return _FakeFAManager(**kwargs)
 
 
-def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
+def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
     groups = [
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
-    return KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=retention_interval,
+    )
 
 
 def _make_coordinator(
@@ -109,10 +114,11 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    retention_interval: int | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
-    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
+    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -125,7 +131,14 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
     )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 384])
+def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_interval):
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=retention_interval)
+    assert coordinator.retention_interval == retention_interval
 
 
 # ---------------------------------------------------------------------------
