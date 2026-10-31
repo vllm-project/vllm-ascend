@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unmodified PR 16981 (207a6753) integer preparation oracle for tests."""
+"""Reference GBSA metadata preparation used by Qwen4Exp unit tests."""
 
 import torch
 
@@ -8,7 +8,14 @@ GBSA_COMPRESS_RATIO = 4
 GBSA_MAX_SPARSE_BLOCKS = 512
 
 
-def reference_prepare(compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads):
+def reference_prepare(
+    compact_indices: torch.Tensor,
+    logical_positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    token_to_req: torch.Tensor,
+    block_table: torch.Tensor,
+    num_kv_heads: int,
+) -> tuple[torch.Tensor, ...]:
     sparse_width = compact_indices.shape[1] - GBSA_RESIDUAL_TOKENS
     row_requests = token_to_req.long()
     row_request_lens = seq_lens[row_requests].to(torch.int32)

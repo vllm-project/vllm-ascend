@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Selected-token FIA for Qwen3.8-Flash-Next prefill and eager decode."""
+"""Selected-token FIA for Qwen3.8-Flash-Next prefill."""
 
 import torch
 import torch_npu
