@@ -1,0 +1,9 @@
+pr: 19801
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DSpark drafting with prefill context parallelism to negotiate draft
+      data-parallel capacity independently and keep draft tokens and probabilities
+      synchronized across replicas, including on older vLLM versions.
+      Preserved full MTP O-projection weights to avoid a draft acceptance-rate
+      regression with prefill context parallelism.

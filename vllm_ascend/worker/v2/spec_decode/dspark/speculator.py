@@ -22,11 +22,12 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -46,12 +47,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    build_dspark_draft_config,
     disable_profiling_chunk_for_draft,
-    prepare_replicated_pcp_config,
 )
 
 
@@ -65,7 +65,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
+        vllm_config = build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
@@ -386,25 +386,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
-    @torch.inference_mode()
-    def _run_model(
-        self,
-        num_tokens: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> torch.Tensor:
-        hidden_states = super()._run_model(
-            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-        )
-        # PCP replicas must propose identical tokens for the next joint target
-        # verification. Share the backbone output before sequential Markov sampling.
-        hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
-            hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
-        )
-        return hidden_states
-
     def propose(
         self,
         input_batch: InputBatch,
@@ -427,11 +408,11 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        # Replicated drafts consume global requests, unlike sharded targets.
-        # Adaptive verification also negotiates the draft shape independently.
-        # Every DP rank must synchronize the draft batch independently.
+        # PCP restores global requests for the replicated draft, whereas the
+        # target DP sync describes its rank-local batch. Negotiate draft
+        # capacity independently, as adaptive verification also requires.
         sync_state = dp_sync_state
-        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
             sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
@@ -458,7 +439,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
-            return super().propose(
+            draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -477,3 +458,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
+            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
+            # Older vLLM lacks that runner hook; keep its token/logit contract
+            # here until both supported lanes provide PCPManager.sync_drafts.
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(draft_tokens, src=0)
+            if self.draft_logits is not None:
+                logits = self.draft_logits[input_batch.idx_mapping]
+                pcp_group.broadcast(logits, src=0)
+                self.draft_logits[input_batch.idx_mapping] = logits
+        return draft_tokens
