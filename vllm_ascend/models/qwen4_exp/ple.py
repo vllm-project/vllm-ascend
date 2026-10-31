@@ -33,7 +33,7 @@ from vllm_ascend.ops.triton_ple import ple_conv_prefill
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
     if mode == "prefill":
-        ple_conv_prefill(*args, mode=mode, **kwargs)
+        ple_conv_prefill(*args, **kwargs)
     else:
         upstream_ple_conv(*args, mode=mode, **kwargs)
 

@@ -11,7 +11,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.models.qwen4_exp import ple as ple_adapter
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
-from vllm_ascend.ops.triton_ple import ple_conv_prefill
 
 
 def test_model_dispatch_uses_upstream_decode_and_spec(monkeypatch):
@@ -71,6 +70,9 @@ def test_modes_and_token_mapping():
                     spec_query_len=spec_len,
                     token_indices=torch.arange(tokens - 1, -1, -1, device="npu", dtype=torch.int32),
                 )
+                if mode == "prefill":
+                    kwargs.pop("num_accepted_tokens")
+                    kwargs.pop("spec_query_len")
                 expected, actual = residual.clone(), residual.clone()
                 expected_state, actual_state = state.clone(), state.clone()
                 upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
@@ -120,7 +122,7 @@ def test_prefill_one_request():
                             has_initial_states=torch.tensor([initialized], device="npu"),
                         )
                         upstream_ple_conv(**kwargs, residual=expected_output, conv_state=expected_state)
-                        ple_conv_prefill(**kwargs, residual=actual_output, conv_state=actual_state)
+                        _ple_conv_ascend(**kwargs, residual=actual_output, conv_state=actual_state)
                         torch.npu.synchronize()
                         exact = (expected_output == actual_output).float().mean().item()
                         max_abs = (expected_output.float() - actual_output.float()).abs().max().item()
@@ -159,7 +161,7 @@ def test_prefill_multiple_requests_across_token_chunks():
         expected, actual = residual.clone(), residual.clone()
         expected_state, actual_state = state.clone(), state.clone()
         upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
-        ple_conv_prefill(**kwargs, residual=actual, conv_state=actual_state)
+        _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
         torch.npu.synchronize()
         assert torch.equal(expected, actual)
         assert torch.equal(expected_state, actual_state)
