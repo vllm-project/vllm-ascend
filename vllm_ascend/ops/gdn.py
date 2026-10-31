@@ -35,7 +35,7 @@ from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -158,6 +158,7 @@ def _flatten_recurrent_state_indices(
     state_indices: torch.Tensor,
     total_tokens: int,
     query_start_loc: torch.Tensor | None = None,
+    num_live_tokens: int | None = None,
 ) -> torch.Tensor:
     """Reduce state indices to exactly one entry per recurrent token.
 
@@ -169,14 +170,23 @@ def _flatten_recurrent_state_indices(
     slots left unused when a sequence capped at max_model_len carries fewer
     than ``num_spec + 1`` query tokens. 1D indices follow the live-rows-first
     convention; 2D indices keep the first ``query_len`` slots of each row.
+
+    ``num_live_tokens`` is the host-known number of scheduled tokens when a
+    graph bucket pads the query past them. The trailing rows are emitted as
+    ``NULL_BLOCK_ID``, which the recurrent kernel skips (no initial-state read
+    and no per-token store), so they cannot clobber the state slot of the
+    sequence they are appended to.
     """
     if state_indices.ndim == 1:
         # Plain slice: zero device work. The block-table column view is
         # strided and the kernel accepted strided input here before the fix,
         # so forcing contiguity would add a per-layer copy on the hot path.
+        if num_live_tokens is not None and num_live_tokens < total_tokens:
+            raise ValueError("1D recurrent state indices cannot represent graph-padded query rows")
         return state_indices[:total_tokens]
     num_seqs, num_slots = state_indices.shape
-    if total_tokens == num_seqs * num_slots:
+    no_padded_rows = num_live_tokens is None or num_live_tokens >= total_tokens
+    if total_tokens == num_seqs * num_slots and no_padded_rows:
         return state_indices.reshape(-1).contiguous()
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
@@ -191,7 +201,11 @@ def _flatten_recurrent_state_indices(
     token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
-    return state_indices[seq_ids, slot_ids].contiguous()
+    live_indices = state_indices[seq_ids, slot_ids]
+    if no_padded_rows:
+        return live_indices.contiguous()
+    live_indices.masked_fill_(token_ids >= num_live_tokens, NULL_BLOCK_ID)
+    return live_indices
 
 
 def _split_head_first_conv_output(
@@ -728,6 +742,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     spec_state_indices_tensor,
                     query_spec.shape[1],
                     spec_causal_conv1d_meta.query_start_loc,
+                    num_live_tokens=getattr(attn_metadata, "num_live_spec_tokens", None),
                 ),
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)

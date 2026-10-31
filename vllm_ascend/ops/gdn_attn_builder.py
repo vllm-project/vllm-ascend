@@ -508,6 +508,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata: GDNAttentionMetadata,
         actual_seq_lengths: torch.Tensor | None = None,
         cache_indices: torch.Tensor | None = None,
+        padding_tokens: int = 0,
     ) -> GDNAttentionMetadata:
         attn_metadata.spec_decode_metadata = None
         if attn_metadata.spec_sequence_masks is None:
@@ -527,6 +528,24 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             actual_seq_lengths_buffer = self.spec_actual_seq_lengths
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
 
+        if actual_seq_lengths is None and self._USE_COMMON_KERNEL_METADATA:
+            actual_seq_lengths = _build_actual_seq_lengths(
+                attn_metadata.spec_query_start_loc,
+                num_sequences,
+                actual_seq_lengths_buffer,
+            )
+        if actual_seq_lengths is not None:
+            actual_seq_lengths = actual_seq_lengths[: num_sequences + 1]
+            if padding_tokens:
+                # The recurrent kernel takes T from actual_seq_lengths and
+                # requires len(ssm_state_indices) == T. A graph bucket pads the
+                # speculative query past the scheduled tokens, so attribute the
+                # padding rows to the last sequence to make T cover every query
+                # row. The runtime emits NULL_BLOCK_ID for them, so the kernel
+                # loads no initial state and stores no per-token state.
+                actual_seq_lengths[-1].add_(padding_tokens)
+                attn_metadata.num_live_spec_tokens = attn_metadata.num_actual_tokens - padding_tokens
+
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
@@ -535,17 +554,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 ],
                 num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
             ),
-            actual_seq_lengths=(
-                actual_seq_lengths[: num_sequences + 1]
-                if actual_seq_lengths is not None
-                else _build_actual_seq_lengths(
-                    attn_metadata.spec_query_start_loc,
-                    num_sequences,
-                    actual_seq_lengths_buffer,
-                )
-                if self._USE_COMMON_KERNEL_METADATA
-                else None
-            ),
+            actual_seq_lengths=actual_seq_lengths,
         )
         return attn_metadata
 
@@ -703,6 +712,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_spec_decodes: int,
         graph_request_count: int,
         batch: tuple[int, int, int, int, int, torch.Tensor | None],
+        padding_tokens: int = 0,
     ) -> GDNAttentionMetadata | None:
         return None
 
@@ -741,6 +751,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             if num_decode_draft_tokens_cpu is not None:
                 num_decode_draft_tokens_cpu = num_decode_draft_tokens_cpu[:num_actual_reqs]
         m = _treat_single_token_prefills_with_state_as_decodes(m)
+        # Host-known number of scheduled tokens. A graph bucket pads the query
+        # to the captured token count, while num_spec_decode_tokens counts the
+        # speculative rows the kernel runs, padding included, so it cannot
+        # recover the padding. Keep the scheduled count here instead.
+        num_scheduled_tokens = int(m.query_start_loc_cpu[-1])
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
@@ -778,9 +793,21 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
+        # Only a pure speculative batch can carry rows that a graph bucket
+        # added: mixed batches compact the speculative query through
+        # spec_token_indx, so their query has no padding rows.
+        padding_tokens = 0
+        if num_prefills == 0 and num_decodes == 0:
+            padding_tokens = max(m.num_actual_tokens - num_scheduled_tokens, 0)
         if runtime_batch and num_actual_reqs > 0:
             fused = self._build_fused_metadata(
-                m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
+                m,
+                num_accepted_tokens,
+                spec_sequence_masks_cpu,
+                num_spec_decodes,
+                graph_request_count,
+                batch,
+                padding_tokens,
             )
             if fused is not None:
                 return fused
@@ -1012,7 +1039,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
         )
-        self._attach_spec_decode_metadata(attn_metadata)
+        self._attach_spec_decode_metadata(attn_metadata, padding_tokens=padding_tokens)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return self._finalize_metadata(attn_metadata)
 
@@ -1120,6 +1147,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         num_spec_decodes: int,
         graph_request_count: int,
         batch: tuple[int, int, int, int, int, torch.Tensor | None],
+        padding_tokens: int = 0,
     ) -> GDNAttentionMetadata | None:
         # Request validation and phase classification have already run in build.
         if (
@@ -1247,7 +1275,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
                 build_device_metadata=False,
             )
         self._attach_non_spec_prefill_metadata(metadata, chunk, non_spec_states)
-        self._attach_spec_decode_metadata(metadata, spec_lengths, self._spec_conv_indices)
+        self._attach_spec_decode_metadata(metadata, spec_lengths, self._spec_conv_indices, padding_tokens)
         self._attach_non_spec_decode_metadata(metadata, non_spec_states, non_spec_lengths)
         return self._finalize_metadata(metadata, fused=True)
 

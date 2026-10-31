@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 import torch
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.ops.gdn import _flatten_recurrent_state_indices
 
@@ -47,6 +48,45 @@ def test_2d_missing_query_start_loc_raises():
     indices = torch.arange(6, dtype=torch.int32).reshape(3, 2)
     with pytest.raises(ValueError, match="query_start_loc is required"):
         _flatten_recurrent_state_indices(indices, 5)
+
+
+def test_2d_graph_padding_rows_use_null_slot():
+    # 3 + 4 scheduled tokens inside an 8-row graph bucket. The padding row must
+    # not overwrite slot 3 of the second sequence, which holds its live state.
+    indices = torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3, 7], dtype=torch.int32)
+    flattened = _flatten_recurrent_state_indices(indices, 8, query_start_loc, num_live_tokens=7)
+    torch.testing.assert_close(
+        flattened,
+        torch.tensor([10, 11, 12, 20, 21, 22, 23, NULL_BLOCK_ID], dtype=torch.int32),
+    )
+    assert flattened.is_contiguous()
+
+
+def test_2d_padded_rows_skip_uniform_fast_path():
+    # A single sequence keeping all four draft slots still needs the padding
+    # row neutralized when the bucket adds one.
+    indices = torch.tensor([[10, 11, 12, 13]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    flattened = _flatten_recurrent_state_indices(indices, 4, query_start_loc, num_live_tokens=3)
+    torch.testing.assert_close(
+        flattened,
+        torch.tensor([10, 11, 12, NULL_BLOCK_ID], dtype=torch.int32),
+    )
+
+
+def test_2d_live_tokens_equal_total_keeps_fast_path():
+    indices = torch.arange(8, dtype=torch.int32).reshape(4, 2)
+    flattened = _flatten_recurrent_state_indices(indices, 8, num_live_tokens=8)
+    torch.testing.assert_close(flattened, indices.reshape(-1))
+
+
+def test_1d_padded_rows_raise():
+    # 1D indices have no per-token slot dimension, so a padding request row
+    # cannot be represented. Fail loudly instead of truncating the batch.
+    indices = torch.arange(8, dtype=torch.int32)
+    with pytest.raises(ValueError, match="cannot represent graph-padded query rows"):
+        _flatten_recurrent_state_indices(indices, 8, num_live_tokens=6)
 
 
 @pytest.mark.parametrize(
