@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
@@ -241,6 +242,27 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
+
+    def test_get_dispatch_mc2_kwargs_moe_expert_num_counts_physical_map(self):
+        # expert_map is a full-length physical map (logical + redundant), so
+        # its length already is the global physical expert count and the
+        # redundant count must not be added again (the old code computed
+        # len(expert_map) + global_redundant_expert_num = 12 here).
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 10, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.arange(10)
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            global_redundant_expert_num=2,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["moe_expert_num"], 10)
 
     def test_token_permutation_dispatch(self):
         hidden_states = torch.randn(10, 128)
@@ -767,6 +789,48 @@ def test_allgather_bf16_lora_skips_quant_backend_validation():
     assert output.dynamic_scale is None
 
 
+def test_allgather_dispatch_masks_physical_topk_ids_in_full_physical_map():
+    # topk_ids are global physical IDs (log2phy-mapped) and expert_map is a
+    # full-length physical map, so the mask stays in range and the histogram
+    # is sized by the global physical count (issue #14080).
+    dispatcher = TokenDispatcherWithAllGather(top_k=2, num_experts=10, num_local_experts=5)
+    hidden_states = torch.randn(2, 128)
+    topk_weights = torch.ones(2, 2)
+    # Physical 8/9 are the redundant tail; rank 0 owns physical 0..4 only.
+    topk_ids = torch.tensor([[8, 9], [0, 1]], dtype=torch.int32)
+    expert_map = torch.tensor([0, 1, 2, 3, 4, -1, -1, -1, -1, -1], dtype=torch.int32)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+        global_redundant_expert_num=2,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.arange(4, dtype=torch.int32),
+        torch.tensor([1, 1, 1, 1], dtype=torch.int32),
+        None,
+    )
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    # The histogram is sized by the global physical count, not map len + redundant.
+    assert mock_init_routing.call_args.kwargs["expert_num"] == 10
+    # The non-owned physical IDs 8/9 are masked out of the router weights.
+    assert torch.equal(output.combine_metadata.topk_weights, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
     def setUp(self):
         # Mock dependencies
@@ -1146,3 +1210,80 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.group_list)
         self.assertIsNotNone(result.dynamic_scale)
         self.assertEqual(result.group_list_type, 1)
+
+
+class TestTokenDispatcherWithAllGatherMask(TestBase):
+    """Regression (review P1): keep the ALLGATHER ownership mask in the same
+    coordinate system as the routing IDs after a cross-rank rebalance.
+
+    log2phy emits global FLAT expert ids (rank * num_local + slot). After a
+    cross-rank swap those diverge from the physical-id-indexed expert_map:
+    indexing the map with flat ids drops swapped experts from their new owner
+    (and lets a wrong rank pass the mask outside its active window), so no
+    rank executes them. The mask must therefore be the per-rank flat-id
+    window, matching active_expert_range.
+    """
+
+    def setUp(self):
+        ep_group_patch = patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group")
+        self.mock_get_ep_group = ep_group_patch.start()
+        self.addCleanup(ep_group_patch.stop)
+
+        self.captured_kwargs: dict[str, Any] = {}
+
+        def _fake_init_routing(x, expert_idx, **kwargs):
+            self.captured_kwargs.update(kwargs)
+            return (MagicMock(), MagicMock(), torch.zeros(6, dtype=torch.int64), None)
+
+        init_routing_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            side_effect=_fake_init_routing,
+        )
+        init_routing_patch.start()
+        self.addCleanup(init_routing_patch.stop)
+
+    def _dispatch(self, rank, topk_ids, expert_map):
+        self.mock_get_ep_group.return_value = SimpleNamespace(rank_in_group=rank)
+        dispatcher = TokenDispatcherWithAllGather(max_num_tokens=8, num_local_experts=3, num_experts=6, top_k=1)
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.ones(2, 1),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+        self.captured_kwargs.clear()
+        return dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+    def test_mask_follows_flat_window_after_cross_rank_swap(self):
+        # EP=2, 3 slots per rank. After swapping physical experts 2 and 3:
+        # rank0 owns physical {0, 1, 3}, rank1 owns {2, 4, 5}.
+        rank0_map = torch.tensor([0, 1, -1, 2, -1, -1], dtype=torch.int32)
+        rank1_map = torch.tensor([-1, -1, 0, -1, 1, 2], dtype=torch.int32)
+
+        # Logical 2 now sits on rank1 slot0 -> flat id 3. The old physical-map
+        # mask would read rank1_map[3] == -1 and drop it entirely.
+        topk_ids = torch.tensor([[3], [3]], dtype=torch.int64)
+        out = self._dispatch(rank=1, topk_ids=topk_ids, expert_map=rank1_map)
+        self.assertTrue(
+            torch.equal(out.combine_metadata.topk_weights, torch.ones(2, 1)),
+            "owning rank must keep the token after the swap",
+        )
+        self.assertEqual(self.captured_kwargs["active_expert_range"], [3, 6])
+
+        # The other rank must NOT compute it, even though its stale physical
+        # map still marks physical 3 as owned (rank0_map[3] == 2).
+        out = self._dispatch(rank=0, topk_ids=topk_ids, expert_map=rank0_map)
+        self.assertTrue(
+            torch.equal(out.combine_metadata.topk_weights, torch.zeros(2, 1)),
+            "non-owning rank must mask the token out",
+        )
+        self.assertEqual(self.captured_kwargs["active_expert_range"], [0, 3])
+
+    def test_mask_ignores_physical_map_contents(self):
+        # Even a map that claims ownership of a flat id outside the active
+        # window must not resurrect the token: the coordinate system is the
+        # flat routing id, not the physical map.
+        rank0_map = torch.tensor([0, 1, -1, 2, -1, -1], dtype=torch.int32)
+        topk_ids = torch.tensor([[4], [5]], dtype=torch.int64)
+        out = self._dispatch(rank=0, topk_ids=topk_ids, expert_map=rank0_map)
+        self.assertTrue(torch.equal(out.combine_metadata.topk_weights, torch.zeros(2, 1)))

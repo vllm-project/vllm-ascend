@@ -34,6 +34,7 @@ class D2DExpertWeightLoader:
         self.comm_op_list = None
         self.updated_expert_map = None
         self.updated_log2phy_map = None
+        self.updated_log2phy_rank_independent_map = None
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
@@ -79,8 +80,9 @@ class D2DExpertWeightLoader:
 
         self.state = ExpertWeightUpdateState.READY
 
-    def set_log2phy_map(self, log2phy_map):
+    def set_log2phy_map(self, log2phy_map, log2phy_rank_independent_map=None):
         self.updated_log2phy_map = log2phy_map
+        self.updated_log2phy_rank_independent_map = log2phy_rank_independent_map
 
     def asyn_expert_weight_transfer(self, reqs):
         # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be launched
@@ -111,8 +113,13 @@ class D2DExpertWeightLoader:
         # update expert_map
         self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
-        # update log2phy_map
-        self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
+        # update log2phy_map (rotated for MC2/ALLTOALL, rank-independent for
+        # ALLGATHER)
+        self.eplb_adaptor.do_update_log2phy_map(
+            self.layer_id,
+            self.updated_log2phy_map,
+            self.updated_log2phy_rank_independent_map,
+        )
 
         # update expert weight
         buffer_tensor_id = 0
