@@ -340,7 +340,9 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _make_worker(self, prefill_tp_size, decode_tp_size, tp_rank, pcp_size, pcp_rank, dp_rank, use_mamba, role):
+    def _make_worker(
+        self, prefill_tp_size, decode_tp_size, tp_rank, pcp_size, pcp_rank, dp_rank, use_mamba, role, dcp_size=1
+    ):
         tp_size = prefill_tp_size if role == "kv_producer" else decode_tp_size
         dp_size = 2 if role == "kv_producer" else 1
         extra_config = {
@@ -351,7 +353,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             parallel_config=types.SimpleNamespace(
                 tensor_parallel_size=tp_size,
                 prefill_context_parallel_size=pcp_size,
-                decode_context_parallel_size=1,
+                decode_context_parallel_size=dcp_size,
                 pipeline_parallel_size=1,
                 data_parallel_rank=dp_rank,
                 data_parallel_size=dp_size,
@@ -410,6 +412,21 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             else:
                 worker.kv_recv_thread = MagicMock()
         return worker
+
+    def test_worker_rejects_dcp(self):
+        """Hybrid KV transfer is incompatible with decode context parallelism."""
+        with self.assertRaisesRegex(AssertionError, "requires decode_context_parallel_size=1"):
+            self._make_worker(2, 2, 0, 1, 0, 0, False, "kv_producer", dcp_size=2)
+
+    def test_worker_rejects_consumer_pcp(self):
+        """PCP replicates KV only on the prefill engine; a kv_consumer with PCP must fail fast."""
+        with self.assertRaisesRegex(ValueError, "PCP only on the prefill"):
+            self._make_worker(2, 2, 0, 2, 0, 0, False, "kv_consumer")
+
+    def test_worker_rejects_mamba_with_unequal_tp(self):
+        """Mamba state transfer requires the same TP size on both engines."""
+        with self.assertRaisesRegex(AssertionError, "does not support different TP size with Mamba"):
+            self._make_worker(4, 2, 0, 1, 0, 0, True, "kv_producer")
 
     def test_start_load_kv_replica_routing_and_completion(self):
         cases = [
