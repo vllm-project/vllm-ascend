@@ -1,0 +1,209 @@
+test_name: "DeepSeek-V4.1-Flash-FP8-A5-PD"
+# TODO: Confirm this path is visible inside both CI containers. The A5 workflow
+# currently mounts host /mnt/weight at /root/.cache; adjust the path or provisioning.
+model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+# IPs, network interfaces and per-rank device IDs are supplied by the test framework.
+# TODO: Validate the scheduled nightly A5 image / vLLM revisions with this case.
+# The supplied launch scripts require HCCL_INTRA_ROCE_ENABLE to be unset in that image.
+env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "2040"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_OP_EXPANSION_MODE: "CCU_SCHED"
+  # TODO: Update this compiler-header directory to match the CI image's CANN build.
+  AICPU_HEADERS: "/usr/local/Ascend/cann-9.2.0/tools/hcc/aarch64-target-linux-gnu/include/c++/14.3.0"
+  CPLUS_INCLUDE_PATH: "$AICPU_HEADERS:$AICPU_HEADERS/aarch64-target-linux-gnu:$AICPU_HEADERS/backward"
+  ftp_proxy: ""
+  https_proxy: ""
+  http_proxy: ""
+  all_proxy: ""
+  FTP_PROXY: ""
+  HTTPS_PROXY: ""
+  HTTP_PROXY: ""
+  ALL_PROXY: ""
+  no_proxy: "127.0.0.1,localhost,${NODE_0_IP},${NODE_1_IP}"
+  NO_PROXY: "127.0.0.1,localhost,${NODE_0_IP},${NODE_1_IP}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "1024"
+  HCCL_ALGO: "level0:fullmesh"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1600"
+
+# Requests use `model` above as their model name, so no private served-model alias
+# is needed. Profiling is configured through the nightly workflow's profiling inputs.
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "5120"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --enable-expert-parallel
+      - --max-num-seqs
+      - "16"
+      - --block-size
+      - "128"
+      - --engram-config
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - --quantization
+      - "deepseek_v4_fp8"
+      - --tokenizer-mode
+      - "deepseek_v41"
+      - --tool-call-parser
+      - "deepseek_v41"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "deepseek_v41"
+      - --enable-prefix-caching
+      - --swa-bounded-replay
+      - --trust-remote-code
+      - --enforce-eager
+      - --speculative-config
+      - '{"num_speculative_tokens":5,"method":"dspark"}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"36010","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":8,"tp_size":1},"decode":{"dp_size":8,"tp_size":1}}}'
+      - --additional-config
+      - '{"multistream_engram_overlap":false,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "1024"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --enable-expert-parallel
+      - --async-scheduling
+      - --max-num-seqs
+      - "64"
+      - --block-size
+      - "128"
+      - --engram-config
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - --quantization
+      - "deepseek_v4_fp8"
+      - --tokenizer-mode
+      - "deepseek_v41"
+      - --tool-call-parser
+      - "deepseek_v41"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "deepseek_v41"
+      - --enable-prefix-caching
+      - --trust-remote-code
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"1","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_consumer","kv_port":"36010","kv_connector_extra_config":{"prefill":{"dp_size":8,"tp_size":1},"decode":{"dp_size":8,"tp_size":1}}},{"kv_connector":"PreemptOffloadConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":1073741824,"enable_offload_prefix_caching":false}}]}}'
+      - --additional-config
+      - '{"multistream_engram_overlap":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true,"enable_fused_mc2":0,"enable_force_eplb":false,"finegrained_tp_config":{"oproj_tensor_parallel_size":1},"scheduler_config":{"recompute_scheduler_enable":true}}'
+
+# Provisional workloads and gates copied from DeepSeek-V4.1-Flash-w8a8-PD-MRV2.yaml.
+# These are A3 W8A8 reference values, NOT measured A5 FP8 results.
+# TODO: Calibrate both benchmarks on A5 before making this draft ready for review.
+benchmarks:
+  acc-gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    # Accuracy uses baseline +/- threshold (percentage points), not a ratio.
+    baseline: 88
+    threshold: 5
+    temperature: 1
+    thinking: true
+    reasoning_effort: low
+  perf_TPOT50_16k_1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1024
+    batch_size: 64
+    request_rate: 2.7
+    # Output throughput (tokens/s) must be >= baseline * threshold.
+    baseline: 1800
+    threshold: 0.95
+    # Mean time per output token, in milliseconds.
+    tpot_threshold: 50
