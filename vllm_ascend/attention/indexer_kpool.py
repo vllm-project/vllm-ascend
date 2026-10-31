@@ -215,7 +215,13 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         plan_queries = kwargs.pop("_plan_queries", True)
         del common_prefix_len, fast_build
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
-        if plan_queries and not graph_capture and getattr(common_attn_metadata, "graph_pad_size", -1) == -1:
+        # MTP decode capture can call the ordinary builder with runtime mode NONE.
+        if (
+            plan_queries
+            and not graph_capture
+            and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
+            and not torch.npu.is_current_stream_capturing()
+        ):
             metadata.query_plan = build_kpool_query_plan(common_attn_metadata, self.topk_tokens, self.device)
         pcp_context = common_attn_metadata.pcp_context
         if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
@@ -643,13 +649,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
-            query_input, weight_input = q_c[:num_tokens], hidden
+            query_input = q_c[:num_tokens]
             if query_plan is not None and query_plan.selective_rows.numel():
                 query_input = torch.index_select(query_input, 0, query_plan.selective_rows)
-                weight_input = torch.index_select(hidden, 0, query_plan.selective_rows)
             if query_plan is None or query_plan.selective_rows.numel():
                 q_values = self.wq_b(query_input)[0].view(-1, self.n_head, self.head_dim)
-                weights = F.linear(weight_input.float(), self._head_weight_f32).to(q_values.dtype)
+                # Preserve the head-weight GEMM shape: rounding can change top-k membership.
+                weights = F.linear(hidden.float(), self._head_weight_f32).to(q_values.dtype)
+                if query_plan is not None:
+                    weights = torch.index_select(weights, 0, query_plan.selective_rows)
                 weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache = self._bound_cache(self.k_cache)

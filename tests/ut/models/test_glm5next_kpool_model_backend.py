@@ -477,7 +477,12 @@ def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
     op._pack_keypool_indices = MagicMock(return_value=op.topk_indices_buffer[:11, :11].unsqueeze(1))
     hidden = torch.arange(33, dtype=torch.float32).view(11, 3)
     query = torch.arange(22, dtype=torch.float32).view(11, 2)
-    with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected D2H")):
+    linear = torch.nn.functional.linear
+    # Model the batch-dependent rounding observed in NPU head-weight GEMMs.
+    with (
+        patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected D2H")),
+        patch.object(backend_module.F, "linear", side_effect=lambda values, weight: linear(values, weight) + values.shape[0]),
+    ):
         result = op.forward(hidden, query, hidden + 1, metadata, compute_topk=compute_topk)
     torch.testing.assert_close(op._key_pool.call_args.args[0], hidden + 1)
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
@@ -492,7 +497,7 @@ def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
         torch.testing.assert_close(projection_inputs[0], query[rows])
         call = op._pool_key_indexer.call_args
         torch.testing.assert_close(call.args[0], query[rows].repeat(1, 2).view(-1, 2, 2).bfloat16())
-        expected_weights = torch.nn.functional.linear(hidden[rows], op._head_weight_f32) * (0.5 * 2**-0.5)
+        expected_weights = (linear(hidden, op._head_weight_f32) + hidden.shape[0])[rows] * (0.5 * 2**-0.5)
         torch.testing.assert_close(call.args[2], expected_weights.bfloat16())
         assert call.kwargs["actual_seq_k"] is metadata.seq_lens
         assert call.args[3] is metadata.pool_tail

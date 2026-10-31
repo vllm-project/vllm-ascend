@@ -662,7 +662,7 @@ def _common():
     )
 
 
-@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay"])
+@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay", "stream_capture"])
 def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels, mode):
     config, common = _config(), _common()
     config.model_config.hf_text_config = SimpleNamespace(index_topk=16)
@@ -674,6 +674,12 @@ def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels,
         metadata = builder.build_for_graph_capture(common)
     elif mode == "draft":
         metadata = builder.build_for_drafting(common, 1)
+    elif mode == "stream_capture":
+        with (
+            patch("torch.npu.is_current_stream_capturing", return_value=True),
+            patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError),
+        ):
+            metadata = builder.build(0, common)
     else:
         metadata = builder.build(0, common)
     if mode == "normal":
