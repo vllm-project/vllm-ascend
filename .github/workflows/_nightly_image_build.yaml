@@ -184,6 +184,7 @@ jobs:
     needs: generate-matrix
     name: Build nightly-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}
     runs-on: ${{ matrix.arch_runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}

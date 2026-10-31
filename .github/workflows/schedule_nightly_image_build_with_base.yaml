@@ -65,6 +65,10 @@ permissions:
   packages: write
   contents: read
 
+concurrency:
+  group: nightly-image-build-with-base
+  cancel-in-progress: false
+
 jobs:
   setup-matrix:
     runs-on: linux-amd64-cpu-2-hk
