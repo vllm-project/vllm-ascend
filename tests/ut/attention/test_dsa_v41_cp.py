@@ -603,7 +603,7 @@ class TestPCPMetadata:
         assert builder.take_device_metadata_tasks() == ()
 
     @pytest.mark.parametrize("rank", [0, 1])
-    def test_a5_attention_metadata_has_one_local_owner_across_capture_and_prefill(self, builders, rank):
+    def test_a5_attention_metadata_is_deferred_to_real_layer_lengths(self, builders, rank):
         owners = builders(rank=rank)
         swa_builder = owners["swa"]
         calls = []
@@ -624,12 +624,9 @@ class TestPCPMetadata:
                 result = _build_planes(owners, batch)[PREFIXES["swa"]]
             tasks = swa_builder.take_device_metadata_tasks()
             assert not swa_builder._global_builder.take_device_metadata_tasks()
-            assert len(tasks) == int(bool(batch.local_ids))
-            for task in tasks:
-                assert task.stage == dsa_v41.DeviceMetadataStage.ATTENTION
-                assert task.group_id == id(swa_builder._a5_smla_metadata)
-                task.run()
-                torch.testing.assert_close(calls[-1], result.query_start_loc)
+            assert tasks == ()
+            assert result.smla_metadata is None
+            assert calls == []
             assert swa_builder._a5_smla_metadata.data_ptr() == address
             assert torch.count_nonzero(swa_builder._global_builder._a5_smla_metadata) == 0
 
