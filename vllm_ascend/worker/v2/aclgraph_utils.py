@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
@@ -46,6 +47,8 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
+from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.device_allocator.graph_reuse import reuse_unsupported_reason
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -109,6 +112,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        self.sleep_reuse_capture_ready = False
+        self.sleep_graph_capture_count = 0
+        self.sleep_graph_replay_count = 0
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
@@ -143,10 +149,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 ):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                result = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                result = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            if get_ascend_config().rl_config.sleep_mode_graph_reuse is True:
+                self.sleep_graph_replay_count += 1
+            return result
         finally:
             if metadata is not None:
                 metadata.finish_replay()
@@ -217,9 +226,17 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
+        reusable = (
+            get_ascend_config().rl_config.sleep_mode_graph_reuse is True
+            and not getattr(self.model_runner, "_sleep_graph_profile_only", False)
+            and reuse_unsupported_reason(self.vllm_config, self.model_runner) is None
+        )
+        pool_context = CaMemAllocator.get_instance().aclgraph_pool() if reusable else nullcontext(self.pool)
+        original_pool = self.pool
         try:
-            with communicator_switch():
-                return super().capture(
+            with pool_context as pool, communicator_switch():
+                self.pool = pool
+                result = super().capture(
                     model,
                     model_state,
                     input_buffers,
@@ -233,7 +250,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
                 )
+                self.sleep_reuse_capture_ready = reusable and bool(self.graphs)
+                self.sleep_graph_capture_count += len(self.graphs)
+                return result
         finally:
+            self.pool = original_pool
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:
                 metadata.finish()
