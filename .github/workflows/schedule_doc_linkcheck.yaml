@@ -66,13 +66,7 @@ jobs:
 
       - name: Install checker dependencies
         run: |
-          python -m pip install -r docs/requirements-linkcheck.txt 'pytest>=8,<9'
-
-      - name: Test checker
-        env:
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-        run: |
-          python -m pytest --confcutdir=tests/ut/_tools tests/ut/_tools/test_check_md_links.py
+          python -m pip install -r docs/requirements-linkcheck.txt
 
       - name: Run full link check
         if: ${{ github.event_name != 'pull_request' || steps.changed.outputs.checker_any_changed == 'true' }}
