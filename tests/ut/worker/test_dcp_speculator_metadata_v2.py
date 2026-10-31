@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, attr-defined, method-assign"
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the DSpark/MTP entry points, not just the length helper."""
 
@@ -18,6 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -67,6 +69,7 @@ class FakeDecodeMetadata:
 def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=True):
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
+        model_config=SimpleNamespace(max_model_len=128),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=8 if use_dcp else 1,
             cp_kv_cache_interleave_size=4,
@@ -88,7 +91,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.dcp_manager = manager
     # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
     spec.dcp_size = config.parallel_config.decode_context_parallel_size
-    spec.max_model_len = 128
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    if vllm_version_is("0.32.0"):
+        spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
     spec.vllm_config = spec.draft_vllm_config = config

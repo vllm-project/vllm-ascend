@@ -108,6 +108,7 @@ from vllm_ascend.utils import (
     lmhead_tp_pad_rows,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -933,9 +934,13 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
-                req_ids, idx_mapping
-            )
+            # vLLM main appends the admitted draft counts (a 4th element) for
+            # batch-sharded sampling; the release tree returns three fields.
+            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            if vllm_version_is("0.32.0"):
+                cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
+            else:
+                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
             # Non-fia backends skip padding query boundary when using adaptive verification

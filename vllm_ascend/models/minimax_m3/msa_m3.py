@@ -56,19 +56,30 @@ from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
+    vllm_version_is,
 )
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
 
-# Use CANN MsaIndexScore for prefill and decode on every device, keeping A5
-# aligned with A3. A5's Triton decode kernel stays importable as a rollback
-# path.
-_USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = True
+
+# MiniMax-M3 index-score kernels: the CANN MsaIndexScore ops ship with the
+# vLLM main toolchain; the pinned v0.32.0 release keeps the Triton path.
+_CANN_INDEX_SCORE_AVAILABLE = not vllm_version_is("0.32.0")
+
+# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
+# A5 decode keeps its lower-latency Triton path.
+_USE_ASCENDC_INDEX_SCORE_PREFILL = _CANN_INDEX_SCORE_AVAILABLE
+_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5 and _CANN_INDEX_SCORE_AVAILABLE
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
@@ -502,7 +513,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     decode_query_len=d.decode_query_len,
                 )
             else:
-                decode_topk, decode_select_num_idx = minimax_m3_index_decode(
+                decode_result = minimax_m3_index_decode(
                     decode_iq,
                     kv,
                     d.block_table,
@@ -515,6 +526,16 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     d.decode_query_len,
                     sm_scale=self.scale,
                 )
+                # The v0.32.0 Triton decode follows the upstream single-tensor
+                # contract, while the A5 Triton decode returns
+                # (topk_idx, select_num_idx). The sparse decode op derives the
+                # per-query selected counts from ``topk_idx`` when they are not
+                # supplied (see _select_num_idx_from_topk).
+                if isinstance(decode_result, tuple):
+                    decode_topk, decode_select_num_idx = decode_result
+                else:
+                    decode_topk = decode_result
+                    decode_select_num_idx = None
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None

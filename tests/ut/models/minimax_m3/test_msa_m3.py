@@ -59,7 +59,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
 from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 
 
 @dataclass
@@ -396,39 +396,53 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
 
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
-    assert metadata.causal_mask is not None
-    assert metadata.causal_mask.shape == (2048, 2048)
+    if msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL:
+        assert metadata.causal_mask is not None
+        assert metadata.causal_mask.shape == (2048, 2048)
+    else:
+        assert metadata.causal_mask is None
     if batch_spec.name == "decode_only":
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
-        assert metadata.decode.start_loc is not None
-        assert metadata.decode.context_lens is not None
-        assert metadata.decode.start_loc.dtype == torch.int32
-        assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
-        assert builder.decode_start_loc_buffer is not None
-        assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
-        rebuilt = builder.build(0, common)
-        assert rebuilt.decode is not None
-        assert rebuilt.decode.start_loc is not None
-        assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
+        if msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE:
+            assert metadata.decode.start_loc is not None
+            assert metadata.decode.context_lens is not None
+            assert metadata.decode.start_loc.dtype == torch.int32
+            assert torch.equal(metadata.decode.start_loc, metadata.decode.context_lens // 128)
+            assert builder.decode_start_loc_buffer is not None
+            assert metadata.decode.start_loc.data_ptr() == builder.decode_start_loc_buffer.data_ptr()
+            rebuilt = builder.build(0, common)
+            assert rebuilt.decode is not None
+            assert rebuilt.decode.start_loc is not None
+            assert rebuilt.decode.start_loc.data_ptr() == metadata.decode.start_loc.data_ptr()
+        else:
+            assert metadata.decode.start_loc is None
+            assert builder.decode_start_loc_buffer is None
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
-        assert metadata.prefill.start_loc is not None
-        assert torch.equal(
-            metadata.prefill.start_loc,
-            metadata.prefill.context_lens // 128,
-        )
-        assert builder.prefill_start_loc_buffer is not None
-        assert metadata.prefill.start_loc.data_ptr() == builder.prefill_start_loc_buffer.data_ptr()
+        if msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL:
+            assert metadata.prefill.start_loc is not None
+            assert metadata.prefill.context_lens is not None
+            assert torch.equal(
+                metadata.prefill.start_loc,
+                metadata.prefill.context_lens // 128,
+            )
+            assert builder.prefill_start_loc_buffer is not None
+            assert metadata.prefill.start_loc.data_ptr() == builder.prefill_start_loc_buffer.data_ptr()
+        else:
+            assert metadata.prefill.start_loc is None
+            assert builder.prefill_start_loc_buffer is None
         assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
-        assert rebuilt.prefill.start_loc is not None
-        assert rebuilt.prefill.start_loc.data_ptr() == metadata.prefill.start_loc.data_ptr()
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
+        if msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL:
+            assert metadata.prefill.start_loc is not None
+            assert rebuilt.prefill.start_loc is not None
+            assert rebuilt.prefill.start_loc.data_ptr() == metadata.prefill.start_loc.data_ptr()
 
 
 def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
@@ -506,15 +520,17 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode(monkeypatch: py
     assert first.num_decode_tokens == 60
     assert first.decode is not None
     assert first.decode.cu_seqlens_q is not None
-    assert first.decode.context_lens is not None
     assert first.decode.cu_seqlens_q.shape == (16,)
     assert first.decode.cu_seqlens_q[-1] == 60
+    assert first.decode.block_table is not None
     assert first.decode.block_table.shape[0] == 15
+    assert first.decode.context_lens is not None
     assert first.decode.context_lens.shape == (15,)
     assert second.decode is not None
-    assert first.decode.block_table.data_ptr() == second.decode.block_table.data_ptr()
+    assert second.decode.block_table is not None
     assert second.decode.context_lens is not None
     assert second.decode.cu_seqlens_q is not None
+    assert first.decode.block_table.data_ptr() == second.decode.block_table.data_ptr()
     assert first.decode.context_lens.data_ptr() == second.decode.context_lens.data_ptr()
     assert first.decode.cu_seqlens_q.data_ptr() == second.decode.cu_seqlens_q.data_ptr()
 
@@ -665,6 +681,81 @@ def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
     assert actual is expected
     assert prefill is None
     assert select_num_idx is expected_select_num_idx
+    mock_decode.assert_called_once()
+    decode_args = mock_decode.call_args.args
+    assert torch.equal(decode_args[0], torch.zeros(1, 1, 4))
+    assert decode_args[1] is impl.index_cache.kv_cache
+    assert decode_args[2] is decode.block_table
+    assert decode_args[3] is decode.seq_lens
+    assert decode_args[4:] == (
+        decode.max_seq_len,
+        impl.topk_blocks,
+        impl.init_blocks,
+        impl.local_blocks,
+        impl.num_kv_heads,
+        decode.decode_query_len,
+    )
+    assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
+
+
+def test_triton_indexer_forward_accepts_single_return_value() -> None:
+    """v0.32.0 keeps the upstream single-tensor decode contract."""
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.num_kv_heads = 1
+    impl.index_head_dim = 4
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.scale = 0.5
+    impl.index_cache = cast(
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(
+            prefix="layer.attn.index_cache",
+            kv_cache=torch.zeros(4, 128, 4),
+        ),
+    )
+    decode = AscendMiniMaxM3IndexerDecodeMetadata(
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        max_seq_len=129,
+        decode_query_len=1,
+    )
+    metadata = AscendMiniMaxM3IndexerMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=decode.max_seq_len,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    expected = torch.zeros(1, 1, 2, dtype=torch.int32)
+
+    with (
+        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", False),
+        patch.object(
+            msa_m3_module,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={impl.index_cache.prefix: metadata},
+            ),
+        ),
+        patch.object(
+            msa_m3_module,
+            "minimax_m3_index_decode",
+            return_value=expected,
+            create=True,
+        ) as mock_decode,
+    ):
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
+
+    assert actual is expected
+    assert prefill is None
+    assert select_num_idx is None
     mock_decode.assert_called_once()
     decode_args = mock_decode.call_args.args
     assert torch.equal(decode_args[0], torch.zeros(1, 1, 4))

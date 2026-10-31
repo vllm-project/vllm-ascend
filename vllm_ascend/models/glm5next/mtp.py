@@ -27,7 +27,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
-from vllm_ascend.utils import is_rot_weight_used
+from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
 
 from .model import (
     Glm5NextDecoderLayer,
@@ -346,7 +346,13 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        if vllm_version_is("0.32.0"):
+            _pending_wk_fp8: dict = {}
+        else:
+            # Reordering loaders can split an FP8 indexer wk weight/scale pair
+            # across load_weights() calls; keep the pending buffer on the model.
+            _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
