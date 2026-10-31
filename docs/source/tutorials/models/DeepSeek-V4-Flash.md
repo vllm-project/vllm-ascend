@@ -2460,6 +2460,42 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+#### 9.2.2 Shared compressor workspace and prefix checkpoints
+
+The shared compressor workspace (CWS) keeps persistent compressor tails in
+bounded private rings and transient prefill state in invocation-local workspace.
+The configuration switch below defaults to `false`. Rebuild the native
+compressor and SCFA operators before enabling it; updating only Python files
+is insufficient.
+
+The opt-in `additional_config.enable_dsv4_shared_compressor_workspace=true`
+path can use prefix caching with Model Runner V2 on Atlas A3. Enable prefix
+caching and chunked prefill, enforce eager Attention, and select an explicit
+synchronous or asynchronous scheduling mode. The platform selects the matching
+compressor checkpoint scheduler automatically. Prefix-disabled CWS keeps its
+existing behavior.
+
+Checkpoints contain immutable copies of the compressor KV and score tail pages,
+including indexer state and physical padding. A hit requires ordinary KV, SWA,
+and a completed tail checkpoint at the same boundary. Each request restores the
+snapshot into its own writable ring; the snapshot pages are never adopted as
+request-private state. At `block_size=128`, the complete compressed-page boundary
+is 16,384 tokens; at `block_size=32`, it is 4,096 tokens. A prompt must extend past
+the boundary because its last token is recomputed to obtain logits.
+
+Snapshot allocations borrow at most 1/16 of the existing global KV block pool.
+Idle snapshots can be reclaimed for request admission. If the budget cannot
+hold a snapshot, execution continues without creating that checkpoint. Pending
+saves cannot hit, and in-flight saves/restores retain their pages through worker
+completion, cancellation, and preemption. Copy-bearing steps fence the device
+copy and TP participants before publication; other steps keep native async
+scheduling. The existing CWS native operators are reused.
+
+This path currently requires PP, PCP, DCP, and KV layer parallel sizes of one.
+Attention graph execution, P/D or other KV transfer, speculative decoding, KV
+events, DSA multistream overlap, and additional scheduler policies are rejected.
+Native AFD DBO can remain enabled.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
