@@ -63,21 +63,11 @@ def _mkdocs_main_versions() -> dict[str, str]:
     return versions
 
 
-def _mkdocs_stable_version() -> str:
-    mkdocs = _read("mkdocs.yml")
-    match = re.search(
-        r'^\s*stable_vllm_ascend_version:\s*["\']?([^"\'\s#]+)',
-        mkdocs,
-        flags=re.MULTILINE,
-    )
-    return match.group(1) if match else ""
-
-
 class DependencyDocumentationTest(unittest.TestCase):
-    def test_stable_documentation_version_is_explicit(self):
-        self.assertTrue(_mkdocs_stable_version())
+    def test_preview_banner_links_to_latest(self):
         main_html = _read("docs/overrides/main.html")
-        self.assertIn("config.extra.stable_vllm_ascend_version", main_html)
+        self.assertIn("/latest", main_html)
+        self.assertNotIn("config.extra.stable_vllm_ascend_version", main_html)
         self.assertNotIn("config.extra.vllm_ascend_version", main_html)
 
     def test_main_dependency_versions_match_repository_metadata(self):
