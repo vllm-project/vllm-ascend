@@ -381,7 +381,8 @@ class EplbConfig:
 
         logger.info(
             "Dynamic EPLB is %s and convert moe's weights to list is %s",
-            self.dynamic_eplb, self.convert_weight_to_list,
+            self.dynamic_eplb,
+            self.convert_weight_to_list,
         )
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
@@ -641,9 +642,9 @@ class AscendConfig:
     # model's quant_type, 0 means disabled (use the model's own quant).
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    # Global token ceiling for dispatch_ffn_combine. A5 MegaMoE derives its
-    # per-rank symmetric-buffer capacity from this ceiling and the current
-    # process's MC2 execution capacity.
+    # Receive-token ceiling for dispatch_ffn_combine and CANN MegaMoE.
+    # A5 also bounds its per-rank input capacity by this ceiling divided
+    # by EP size and the execution capacity for the current PD role.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
@@ -1139,6 +1140,9 @@ class AscendConfig:
 
     @staticmethod
     def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
+        # utils imports ascend_config; defer this import to avoid a cycle.
+        from vllm_ascend.utils import is_deepseek_v41
+
         model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         is_kimi_k3 = any(
@@ -1174,6 +1178,8 @@ class AscendConfig:
         # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
         # validated SiTU shape without widening support for unrelated models.
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
+        if is_deepseek_v41(getattr(vllm_config.model_config, "hf_config", hf_text_config)):
+            supported_intermediate_sizes.add(4608)
         if is_minimax_m3 or is_kimi_k3:
             supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
