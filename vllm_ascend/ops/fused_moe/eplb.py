@@ -8,13 +8,12 @@ from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardw
 from vllm_ascend.distributed.eplb.tensor_ops import EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
 
 
-def use_allgather_eplb(enabled: bool) -> bool:
+def use_allgather_eplb() -> bool:
     # The forward context imports the MoE implementations during setup.
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
     return (
-        enabled
-        and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
         and _EXTRA_CTX.moe_comm_type is MoECommType.ALLGATHER
     )
 

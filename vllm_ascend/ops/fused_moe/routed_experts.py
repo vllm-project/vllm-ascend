@@ -743,7 +743,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             if eplb_state is not None:
                 assert isinstance(eplb_state, AscendEplbLayerState)
                 all_gather_mask = None
-                if use_allgather_eplb(True):
+                if use_allgather_eplb():
                     assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
                     all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
                 eplb_state.record_load(

@@ -1044,7 +1044,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     record_expert_tokens = MagicMock()
-    monkeypatch.setattr(routed_experts_module, "use_allgather_eplb", lambda enabled: False)
+    monkeypatch.setattr(routed_experts_module, "use_allgather_eplb", lambda: False)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
     result = routed_experts.forward_impl(
