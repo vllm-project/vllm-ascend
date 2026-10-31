@@ -1237,6 +1237,36 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
         return kv_cache_raw_tensors
 
+    # Qwen4 QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
+    # build the layout from the cache groups themselves. Allocate
+    # slot_count shared slabs plus one dense bank per PLE/hidden owner.
+    # Reshape must preserve the physical byte strides used by this planner.
+    qwen4_cache_layout = build_qwen4_kv_cache_layout(
+        kv_cache_config.kv_cache_groups,
+        kv_cache_config.num_blocks,
+    )
+    if qwen4_cache_layout is not None:
+        backing = _allocate_int8_cache_tensor(
+            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
+            alignment,
+            device,
+        )
+        for cache_owner in qwen4_cache_layout.owners:
+            if cache_owner.role in (PLE, HIDDEN):
+                # PLE indexed updates require dense blocks; r2's larger
+                # stride would materialize the entire state pool.
+                size = (
+                    cache_owner.spec.state_content_size_bytes
+                    if isinstance(cache_owner.spec, MambaSpec)
+                    else cache_owner.spec.page_size_bytes
+                )
+                kv_cache_raw_tensors[cache_owner.layer_name] = _allocate_int8_cache_tensor(
+                    kv_cache_config.num_blocks * size, alignment, device
+                )
+            else:
+                kv_cache_raw_tensors[cache_owner.layer_name] = backing
+        return kv_cache_raw_tensors
+
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
     # Validate all descriptors before allocating so an unsupported geometry
