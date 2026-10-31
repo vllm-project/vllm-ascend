@@ -8,7 +8,7 @@ import torch_npu  # noqa: F401
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env(include_vendor_lib=True)
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F401
 
 
 @pytest.mark.parametrize("queries", [1, 5])
