@@ -27,6 +27,8 @@ def preserve_worker_signal_handlers() -> Iterator[None]:
         yield
     finally:
         for number, handler in handlers.items():
-            if signal.getsignal(number) != handler:
+            # None denotes a native-installed handler which Python cannot
+            # reinstall. Do not pass it to signal.signal or guess its value.
+            if handler is not None and signal.getsignal(number) != handler:
                 signal.signal(number, handler)
                 logger.info("Restored caller's %s handler after graph SDK initialization.", number.name)
