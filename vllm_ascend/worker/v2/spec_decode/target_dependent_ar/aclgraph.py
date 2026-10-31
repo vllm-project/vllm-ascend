@@ -50,6 +50,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -57,6 +58,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
         )
 
         # Upstream constructs graph managers without a speculator reference.

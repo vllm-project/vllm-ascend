@@ -19,6 +19,8 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
@@ -38,7 +40,9 @@ def copy_kv_cache_blocks_inplace(
         return
 
     cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    seen_tensors: set[tuple[torch.device, int] | tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = (
+        set()
+    )
     for entry in kv_caches:
         if entry is None:
             continue
@@ -50,9 +54,17 @@ def copy_kv_cache_blocks_inplace(
             if tensor is None:
                 continue
             data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            # Hybrid models can overlay layers of different kinds on one
+            # allocation, so views at the same address can differ in geometry.
+            # Main keys on that geometry; the release lane keys on (device, address).
+            key = (
+                (tensor.device, data_ptr)
+                if vllm_version_is("0.32.0")
+                else (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
+            )
+            if key in seen_tensors:
                 continue
-            seen_tensors.add(data_ptr)
+            seen_tensors.add(key)
             cache_tensors.append(tensor)
 
     if not cache_tensors:

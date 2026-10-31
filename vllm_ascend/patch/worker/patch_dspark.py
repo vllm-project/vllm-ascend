@@ -44,7 +44,17 @@ import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 from vllm.distributed.parallel_state import get_pp_group
 
+# Mirrors the `gumbel_sample` binding that `patch_triton` installs on the
+# DSpark speculator module, so the wrapper below keeps the same sampling entry
+# point visible through its module globals.
+from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample as gumbel_sample  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
+
+if not vllm_version_is("0.32.0"):
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
+        DraftLogitsCache,
+    )
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
 _original_load_dspark_model = dspark_utils.load_dspark_model
@@ -95,3 +105,29 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
 # the utils module and the speculator module must point at the wrapper.
 dspark_utils.load_dspark_model = _load_dspark_model_with_target_quant
 speculator_module.load_dspark_model = _load_dspark_model_with_target_quant
+
+if not vllm_version_is("0.32.0"):
+    _original_dspark_sample_logits = speculator_module.DSparkSpeculator._sample_logits
+
+    def _sample_logits_with_tensor_draft_logits(self, logits, idx_map, sample_pos, step):
+        """Let a raw per-step tensor stand in for main's `DraftLogitsCache`.
+
+        Upstream main wraps the drafts in `DraftLogitsCache`; public helpers
+        (and the frozen one-card E2E) can still assign the raw tensor to
+        `speculator.draft_logits`. Adapt it for the duration of the call so the
+        upstream method sees the `.values`/`.row_mapping` protocol.
+        """
+        draft_logits = self.draft_logits
+        if draft_logits is None or isinstance(draft_logits, DraftLogitsCache):
+            return _original_dspark_sample_logits(self, logits, idx_map, sample_pos, step)
+
+        cache = DraftLogitsCache.__new__(DraftLogitsCache)
+        cache.values = draft_logits
+        cache.row_mapping = None
+        self.draft_logits = cache
+        try:
+            return _original_dspark_sample_logits(self, logits, idx_map, sample_pos, step)
+        finally:
+            self.draft_logits = draft_logits
+
+    speculator_module.DSparkSpeculator._sample_logits = _sample_logits_with_tensor_draft_logits  # type: ignore[method-assign]

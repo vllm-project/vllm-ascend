@@ -165,7 +165,11 @@ def _load_patch_distributed_module():
 
     shm_broadcast_module.MessageQueue = MessageQueue
 
+    distributed_utils_module: Any = ModuleType("vllm.distributed.utils")
+    distributed_utils_module.get_cpu_distributed_timeout_or_none = lambda: None
+
     vllm_distributed.parallel_state = parallel_state_module
+    vllm_distributed.utils = distributed_utils_module
     vllm_distributed.destroy_distributed_environment = destroy_distributed_environment
     vllm_module.distributed = vllm_distributed
 
@@ -185,6 +189,10 @@ def _load_patch_distributed_module():
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
+    # The patch only uses this to decide whether to set ``cpu_timeout`` (vLLM
+    # main) or leave it to the upstream base class (0.32.0); no test here
+    # asserts on that branch.
+    utils_module.vllm_version_is = lambda _target: False
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
@@ -198,6 +206,7 @@ def _load_patch_distributed_module():
         "vllm": vllm_module,
         "vllm.distributed": vllm_distributed,
         "vllm.distributed.parallel_state": parallel_state_module,
+        "vllm.distributed.utils": distributed_utils_module,
         "vllm.distributed.device_communicators.shm_broadcast": shm_broadcast_module,
         "vllm_ascend": vllm_ascend_module,
         "vllm_ascend.patch": vllm_ascend_patch,

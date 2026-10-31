@@ -435,7 +435,13 @@ def test_raw_sequence_lifecycle(
         seed_length = 256 if speculative_method else 128
         seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
+        # vLLM main caches speculative blocks in the base Scheduler; only the
+        # pure full-attention dspark layout sees the doubled local prefix hit.
+        only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
+        mixed_local = 128
+        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+            mixed_local = 256
+        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}

@@ -24,17 +24,60 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+import sys
+from functools import cached_property
+from importlib import import_module
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
+import vllm.distributed.weight_transfer.base as _weight_transfer_base
 
-from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
-    MODEL_CASES,
-    live_update_serve_args,
-    reference_serve_args,
-    reference_signature,
-)
+from vllm_ascend.utils import vllm_version_is
+
+_HELPER_MODULE = "tests.e2e.pull_request.rlhf.weight_transfer_test_utils"
+
+
+class _CompatWeightSource(_weight_transfer_base.WeightSource):
+    """Local adapter for the frozen pre-#63256 E2E helper.
+
+    The shared helper (under the frozen tests/e2e tree) still declares
+    ``metadata()`` as a plain method and yields through ``__iter__``; coerce
+    those into the cached-property ``metadata`` and ``iter_full`` protocol that
+    main validates, without touching the upstream base class.
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        metadata = cls.__dict__.get("metadata")
+        if metadata is not None and not isinstance(metadata, cached_property):
+            prop = cached_property(metadata)
+            prop.__set_name__(cls, "metadata")
+            cls.metadata = prop
+        if "iter_full" not in cls.__dict__ and "__iter__" in cls.__dict__:
+            cls.iter_full = cls.__dict__["__iter__"]
+        super().__init_subclass__(**kwargs)
+
+
+def _import_oracle_utils():
+    if vllm_version_is("0.32.0"):
+        return import_module(_HELPER_MODULE)
+    # Shadow the base module only for the duration of the helper import so its
+    # pre-protocol source class inherits the local adapter; the real upstream
+    # module and class are left untouched.
+    base_name = _weight_transfer_base.__name__
+    shim = ModuleType(base_name)
+    shim.__dict__.update(vars(_weight_transfer_base))
+    shim.WeightSource = _CompatWeightSource  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {base_name: shim}):
+        return import_module(_HELPER_MODULE)
+
+
+utils = _import_oracle_utils()
+
+MODEL_CASES = utils.MODEL_CASES
+live_update_serve_args = utils.live_update_serve_args
+reference_serve_args = utils.reference_serve_args
+reference_signature = utils.reference_signature
 
 CASE = MODEL_CASES[0]
 PORT = 8123

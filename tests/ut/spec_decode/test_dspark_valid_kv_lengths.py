@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
@@ -23,7 +24,11 @@ def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec.use_dcp = use_dcp
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([99999], dtype=torch.int32))
-    spec.max_model_len = 131072
+    if vllm_version_is("0.32.0"):
+        spec.max_model_len = 131072
+    else:
+        # vLLM main exposes max_model_len as a read-only view of vllm_config.
+        spec.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=131072))
     return spec
 
 

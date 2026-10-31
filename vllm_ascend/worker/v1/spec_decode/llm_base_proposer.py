@@ -62,7 +62,14 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     PREPARE_INPUTS_BLOCK_SIZE,
 )
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
+from vllm_ascend.utils import (
+    _is_glm_model,
+    check_gdn_layer,
+    enable_sp,
+    lmhead_tp_enable,
+    use_updatable_graph,
+    vllm_version_is,
+)
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
@@ -1215,6 +1222,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
         common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
+        if not vllm_version_is("0.32.0"):
+            # seq_lens/query_start_loc were replaced above; drop cached layouts.
+            common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
 
         common_attn_metadata.num_input_tokens = num_input_tokens
 
@@ -2070,6 +2080,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
+        if not vllm_version_is("0.32.0"):
+            # seq_lens was advanced in place above; drop cached layouts.
+            common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
         if common_attn_metadata.seq_lens_cpu is not None:
             if advance_draft_positions:
                 common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1

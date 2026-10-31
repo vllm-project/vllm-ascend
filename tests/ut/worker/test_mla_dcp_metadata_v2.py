@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, assignment, method-assign, union-attr"
 # SPDX-License-Identifier: Apache-2.0
 """CPU metadata contracts for MLA DCP producers and graph updates."""
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -114,7 +116,11 @@ def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, int
     speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "MLA"
     speculator.use_dcp = True
-    speculator.max_model_len = 128
+    if vllm_version_is("0.32.0"):
+        speculator.max_model_len = 128
+    else:
+        # vLLM main exposes max_model_len as a read-only view of vllm_config.
+        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=128))
     speculator.dcp_manager = _manager(size, rank, interleave)
     speculator.draft_vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=size, cp_kv_cache_interleave_size=interleave)
