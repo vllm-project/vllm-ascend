@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -520,6 +520,37 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 self.weight.data.copy_(loaded_weight)
         else:
             super().weight_loader(param, loaded_weight)
+
+
+class AscendDCPGroupColumnParallelLinear(AscendColumnParallelLinear):
+    """Project group Q heads for every token, then select local heads for prefill."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        parallel = get_current_vllm_config().parallel_config
+        self.group_size = parallel.decode_context_parallel_size
+        tp_size = parallel.tensor_parallel_size
+        if output_size % tp_size:
+            raise ValueError("DCP Q output size must be divisible by TP size")
+        self.qrep_active = self.group_size > 1
+        self.rank_in_group = get_tensor_model_parallel_rank() % self.group_size
+        super().__init__(input_size, output_size, bias=bias, quant_config=quant_config, prefix=prefix)
+        self.update_param_tp_status()
+
+    def _local_view(self, out: torch.Tensor) -> torch.Tensor:
+        """Select this TP rank's heads from a (..., group_heads, head_dim) output."""
+        if self.group_size == 1:
+            return out
+        local_num_heads = out.shape[-2] // self.group_size
+        start = self.rank_in_group * local_num_heads
+        return out[..., start : start + local_num_heads, :].contiguous()
 
 
 class AscendReplicatedLinear(ReplicatedLinear):
