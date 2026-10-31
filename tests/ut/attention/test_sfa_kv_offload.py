@@ -393,6 +393,10 @@ def test_c8_quant_lim():
     impl.lim_miss_dst = torch.empty_like(impl.lim_miss_src)
     impl.lim_misses = torch.zeros(num_decodes, dtype=torch.int32)
     impl.lim_reuse_request_count = 0
+    # Group-onboarding attributes normally set in __init__ (inline mode +
+    # empty group: no side-stream launch).
+    impl._lim_share_members = []
+    impl.use_side_stream_onboard = False
     impl._copy_sfa_metadata = SimpleNamespace(
         copy_sfa_pool_entries=torch.arange(num_decodes, dtype=torch.int32),
         num_decode_tokens=tokens,
@@ -443,6 +447,9 @@ def test_offload_attention_dispatch_after_removing_unfused_mode(mode):
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.use_fused_overlap = mode == "overlap"
+    # offload_shared_indexer_only is off in this test: legacy offload flow.
+    impl.lim_full_resident = False
+    impl.use_side_stream_onboard = False
     impl._copy_sfa_attention = MagicMock(return_value=torch.ones(2, 1, 4))
     impl._execute_fused_overlap_offload_decode = MagicMock(return_value=torch.ones(2, 1, 4))
     query = torch.zeros(2, 1, 4)

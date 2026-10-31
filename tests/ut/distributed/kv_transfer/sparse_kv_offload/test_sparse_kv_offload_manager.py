@@ -275,6 +275,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk=1,
             use_fused_overlap=False,
             use_fused_copy_sfa=False,
+            use_side_stream_onboard=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
         )
         return vllm_config, kv_cache_config, offload_config
@@ -291,7 +292,9 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             with self.subTest(rank=rank, dp_index=dp_index):
                 vllm_config.parallel_config.data_parallel_index = dp_index
                 offload_backend = SimpleNamespace(
-                    OffloadConfig=lambda: SimpleNamespace(),
+                    # store_url field must exist: the manager sets it only when
+                    # the field is present (older memfabric builds lack it).
+                    OffloadConfig=lambda: SimpleNamespace(store_url=None),
                     Scene=SimpleNamespace(SHARED="shared"),
                     initialize=MagicMock(return_value=0),
                 )
@@ -420,6 +423,9 @@ class TestHostKVRegistration(unittest.TestCase):
                 manager.tp_rank = rank
                 manager.num_layers = 1
                 manager.offload_layer_names = ["layer.0"]
+                # register_kv_caches publishes full-resident HBM bases; the
+                # mocked _register_offload_layers would normally set this.
+                manager.full_resident_layer_names = []
                 manager.kv_cache_config = SimpleNamespace(num_blocks=3)
                 manager.topk_buffer_size = 256
                 manager.block_size = 128

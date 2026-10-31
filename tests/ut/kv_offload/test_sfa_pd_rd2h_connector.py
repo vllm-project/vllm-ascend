@@ -210,7 +210,6 @@ def _make_read_thread() -> MembPullReadThread:
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": ([3, 4], [8])},
-        get_offload_layer_id=lambda _: 0,
     )
     return thread
 
@@ -1291,7 +1290,6 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},
-        get_offload_layer_id=lambda _: 0,
     )
     return thread
 

@@ -7,7 +7,6 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,13 +56,18 @@ class ConsumerReadState:
     indexer_tensors: list[Any | None]
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
-    get_offload_layer_id: Callable[[str], int]
     copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = field(default_factory=dict)
     topk_k_bases: list[int] = field(default_factory=list)
     topk_v_bases: list[int] = field(default_factory=list)
     topk_row_tokens: int = 0
     topk_hot_tokens: int = 0
     block_size: int = 128
+    # offload_shared_indexer_only: per-pull-layer destination topology. A
+    # per-rank destination (device-resident full layer) receives the whole
+    # main block list on every rank; hot-row-backed layers additionally map
+    # to their topk buffer base slot (-1 when absent).
+    per_rank_dest: list[bool] = field(default_factory=list)
+    topk_base_index: list[int] = field(default_factory=list)
     dspark_context_receiver: DSparkContextReceiver | None = None
     dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = field(default_factory=dict)
     dspark_draft_blocks_by_req: dict[str, dict[int, tuple[int, ...]]] = field(default_factory=dict)
@@ -513,15 +517,12 @@ class MembPullReadThread(threading.Thread):
         if pool_idx is None:
             logger.warning("MembPull _do_read: layer %s not in main names, skip", layer_name)
             return None
-        offload_id = state.get_offload_layer_id(layer_name)
-        if pool_idx != offload_id:
-            logger.debug(
-                "MembPull _do_read: layer-order mismatch for %s -- pull _main_names "
-                "idx=%d != resident offload_id=%d. Using offload_id.",
-                layer_name,
-                pool_idx,
-                offload_id,
-            )
+        # Pull destinations are indexed by the combined pull-layer order
+        # (offloaded hot-row layers and device-resident full layers alike);
+        # hot-row bases are reached through topk_base_index instead.
+        offload_id = pool_idx
+        per_rank_dest = bool(state.per_rank_dest[pool_idx]) if pool_idx < len(state.per_rank_dest) else False
+        topk_base_index = state.topk_base_index[pool_idx] if pool_idx < len(state.topk_base_index) else offload_id
         p_meta = p_layer_meta.get(layer_name)
         if p_meta is None:
             logger.warning(
@@ -616,6 +617,8 @@ class MembPullReadThread(threading.Thread):
             "layer_name": layer_name,
             "pool_idx": pool_idx,
             "offload_id": offload_id,
+            "per_rank_dest": per_rank_dest,
+            "topk_base_index": topk_base_index,
             "p_k_base": p_base_addrs[0],
             "p_v_base": p_base_addrs[1],
             "p_k_len": p_block_len[0] * p_block_size_scale[0],
@@ -675,10 +678,15 @@ class MembPullReadThread(threading.Thread):
             return
         if state.block_size <= 0 or state.topk_row_tokens <= 0:
             return
+        # Device-resident full layers have no circular tail slots; hand-built
+        # legacy layer dicts fall back to their offload id.
+        topk_base_index = int(layer.get("topk_base_index", layer.get("offload_id", -1)))
+        if topk_base_index < 0:
+            return
         local_idx = tail.tail_block_index - main_start_block
         if local_idx < 0 or local_idx >= len(p_main_block_ids):
             return
-        offload_id = layer["offload_id"]
+        offload_id = topk_base_index
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
             raise RuntimeError(f"MembPull fused_copy_sfa tail is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
@@ -734,12 +742,17 @@ class MembPullReadThread(threading.Thread):
             return
         if state.block_size <= 0 or state.topk_row_tokens <= 0:
             return
+        # Device-resident full layers have no hot rows to fill; hand-built
+        # legacy layer dicts fall back to their offload id.
+        topk_base_index = int(layer.get("topk_base_index", layer.get("offload_id", -1)))
+        if topk_base_index < 0:
+            return
         if dest.kv_tokens > state.topk_row_tokens - 2 * state.block_size:
             raise RuntimeError(
                 f"MembPull fused_copy_sfa dense prompt exceeds the row hot region: "
                 f"kv_tokens={dest.kv_tokens}, hot={state.topk_row_tokens - 2 * state.block_size}"
             )
-        offload_id = layer["offload_id"]
+        offload_id = topk_base_index
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
             raise RuntimeError(f"MembPull fused_copy_sfa dense is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
@@ -803,7 +816,10 @@ class MembPullReadThread(threading.Thread):
         # skip it entirely. P broadcasts the full p_main_block_ids to every contributor, so
         # resolve/validate the main destination range only for the one that actually pulls
         # (a non-zero contributor may have no main destination range for this chunk).
-        owns_main = group_member_idx == 0
+        # Per-rank destinations (device-resident full layers) always pull the
+        # whole main range: the paged caches are rank-local, not TP-shared.
+        per_rank_dest = bool(layer.get("per_rank_dest", False))
+        owns_main = per_rank_dest or group_member_idx == 0
         d_main_ids: list[int] = []
         if owns_main:
             main_end_block = main_start_block + len(p_main_block_ids)
@@ -855,13 +871,19 @@ class MembPullReadThread(threading.Thread):
 
         # Main MLA is replicated across P ranks and already split across D TP; only the
         # group's first contributor pulls it, so it is neither duplicated nor fine-split.
-        pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
+        # Per-rank paged destinations skip the D-TP split: every rank pulls the
+        # full block list into its own HBM cache.
+        pull_main = (
+            layer["k_cpu_ptr"] is not None
+            and layer["v_cpu_ptr"] is not None
+            and (per_rank_dest or group_member_idx == 0)
+        )
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
-        if pull_main:
+        if pull_main and not per_rank_dest:
             owned_start, owned_end = _tp_block_range(
                 len(d_main_ids),
                 self.tp_rank,

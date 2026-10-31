@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
@@ -30,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT, SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -46,6 +47,58 @@ OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 OFFLOAD_STORE_PORT_BASE = 8500
+# Per-request miss-plan capacity for lim_miss_src/lim_miss_dst. MUST equal
+# LIMConfig::MISS_CAPACITY in
+# csrc/attention/fused_lightning_indexer_manage/op_kernel/..._constants.h;
+# a mismatch causes silent buffer overrun in the LIM operator.
+LIM_MISS_PLAN_MAX_WIDTH = 32768
+# UB staging capacity of one KV row inside npu_lim_copy_descriptors. MUST match
+# LCD_KV_DIM_MAX / LCD_ROPE_DIM_MAX in
+# csrc/attention/lim_copy_descriptors/op_kernel/lim_copy_descriptors.cpp. The
+# per-model dims travel to the kernel through params and are validated against
+# these bounds here, so an unsupported model fails loudly instead of writing
+# past the UB staging buffer.
+LIM_KV_DIM_MAX = 512
+LIM_ROPE_DIM_MAX = 64
+
+
+@dataclass
+class _LIMGroupRuntime:
+    """Side-stream onboarding state for one LIM selection group.
+
+    ``plan_event`` orders the side stream after the owner's LIM operator on
+    the main stream; ``done_events`` order each member's resident SFA after
+    the group copy. All objects are created once (outside graph capture) and
+    reused every step. ``request_slots`` bounds the per-step request count;
+    onboarding always goes through the npu_lim_copy_descriptors operator.
+    ``last_launch_token`` holds the ForwardContext object of the forward
+    pass that last launched this group's onboarding. Members compare it
+    against their own pass before taking the all-zero-miss-plan
+    (direct-addressed) path, so a pass whose owner skipped the LIM (e.g. a
+    draft reuse step) falls back to inline miss resolution. The forward
+    context — not the attention metadata — is the step token here: owners
+    and members live in different KV cache groups under
+    offload_shared_indexer_only, so their builders hand out distinct
+    metadata objects for the same step.
+
+    ``ksc_geometry`` is this group's private ``[active_rows,
+    block_table_width]`` tensor, filled on the main stream right before the
+    side-stream launch. It must be per group: the side-stream kernel reads
+    it asynchronously, so a shared manager-level tensor could let a later
+    group's launch-time fill overwrite the values while an earlier group's
+    in-flight kernel is still reading them. The per-member done events
+    already join the side stream before the next owner runs; the private
+    tensor keeps that guarantee local to the group instead of relying on
+    cross-group layer ordering.
+    """
+
+    member_names: list[str]
+    plan_event: object
+    done_events: dict[str, object]
+    request_slots: int
+    ksc_geometry: torch.Tensor
+    last_launch_token: object = None
+
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -123,7 +176,10 @@ def allocate_kv_offload_topk_buffer_pair(
         # Graph padding uses a second, private arena of the same capacity.
         # Query-row metadata still needs max_num_seqs * decode_width, but
         # multiplying the large hot K/V allocation by that width wastes HBM.
-        request_rows = 2 * copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs)
+        # Inactive request slots share a small dummy-row ring
+        # (DUMMY_POOL_ROW_COUNT) instead of each consuming a dedicated hot
+        # row: one row per live request slot plus the ring.
+        request_rows = copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs) + DUMMY_POOL_ROW_COUNT
         max_num_topk_rows = request_rows
         topk_buffer_size += COPY_SFA_TAIL_BLOCKS * vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
@@ -142,7 +198,7 @@ def allocate_kv_offload_topk_buffer_pair(
         .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
     )
     if sparse_kv_offload_config.use_fused_copy_sfa:
-        # Dummy copy-SFA reads its private hot rows during capture/replay.
+        # Dummy copy-SFA/LIM rows read their private hot rows during capture/replay.
         topk_buffer_raw.zero_()
     return (topk_buffer_k, topk_buffer_v)
 
@@ -473,6 +529,34 @@ def prepare_sparse_kv_offload_mtp_dummy_metadata(
     )
 
 
+# LimCopyDescriptors operator used by the side-stream group onboarding
+# (miss_onboard_mode=side_stream). Resolved lazily from the registered
+# ``torch.ops._C_ascend`` namespace so worker processes only touch the
+# dispatcher when the side-stream path actually runs.
+_LIM_DESC_OP_UNRESOLVED = object()
+_LIM_DESC_OP = _LIM_DESC_OP_UNRESOLVED
+
+
+def _get_lim_desc_op():
+    """Resolve ``torch.ops._C_ascend.npu_lim_copy_descriptors`` once.
+
+    The operator ships with vllm_ascend_C builds that carry
+    csrc/attention/lim_copy_descriptors. Older builds do not register it;
+    miss_onboard_mode=side_stream then degrades to inline miss resolution
+    inside the fused attention operator (see configure_lim_groups).
+    """
+    global _LIM_DESC_OP
+    if _LIM_DESC_OP is _LIM_DESC_OP_UNRESOLVED:
+        op = getattr(torch.ops._C_ascend, "npu_lim_copy_descriptors", None)
+        if op is None:
+            logger.warning_once(
+                "npu_lim_copy_descriptors is not registered in this vllm_ascend_C build; "
+                "miss_onboard_mode=side_stream falls back to inline miss resolution."
+            )
+        _LIM_DESC_OP = op
+    return _LIM_DESC_OP
+
+
 class SparseKVOffloadManager:
     """
     A manager responsible to the Sparse KV cache Offload.
@@ -503,6 +587,17 @@ class SparseKVOffloadManager:
         self.topk = sparse_kv_offload_config.topk
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
         self.use_fused_copy_sfa = sparse_kv_offload_config.use_fused_copy_sfa
+        # LIM selection groups (offload_shared_indexer_only): empty until
+        # configure_lim_groups runs, so calls from the legacy full-offload
+        # path are harmless no-ops.
+        self._lim_group_states: dict[str, _LIMGroupRuntime] = {}
+        self._lim_side_stream = None
+        self._lim_group_ksc_params = None
+        self._lim_group_ksc_ready = False
+        # Main-KV row dims, published by register_kv_caches and forwarded to
+        # the onboarding operator through params.
+        self.head_dim_k = 0
+        self.head_dim_v = 0
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -548,7 +643,11 @@ class SparseKVOffloadManager:
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
         store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        config.store_url = f"tcp://127.0.0.1:{store_port}"
+        # Older pip-packaged memfabric_hybrid 1.2.0 builds have no
+        # OffloadConfig.store_url field and derive the store endpoint
+        # internally; only set it when the field exists.
+        if hasattr(config, "store_url"):
+            config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
@@ -577,7 +676,11 @@ class SparseKVOffloadManager:
             return (cache_or_caches,)
         return tuple(cache_or_caches)
 
-    def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
+    def _register_offload_layers(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        full_resident_layer_names: list[str] | None = None,
+    ) -> None:
         host_layer_names = set()
         for group in self.kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
@@ -586,7 +689,20 @@ class SparseKVOffloadManager:
                     spec = spec.kv_cache_specs[layer_name]
                 if getattr(spec, "store_on_host", False):
                     host_layer_names.add(layer_name)
-        self.offload_layer_names = [layer_name for layer_name in kv_caches if layer_name in host_layer_names]
+        # offload_shared_indexer_only keeps full (indexer-owner) layers on
+        # standard NPU paged caches (store_on_host=False specs); they carry
+        # no hot rows / CPU pool here. The model runner passes their names.
+        resident_names = set(full_resident_layer_names or ())
+        self.full_resident_layer_names: list[str] = [
+            layer_name
+            for layer_name in kv_caches
+            if "indexer" not in layer_name and layer_name in resident_names and layer_name not in host_layer_names
+        ]
+        self.offload_layer_names = [
+            layer_name
+            for layer_name in kv_caches
+            if layer_name in host_layer_names and layer_name not in resident_names
+        ]
         if not self.offload_layer_names:
             raise ValueError("Sparse KV offload did not find SFA KV cache layers.")
 
@@ -596,8 +712,9 @@ class SparseKVOffloadManager:
         }
 
         logger.info_once(
-            "Sparse KV offload registered %s layers (%s target layers).",
+            "Sparse KV offload registered %s offloaded layers and %s device-resident full layers (%s target layers).",
             self.num_layers,
+            len(self.full_resident_layer_names),
             self.num_target_layers,
         )
         self.mtp_layer_id = self.num_layers - 1 if self.num_layers != self.num_target_layers else -1
@@ -733,8 +850,9 @@ class SparseKVOffloadManager:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
+        full_resident_layer_names: list[str] | None = None,
     ):
-        self._register_offload_layers(kv_caches)
+        self._register_offload_layers(kv_caches, full_resident_layer_names)
 
         # register topk_buffer and cpu kv_cache
         self.topk_buffers_k: list[torch.Tensor] = []
@@ -755,6 +873,31 @@ class SparseKVOffloadManager:
                 self.k_caches_cpu.append(cache_or_caches[OFFLOAD_K_CACHE_CPU_INDEX])
                 self.v_caches_cpu.append(cache_or_caches[OFFLOAD_V_CACHE_CPU_INDEX])
 
+        # Device-resident full layers: the PD pull writes their paged caches
+        # directly (same per-block layout the CPU pool mirrors), so publish
+        # the rank-local HBM bases and per-block byte lengths for the
+        # connector's read state.
+        self.full_resident_k_bases: list[int] = []
+        self.full_resident_v_bases: list[int] = []
+        self.full_resident_block_lens: list[tuple[int, int]] = []
+        for layer_name in self.full_resident_layer_names:
+            k_cache, v_cache = self._as_cache_tuple(kv_caches[layer_name])[:2]
+            if k_cache is None or v_cache is None:
+                raise ValueError(f"Sparse KV offload full-resident layer {layer_name} has no NPU paged K/V caches")
+            self.full_resident_k_bases.append(int(k_cache.data_ptr()))
+            self.full_resident_v_bases.append(int(v_cache.data_ptr()))
+            self.full_resident_block_lens.append(
+                (
+                    int(k_cache.element_size() * np.prod(k_cache.shape[1:])),
+                    int(v_cache.element_size() * np.prod(v_cache.shape[1:])),
+                )
+            )
+        if self.full_resident_layer_names:
+            logger.info_once(
+                "Sparse KV offload keeps %d full layers device-resident for the PD pull.",
+                len(self.full_resident_layer_names),
+            )
+
         kv_head_num = self.topk_buffers_k[0].size(-2)
         head_dim_k = self.topk_buffers_k[0].size(-1)
         head_dim_v = self.topk_buffers_v[0].size(-1)
@@ -767,6 +910,8 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
+        self.head_dim_k = int(head_dim_k)
+        self.head_dim_v = int(head_dim_v)
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -1109,6 +1254,319 @@ class SparseKVOffloadManager:
         if result not in (None, 0):
             raise RuntimeError(f"memfabric fused_copy_sfa tail H2D failed with result={result}")
 
+    def configure_lim_groups(self, owner_to_members: dict[str, list[str]]) -> None:
+        """Register the LIM selection groups and pre-create the side stream.
+
+        Must run before any graph capture: the stream, the per-owner /
+        per-member events and the per-group scratch buffers are fixed objects
+        reused by every step so the fork-join topology (main LIM -> side
+        copies -> member SFA) is deterministic and capture-safe.
+        """
+        self._lim_group_states = {}
+        self._lim_side_stream = None
+        self._lim_group_ksc_params = None
+        self._lim_group_ksc_ready = _get_lim_desc_op() is not None
+        if not owner_to_members:
+            return
+        device = self.topk_buffers_k[0].device
+        requests = self.topk_buffers_k[0].shape[0]
+        # One decode-D2H staging set per LIM group, laid out
+        # [token, part(=k/v), member]: the live descriptors of a step are
+        # then exactly the flat prefix [0, tokens * 2 * members), so the
+        # group flush hands the engine contiguous views without any
+        # gather/reshape copies. Member i writes its strided slice; the
+        # group's last member issues a single sparse_copy for the whole
+        # group. Allocated for every offload_shared_indexer_only deployment
+        # (inline mode batches the decode D2H per group too); independent of
+        # the side stream.
+        self._group_d2h_buffers: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        for owner_name, member_names in owner_to_members.items():
+            if not member_names:
+                continue
+            # Layout [2, members, tokens]: per-member writes are contiguous
+            # rows (stride 1); the flush slices [.., :members, :tc] and
+            # reshapes (one gather per group, amortized across its members).
+            self._group_d2h_buffers[owner_name] = (
+                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int64, device=device),
+                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int64, device=device),
+                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int32, device=device),
+            )
+        self._group_d2h_count = torch.zeros(1, dtype=torch.int32, device=device)
+        self._group_d2h_step = None
+        self._group_d2h_refs = []
+        if not self._lim_group_ksc_ready:
+            # Documented fallback: without the npu_lim_copy_descriptors
+            # binding, miss_onboard_mode=side_stream degrades to inline
+            # (members resolve the owner's miss plan inside the fused
+            # attention operator; no pre-copy is issued).
+            logger.warning(
+                "npu_lim_copy_descriptors is unavailable; miss_onboard_mode=side_stream "
+                "falls back to inline miss resolution for %d LIM groups.",
+                sum(1 for names in owner_to_members.values() if names),
+            )
+            return
+        # Deployment constants, created here (before any graph capture) rather
+        # than lazily during the first decode step. The per-step geometry
+        # (active request count + live block-table width) travels in each
+        # group's own ksc_geometry tensor, so this tensor never needs to
+        # change after capture.
+        if self.head_dim_k <= 0 or self.head_dim_v <= 0:
+            self._lim_group_ksc_ready = False
+            raise RuntimeError(
+                "Sparse KV offload LIM groups require the main KV head dims to be "
+                "registered before configure_lim_groups"
+            )
+        if self.head_dim_k > LIM_KV_DIM_MAX or self.head_dim_v > LIM_ROPE_DIM_MAX:
+            self._lim_group_ksc_ready = False
+            raise RuntimeError(
+                "Sparse KV offload side-stream onboarding supports kv_lora_rank <= "
+                f"{LIM_KV_DIM_MAX} and qk_rope_head_dim <= {LIM_ROPE_DIM_MAX}; got "
+                f"kv_lora_rank={self.head_dim_k}, qk_rope_head_dim={self.head_dim_v}. "
+                "Update LCD_KV_DIM_MAX / LCD_ROPE_DIM_MAX in the C++ kernel together "
+                "with LIM_KV_DIM_MAX / LIM_ROPE_DIM_MAX here."
+            )
+        self._lim_side_stream = torch_npu.npu.Stream(device)
+        self._lim_group_ksc_params = torch.tensor(
+            [
+                self.block_size,
+                self.topk_buffer_size,
+                LIM_MISS_PLAN_MAX_WIDTH,
+                self.head_dim_k,
+                self.head_dim_v,
+            ],
+            dtype=torch.int64,
+            device=device,
+        )
+        for owner_name, member_names in owner_to_members.items():
+            if not member_names:
+                continue
+            self._lim_group_states[owner_name] = _LIMGroupRuntime(
+                member_names=list(member_names),
+                plan_event=torch_npu.npu.Event(),
+                done_events={name: torch_npu.npu.Event() for name in member_names},
+                request_slots=requests,
+                # [active_rows, block_table_width]; rewritten every step on the
+                # main stream before the side-stream launch. Private to the
+                # group: the side-stream kernel reads it asynchronously, so a
+                # later group's fill must never overwrite a shared tensor
+                # while this group's kernel is still in flight.
+                ksc_geometry=torch.zeros(2, dtype=torch.int64, device=device),
+            )
+        logger.info(
+            "Sparse KV offload LIM groups: %d owners, %d shared members on the side stream.",
+            len(self._lim_group_states),
+            sum(len(state.member_names) for state in self._lim_group_states.values()),
+        )
+
+    @property
+    def lim_group_onboard_ready(self) -> bool:
+        """True when side-stream group onboarding is actually active."""
+        return self._lim_group_ksc_ready
+
+    def _lim_group_state(self, owner_impl) -> _LIMGroupRuntime | None:
+        owner_name = owner_impl.layer_name or owner_impl._current_layer_name
+        if owner_name is None:
+            raise RuntimeError("group onboarding requires a bound owner layer name")
+        return self._lim_group_states.get(owner_name)
+
+    def launch_lim_group_onboard(self, owner_impl, metadata) -> None:
+        """Issue the shared members' miss onboarding on the side stream.
+
+        Called right after the owner's LIM operator produced the miss plan on
+        the main stream (miss_onboard_mode=side_stream). One KSC operator
+        launch per member; when the extension is unavailable the members fall
+        back to inline miss resolution inside the fused attention operator.
+        """
+        if not self._lim_group_ksc_ready:
+            return  # inline fallback: the fused op resolves the miss plan itself
+        state = self._lim_group_state(owner_impl)
+        if state is None:
+            return
+        count = metadata.copy_sfa_pool_entries.numel()
+        if count > state.request_slots:
+            raise ValueError(f"onboard request count {count} exceeds descriptor capacity {state.request_slots}")
+        # No zeroing of lim_misses beyond `count` is needed: the kernel's
+        # active_geometry[0] bounds its request loop to the current batch,
+        # and every Python consumer slices the counts to `count`.
+        self._launch_lim_group_ksc(_get_lim_desc_op(), owner_impl, state, metadata, count)
+
+    def _launch_lim_group_ksc(self, op, owner_impl, state, metadata, count: int) -> None:
+        """KSC-style group onboarding: one operator launch per member.
+
+        Each member's ``npu_lim_copy_descriptors`` launch resolves the owner's
+        miss plan through the source block table and moves the missed rows
+        from the host pool into that member's hot rows entirely in-kernel —
+        no Python address computation and no engine call. Launches run back to
+        back on the side stream with one done event per member, so a member
+        waits exactly once and only for its own (shorter) copy.
+        """
+        if not (0 < count <= owner_impl.lim_miss_src.shape[0]):
+            raise RuntimeError(
+                f"group KSC onboarding geometry check failed (count={count}, rows={owner_impl.lim_miss_src.shape[0]})"
+            )
+        block_table_width = metadata.copy_sfa_source_block_table.shape[1]
+        if block_table_width <= 0:
+            raise RuntimeError(
+                f"group KSC onboarding requires a non-empty source block table, got width={block_table_width}"
+            )
+        # [0] active_rows bounds the kernel loop to the current batch (so stale
+        # miss counts from a larger previous step are never read); [1] is the
+        # live block-table row stride, so the kernel never derives it from
+        # max_model_len (which can differ from the table width). Both fills
+        # target this group's private geometry tensor and are captured into
+        # the graph per capture size and replayed with it.
+        state.ksc_geometry[0].fill_(count)
+        state.ksc_geometry[1].fill_(block_table_width)
+        torch_npu.npu.current_stream().record_event(state.plan_event)
+        with torch_npu.npu.stream(self._lim_side_stream):
+            self._lim_side_stream.wait_event(state.plan_event)
+            for member_name in state.member_names:
+                layer_id = self._get_offload_layer_id(member_name)
+                op(
+                    owner_impl.lim_miss_src,
+                    owner_impl.lim_miss_dst,
+                    owner_impl.lim_misses,
+                    metadata.copy_sfa_source_block_table[:count],
+                    metadata.copy_sfa_pool_entries,
+                    self.copy_sfa_host_bases[layer_id].view(2),
+                    self.copy_sfa_device_bases[layer_id].view(2),
+                    self._lim_group_ksc_params,
+                    state.ksc_geometry,
+                )
+                state.done_events[member_name].record()
+        # Remember which forward pass this launch belongs to: members of a
+        # later pass verify the token before taking the all-zero-miss-plan
+        # (misses_already_resident) attention path, so a pass whose owner
+        # skipped the LIM (e.g. a draft reuse step) falls back to inline
+        # miss resolution instead of reading un-onboarded hot rows. The
+        # ForwardContext object is the step token (one instance per pass,
+        # shared by every layer of the pass, including other KV cache
+        # groups' metadata builders).
+        state.last_launch_token = get_forward_context() if is_forward_context_available() else None
+
+    def lim_group_launched_for(self, owner_impl) -> bool:
+        """Whether the side-stream onboarding ran in the current forward pass."""
+        state = self._lim_group_state(owner_impl)
+        if state is None or state.last_launch_token is None:
+            return False
+        if not is_forward_context_available():
+            return False
+        return state.last_launch_token is get_forward_context()
+
+    def wait_lim_group_onboard(self, owner_impl, member_impl) -> None:
+        """Order the member's resident-SFA reads after its side-stream copy."""
+        state = self._lim_group_state(owner_impl)
+        if state is None:
+            return
+        member_name = member_impl.layer_name or member_impl._current_layer_name
+        event = state.done_events.get(member_name)
+        if event is not None:
+            torch_npu.npu.current_stream().wait_event(event)
+
+    def stage_group_d2h(
+        self,
+        owner_name: str,
+        member_idx: int,
+        is_last: bool,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_cache_cpu: torch.Tensor | None,
+        v_cache_cpu: torch.Tensor | None,
+    ) -> None:
+        """Stage one shared member's decode D2H descriptors; flush per group.
+
+        Every member of a group writes its strided slice of the group's
+        descriptor buffers (source = the member's freshly computed KV rows,
+        destination = the member's CPU pool rows); the last member issues a
+        single ``offload.sparse_copy`` for the whole group. The buffers are
+        laid out [token, part, member], so the live descriptors are the flat
+        prefix [0, tokens * 2 * members) and the flush passes contiguous
+        views — no per-flush gather or reshape copies. The per-step geometry
+        (pool-slot validity/offsets, lengths, token-index source offsets) is
+        computed once per step, in-graph, by the first member. Pending KV
+        tensors are referenced until the flush so their addresses stay valid.
+        """
+        if self.tp_rank != 0:
+            return
+        if k_cache_cpu is None or v_cache_cpu is None:
+            raise RuntimeError("Sparse KV offload TP0 CPU cache is not registered")
+        buffers = self._group_d2h_buffers.get(owner_name)
+        if buffers is None:
+            raise RuntimeError(f"Sparse KV offload D2H staging was not configured for group {owner_name}")
+        src_buf, dst_buf, len_buf = buffers
+        k_rows = k.reshape(-1, self.token_size_bytes_k // k.element_size())
+        v_rows = v.reshape(-1, self.token_size_bytes_v // v.element_size())
+        token_count = k_rows.shape[0]
+        if token_count > self.max_num_tokens:
+            raise ValueError(f"Sparse KV offload decode rows {token_count} exceed D2H capacity {self.max_num_tokens}")
+        num_slots = k_cache_cpu.numel() * k_cache_cpu.element_size() // self.token_size_bytes_k
+        step = self._group_d2h_step_state(slot_mapping, token_count, num_slots, k.device)
+        base_k = int(k_cache_cpu.data_ptr())
+        base_v = int(v_cache_cpu.data_ptr())
+        src_buf[0, member_idx, :token_count].copy_(int(k_rows.data_ptr()) + step["src_off_k"])
+        src_buf[1, member_idx, :token_count].copy_(int(v_rows.data_ptr()) + step["src_off_v"])
+        dst_buf[0, member_idx, :token_count].copy_(base_k + step["dst_k"])
+        dst_buf[1, member_idx, :token_count].copy_(base_v + step["dst_v"])
+        len_buf[0, member_idx, :token_count].copy_(step["len_k"])
+        len_buf[1, member_idx, :token_count].copy_(step["len_v"])
+        # Keep the member's KV allocations alive until the group flush.
+        self._group_d2h_refs.append((k_rows, v_rows))
+        if not is_last:
+            return
+        members = member_idx + 1
+        self._group_d2h_count.fill_(2 * members * token_count)
+        result = offload.sparse_copy(
+            src_buf[:, :members, :token_count].reshape(-1),
+            dst_buf[:, :members, :token_count].reshape(-1),
+            len_buf[:, :members, :token_count].reshape(-1),
+            self._group_d2h_count,
+            k.device,
+        )
+        if result not in (None, 0):
+            raise RuntimeError(f"memfabric D2H sparse_copy failed with result={result}")
+        self._group_d2h_refs.clear()
+
+    def _group_d2h_step_state(
+        self,
+        slot_mapping: torch.Tensor,
+        token_count: int,
+        num_slots: int,
+        device: torch.device,
+    ) -> dict:
+        """Per-step decode D2H geometry shared by all staged members.
+
+        The cache holds a strong reference to the slot_mapping tensor itself
+        and validates identity (``is``), never ``data_ptr()``: a bare address
+        can be recycled by a later tensor after the original is freed, which
+        would silently reuse stale destination offsets.
+        """
+        state = self._group_d2h_step
+        if (
+            state is not None
+            and state["slot_mapping"] is slot_mapping
+            and state["version"] == slot_mapping._version
+            and state["token_count"] == token_count
+        ):
+            return state
+        slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
+        valid = (slots >= 0) & (slots < num_slots)
+        safe_slots = slots.clamp(min=0, max=num_slots - 1)
+        token_indices = self.d2h_token_indices_npu[:token_count]
+        state = {
+            "slot_mapping": slot_mapping,
+            "version": slot_mapping._version,
+            "token_count": token_count,
+            "src_off_k": token_indices * self.token_size_bytes_k,
+            "src_off_v": token_indices * self.token_size_bytes_v,
+            "dst_k": safe_slots * self.token_size_bytes_k,
+            "dst_v": safe_slots * self.token_size_bytes_v,
+            "len_k": (valid * self.token_size_bytes_k).to(torch.int32),
+            "len_v": (valid * self.token_size_bytes_v).to(torch.int32),
+        }
+        self._group_d2h_step = state
+        return state
+
     def offload_new_kv(
         self,
         layer_name: str,
@@ -1204,6 +1662,7 @@ class SparseKVOffloadManager:
             raise ValueError(
                 f"Sparse KV offload CPU K/V pools have incompatible token capacities: k={num_k_slots}, v={num_v_slots}"
             )
+
         valid = (slots >= 0) & (slots < num_k_slots)
         safe_slots = slots.clamp(min=0, max=num_k_slots - 1)
 

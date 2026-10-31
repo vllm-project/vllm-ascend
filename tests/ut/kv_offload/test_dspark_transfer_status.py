@@ -55,7 +55,6 @@ def _reader(receiver):
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={},
-        get_offload_layer_id=lambda name: 0,
         dspark_context_receiver=receiver,
         dspark_draft_kv_metadata={"draft": _metadata(2, 4000)},
         dspark_draft_blocks_by_req={"request": {2: (4, 5)}},

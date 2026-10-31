@@ -10,6 +10,7 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -440,7 +441,10 @@ def test_hot_cache_rows_follow_request_slots_not_query_width(monkeypatch, width,
     monkeypatch.setattr(torch, "empty", cpu_empty)
     k, v = allocate_kv_offload_topk_buffer_pair(runtime, config)
     query_rows = min(64, 4 * width)
-    request_rows = 2 * (4 + 2)
+    # One hot row per live request slot plus the shared dummy-row ring for
+    # inactive/padded slots (DUMMY_POOL_ROW_COUNT); the previous rule of
+    # doubling the slot count reserved a full row per dummy slot.
+    request_rows = 4 + 2 + DUMMY_POOL_ROW_COUNT
     # Mixed debug batches attend the retained device KV, so Copy-SFA hot
     # buffers need only request-slot rows even with keep_device_kv_cache.
     expected_rows = request_rows if fused else query_rows
