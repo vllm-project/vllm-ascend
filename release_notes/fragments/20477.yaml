@@ -1,4 +1,4 @@
-pr: 19639
+pr: 20477
 entries:
   - category: bugfix
     text: Fixed MLA decode paths skipping layerwise KV load waits and the decode prefetch-start signal, which could produce incorrect output, leave stale completion events, or block subsequent loads when a short prefill reuses external KV cache.
