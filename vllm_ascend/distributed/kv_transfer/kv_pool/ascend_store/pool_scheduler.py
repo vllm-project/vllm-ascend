@@ -126,7 +126,6 @@ class KVPoolScheduler:
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
-        self._preempted_req_ids: set[str] = set()
         # Whether to discard partial chunks
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
             "discard_partial_chunks", True
@@ -546,13 +545,6 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        if self.vllm_config.use_v2_model_runner:
-            # MRV2 resumes through scheduled_new_reqs with a full block table.
-            # Clear the marker so the next RUNNING delta extends this table instead
-            # of rebuilding the tracker from the delta and resetting save progress.
-            # MRV1 resumes through cached requests and consumes the marker in
-            # _process_preempted_cached_request.
-            self._preempted_req_ids.discard(request.req_id)
         load_spec = self.load_specs.pop(request.req_id, None)
         num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
         request_tuple = self._unfinished_requests.get(request.req_id)
@@ -596,7 +588,6 @@ class KVPoolScheduler:
         force_skip_save: bool,
     ) -> ReqMeta | None:
         new_block_ids_by_group = normalize_block_ids_by_group(new_block_ids)
-        self._preempted_req_ids.discard(req_id)
         load_spec = self.load_specs.pop(req_id, None)
         request_tuple = self._unfinished_requests.get(req_id)
         if request_tuple is None:
@@ -745,10 +736,8 @@ class KVPoolScheduler:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._preempted_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
-            self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
             self._loading_req_ids.discard(req_id)
@@ -784,7 +773,9 @@ class KVPoolScheduler:
                     and not self.save_decode_cache
                 ):
                     continue
-                if req_id in self._preempted_req_ids:
+                # MRV1 resumes here with a full table; MRV2 resumes via scheduled_new_reqs.
+                # The scheduler marks replacements in resumed_req_ids; all other tables are deltas.
+                if req_id in cached_reqs.resumed_req_ids:
                     if not new_block_ids:
                         continue
                     req_meta = self._process_preempted_cached_request(
