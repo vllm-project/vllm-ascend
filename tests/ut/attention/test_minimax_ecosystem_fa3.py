@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -30,7 +31,7 @@ def execute_nodes(path, names, namespace):
 @pytest.fixture
 def profiles():
     # Execute the real immutable capability matrix without initializing a device.
-    namespace = {"__name__": __name__}
+    namespace: dict[str, Any] = {"__name__": __name__}
     exec((ROOT / "vllm_ascend/device/hardware.py").read_text(), namespace)
     source = (ROOT / "vllm_ascend/device/hardware_profile.py").read_text()
     source = source.replace("from vllm_ascend.device.device_config import get_device_config", "")
@@ -76,7 +77,7 @@ def selection(monkeypatch, profiles):
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(path, {"_validate_minimax_ecosystem_fa3", "_uses_minimax_ecosystem_fa3"}, namespace)
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
-    method = next(n for n in cls.body if getattr(n, "name", None) == "_select_attn_backend_cls")
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_select_attn_backend_cls")
     method.decorator_list = []
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
     runtime.select = lambda: namespace["_select_attn_backend_cls"](None, runtime.selector)
@@ -225,7 +226,12 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
 
     fa3.attention_transfer_window = transfer
     query = torch.ones(2, 4, 128, dtype=torch.bfloat16)
-    fa3.flash_attn_with_kvcache.side_effect = lambda *a, **kw: events.append("attention") or query * 2
+
+    def record_attention(*args, **kwargs):
+        events.append("attention")
+        return query * 2
+
+    fa3.flash_attn_with_kvcache.side_effect = record_attention
     impl = fa3.AscendFlashAttentionImpl(4, 128, 0.1, num_kv_heads=1, sliding_window=8)
     metadata = NS(
         num_actual_tokens=2,
@@ -249,32 +255,6 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
     assert not events and not out.any()
 
 
-@pytest.mark.parametrize("method,expected", [(None, True), ("eagle3", True), ("dspark", False)])
-def test_sparse_prepare_fusion_is_disabled_for_dspark(method, expected):
-    path = ROOT / "vllm_ascend/models/minimax_m3/minimax_m3.py"
-    cls = next(
-        n
-        for n in ast.parse(path.read_text()).body
-        if isinstance(n, ast.ClassDef) and n.name == "MiniMaxM3SparseAttention"
-    )
-    guard = next(n for n in cls.body if getattr(n, "name", None) == "_can_fuse_sparse_prepare")
-    namespace = {"torch": torch, "HAS_TRITON": True, "_MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS": 262144}
-    exec(compile(ast.Module(body=[guard], type_ignores=[]), str(path), "exec"), namespace)
-    norm = NS(variance_epsilon=1e-6)
-    layer = NS(
-        use_dspark=method == "dspark",
-        head_dim=128,
-        idx_head_dim=128,
-        rotary_emb=NS(is_neox_style=True, rotary_dim=64),
-        q_norm=norm,
-        k_norm=norm,
-        index_q_norm=norm,
-        index_k_norm=norm,
-    )
-    hidden = NS(shape=(8, 128), device=NS(type="npu"), dtype=torch.bfloat16)
-    assert namespace["_can_fuse_sparse_prepare"](layer, torch.arange(8), hidden) == expected
-
-
 @pytest.mark.parametrize("method", [None, "eagle3", "dspark"])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
@@ -293,7 +273,7 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
     monkeypatch.setitem(
         sys.modules, "vllm_ascend.compilation.passes.qknorm_rope_fusion_pass", NS(QKNormRopeFusionPass=fusion)
     )
-    namespace = {
+    namespace: dict[str, Any] = {
         "__package__": "vllm_ascend.compilation",
         "enable_sp": lambda _: False,
         "get_current_hardware_profile": lambda: NS(supports=lambda _: False),

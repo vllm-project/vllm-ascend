@@ -73,7 +73,7 @@ def register_model():
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
     ModelRegistry.register_model(
-        "DSparkMiniMaxDraftModel", "vllm_ascend.patch.worker.patch_minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
+        "DSparkMiniMaxDraftModel", "vllm_ascend.models.minimax_m3.minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
     )
     ModelRegistry.register_model("Glm5DSparkForCausalLM", "vllm_ascend.models.glm5_dspark:Glm5DSparkForCausalLM")
     ModelRegistry.register_model(
