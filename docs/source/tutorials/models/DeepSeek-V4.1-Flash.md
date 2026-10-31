@@ -642,6 +642,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 === "A2 series"
 
+    > [!WARNING]
+    > The A2 configurations below are retained from earlier revisions and
+    > **have not been revalidated** with INT8 Engram storage. Field reports
+    > on four A2 nodes could only start with `--max-model-len 524288`; the
+    > 1M setting used below is not validated on A2 and has been reported to
+    > OOM (#18158, #18092). Treat the A2 context length as unverified until
+    > a revised A2 configuration is documented.
+
     This example uses four Atlas 800 A2 servers. The Prefill role runs four DP
     ranks with TP4 (DP4/TP4) across two servers: the first Prefill server hosts
     DP ranks 0-1 and the second Prefill server hosts DP ranks 2-3. The Decode
@@ -1854,7 +1862,10 @@ For common environment, installation, and parameter issues, refer to the
 - The documented A3 deployments use either one server in colocated mode or two
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
-  update. Its revised configuration will be documented separately.
+  update. Its revised configuration will be documented separately. The 1M
+  `--max-model-len` in the A2 sections is **not validated on A2**: field
+  reports could only start with 512K on four A2 nodes (#18092) and reported
+  OOM with the documented 1M parameters (#18158).
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
   DSpark draft model.
