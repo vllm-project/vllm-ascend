@@ -41,7 +41,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
 import vllm.v1.executor.multiproc_executor as _multiproc_mod
 from vllm.v1.executor.multiproc_executor import WorkerProc, logger
 
@@ -102,8 +101,8 @@ _EXPECTED_BUSY_LOOP_DELTA = [
     "-def worker_busy_loop(self):",
     '-    """Main busy loop for Multiprocessing Workers"""',
     "+def _patched_worker_busy_loop(self, *args, **kwargs):",
-    "+    rank = kwargs.get(\"rank\", 0)",
-    "+    start_watch_dog(f\"worker_{rank}\", logger)",
+    '+    rank = kwargs.get("rank", 0)',
+    '+    start_watch_dog(f"worker_{rank}", logger)',
     '+    """Main busy loop for Multiprocessing Workers."""',
     "-        self._execute_worker_rpc(self.rpc_broadcast_mq.dequeue(indefinite=True))",
     "+        with get_watch_dog().disable():",
@@ -118,7 +117,7 @@ _EXPECTED_DEATH_PIPE_DELTA = [
     "+def _patched_monitor_death_pipe(self, death_pipe, shutdown_requested):",
     "-    def death_pipe_monitor(queues_to_shutdown: list[MessageQueue]):",
     "+    def death_pipe_monitor(queues_to_shutdown):",
-    "+            get_watch_dog().handle_failure(\"shutdown\")",
+    '+            get_watch_dog().handle_failure("shutdown")',
 ]
 
 
@@ -131,8 +130,7 @@ def test_patched_worker_busy_loop_is_upstream_copy_plus_watchdog():
         inspect.getsource(_worker_watchdog_patch._patched_worker_busy_loop),
     )
     assert delta == _EXPECTED_BUSY_LOOP_DELTA, (
-        "patched worker_busy_loop diverged from upstream beyond the "
-        "intended watchdog lines:\n" + "\n".join(delta)
+        "patched worker_busy_loop diverged from upstream beyond the intended watchdog lines:\n" + "\n".join(delta)
     )
 
 
@@ -169,8 +167,7 @@ def test_upstream_worker_proc_seams_for_patched_copies():
         "the death-pipe monitor in patch_worker_watchdog.py would silently break."
     )
     assert hasattr(logger, "info_once"), (
-        "upstream executor logger lost info_once; the death-pipe monitor "
-        "would silently break."
+        "upstream executor logger lost info_once; the death-pipe monitor would silently break."
     )
 
 
