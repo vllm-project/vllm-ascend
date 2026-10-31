@@ -1291,7 +1291,11 @@ class NPUModelRunner(GPUModelRunner):
             or self.speculator is None
             or spec.method != "dspark"
             or self.model_config.architecture
-            not in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
             or spec.draft_model_config is None
             or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
         ):

@@ -2071,7 +2071,9 @@ def m3_device_length_runner():
     return _m3_device_length_runner()
 
 
-@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize(
+    "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
+)
 @pytest.mark.parametrize("eager", [False, True])
 def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager):
     runner, _, _ = m3_device_length_runner
@@ -2102,8 +2104,10 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
         "pp_exact_counts",
     ],
 )
-def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported):
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "GlmMoeDsaForCausalLM"])
+def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture):
     runner, _, _ = m3_device_length_runner
+    runner.model_config.architecture = architecture
     spec = runner.speculative_config
     if unsupported == "no_spec_config":
         runner.speculative_config = None
@@ -2139,9 +2143,11 @@ def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsu
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark"])
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
+    if draft == "glm_dspark":
+        runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])
