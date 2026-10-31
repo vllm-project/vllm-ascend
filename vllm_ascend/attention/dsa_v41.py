@@ -1310,6 +1310,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 if num_actual_tokens == 0:
                     self._smla_metadata.zero_()
                     return
+                # Fix SMLA metadata hang under async metadata scheduling
+                # (#16416): derive max_seqlen_q from the device-local
+                # query_start_loc consumed here; the host-side
+                # common.max_query_len may diverge from the device tensor by
+                # the time this deferred task executes.
+                qsl_q = common.query_start_loc[: num_reqs + 1]
+                seq_lens_q = qsl_q[1:] - qsl_q[:-1]
+                max_seqlen_q = max(1, int(seq_lens_q.max().item()))
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
                     n_local_heads,
                     1,
@@ -1319,7 +1327,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=num_reqs,
-                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_q=max_seqlen_q,
                     max_seqlen_ori_kv=max_ori_seq_len,
                     max_seqlen_cmp_kv=(coordinates["max_cache_seq_len"] if has_compressed else 0),
                     ori_topk=ori_sparse_indices.shape[-1] if ori_sparse_indices is not None else 0,
@@ -1388,6 +1396,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             else:
 
                 def build_qli_metadata() -> None:
+                    # Fix QLI metadata hang under async metadata scheduling
+                    # (#16416): derive max_seqlen_q from the device-local
+                    # query_start_loc consumed here; the host-side
+                    # common.max_query_len may diverge from the device tensor
+                    # by the time this deferred task executes.
+                    # Guard the empty-batch case (e.g. CP rank without query):
+                    # keep the original host-side value there.
+                    if num_reqs > 0:
+                        qsl_q = common.query_start_loc[: num_reqs + 1]
+                        seq_lens_q = qsl_q[1:] - qsl_q[:-1]
+                        max_seqlen_q = max(1, int(seq_lens_q.max().item()))
+                    else:
+                        max_seqlen_q = int(getattr(common, "max_query_len", 0))
                     value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                         int(_config_value(text_config, "index_n_heads")),
                         1,
@@ -1398,7 +1419,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         seqused_k=coordinates["cache_seq_lens"],
                         cmp_residual_k=residual,
                         batch_size=num_reqs,
-                        max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                        max_seqlen_q=max_seqlen_q,
                         max_seqlen_k=coordinates["max_cache_seq_len"],
                         layout_q="TND",
                         layout_k="PA_BBND",
