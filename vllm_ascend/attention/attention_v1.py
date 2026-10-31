@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, EncoderOnlyAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -363,7 +363,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         attn_state = common_attn_metadata.attn_state
 
         # Get attn_mask from singleton AttentionMaskBuilder
-        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        # Common metadata defaults to causal, including mixed recurrent/encoder
+        # models. Encoder-only groups must attend to the complete request.
+        causal = common_attn_metadata.causal and not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        attn_mask = self.attn_mask_builder.get_attention_mask(causal, self.model_config)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -460,7 +463,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            causal=common_attn_metadata.causal,
+            causal=causal,
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
         )
