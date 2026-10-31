@@ -715,8 +715,7 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
-                if len(req_meta["local_block_ids"]) > 0 or self._is_failed_recv_request(request_id):
-                    self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
             self.request_queue.task_done()
@@ -1977,11 +1976,10 @@ class MooncakeConnectorWorker:
                 len(done_sending),
                 len(done_recving),
             )
-        failed_recving = (
-            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)
-            if self.kv_role == "kv_consumer"
-            else set()
-        )
+        failed_recving: set[str] = set()
+        if self.kv_role == "kv_consumer":
+            assert self.kv_recv_thread is not None
+            failed_recving = self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)
         if failed_recving:
             logger.error("KV_RECV_FAILED requests=%s", sorted(failed_recving))
         return KVConnectorTransferResults(
@@ -1992,6 +1990,13 @@ class MooncakeConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
+        # Register before publishing work: empty reads can finish immediately.
+        for req_id in metadata.reqs_in_batch:
+            if self.kv_send_thread is not None:
+                self.kv_send_thread.task_tracker.add_req_to_process(req_id)
+            if self.kv_recv_thread is not None:
+                self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
+
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
@@ -2068,12 +2073,6 @@ class MooncakeConnectorWorker:
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
                     )
-
-        for req_id in metadata.reqs_in_batch:
-            if self.kv_send_thread is not None:
-                self.kv_send_thread.task_tracker.add_req_to_process(req_id)
-            if self.kv_recv_thread is not None:
-                self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():

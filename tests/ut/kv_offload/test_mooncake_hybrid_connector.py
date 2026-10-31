@@ -244,6 +244,18 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         self.assertFalse(thread.failed_recv_requests)
         self.assertFalse(thread.task_tracker.reqs_to_process)
 
+    def test_successful_empty_blocks_complete_without_failure(self):
+        thread, connector = self._make_receive_worker()
+        thread._transfer_kv_cache_all_groups = MagicMock()
+        thread.task_tracker.add_req_to_process("r")
+        thread._handle_request(self._submit_receive(thread, "r", True, blocks=[]))
+        result = connector.get_transfer_results(set())
+        self.assertEqual(result.finished_recving, {"r"})
+        self.assertFalse(result.failed_recving)
+        self.assertFalse(thread.task_tracker.reqs_to_process)
+        self.assertFalse(thread.request_task_counts)
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_producer_transfer_results_and_legacy_completion(self):
         tracker = KVCacheTaskTracker()
         worker = object.__new__(MooncakeConnectorWorker)
@@ -607,7 +619,18 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                         source_ports = set()
                         for decoder in decoders:
                             decoder.kv_recv_thread.reset_mock()
+                            tracker = KVCacheTaskTracker()
+                            decoder.kv_recv_thread.task_tracker = tracker
+
+                            def complete_immediately(tracker=tracker, **kwargs):
+                                req_id = kwargs["request_id"]
+                                self.assertIn(req_id, tracker.reqs_to_process)
+                                tracker.update_done_task_count(req_id)
+
+                            decoder.kv_recv_thread.add_request.side_effect = complete_immediately
                             decoder.start_load_kv(metadata)
+                            self.assertEqual(tracker.get_and_clear_finished_requests(), {f"decode-{request_id}"})
+                            self.assertFalse(tracker.reqs_to_process)
                             decoder.kv_recv_thread.add_request.assert_called_once()
                             pull = decoder.kv_recv_thread.add_request.call_args.kwargs
                             port = pull["remote_handshake_port"]
