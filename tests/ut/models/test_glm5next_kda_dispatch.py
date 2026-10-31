@@ -19,10 +19,17 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
 
 @pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
 @pytest.mark.parametrize("has_prefill", [False, True])
-def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_size, pcp_rank, has_prefill):
+@pytest.mark.parametrize("needs_output_buffer", [False, True])
+def test_kda_pcp_restores_prefill_and_skips_decode_gather(
+    monkeypatch, pcp_size, pcp_rank, has_prefill, needs_output_buffer
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
+    # Set by __init__ from the resolved splitting ops, which this fixture skips.
+    # True dispatches to the mutable op writing a graph-owned buffer, False to
+    # the variant returning its own output.
+    layer._needs_output_buffer = needs_output_buffer
     layer.local_projection_size = 2
     layer.local_num_heads = 1
     layer.head_dim = 2
@@ -45,7 +52,7 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_size,
         core_attn_out[0, :, 0, 0] = qkv_proj_states[:, 0]
         core_attn_out[0, :, 0, 1].zero_()
 
-    layer._forward = run_kda
+    layer._forward_core = run_kda
     pcp_context = SimpleNamespace(
         global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([has_prefill])),
         hidden_restore_idx=torch.tensor([0, 1, 4, 5, 6, 7, 2]),
@@ -68,9 +75,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_size,
     layer.pcp_size = pcp_group.world_size
     layer.pcp_rank = pcp_group.rank_in_group
 
-    # The KDA custom op is registered against the NPU dispatch key, so a CPU
-    # runner cannot dispatch it. Call its implementation directly instead.
-    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_pcp_forward", model_kda.glm5next_kda_pcp_forward)
+    # Both KDA custom ops are registered against the NPU dispatch key, so a CPU
+    # runner cannot dispatch them. Call their implementations directly instead.
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward_with_output", model_kda.glm5next_kda_forward_with_output)
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
 
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
@@ -319,7 +327,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     query = query + torch.arange(128, dtype=torch.bfloat16)[None, :] / 128
     qkv = torch.cat((query, query + 8, query + 16), dim=-1)
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
-    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    layer._forward_core(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
     expected = query * 3
     recurrent_tokens = 2 if speculative else 1
     expected[:recurrent_tokens] = query[:recurrent_tokens] * 2
@@ -376,7 +384,7 @@ def test_profile_does_not_touch_the_connector(monkeypatch, metadata):
     monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", unexpected)
     monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", unexpected)
     output = torch.ones(1)
-    layer._forward(None, None, None, output)
+    layer._forward_core(None, None, None, output)
     assert output.item() == 0
 
 
@@ -439,7 +447,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     qkv = torch.arange(4 * 384, dtype=torch.float32).reshape(4, 384)
-    layer._forward(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
+    layer._forward_core(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
     assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []
