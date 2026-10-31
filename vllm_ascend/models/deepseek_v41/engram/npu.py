@@ -142,11 +142,26 @@ def _host_library() -> ctypes.CDLL:
     return lib
 
 
+class HostUvaBufferCleanupError(RuntimeError):
+    """Keep a partially constructed host buffer available for cleanup retry."""
+
+    def __init__(self, host_buffer, initialization_error, cleanup_error):
+        super().__init__(
+            f"Host buffer initialization failed: {initialization_error}; "
+            f"cleanup failed: {cleanup_error}. Retry host_buffer.close()."
+        )
+        self.host_buffer = host_buffer
+
+
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
     def __init__(self, shape, dtype, device):
         self.lib = _host_library()
+        self._registered = False
+        self.ptrs = None
+        self.tensor = None
+        self.buffer = None
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
@@ -162,9 +177,9 @@ class HostUvaBuffer:
         if allocation_address is None:
             raise RuntimeError("aclrtMallocHost returned a NULL pointer")
         self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
-        self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
-        self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
+            self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
+            self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
@@ -178,14 +193,14 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
-        except Exception:
-            # A half-built buffer must not leave the host range registered: the
-            # caller only sees the exception, so nothing else can release it.
-            self.lib.aclrtHostUnregister(self.pointer)
-            self.lib.aclrtFreeHost(self._allocation_pointer)
-            self.tensor = None
-            self.buffer = None
-            self.pointer = ctypes.c_void_p()
+        except Exception as initialization_error:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                # Assignment to the caller's owner has not completed. Retain
+                # this allocation on the exception rather than lose the only
+                # handle capable of retrying unregister/free.
+                raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
             raise
 
     def close(self):

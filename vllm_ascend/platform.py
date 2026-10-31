@@ -1840,19 +1840,8 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         # Qwen4Exp PLE is managed by its model-specific implementation, not
         # the DeepSeek V4.1 Engram runtime.
         if engram_config is not None and engram_config.cpu_offload:
-            parallel = vllm_config.parallel_config
-            if (
-                parallel.prefill_context_parallel_size != 1
-                or parallel.decode_context_parallel_size != 1
-                or engram_config.embedding_across_dp
-                or engram_config.dp_shared_memory
-                or engram_config.use_thp
-                or parallel.enable_elastic_ep
-                or parallel.use_ubatching
-            ):
-                raise ValueError(
-                    "Qwen PLE offload requires PCP=DCP=1 without shared tables, THP, elastic EP or ubatching"
-                )
+            if engram_config.embedding_across_dp or engram_config.use_thp:
+                raise ValueError("Qwen PLE offload requires ETP=TP without THP")
             if not vllm_config.use_v2_model_runner:
                 raise ValueError("Qwen PLE offload requires model runner v2")
         return
