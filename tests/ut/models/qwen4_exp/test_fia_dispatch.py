@@ -365,9 +365,9 @@ def test_runner_keeps_qwen_prompt_tails_out_of_decode_graph(architecture, has_pr
             return state, 1
 
     namespace: dict[str, Any] = dict(Base=Base)
-    child = ast.ClassDef(
-        name="Runner", bases=[ast.Name(id="Base", ctx=ast.Load())], keywords=[], body=[method], decorator_list=[]
-    )
+    child = ast.parse("class Runner(Base):\n    pass").body[0]
+    assert isinstance(child, ast.ClassDef)
+    child.body = [method]
     exec(compile(ast.fix_missing_locations(ast.Module(body=[child], type_ignores=[])), str(source), "exec"), namespace)
     runner = namespace["Runner"]()
     runner._uses_flashmla = False
