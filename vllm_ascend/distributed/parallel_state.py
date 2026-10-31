@@ -181,15 +181,21 @@ def init_ascend_model_parallel(
         if group_size is None:
             return None
         if group_size not in _group_cache:
-            rank_grid = torch.arange(world_size).reshape(global_pp_size, global_dp_size, global_tp_size)
+            # Reuse the upstream rank topology. A rank grid keyed by PP first
+            # silently mixes pipeline stages when DP > 1; PCP is part of the
+            # same fine-grained TP replica and must not be collapsed either.
+            rank_grid = all_ranks.reshape(-1, global_dp_size, global_pp_size, global_pcp_size, global_tp_size)
             num_chunks = global_dp_size // group_size
             group_ranks = []
-            for pp_idx in range(global_pp_size):
-                stage_ranks = rank_grid[pp_idx]  # (dp, tp)
-                for chunk in range(num_chunks):
-                    for tp_idx in range(global_tp_size):
-                        group = stage_ranks[chunk * group_size : (chunk + 1) * group_size, tp_idx].tolist()
-                        group_ranks.append(group)
+            for replica_idx in range(rank_grid.shape[0]):
+                for pp_idx in range(global_pp_size):
+                    for pcp_idx in range(global_pcp_size):
+                        for tp_idx in range(global_tp_size):
+                            # dp x (pp, pcp, tp) for one external-DP replica.
+                            stage_ranks = rank_grid[replica_idx, :, pp_idx, pcp_idx, tp_idx]
+                            for chunk in range(num_chunks):
+                                group = stage_ranks[chunk * group_size : (chunk + 1) * group_size].tolist()
+                                group_ranks.append(group)
             pg = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name=group_name)
             _group_cache[group_size] = pg
 
