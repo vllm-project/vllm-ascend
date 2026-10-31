@@ -421,8 +421,12 @@ jobs:
           name: coverage-report
           path: ./tests/coverage.json
 
+      - name: Generate Cobertura XML from coverage data
+        run: |
+          python -m slipcover --merge ./tests/coverage.json \
+            --xml --out ./tests/coverage.xml
+
       - name: Check coverage on new code
-        if: github.event_name == 'pull_request'
         run: |
           pip install diff-cover
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
