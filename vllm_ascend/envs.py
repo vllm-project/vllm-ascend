@@ -72,6 +72,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # QLI (QuantLightningIndexerV2) candidate skip fast path for DeepSeek-V4.1
+    # consumer layers. "1": use candidate_mode=4 (compact collect + sort within
+    # candidate blocks) instead of mode=2 (full-tile sort with pre-sort mask);
+    # output top-k set is mathematically equivalent to mode=2. "0": keep mode=2.
+    # Not sensitive.
+    "VLLM_ASCEND_QLI_CANDIDATE_SKIP": lambda: os.getenv("VLLM_ASCEND_QLI_CANDIDATE_SKIP", "0") == "1",
 }
 
 # end-env-vars-definition

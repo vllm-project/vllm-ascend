@@ -109,6 +109,7 @@ constexpr uint32_t MX_SCALE_GROUP_SIZE = 32;   // MX量化每32个D维元素对�
 constexpr uint32_t CANDIDATE_MODE_SOURCE = 1;      // is_candidate_source: 输出候选块索引
 constexpr uint32_t CANDIDATE_MODE_CONSUMER = 2;    // use_candidate: 输入候选块索引, 候选内选topk
 constexpr uint32_t CANDIDATE_MODE_OFF = 3;         // 关闭candidate功能(默认)
+constexpr uint32_t CANDIDATE_MODE_CONSUMER_SKIP = 4; // use_candidate+skip: 候选块内紧凑收集+排序 (输出与mode2等价)
 constexpr uint32_t CANDIDATE_TOPK_BLOCKS_FIX = 2048;      // O2决策: 当前仅支持2048
 constexpr uint32_t CANDIDATE_BLOCK_SIZE_DEFAULT = 8;
 constexpr uint32_t CANDIDATE_BLOCK_SIZE_MAX = 64;

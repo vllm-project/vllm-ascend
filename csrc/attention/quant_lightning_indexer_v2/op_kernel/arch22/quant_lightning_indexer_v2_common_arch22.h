@@ -21,6 +21,11 @@ namespace QLIV2Common {
 inline constexpr uint32_t CANDIDATE_MODE_SOURCE = 1;   // is_candidate_source: 输出候选块索引
 inline constexpr uint32_t CANDIDATE_MODE_CONSUMER = 2; // use_candidate: 输入候选块索引, 候选内选topk
 inline constexpr uint32_t CANDIDATE_MODE_OFF = 3;      // 关闭candidate功能(默认)
+inline constexpr uint32_t CANDIDATE_MODE_CONSUMER_SKIP = 4; // use_candidate + skip: 候选块内紧凑收集+排序
+// (替代 mode2 的 "全量计算+排序前 mask": 排序对象从 tile 全长 (2048) 降为候选命中长度 S,
+//  topk 输出与 mode2 严格等价 — 候选外位置在 mode2 下被降级 NEG_HUGE, 仅当行内候选有效
+//  位置 < topk 时泄漏, 而 mode1 候选列表每块均为本行真实块, 总块数>topkBlocks 时候选有效
+//  位置 >= topk, 总块数<=topkBlocks 时候选外为空, 两种情形输出集合均一致)
 
 // 与tiling的layout保持一致
 enum class LI_LAYOUT : uint32_t {
