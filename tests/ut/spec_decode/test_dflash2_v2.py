@@ -335,8 +335,8 @@ def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, enforce_eager,
 def test_selector_scores_in_request_scoped_context(monkeypatch):
     config = SimpleNamespace()
     selector = MagicMock()
-    selector.vllm_config = config
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.vllm_config = config
     speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
     speculator.num_query_per_req = 3
     speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(6))

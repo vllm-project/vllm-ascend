@@ -134,10 +134,9 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
         # compiled graph wrapper still needs one, even though it has no
         # attention or distributed layers. Its dynamic axis counts requests,
         # not the flattened draft tokens used by the backbone.
-        selector = self.model.model.candidate_selector
         forward_context = create_forward_context(
             None,
-            selector.vllm_config,
+            self.vllm_config,
             batch_descriptor=BatchDescriptor(num_tokens=candidate_ids.shape[0]),
         )
         # Keep the inner graph mode NONE: the outer DFlash ACL graph captures
