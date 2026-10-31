@@ -92,7 +92,7 @@ def build_kpool_query_plan(
         tuple(full_ranges),
         rows.to(device, non_blocking=True),
         selection_index.to(device, non_blocking=True),
-        torch.tensor(ends, dtype=torch.int64, device=device),
+        torch.tensor(ends, dtype=torch.int64, device="cpu").to(device, non_blocking=True),
         _build_dense_plan(common, starts, lengths, topk, device) if plan_dense_attention else None,
     )
 
@@ -132,7 +132,7 @@ def _build_dense_plan(common, starts, lengths, topk: int, device: torch.device) 
         request,
         torch.arange(begin, begin + count, device="cpu").to(device, non_blocking=True),
         sparse_rows.to(device, non_blocking=True),
-        torch.tensor(sparse_ends, dtype=torch.int32, device=device),
+        torch.tensor(sparse_ends, dtype=torch.int32, device="cpu").to(device, non_blocking=True),
         torch.arange(pages, dtype=torch.int32, device=device).unsqueeze(0),
         seq_len,
     )

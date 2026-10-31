@@ -130,6 +130,41 @@ def test_query_plan_staging_ignores_default_tensor_device():
     assert plan.cum_query_lens.tolist() == [0]
 
 
+@pytest.mark.parametrize("dense", [False, True])
+def test_query_plan_transfers_host_metadata_without_blocking(dense):
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=8192,
+        query_start_loc_cpu=torch.tensor([0, 8192]),
+        seq_lens_cpu=torch.tensor([8192]),
+        is_prefilling=torch.tensor([True]),
+    )
+    target = torch.device("meta")
+    original_tensor, original_to = torch.tensor, torch.Tensor.to
+    transfers = []
+
+    def host_tensor(*args, **kwargs):
+        assert torch.device(kwargs.get("device", "cpu")).type == "cpu"
+        return original_tensor(*args, **kwargs)
+
+    def transfer(tensor, device, *args, **kwargs):
+        if device == target:
+            assert kwargs.get("non_blocking") is True
+            transfers.append(tensor)
+            return tensor
+        return original_to(tensor, device, *args, **kwargs)
+
+    with patch.object(torch, "tensor", side_effect=host_tensor), patch.object(torch.Tensor, "to", new=transfer):
+        plan = build_kpool_query_plan(common, 2048, target, plan_dense_attention=dense)
+    assert plan is not None
+    assert any(x.dtype == torch.int64 and x.tolist() == [6144] for x in transfers)
+    assert plan.cum_query_lens.tolist() == [6144]
+    if dense:
+        assert plan.dense is not None
+        assert any(x.dtype == torch.int32 and x.tolist() == [6144] for x in transfers)
+        assert plan.dense.sparse_cum_query_lens.tolist() == [6144]
+
+
 def test_host_upper_bound_does_not_invoke_legacy_syncing_property():
     class Common:
         num_reqs = 1
