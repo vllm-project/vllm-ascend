@@ -184,6 +184,39 @@ def test_registration_uses_runtime_storage_once_without_descriptors():
     assert regions == ([allocation.data_ptr()], [size])
 
 
+@pytest.mark.parametrize("offsets", [(128,), (0, 2 * 1024 * 1024)])
+def test_hybrid_registration_recovers_and_deduplicates_shared_storage(offsets):
+    alignment = 2 * 1024 * 1024
+    size = 4 * alignment
+    backing = make_exact_aligned_cpu_buffer(size)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[make_mock_kv_cache_tensor(size, [str(index)]) for index in range(len(offsets))]
+    )
+    caches = {str(index): backing[offset:] for index, offset in enumerate(offsets)}
+
+    ptrs, lengths = worker._get_registered_kv_tensor_buffers_hybrid(caches)
+
+    assert ptrs == [backing.data_ptr()]
+    assert lengths == [size]
+    assert [cache.data_ptr() - backing.data_ptr() for cache in caches.values()] == list(offsets)
+
+
+def test_hybrid_registration_keeps_private_layer_storages_separate():
+    alignment = 2 * 1024 * 1024
+    size = 2 * alignment
+    backings = [make_exact_aligned_cpu_buffer(size) for _ in range(2)]
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[make_mock_kv_cache_tensor(2 * size, ["first", "second"])]
+    )
+    caches = {name: backing[128:] for name, backing in zip(("first", "second"), backings, strict=True)}
+
+    ptrs, lengths = worker._get_registered_kv_tensor_buffers_hybrid(caches)
+
+    assert sorted(zip(ptrs, lengths, strict=True)) == sorted((backing.data_ptr(), size) for backing in backings)
+
+
 @pytest.mark.parametrize("pp_rank,pcp_rank,tp_rank,port", [(0, 0, 0, 5555), (0, 1, 1, 5560), (1, 0, 1, 5564)])
 def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pcp_rank, tp_rank, port):
     """HIST-002 boundary: rank-local endpoint and readiness before receiving."""
@@ -1976,6 +2009,37 @@ def wire_transfer_contract(monkeypatch, request):
         yield worker, receiver, engine, socket, peer
     finally:
         receiver.executor.shutdown(wait=True)
+
+
+def test_hybrid_registration_boundary_keeps_logical_metadata(wire_transfer_contract, monkeypatch):
+    worker, _, _, _, _ = wire_transfer_contract
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    size = 4 * 1024 * 1024
+    backing = make_exact_aligned_cpu_buffer(size)
+    layer_name = "model.layers.0.self_attn"
+    cache = backing[128:160].view(2, 16)
+    worker.use_hybrid = True
+    worker.kv_cache_config.num_blocks = 2
+    worker.kv_cache_config.kv_cache_tensors = [make_mock_kv_cache_tensor(size, [layer_name])]
+    register = MagicMock()
+    monkeypatch.setattr(module.global_te, "register_buffer", register)
+    receiver_signature = inspect.signature(module.KVCacheRecvingThread)
+
+    def make_receiver(*args, **kwargs):
+        arguments = receiver_signature.bind(*args, **kwargs).arguments
+        receiver = MagicMock()
+        receiver.start.side_effect = arguments["ready_event"].set
+        return receiver
+
+    monkeypatch.setattr(module, "KVCacheRecvingThread", make_receiver)
+
+    worker.register_kv_caches({layer_name: cache})
+
+    register.assert_called_once_with([backing.data_ptr()], [size])
+    assert worker.kv_caches_base_addr == [[cache.data_ptr()]]
+    assert worker.block_len_per_addr == [[16]]
+    assert worker.block_stride_per_addr == [[16]]
+    assert worker.block_size_scale == [[1]]
 
 
 @pytest.mark.parametrize(

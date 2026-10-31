@@ -2613,24 +2613,10 @@ class MooncakeConnectorWorker:
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> tuple[list[int], list[int]]:
-        ptrs: list[int] = []
-        lengths: list[int] = []
-
-        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            shared_addrs: list[int] = []
-            for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
-                    shared_addrs.append(single_kv_cache.data_ptr())
-
-            if not shared_addrs:
-                continue
-            base_addr = min(shared_addrs)
-            if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
-                raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
-            ptrs.append(base_addr)
-            lengths.append(kv_cache_tensor.size)
-
-        return ptrs, lengths
+        # Hybrid attention views need the same storage-base recovery and
+        # overlap coalescing as Mamba views. Logical layer addresses remain
+        # separate in the transfer metadata built by register_kv_caches().
+        return self._get_registered_kv_tensor_buffers(kv_caches)
 
     def _get_registered_layer_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
