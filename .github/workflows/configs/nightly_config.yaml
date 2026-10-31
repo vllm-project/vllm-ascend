@@ -155,6 +155,24 @@ a3:
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 2
 
+  multi_card:
+    test_config:
+      # Require the existing Eco-Tech/GLM-5.2-w8a8 cache; tests never download it.
+      - name: mlapo-direct-equivalence-a3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_mlapo_direct_equivalence.py
+        download_path: /tmp/test-logs/mlapo-direct
+      - name: mlapo-direct-dtypes-a3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_mlapo_direct_modes.py
+      - name: mlapo-direct-no-quant-a3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_mlapo_direct_no_quant.py
+      - name: mlapo-direct-writeback-multitp-a3
+        os: linux-aarch64-a3-800i-4
+        tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_mlapo_direct_writeback.py
+        download_path: /tmp/test-logs/mlapo-direct
+
 a3-560t:
   single_node:
     test_config:
