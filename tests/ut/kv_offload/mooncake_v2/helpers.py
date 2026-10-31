@@ -212,9 +212,17 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "output_token_ids": [100],
         "_all_token_ids": list(range(32)),
         "max_tokens": 16,
+        "block_hashes": [],
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    request = SimpleNamespace(**values)
+    if "update_block_hashes" not in overrides:
+
+        def update_block_hashes() -> None:
+            request.block_hashes.append(tuple(request._all_token_ids))
+
+        request.update_block_hashes = update_block_hashes
+    return request
 
 
 def make_blocks(
