@@ -1,4 +1,0 @@
-pr: 20459
-entries:
-  - category: bugfix
-    text: Reject unsupported AscendStore layerwise data planes during scheduler initialization instead of attempting the obsolete lookup fallback.
