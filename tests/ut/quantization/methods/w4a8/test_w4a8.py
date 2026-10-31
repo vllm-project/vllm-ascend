@@ -315,7 +315,8 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
     def setUp(self):
         self.quant_config = SimpleNamespace(quant_description={}, get_name=lambda: "ascend")
         self.config_patch = patch(
-            "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", return_value=SimpleNamespace(quant_config=self.quant_config)
+            "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config",
+            return_value=SimpleNamespace(quant_config=self.quant_config),
         )
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
@@ -362,7 +363,10 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
                     "scale_bias": torch.ones(output_size, 2),
                 }.items():
                     layer.register_parameter(name, torch.nn.Parameter(value, requires_grad=False))
-                with patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=lambda x: x) as convert:
+                with patch(
+                    "vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz",
+                    side_effect=lambda x: x,
+                ) as convert:
                     self.method.process_weights_after_loading(layer)
                 self.assertEqual(convert.call_count, int(use_nz))
                 if use_nz:
@@ -405,7 +409,11 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
             kwargs["x"][0].zero_()
             return [torch.ones(2, 64, dtype=torch.bfloat16)]
 
-        with patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul", side_effect=mutating_matmul, create=True):
+        with patch(
+            "vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul",
+            side_effect=mutating_matmul,
+            create=True,
+        ):
             for _ in range(2):
                 output = self.method.apply(layer, prepared, bias=torch.ones(64, dtype=torch.bfloat16))
                 torch.testing.assert_close(output, torch.full((2, 64), 2.0, dtype=torch.bfloat16))
