@@ -283,7 +283,9 @@ def _make_global_pcp_batch():
 
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
-    global_batch = _make_global_pcp_batch()
+    global_max_seq_len = np.array([19], dtype=np.int32)
+    global_batch = replace(_make_global_pcp_batch(), max_seq_len_np=global_max_seq_len)
+    max_seq_len_snapshot = global_max_seq_len.copy()
     req_states = SimpleNamespace(
         last_sampled_tokens=torch.zeros(4, dtype=torch.int64),
         prefill_len=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
@@ -320,6 +322,9 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
     assert manager.global_batch is global_batch
+    assert global_batch.max_seq_len_np is global_max_seq_len
+    np.testing.assert_array_equal(global_batch.max_seq_len_np, max_seq_len_snapshot)
+    assert global_batch.max_seq_len_np.shape == (1,)
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
@@ -327,6 +332,8 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     # implementation produces this canonical local row order and pads to rank
     # 1's size.
     assert result.req_ids == ["global-req", "global-req"]
+    assert result.num_reqs == 2
+    assert result.max_seq_len_np is None
     np.testing.assert_array_equal(result.idx_mapping_np, np.array([3, 3], dtype=np.int32))
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([5, 3], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 5, 8], dtype=np.int32))
