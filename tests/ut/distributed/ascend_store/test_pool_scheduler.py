@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -233,6 +234,90 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
     assert scheduler.num_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
     )
+
+
+class TestKVPoolSchedulerLayerwiseProbe:
+    @staticmethod
+    def _make_scheduler(offload=False, batch_size=0):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.layerwise_offload = offload
+        scheduler.layerwise_max_transfer_blocks = batch_size
+        scheduler.store_scheduler = SimpleNamespace(batch_is_readable=MagicMock())
+        return scheduler
+
+    @pytest.mark.parametrize("offload", [False, True])
+    @pytest.mark.parametrize(
+        "error_type", [BatchResultShapeError, RuntimeError, TimeoutError, AttributeError, TypeError]
+    )
+    def test_probe_exception_respects_offload_contract(self, offload, error_type):
+        scheduler = self._make_scheduler(offload)
+        error = error_type("pool metadata query failed")
+        scheduler.store_scheduler.batch_is_readable.side_effect = error
+
+        if offload or error_type is not BatchResultShapeError:
+            with pytest.raises(error_type) as exc_info:
+                scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
+            assert exc_info.value is error
+        else:
+            assert scheduler._query_layerwise_block_hits([["rank0", "rank1"]]) == [False]
+
+    @pytest.mark.parametrize("offload", [False, True])
+    @pytest.mark.parametrize("result", [[], [True], [True, True, True], [True, 1]])
+    def test_malformed_probe_respects_offload_contract(self, offload, result):
+        scheduler = self._make_scheduler(offload)
+        scheduler.store_scheduler.batch_is_readable.return_value = result
+
+        if offload:
+            with pytest.raises(RuntimeError, match="Layerwise readability probe returned invalid results"):
+                scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
+        else:
+            assert scheduler._query_layerwise_block_hits([["rank0", "rank1"]]) == [False]
+
+    @pytest.mark.parametrize("offload", [False, True])
+    def test_non_sequence_probe_result_propagates_type_error(self, offload):
+        scheduler = self._make_scheduler(offload)
+        scheduler.store_scheduler.batch_is_readable.return_value = None
+
+        with pytest.raises(TypeError):
+            scheduler._query_layerwise_block_hits([["rank0", "rank1"]])
+
+    @pytest.mark.parametrize("failed_result", [BatchResultShapeError("query failed"), [True], [True, 1]])
+    def test_failed_batch_does_not_change_other_block_hits(self, failed_result):
+        scheduler = self._make_scheduler(batch_size=1)
+        keys_by_block = [[f"block{block}-rank{rank}" for rank in range(2)] for block in range(3)]
+        probe = scheduler.store_scheduler.batch_is_readable
+        probe.side_effect = [[True, True], failed_result, [True, True]]
+
+        assert scheduler._query_layerwise_block_hits(keys_by_block) == [True, False, True]
+        assert [call.args[0] for call in probe.call_args_list] == keys_by_block
+
+    @pytest.mark.parametrize("offload", [False, True])
+    def test_empty_probe_skips_backend(self, offload):
+        scheduler = self._make_scheduler(offload)
+
+        assert scheduler._query_layerwise_block_hits([]) == []
+        scheduler.store_scheduler.batch_is_readable.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.time.monotonic", return_value=100.0)
+    def test_scheduler_recomputes_after_probe_failure_and_recovers(self, mock_time):
+        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        assert not scheduler.layerwise_offload
+        probe = scheduler.store_scheduler.batch_is_readable
+        probe.side_effect = BatchResultShapeError("batch_get_key_info returned 0 results for 2 keys")
+        request = SimpleNamespace(
+            request_id="probe-failure", prompt_token_ids=list(range(32)), num_tokens=32, block_hashes=[b"h0", b"h1"]
+        )
+
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        assert request.request_id not in scheduler.load_specs
+        probe.assert_called_once()
+
+        probe.side_effect = None
+        probe.return_value = [True, True]
+        mock_time.return_value += scheduler._lw_hit_cache_ttl + 1
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (31, False)
+        assert scheduler.load_specs[request.request_id].can_load
+        assert probe.call_count == 2
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):
@@ -1533,6 +1618,21 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
 
         self.assertEqual(hit, 0)
+
+    def test_probe_failure_respects_offload_contract_across_groups(self):
+        for offload in (False, True):
+            with self.subTest(offload=offload):
+                scheduler = self._make_scheduler()
+                scheduler.layerwise_offload = offload
+                error = BatchResultShapeError("pool metadata query failed")
+                scheduler.store_scheduler.batch_is_readable.side_effect = error
+
+                if offload:
+                    with self.assertRaises(BatchResultShapeError) as exc_info:
+                        scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
+                    self.assertIs(exc_info.exception, error)
+                else:
+                    self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0), 0)
 
     def test_without_coordinator_falls_back_to_contiguous(self):
         scheduler = self._make_scheduler()
