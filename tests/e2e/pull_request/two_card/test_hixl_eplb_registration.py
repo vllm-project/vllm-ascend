@@ -5,6 +5,8 @@
 
 import importlib.util
 import statistics
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
@@ -25,6 +27,21 @@ from vllm_ascend.distributed.eplb import eplb_communicator, hixl_compat
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 _MIB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "first_module",
+    ["vllm_ascend.distributed.eplb.eplb_state", "vllm_ascend.ops.fused_moe.routed_experts"],
+)
+def test_eplb_imports_in_fresh_process(first_module):
+    # Spawned workers import modules before pytest/plugin initialization.
+    script = (
+        f"import {first_module}\n"
+        "from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState\n"
+        "from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts\n"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _migrate(communicator, buffers, rank: int) -> None:

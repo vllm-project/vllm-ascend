@@ -32,7 +32,6 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
@@ -739,6 +738,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if self._use_v2_model_runner:
             eplb_state = self.router.eplb_state
             if eplb_state is not None:
+                # EPLB state also imports MoE ops while its module initializes.
+                from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+
                 assert isinstance(eplb_state, AscendEplbLayerState)
                 eplb_state.record_load(
                     fused_experts_results.expert_tokens,
