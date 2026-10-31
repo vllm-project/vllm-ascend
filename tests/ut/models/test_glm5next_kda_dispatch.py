@@ -26,7 +26,7 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
-    # Set by __init__ from the resolved splitting ops, which this fixture skips.
+    # Set by __init__ from the CUDA graph mode, which this fixture skips.
     # True dispatches to the mutable op writing a graph-owned buffer, False to
     # the variant returning its own output.
     layer._needs_output_buffer = needs_output_buffer

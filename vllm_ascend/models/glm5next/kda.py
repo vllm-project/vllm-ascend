@@ -388,12 +388,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward_core call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
-        # Only a splitting op runs eagerly between captured graph segments and
-        # therefore needs a graph-owned output address. With an unsplit FX graph
-        # (full-decode-only / eager) decode capture bakes in this op's own
-        # allocation and prefill runs uncaptured, so the layer returns its
-        # output directly and skips a hidden_size-wide copy per layer.
-        self._needs_output_buffer = "vllm::glm5next_kda_forward_with_output" in (compilation_config.splitting_ops or [])
+        # Piecewise graph capture needs a graph-owned output address for the
+        # eager KDA op between captured segments. Other modes can return the
+        # op's own output and skip a hidden_size-wide copy per layer.
+        self._needs_output_buffer = compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
 
     def _dt_bias_weight_loader(self, param, loaded_weight):
         shard_size = param.shape[0]
