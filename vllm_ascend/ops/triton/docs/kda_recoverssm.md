@@ -40,7 +40,9 @@
      accumulates decay/products and correction outer products, and writes the
      reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`
      performs the same operation for two adjacent heads per program on its A5
-     fast path.
+     fast path. Both variants use a runtime boundary-destination check to skip
+     boundary accumulation and snapshot writeback when no snapshot is needed.
+     Aligned commit retains one state-kernel launch.
 - **Supported modes**: Atlas A3 and Ascend 950DT (A5), inference only, eager and
   NPU graph execution. Atlas A2 and 950PR are not validated by these tests.
   This operator-only change does not activate the GLM serving path. Model,
@@ -150,15 +152,16 @@ buffers are implementation-owned, not user outputs to replace between replays.
   Finite, non-overflowing inputs/intermediates are the validated numerical domain.
 - A3 verification/commit use value tiles no larger than 64. A5 can select 128
   where its occupancy/layout rules permit. Grouped commit requires A5, FP32 state,
-  no align table, `K = V = 128` and `H` in `{32, 64}`; the window is supplied by
+  `K = V = 128` and `H` in `{32, 64}`; the window is supplied by
   the caller rather than restricted to six tokens. Other supported cases use
   ordinary commit. A3 strided convolution compaction uses 256-channel
   tiles; A5 and contiguous-channel compaction retain 4096-channel tiles.
-  Ordinary commit further caps its value tile using the existing
+  Commit further caps its value tile using the existing
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
   lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
-  The estimate covers two matrix buffers normally and six with align enabled.
+  The estimate covers two matrix buffers normally and six with align enabled,
+  multiplied by the number of heads per program for grouped commit.
   Two rows' worth of vector temporaries
   are reserved before rounding down to a power of two. Context creation initializes
   the shared device-property cache outside graph capture; kernel launch reads its UB budget.

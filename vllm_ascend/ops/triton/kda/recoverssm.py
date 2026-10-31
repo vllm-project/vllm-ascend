@@ -550,6 +550,7 @@ def _accumulate_kda_commit_step(
     dt_bias,
     lower_bound,
     boundary_recovery_len,
+    has_boundary,
     final_decay,
     final_correction,
     boundary_decay,
@@ -588,7 +589,7 @@ def _accumulate_kda_commit_step(
     weighted_k = normalized_k * final_decay
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
-    if ALIGN_MODE:
+    if ALIGN_MODE and has_boundary:
         before_boundary = token_offset < boundary_recovery_len
         boundary_k = normalized_k * boundary_decay
         boundary_correction = tl.where(
@@ -662,6 +663,7 @@ def _commit_kda_state_kernel(
     final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
     boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
     boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
+    has_boundary = boundary_state_idx > null_block_id
 
     if final_state_idx <= null_block_id:
         return
@@ -727,6 +729,7 @@ def _commit_kda_state_kernel(
                     dt_bias,
                     lower_bound,
                     boundary_recovery_len,
+                    has_boundary,
                     final_decay,
                     final_correction,
                     boundary_decay,
@@ -754,6 +757,7 @@ def _commit_kda_state_kernel(
                     dt_bias,
                     lower_bound,
                     boundary_recovery_len,
+                    has_boundary,
                     final_decay,
                     final_correction,
                     boundary_decay,
@@ -764,7 +768,7 @@ def _commit_kda_state_kernel(
                 )
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
     state = initial_state * final_decay[None, :] + final_correction
-    if ALIGN_MODE:
+    if ALIGN_MODE and has_boundary:
         boundary_ptrs = (
             state_ptr
             + boundary_state_idx * state_block_stride
@@ -845,13 +849,11 @@ def _commit_kda_state_grouped_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     BH: tl.constexpr = 2,
 ):
-    # Commit two independent heads per program with BV64, matching the
-    # state-element count of a single-head BV128 tile.
-    tl.static_assert(not ALIGN_MODE)
+    # Two independent heads share request metadata and the boundary predicate.
     tl.static_assert(K == 128)
     tl.static_assert(V == 128)
     tl.static_assert(BK == 128)
-    tl.static_assert(BV == 64)
+    tl.static_assert(BV <= 64)
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_lh = tl.program_id(2)
@@ -867,6 +869,9 @@ def _commit_kda_state_grouped_kernel(
     final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
     if final_state_idx <= null_block_id:
         return
+    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
+    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
+    has_boundary = boundary_state_idx > null_block_id
     state_base_addr = tl.load(state_base_addrs_ptr + pid_l)
     state_block_stride = tl.load(state_block_strides_ptr + pid_l)
     state_ptr = state_base_addr.to(tl.pointer_type(state_ref_ptr.dtype.element_ty))
@@ -915,6 +920,8 @@ def _commit_kda_state_grouped_kernel(
     ).to(tl.float32)
     final_decay = tl.full([BH, BK], 1.0, tl.float32)
     final_correction = tl.zeros([BH, BV, BK], tl.float32)
+    boundary_decay = tl.full([BH, BK], 1.0, tl.float32)
+    boundary_correction = tl.zeros([BH, BV, BK], tl.float32)
     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
         if reverse_offset < commit_len:
             token_offset = commit_len - reverse_offset - 1
@@ -942,8 +949,27 @@ def _commit_kda_state_grouped_kernel(
             weighted_k = normalized_k * final_decay
             final_correction = tl.fma(correction[:, :, None], weighted_k[:, None, :], final_correction)
             final_decay *= decay
+            if ALIGN_MODE and has_boundary:
+                before_boundary = token_offset < boundary_recovery_len
+                boundary_k = normalized_k * boundary_decay
+                boundary_correction = tl.where(
+                    before_boundary,
+                    tl.fma(correction[:, :, None], boundary_k[:, None, :], boundary_correction),
+                    boundary_correction,
+                )
+                boundary_decay *= tl.where(before_boundary, decay, 1.0)
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
     state = initial_state * final_decay[:, None, :] + final_correction
+    if ALIGN_MODE and has_boundary:
+        boundary_ptrs = (
+            state_ptr
+            + boundary_state_idx * state_block_stride
+            + pid_h[:, None, None] * stride_state_head
+            + offs_v[None, :, None] * stride_state_v
+            + offs_k[None, None, :] * stride_state_k
+        )
+        boundary_state = initial_state * boundary_decay[:, None, :] + boundary_correction
+        tl.store(boundary_ptrs, boundary_state, mask=mask_state)
     final_ptrs = (
         state_ptr
         + final_state_idx * state_block_stride
@@ -1375,23 +1401,23 @@ class KDARecoverSSMCommitContext:
         is_a5 = is_950()
         # Group two adjacent heads in one program to reconstruct and commit their states.
         grouped_commit = (
-            is_a5
-            and block_table is None
-            and state_ref.dtype == torch.float32
-            and key_dim == value_dim == 128
-            and num_heads in (32, 64)
+            is_a5 and state_ref.dtype == torch.float32 and key_dim == value_dim == 128 and num_heads in (32, 64)
         )
         value_tile = RECOVERSSM_VALUE_TILE
         if grouped_commit:
             head_groups = num_heads // RECOVERSSM_COMMIT_HEAD_TILE
             commit_kernel = _commit_kda_state_grouped_kernel
             commit_options = {}
+            if block_table is not None:
+                bytes_per_row = 6 * RECOVERSSM_COMMIT_HEAD_TILE * block_k * self.correction_caches[0].element_size()
+                max_rows = max(1, get_ub_size_bytes() // bytes_per_row - 2)
+                value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))
         else:
             if is_a5 and block_table is None:
                 value_tile *= 2
             # Runtime iteration keeps accumulator/merge matrices independent of window length.
             matrix_buffers = 6 if block_table is not None else 2
-            bytes_per_row = matrix_buffers * block_k * torch.float32.itemsize
+            bytes_per_row = matrix_buffers * block_k * self.correction_caches[0].element_size()
             # Reserve two rows' worth for FP32 vector temporaries.
             max_rows = max(1, get_ub_size_bytes() // bytes_per_row - 2)
             value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))

@@ -562,16 +562,17 @@ def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_propert
     assert_accuracy(state, expected_state, record_property, "commit_ragged")
 
 
-@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross"])
+@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross", "mixed", "no_cross_inplace"])
+@pytest.mark.parametrize("heads", [2, 8, 16, 32, 64])
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_align_context(mode, graph_mode, state_dtype, record_property):
+def test_align_context(mode, heads, graph_mode, state_dtype, record_property):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(19516)
-    slots, heads, dim, capacity = 12, 2, 128, 6
+    slots, dim, capacity = 12, 128, 6
     blocks, starts, accepted = [1, 2, 0], [0, 6, 9, 15], [4, 3, 0]
     offsets = torch.tensor(starts, dtype=torch.int64, device="npu")
 
@@ -582,9 +583,17 @@ def test_align_context(mode, graph_mode, state_dtype, record_property):
 
     indices = strided(blocks)
     mapping, counts = strided([2, 0, 1]), strided([9, -2, 4])
-    computed_values = {"cross": [7, 0, 5], "exact": [5, 0, 4], "no_cross": [1, 0, 1]}[mode]
+    computed_values = {
+        "cross": [7, 0, 5],
+        "exact": [5, 0, 4],
+        "no_cross": [1, 0, 1],
+        "mixed": [7, 0, 1],
+        "no_cross_inplace": [1, 0, 1],
+    }[mode]
     computed = strided(computed_values)
     table_cpu = torch.tensor([[7, 8, 9], [0, 0, 0], [5, 6, 10]], dtype=torch.int32)
+    if mode == "no_cross_inplace":
+        table_cpu[0, 0], table_cpu[2, 0] = 2, 1
     table = table_cpu.npu()
     layers, expected, originals = [], [], []
     block_size = 8

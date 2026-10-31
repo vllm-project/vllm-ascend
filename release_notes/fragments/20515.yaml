@@ -1,0 +1,4 @@
+pr: 20515
+entries:
+  - category: performance
+    text: Skip unused boundary-state recovery in ordinary and A5 grouped KDA commits while retaining a single aligned commit launch.
