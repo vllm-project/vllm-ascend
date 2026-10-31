@@ -157,6 +157,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.enable_eplb = self.dynamic_eplb or vllm_config.parallel_config.enable_eplb
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
@@ -517,7 +518,21 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
         # then scales must be per-expert too — aclnn grouped_matmul requires
         # len(scale) == len(weight). The stacked path keeps a single-element list.
-        scale = [s.to(w2_scale_dtype) for s in w1_scale]
+        original_scale = getattr(layer, "w13_weight_scale", None)
+        if (
+            self.quant_type == QuantType.W8A8
+            and not self.enable_eplb
+            and not self.use_expert_weight_list
+            and isinstance(original_scale, torch.Tensor)
+            and original_scale.dtype == w2_scale_dtype == torch.bfloat16
+            and original_scale.shape == w1_scale[0].shape
+            and original_scale.device == w1_scale[0].device
+        ):
+            # Loading retains the BF16 scale used to create the FP32 copy.
+            # EPLB only migrates the FP32 copy, so its original may be stale.
+            scale = [original_scale]
+        else:
+            scale = [s.to(w2_scale_dtype) for s in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],

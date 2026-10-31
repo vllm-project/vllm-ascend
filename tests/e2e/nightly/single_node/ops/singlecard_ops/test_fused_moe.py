@@ -288,6 +288,7 @@ def test_token_dispatcher_with_all_gather_quant(
     )
     quant_method = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
     quant_method.use_expert_weight_list = False
+    quant_method.enable_eplb = False
     # TokenDispatcherWithAllGather is the AllGather comm path.
     with moe_comm_type(MoECommType.ALLGATHER):
         expert_output, _ = apply_moe_mlp(mlp_compute_input, quant_method)
