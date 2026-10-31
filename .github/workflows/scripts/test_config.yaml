@@ -113,6 +113,8 @@ runner_mapping:
     default: a3-2
   tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
     default: a5-4
+  tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
+    default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
