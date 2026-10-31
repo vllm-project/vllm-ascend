@@ -139,8 +139,8 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
 
 class AscendRoutedExperts310(AscendRoutedExperts):
-    def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
-        super().__init__(*args, tid2eid=tid2eid, n_shared_experts=n_shared_experts, **kwargs)
+    def __init__(self, *args, n_shared_experts: int = 0, **kwargs):
+        super().__init__(*args, n_shared_experts=n_shared_experts, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -165,7 +165,6 @@ class AscendMoERunner310(AscendMoERunner):
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
-        tid2eid=None,
         n_shared_experts: int = 0,
     ):
         super().__init__(

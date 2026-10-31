@@ -17,8 +17,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
@@ -86,7 +84,6 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid: Any = None,
     ) -> QuantizeMethodBase | None:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
