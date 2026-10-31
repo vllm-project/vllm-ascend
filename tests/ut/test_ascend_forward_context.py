@@ -502,17 +502,17 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
 
 @pytest.mark.parametrize(
     ("num_tokens", "expected"),
-    [(128, MoECommType.MC2), (129, MoECommType.ALLGATHER)],
+    [(2048, MoECommType.MC2), (2049, MoECommType.ALLGATHER), (4096, MoECommType.ALLGATHER)],
 )
 def test_select_moe_comm_method_a5_unquantized_draft_four_cards_topk_ten(monkeypatch, num_tokens, expected):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A5,
-        capacity=128,
+        capacity=4096,
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=4, top_k_experts=10)
+    vllm_config = _make_vllm_config(world_size=4, tensor_parallel_size=4, top_k_experts=10)
 
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
