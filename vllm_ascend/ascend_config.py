@@ -144,7 +144,7 @@ class AscendCompilationConfig:
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
@@ -938,7 +938,7 @@ class AscendConfig:
         )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 
         hardware_profile = get_current_hardware_profile()
         if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
@@ -1234,7 +1234,7 @@ class AscendConfig:
         return
 
     def get_mc2_comm_alg(self) -> str:
-        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 
         # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
         # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
