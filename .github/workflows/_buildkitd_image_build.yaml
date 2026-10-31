@@ -1,0 +1,172 @@
+name: Buildkitd Image Build
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Image name (e.g. vllm-ascend-ci-npu)'
+        required: true
+        type: string
+      image_registry:
+        description: 'Registry URL (e.g. swr.cn-southwest-2.myhuaweicloud.com/modelfoundry)'
+        required: true
+        type: string
+      runner:
+        description: 'Runner label (must have network access to buildkitd daemon)'
+        required: false
+        type: string
+        default: 'linux-aarch64-a2b3-1'
+      dockerfile:
+        description: 'Dockerfile name (relative to dockerfile_dir)'
+        required: false
+        type: string
+        default: 'Dockerfile.npu.ci'
+      dockerfile_dir:
+        description: 'Directory containing the Dockerfile (relative to repo root)'
+        required: false
+        type: string
+        default: 'docker'
+      context_dir:
+        description: 'Build context directory (relative to repo root)'
+        required: false
+        type: string
+        default: '.'
+      vllm_ascend_branch:
+        description: 'Branch/ref to checkout'
+        required: false
+        type: string
+        default: 'main'
+      buildkitd_addr:
+        description: 'Buildkitd daemon address (e.g. tcp://buildkitd-service.buildkitd:1234)'
+        required: false
+        type: string
+        default: 'tcp://buildkitd-service.buildkitd:1234'
+      vllm_image_tag:
+        description: 'Image tag override (defaults to commit SHA)'
+        required: false
+        type: string
+        default: ''
+      buildkit_version:
+        description: 'Buildkit client version for download'
+        required: false
+        type: string
+        default: 'v0.19.0'
+      extra_build_args:
+        description: 'Extra buildctl --opt key=value pairs (newline-separated)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      image_tag:
+        description: 'The full image tag pushed to registry (registry/name:tag)'
+        value: ${{ jobs.build.outputs.image_tag }}
+      vllm_image_tag:
+        description: 'The commit-based tag used for pulling'
+        value: ${{ jobs.build.outputs.vllm_image_tag }}
+    secrets:
+      BUILDKITD_CA:
+        description: 'Base64-encoded buildkitd TLS CA cert (ca.pem)'
+        required: true
+      BUILDKITD_CERT:
+        description: 'Base64-encoded buildkitd TLS client cert (cert.pem)'
+        required: true
+      BUILDKITD_KEY:
+        description: 'Base64-encoded buildkitd TLS client key (key.pem)'
+        required: true
+      SWR_USERNAME:
+        description: 'SWR registry username'
+        required: true
+      SWR_PASSWORD:
+        description: 'SWR registry password'
+        required: true
+
+jobs:
+  build:
+    name: Build and push via buildkitd
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      image_tag: ${{ steps.resolve-tag.outputs.image_tag }}
+      vllm_image_tag: ${{ steps.resolve-tag.outputs.vllm_image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.vllm_ascend_branch }}
+
+      - name: Resolve image tag
+        id: resolve-tag
+        run: |
+          if [ -n "${{ inputs.vllm_image_tag }}" ]; then
+            TAG="${{ inputs.vllm_image_tag }}"
+          else
+            TAG="${{ github.sha }}"
+          fi
+          FULL_TAG="${{ inputs.image_registry }}/${{ inputs.image_name }}:${TAG}"
+          echo "vllm_image_tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "image_tag=${FULL_TAG}" >> $GITHUB_OUTPUT
+          echo "Tag: ${FULL_TAG}"
+
+      - name: Install buildctl
+        run: |
+          ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+          BUILDKIT_VERSION="${{ inputs.buildkit_version }}"
+          URL="https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz"
+          echo "Downloading buildctl from: ${URL}"
+          curl -sSL "${URL}" | tar -xz -C /usr/local/bin --strip-components=1 bin/buildctl
+          buildctl --version
+
+      - name: Setup TLS certs
+        run: |
+          CERT_DIR="${RUNNER_TEMP}/buildkitd-certs"
+          mkdir -p "${CERT_DIR}"
+          echo "${{ secrets.BUILDKITD_CA }}" | base64 -d > "${CERT_DIR}/ca.pem"
+          echo "${{ secrets.BUILDKITD_CERT }}" | base64 -d > "${CERT_DIR}/cert.pem"
+          echo "${{ secrets.BUILDKITD_KEY }}" | base64 -d > "${CERT_DIR}/key.pem"
+          echo "CERT_DIR=${CERT_DIR}" >> $GITHUB_ENV
+
+      - name: Setup registry auth config.json
+        run: |
+          DOCKER_CONFIG_DIR="${RUNNER_TEMP}/docker-config"
+          mkdir -p "${DOCKER_CONFIG_DIR}"
+          echo "${{ secrets.SWR_PASSWORD }}" | \
+            docker --config "${DOCKER_CONFIG_DIR}" login \
+              -u "${{ secrets.SWR_USERNAME }}" --password-stdin \
+              "${{ inputs.image_registry }}"
+          echo "DOCKER_CONFIG_DIR=${DOCKER_CONFIG_DIR}" >> $GITHUB_ENV
+
+      - name: Build and push
+        env:
+          BUILDKITD_ADDR: ${{ inputs.buildkitd_addr }}
+        run: |
+          OPT_ARGS=""
+          if [ -n "${{ inputs.extra_build_args }}" ]; then
+            while IFS= read -r arg; do
+              [ -n "$arg" ] && OPT_ARGS="$OPT_ARGS --opt $arg"
+            done <<< "${{ inputs.extra_build_args }}"
+          fi
+
+          export DOCKER_CONFIG="${DOCKER_CONFIG_DIR}"
+
+          IMAGE_FULL="${{ inputs.image_registry }}/${{ inputs.image_name }}:${{ steps.resolve-tag.outputs.vllm_image_tag }}"
+
+          buildctl \
+            --addr="${BUILDKITD_ADDR}" \
+            --tlscacert="${CERT_DIR}/ca.pem" \
+            --tlscert="${CERT_DIR}/cert.pem" \
+            --tlskey="${CERT_DIR}/key.pem" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context="${{ inputs.context_dir }}" \
+            --local dockerfile="${{ inputs.dockerfile_dir }}" \
+            --opt filename="${{ inputs.dockerfile }}" \
+            --secret id=dockerconfig,src="${DOCKER_CONFIG_DIR}/config.json" \
+            --output type=image,name="${IMAGE_FULL}",push=true \
+            --progress=plain \
+            ${OPT_ARGS}
+
+          echo "Image pushed: ${IMAGE_FULL}"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf "${CERT_DIR:-${RUNNER_TEMP}/buildkitd-certs}"
+          rm -rf "${DOCKER_CONFIG_DIR:-${RUNNER_TEMP}/docker-config}"
