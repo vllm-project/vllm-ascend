@@ -358,6 +358,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.compilation_config.reduced_cg_cap = None
         mock_vllm_config.model_config = MagicMock()
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
         mock_vllm_config.device_config = MagicMock()
