@@ -91,7 +91,9 @@ def test_recoverssm_sd_copy_reconstructs_state_and_preserves_scratch(
             for index, payload in enumerate(state_payload(8 // (remote_tp * remote_pcp), worker_rank)):
                 offset = 2 * remote.block_strides[0][index]
                 source[index][offset : offset + len(payload)] = payload
-            local_addrs, remote_addrs, sizes = [], [], []
+            local_addrs: list[int] = []
+            remote_addrs: list[int] = []
+            sizes: list[int] = []
             thread._append_mamba_transfer_addresses(
                 spec,
                 pcp_rank,
