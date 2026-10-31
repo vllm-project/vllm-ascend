@@ -543,7 +543,7 @@ class NPUWorker(WorkerBase):
         manager = getattr(self, "sleep_wakeup_manager", None)
         reuse_enabled = isinstance(manager, SleepWakeupManager) and manager.graph_reuse is not None
         try:
-            if reuse_enabled:
+            if reuse_enabled and manager is not None:
                 manager.shutdown()
             if model_runner := getattr(self, "model_runner", None):
                 shutdown_fn = getattr(model_runner, "shutdown", None)
