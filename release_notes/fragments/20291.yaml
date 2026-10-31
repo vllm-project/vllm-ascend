@@ -1,0 +1,5 @@
+pr: 20291
+entries:
+  - category: performance
+    text: Fused the per-KV-cache-group DSA V4.1 slot-mapping 2D/flat computation into a single Triton kernel, reducing host-side attention-metadata launch overhead during prefill and decode.
+    hardware: [A2]
