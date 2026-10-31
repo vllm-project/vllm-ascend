@@ -1,0 +1,13 @@
+pr: 20514
+entries:
+  - category: feature
+    text: >-
+      Added experimental GLM-5.3-Flash standalone layerwise cache offload with
+      shared MLA/KDA main buffers through the Memcache-backed AscendStoreConnector,
+      increasing cache capacity within a fixed device memory budget.
+    model: glm-5.3-flash
+  - category: bugfix
+    text: >-
+      Fixed ordinary kv_both prefill chunk alignment so reusable recurrent
+      checkpoints are published at the expected external prefix boundary.
+    model: glm-5.3-flash
