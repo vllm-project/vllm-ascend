@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from math import lcm
 
 import vllm
-import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -135,7 +134,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # behavior. The scheduler always supplies the real value at runtime.
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        # Honor ``--prefix-cache-retention-interval`` only on DeepSeek-V4/V4.1 (SWA-only hybrids): their SWA
+        # write mask's eagle peek/shift already matches the role-specific lookup, so sparse retention is safe.
+        # Other hybrids (Mamba/GDN + MTP) first need the write/checkpoint boundary alignment and keep the dense
+        # (``None``) default. The legacy ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` env lookup never resolved, so
+        # every model previously fell back to ``None`` regardless of the configured value.
+        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+            self.retention_interval = getattr(kv_cache_config, "prefix_cache_retention_interval", None)
+        else:
+            self.retention_interval = None
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",
