@@ -125,6 +125,20 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
+        elif (
+            not keep_nd_weight
+            and not skip_weight_nz_conversion
+            and layer.prefix.endswith(".linear_attn.conv1d")
+            and layer.weight.ndim == 3
+            and layer.weight.shape[1] == 1
+            and layer.weight.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and not layer.weight.is_meta
+        ):
+            # Preserve checkpoint/TP-loader shape [C, 1, K], but store [K, C]
+            # contiguously so GDN's forward-time transpose is only a view.
+            # Keep the Parameter and loader attributes without a weight cache.
+            weight = layer.weight.data.squeeze(1).transpose(0, 1).contiguous()
+            layer.weight.data = weight.transpose(0, 1).unsqueeze(1)
 
         # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
         # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
