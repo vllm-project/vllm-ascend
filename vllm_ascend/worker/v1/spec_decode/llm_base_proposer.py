@@ -46,7 +46,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
@@ -641,7 +641,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
-            self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
                 self.vllm_config,
@@ -653,7 +652,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def set_update_stream(self, update_stream):
         if hasattr(self._runnable, "set_update_stream"):
             self._runnable.set_update_stream(update_stream)
-        self.update_stream = update_stream
 
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
@@ -982,7 +980,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context = get_forward_context()
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
-
+            
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -993,18 +991,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
-
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context: ForwardContext,
-        num_input_tokens: int,
-        multi_steps_attn_metadata: list[dict[str, Any]],
-    ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
     def _propose(
         self,
@@ -1383,12 +1369,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            draft_token_ids = run_draft()
+
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
         return draft_token_ids
@@ -2473,20 +2455,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
-
-    # update full-graph params for one spec token
-    def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
-        assert len(self.draft_attn_groups) > 0
-        attn_backend = self._get_primary_draft_attn_group().backend
-        update_full_graph_params(
-            attn_backend,
-            self.update_stream,
-            forward_context,
-            num_tokens,
-            self.vllm_config,
-            self.vllm_config.speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
 
     # adjusting tensor into desired size
     def _adjust_tensor(self, tensor, desired_size):
