@@ -373,6 +373,10 @@ class RlConfig:
 
     enabled: bool = False
     sleep_mode_extra_cleanup: bool = False
+    # Sleep Mode extra-cleanup policies (used when sleep_mode_extra_cleanup=true).
+    sleep_hccl_policy: str = "lightweight"
+    sleep_acl_graph_policy: str = "inplace"
+    sleep_allow_fallback: bool = True
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
 
@@ -486,6 +490,9 @@ class AscendConfig:
             "rl_config": {
                 "enabled": false,
                 "sleep_mode_extra_cleanup": false,
+                "sleep_hccl_policy": "lightweight",
+                "sleep_acl_graph_policy": "inplace",
+                "sleep_allow_fallback": true,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
             },

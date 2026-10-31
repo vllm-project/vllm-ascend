@@ -20,16 +20,62 @@ from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
 from dataclasses import fields
+from enum import Enum
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import _groups, get_world_group, init_model_parallel_group
+from vllm.distributed.parallel_state import (
+    _groups,
+    get_world_group,
+    init_model_parallel_group,
+)
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.device_allocator.hccl_suspend import (
+    clear_suspended_handles,
+    comm_to_int,
+    get_backend_hccl_comm,
+    hccl_suspend_available,
+    resume_all_registered_pgs,
+    resume_hccl_comm,
+    resume_process_group_hccl,
+    suspend_hccl_comm,
+)
 from vllm_ascend.utils import SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME
+
+
+class HcclSleepPolicy(str, Enum):
+    LIGHTWEIGHT = "lightweight"
+    DESTROY = "destroy"
+    SKIP = "skip"
+
+
+class AclGraphSleepPolicy(str, Enum):
+    INPLACE = "inplace"
+    WORKSPACE_ONLY = "workspace_only"
+    RECAPTURE = "recapture"
+    SKIP = "skip"
+
+
+def _policy_from_rl(vllm_config: VllmConfig) -> tuple[HcclSleepPolicy, AclGraphSleepPolicy, bool]:
+    """Read sleep policies from Ascend RlConfig when available."""
+    hccl = HcclSleepPolicy.DESTROY
+    acl = AclGraphSleepPolicy.RECAPTURE
+    allow_fallback = True
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        rl = getattr(get_ascend_config(), "rl_config", None)
+        if rl is not None:
+            hccl = HcclSleepPolicy(str(getattr(rl, "sleep_hccl_policy", "destroy")))
+            acl = AclGraphSleepPolicy(str(getattr(rl, "sleep_acl_graph_policy", "recapture")))
+            allow_fallback = bool(getattr(rl, "sleep_allow_fallback", True))
+    except Exception:
+        pass
+    return hccl, acl, allow_fallback
 
 
 class SleepWakeupManager:
@@ -74,6 +120,8 @@ class AclGraphSleepWakeupManager:
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
+        _, self.acl_policy, self.allow_fallback = _policy_from_rl(vllm_config)
+        self._used_inplace = False
 
     @staticmethod
     def clear_attention_workspaces(params) -> None:
@@ -120,15 +168,39 @@ class AclGraphSleepWakeupManager:
             manager._graphs_captured = False
 
     def sleep(self) -> None:
+        if self.acl_policy == AclGraphSleepPolicy.SKIP:
+            return
         self.clear_all_attention_workspaces()
+        if self.acl_policy in (AclGraphSleepPolicy.INPLACE, AclGraphSleepPolicy.WORKSPACE_ONLY):
+            # Keep captured entries; only free workspaces for HBM reclaim.
+            self._used_inplace = True
+            return
         self.reset_all_graph_params()
         self.reset_model_runner_graph_manager(self._model_runner_getter())
+        self._used_inplace = False
 
     def wakeup(self, tags: list[str] | None = None) -> None:
         if tags is not None and "kv_cache" not in tags:
             # Level-2 wakeup restores weights before external weight loading;
             # recapture graphs only after KV cache is restored.
             return
+        if self.acl_policy == AclGraphSleepPolicy.SKIP:
+            return
+        if self._used_inplace and self.acl_policy in (
+            AclGraphSleepPolicy.INPLACE,
+            AclGraphSleepPolicy.WORKSPACE_ONLY,
+        ):
+            has_captured = False
+            if acl_graph._acl_graph_wrappers:
+                has_captured = any(
+                    len(getattr(w, "concrete_aclgraph_entries", {}) or {}) > 0 for w in acl_graph._acl_graph_wrappers
+                )
+            if has_captured or not self.allow_fallback:
+                # Lazy workspace rebuild happens on first replay; no capture_model.
+                self._used_inplace = False
+                return
+            logger.warning("In-place ACL Graph entries missing; falling back to recapture.")
+            self._used_inplace = False
         model_runner = self._model_runner_getter()
         with set_current_vllm_config(self.vllm_config):
             model_runner.capture_model()
@@ -140,6 +212,10 @@ class HcclSleepWakeupManager:
         self.worker = worker
         self._lifecycle_anchor_group: Any | None = None
         self._skip_hccl_cleanup_for_cycle = False
+        self.hccl_policy, _, self.allow_fallback = _policy_from_rl(vllm_config)
+        self._used_lightweight = False
+        self._suspended_comms: list[Any] = []
+        self._multi_rank_destroyed = False
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -215,6 +291,104 @@ class HcclSleepWakeupManager:
             )
         return destroyed
 
+    def _group_world_size(self, group: Any) -> int:
+        device_group = getattr(group, "device_group", None)
+        if device_group is None:
+            return 1
+        size = getattr(device_group, "size", 1)
+        return int(size() if callable(size) else size)
+
+    def _has_multi_rank_group(self) -> bool:
+        return any(self._group_world_size(g) > 1 for g in self.iter_alive_group_coordinators())
+
+    def _safe_barrier(self, device_group: Any) -> None:
+        if device_group is None:
+            return
+        try:
+            world = getattr(device_group, "size", 1)
+            world = world() if callable(world) else world
+            if int(world) <= 1:
+                return
+            torch.distributed.barrier(group=device_group)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("HCCL sleep barrier skipped: %s", exc)
+
+    def _global_barrier(self) -> None:
+        try:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Global HCCL barrier skipped: %s", exc)
+
+    def _suspend_all_comms(self) -> int:
+        if not hccl_suspend_available():
+            return 0
+        suspended = 0
+        self._suspended_comms = []
+        groups = list(self.iter_alive_group_coordinators())
+        # Barrier only before suspend; suspended HCCL cannot join collectives.
+        self._global_barrier()
+        seen_handles: set[int] = set()
+        for group in groups:
+            if group is self._lifecycle_anchor_group:
+                continue
+            device_group = getattr(group, "device_group", None)
+            self._safe_barrier(device_group)
+            comm = get_backend_hccl_comm(device_group)
+            if comm is None:
+                continue
+            handle = comm_to_int(comm)
+            if handle in seen_handles:
+                continue
+            if suspend_hccl_comm(comm):
+                self._suspended_comms.append(comm)
+                seen_handles.add(handle)
+                suspended += 1
+        return suspended
+
+    def _resume_all_comms(self) -> int:
+        groups = list(self.iter_alive_group_coordinators())
+        resumed = resume_all_registered_pgs()
+        if resumed > 0:
+            for group in groups:
+                if group is self._lifecycle_anchor_group:
+                    continue
+                device_group = getattr(group, "device_group", None)
+                resume_process_group_hccl(device_group)
+                self._safe_barrier(device_group)
+            self._global_barrier()
+            clear_suspended_handles()
+            self._suspended_comms = []
+            return max(resumed, 1)
+
+        resumed = 0
+        pending_by_handle = {comm_to_int(comm): comm for comm in self._suspended_comms}
+        for group in groups:
+            if group is self._lifecycle_anchor_group:
+                continue
+            device_group = getattr(group, "device_group", None)
+            if resume_process_group_hccl(device_group):
+                resumed += 1
+                handle = get_backend_hccl_comm(device_group)
+                if handle is not None:
+                    pending_by_handle.pop(comm_to_int(handle), None)
+                self._safe_barrier(device_group)
+                continue
+            comm = get_backend_hccl_comm(device_group)
+            target = None
+            if comm is not None:
+                target = pending_by_handle.pop(comm_to_int(comm), None)
+            if (target is not None and resume_hccl_comm(target)) or (comm is not None and resume_hccl_comm(comm)):
+                resumed += 1
+            self._safe_barrier(device_group)
+        for comm in list(pending_by_handle.values()):
+            if resume_hccl_comm(comm):
+                resumed += 1
+        self._global_barrier()
+        clear_suspended_handles()
+        self._suspended_comms = []
+        return resumed
+
     def destroy_hccl(self) -> int:
         groups = list(self.iter_alive_group_coordinators())
         self._skip_hccl_cleanup_for_cycle = False
@@ -285,18 +459,56 @@ class HcclSleepWakeupManager:
                 refresh_fn()
 
     def sleep(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            for handle in getattr(self.worker, "_pp_send_work", []):
-                handle.wait()
-            self.worker._pp_send_work = []
-            torch.npu.synchronize()
-            num_destroyed = self.destroy_hccl()
-            if num_destroyed > 0:
-                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return
+        for handle in getattr(self.worker, "_pp_send_work", []):
+            handle.wait()
+        self.worker._pp_send_work = []
+        torch.npu.synchronize()
+        self._used_lightweight = False
+        self._multi_rank_destroyed = False
+
+        if self.hccl_policy == HcclSleepPolicy.SKIP:
+            return
+
+        if self.hccl_policy == HcclSleepPolicy.LIGHTWEIGHT:
+            # Single-rank: HcclCommSuspend. Multi-rank: destroy/restore under
+            # the same lightweight knob (Suspend+Resume currently unreliable).
+            if self._has_multi_rank_group():
+                destroyed = self.destroy_hccl()
+                self._used_lightweight = True
+                self._multi_rank_destroyed = True
+                logger.info(
+                    "Lightweight multi-NPU sleep via destroy/restore (destroyed_pgs=%d).",
+                    destroyed,
+                )
+                return
+            num = self._suspend_all_comms()
+            if num > 0:
+                self._used_lightweight = True
+                logger.info("Suspended %d HCCL communicators (lightweight).", num)
+                return
+            if self.allow_fallback:
+                logger.warning("HCCL lightweight suspend unavailable; falling back to destroy")
+            else:
+                return
+
+        num_destroyed = self.destroy_hccl()
+        if num_destroyed > 0:
+            logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
 
     def wakeup(self) -> None:
         with set_current_vllm_config(self.vllm_config):
+            if self._used_lightweight and not self._multi_rank_destroyed:
+                num = self._resume_all_comms()
+                self.refresh_moe_hccl_groups()
+                self.refresh_moe_hccl_runtime_state()
+                logger.info("Resumed %d HCCL communicators after lightweight sleep.", num)
+                self._used_lightweight = False
+                return
             num_restored = self.restore_hccl()
             self.refresh_moe_hccl_groups()
             self.refresh_moe_hccl_runtime_state()
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+        self._used_lightweight = False
+        self._multi_rank_destroyed = False
