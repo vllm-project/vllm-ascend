@@ -21,7 +21,7 @@ from tests.ut.base import TestBase
 def test_triton_warmup_precedes_model_runs(enforce_eager, use_v2):
     from vllm_ascend.worker.worker import NPUWorker
 
-    events = []
+    events: list[tuple[str] | tuple[str, int]] = []
     compilation_config = SimpleNamespace(
         compile_sizes=[2, 4],
         cudagraph_mode=CUDAGraphMode.NONE,
