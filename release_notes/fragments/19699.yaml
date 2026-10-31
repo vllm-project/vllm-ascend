@@ -1,0 +1,4 @@
+pr: 19699
+entries:
+  - category: config
+    text: Explicit additional_config.enable_flashcomm1 values now override VLLM_ASCEND_ENABLE_FLASHCOMM1, which remains a fallback when the option is omitted.

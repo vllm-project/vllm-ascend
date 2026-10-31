@@ -749,10 +749,23 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         # FlashComm remains the SP MoE switch on Ascend.
-        effective_flashcomm = validate_additional_config_bool(
-            (vc.additional_config or {}).get("enable_flashcomm1", False),
-            "additional_config.enable_flashcomm1",
-        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        additional_config = vc.additional_config or {}
+        if "enable_flashcomm1" in additional_config:
+            effective_flashcomm = validate_additional_config_bool(
+                additional_config["enable_flashcomm1"],
+                "additional_config.enable_flashcomm1",
+            )
+            legacy_value = os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")
+            if legacy_value is not None:
+                legacy_enabled = legacy_value.strip().lower() in ("1", "true")
+                if legacy_enabled != effective_flashcomm:
+                    logger.warning_once(
+                        "additional_config.enable_flashcomm1=%s overrides VLLM_ASCEND_ENABLE_FLASHCOMM1=%s.",
+                        effective_flashcomm,
+                        legacy_value,
+                    )
+        else:
+            effective_flashcomm = os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
@@ -1934,3 +1947,14 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+def get_init_vllm_config():
+    """Return the config used to initialize AscendConfig, if available.
+
+    Worker-side constructors can run before vLLM installs its thread-local
+    current config. They still run after AscendConfig initialization, so this
+    process-level reference is the correct fallback for feature gates such as
+    sequence-parallel MoE.
+    """
+    return _INIT_VLLM_CONFIG

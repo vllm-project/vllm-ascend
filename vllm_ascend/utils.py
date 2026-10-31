@@ -1014,7 +1014,11 @@ def enable_sp(vllm_config=None) -> bool:
 
             vllm_config = get_current_vllm_config()
         except AssertionError:
-            vllm_config = None
+            # Worker initialization may happen outside vLLM's thread-local
+            # config context. Reuse the config that initialized AscendConfig.
+            from vllm_ascend.ascend_config import get_init_vllm_config
+
+            vllm_config = get_init_vllm_config()
 
     if vllm_config is None:
         return False

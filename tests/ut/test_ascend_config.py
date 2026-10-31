@@ -811,6 +811,55 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm1_migration_matrix(self, _check_config):
+        for explicit in (None, False, True):
+            for legacy in (None, "0", "1", "true", "false"):
+                with self.subTest(explicit=explicit, legacy=legacy):
+                    clear_ascend_config()
+                    config = VllmConfig()
+                    config.parallel_config.tensor_parallel_size = 2
+                    config.parallel_config.data_parallel_size = 2
+                    config.parallel_config.enable_expert_parallel = True
+                    config.parallel_config.all2all_backend = "allgather_reducescatter"
+                    config.additional_config = {} if explicit is None else {"enable_flashcomm1": explicit}
+                    expected = explicit if explicit is not None else legacy in ("1", "true")
+                    with patch.dict(os.environ), patch("vllm_ascend.ascend_config.logger.warning_once") as warning:
+                        os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+                        if legacy is not None:
+                            os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = legacy
+                        init_ascend_config(config)
+                    self.assertEqual(enable_sp(config), expected)
+                    overrides = [c for c in warning.call_args_list if "overrides" in str(c)]
+                    self.assertEqual(
+                        len(overrides),
+                        int(explicit is not None and legacy is not None and explicit != (legacy in ("1", "true"))),
+                    )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm1_worker_context_fallback(self, _check_config):
+        config = VllmConfig()
+        config.parallel_config.tensor_parallel_size = 2
+        config.parallel_config.data_parallel_size = 2
+        config.parallel_config.enable_expert_parallel = True
+        config.parallel_config.all2all_backend = "allgather_reducescatter"
+        config.additional_config = {"enable_flashcomm1": True}
+        init_ascend_config(config)
+        with patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("Current vLLM config is not set")):
+            self.assertTrue(enable_sp())
+            clear_ascend_config()
+            self.assertFalse(enable_sp())
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm1_rejects_invalid_explicit_value(self, _check_config):
+        config = VllmConfig()
+        config.additional_config = {"enable_flashcomm1": "invalid"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
