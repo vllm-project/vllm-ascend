@@ -37,15 +37,24 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
 {
 
     auto x_size = x.sizes();
-    int n = weight_scale[0].sizes().back();
-    int m = x_size[0];
-    int k = x_size[1];
-
-    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
     int64_t dequant_mode_real = dequant_mode.value_or(0);
     int64_t dequant_dtype_real = dequant_dtype.value_or(0);
     int64_t quant_mode_real = quant_mode.value_or(0);
+    // quant_mode=2 (MX quant) outputs fp8 with e8m0 scales; other modes output int8 with fp32 scales
+    bool is_mx_quant = (quant_mode_real == 2);
+    // MX mode: weight_scale is [.., N, 2] (4D), n is the second-to-last dim; other modes: [.., N], n is last dim
+    int n = is_mx_quant ? static_cast<int>(weight_scale[0].size(-2))
+                        : static_cast<int>(weight_scale[0].size(-1));
+    int m = x_size[0];
+    int k = x_size[1];
+    auto out_scalar_type = is_mx_quant ? at::kFloat8_e4m3fn : at::kChar;
+    auto scale_scalar_type = is_mx_quant ? at::kFloat8_e8m0fnu : at::kFloat;
+    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(out_scalar_type));
+    // MX mode: scale shape is [m, ceil(n/2/64), 2] (e8m0, one scale per 64-elem block of the swiglu output);
+    // pertoken mode: scale shape is [m] (fp32)
+    at::Tensor output_scale = is_mx_quant
+        ? at::empty({m, (n/2 + 63) / 64, 2}, x.options().dtype(scale_scalar_type))
+        : at::empty({m}, x.options().dtype(scale_scalar_type));
     auto bias_real = bias.value_or(at::Tensor());
     auto smooth_scale_real = smooth_scale.value_or(at::Tensor());
     double swiglu_limit_f = static_cast<double>(swiglu_limit);
