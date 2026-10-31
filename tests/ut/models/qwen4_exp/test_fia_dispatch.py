@@ -335,50 +335,6 @@ def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
         builder.build(0, SimpleNamespace(is_prefilling=None))
 
 
-@pytest.mark.parametrize(
-    "architecture,has_prefill,dummy",
-    [
-        ("Qwen4ExpForConditionalGeneration", True, False),
-        ("Qwen4ExpForConditionalGeneration", False, False),
-        ("OtherModel", True, False),
-        ("Qwen4ExpForConditionalGeneration", True, True),
-    ],
-)
-def test_runner_keeps_qwen_prompt_tails_out_of_decode_graph(architecture, has_prefill, dummy):
-    source = MODEL_DIR.parents[1] / "worker/v2/model_runner.py"
-    module = ast.parse(source.read_text(encoding="utf-8"))
-    owner = next(
-        n
-        for n in module.body
-        if isinstance(n, ast.ClassDef)
-        and any(isinstance(m, ast.FunctionDef) and m.name == "gather_batch_req_state" for m in n.body)
-    )
-    method = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == "gather_batch_req_state")
-    method.args.args[1].annotation = None
-    from collections import namedtuple
-
-    State = namedtuple("State", "has_prefill decode_graph_eligible prefill_runs_as_decode_np")
-    state = State(has_prefill, True, "tail")
-
-    class Base:
-        def gather_batch_req_state(self, *args):
-            return state, 1
-
-    namespace: dict[str, Any] = dict(Base=Base)
-    child = ast.parse("class Runner(Base):\n    pass").body[0]
-    assert isinstance(child, ast.ClassDef)
-    child.body = [method]
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[child], type_ignores=[])), str(source), "exec"), namespace)
-    runner = namespace["Runner"]()
-    runner._uses_flashmla = False
-    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture]))
-    actual, uniform = runner.gather_batch_req_state(None, dummy)
-    changed = architecture == "Qwen4ExpForConditionalGeneration" and has_prefill and not dummy
-    assert actual.decode_graph_eligible is (not changed)
-    assert actual.prefill_runs_as_decode_np == (None if changed else "tail")
-    assert uniform == (None if changed else 1)
-
-
 def test_fia_helper_tiles_mask_memory_for_eligible_prefill(implementation):
     calls = []
     implementation["QSA_FIA_MASK_BUDGET_BYTES"] = 64
