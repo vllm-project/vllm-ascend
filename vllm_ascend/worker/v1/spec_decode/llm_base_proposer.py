@@ -1006,6 +1006,41 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    @staticmethod
+    def _sampling_indices(query_start_loc, num_tokens: int):
+        """Last-token index of every request that owns tokens in this batch.
+
+        ``query_start_loc`` is padded for graph / DP execution before the
+        drafter runs: ``_pad_query_start_loc_for_fia`` appends an extra entry
+        equal to the padded token count, and cross-DP padding raises that count
+        to the maximum over DP ranks. Those entries describe no real request
+        (their query length is zero), and forwarding them to the gather below
+        yields an index past the end of ``target_hidden_states`` -- e.g. local
+        8184 tokens padded to 8188 produces index 8187, which trips the
+        device-side index check and kills the worker.
+
+        Keep only entries that describe a non-empty, in-range query.
+        """
+        ends = query_start_loc[1:]
+        starts = query_start_loc[:-1]
+        if ends.numel() == 0:
+            return ends - 1
+
+        keep = ((ends - starts) > 0) & (ends <= num_tokens)
+        if bool(keep.all()):
+            return ends - 1
+
+        dropped = int(ends.numel() - keep.sum().item())
+        logger.warning(
+            "Dropping %d padded query_start_loc entr%s before drafting "
+            "(max_end=%d, num_tokens=%d).",
+            dropped,
+            "y" if dropped == 1 else "ies",
+            int(ends.max()),
+            num_tokens,
+        )
+        return ends[keep] - 1
+
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -1054,7 +1089,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         if token_indices_to_sample is None:
-            token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
+            token_indices_to_sample = self._sampling_indices(
+                common_attn_metadata.query_start_loc, target_token_ids.shape[0]
+            )
 
         if self.method in ("eagle3", "dflash", "dspark"):
             model = self.model
@@ -1792,7 +1829,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Simply rotate the input ids and leave the positions unchanged,
             # Inserting the next token ids at the last slot in each request.
             if token_indices_to_sample is None:
-                token_indices_to_sample = cad.query_start_loc[1:] - 1
+                token_indices_to_sample = self._sampling_indices(
+                    cad.query_start_loc, target_token_ids.shape[0]
+                )
 
             num_tokens = target_token_ids.shape[0]
             # Shift the input ids by one token.
