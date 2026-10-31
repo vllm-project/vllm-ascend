@@ -585,8 +585,16 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.addCleanup(device_type_patcher.stop)
 
     def test_cpu_to_mask_handles_single_and_multi_group_masks(self):
+        # smp_affinity groups are ordered from the lowest to the highest 32 bits,
+        # so CPUs >= 32 must carry their bit in the last group.
+        self.assertEqual(CpuAlloc.cpu_to_mask(0), "00000001")
         self.assertEqual(CpuAlloc.cpu_to_mask(3), "00000008")
-        self.assertEqual(CpuAlloc.cpu_to_mask(35), "00000008,00000000")
+        self.assertEqual(CpuAlloc.cpu_to_mask(31), "80000000")
+        self.assertEqual(CpuAlloc.cpu_to_mask(32), "00000000,00000001")
+        self.assertEqual(CpuAlloc.cpu_to_mask(35), "00000000,00000008")
+        self.assertEqual(CpuAlloc.cpu_to_mask(63), "00000000,80000000")
+        self.assertEqual(CpuAlloc.cpu_to_mask(64), "00000000,00000000,00000001")
+        self.assertEqual(CpuAlloc.cpu_to_mask(100), "00000000,00000000,00000000,00000010")
 
     def test_get_threads_map_skips_irrelevant_lines(self):
         thread_message = (
