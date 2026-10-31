@@ -45,6 +45,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.shared_quant_proj import project_with_shared_quant
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -371,38 +372,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor = None,
+        sp_num_tokens: int | None = None,
     ):
         """
         Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
+
+        ``sp_num_tokens`` is the full sequence's token count. Passing it means
+        ``hidden_states`` holds only this rank's sequence-parallel shard, and
+        the input projection all-gathers the rest - after its quantize, so the
+        collective carries one byte per element instead of two. Everything
+        from the core attention on sees the full rows either way.
         """
-        num_tokens = hidden_states.size(0)
+        num_tokens = sp_num_tokens if sp_num_tokens is not None else hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
-            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-            z, _ = self.in_proj_z(hidden_states)
+            mixed_qkv, ba, z = project_with_shared_quant(
+                self, hidden_states, ("in_proj_qkv", "in_proj_ba", "in_proj_z"), sp_num_tokens
+            )
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                mixed_qkvz, ba = project_with_shared_quant(
+                    self, hidden_states, ("in_proj_qkvz", "in_proj_ba"), sp_num_tokens
+                )
                 num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
                 b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
             else:
-                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                projected_states_ba, _ = self.in_proj_ba(hidden_states)
+                projected_states_qkvz, projected_states_ba = project_with_shared_quant(
+                    self, hidden_states, ("in_proj_qkvz", "in_proj_ba"), sp_num_tokens
+                )
                 num_tokens = projected_states_qkvz.size(0)
 
                 mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
