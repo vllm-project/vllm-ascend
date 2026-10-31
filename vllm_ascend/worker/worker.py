@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -216,6 +217,10 @@ class NPUWorker(WorkerBase):
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
+        elif self.cache_config.cache_dtype == "int2_per_token_head":
+            # OSCAR True-INT2: packed 4xINT2 per byte. vLLM's dtype map only
+            # covers stock dtypes, so resolve the packed storage dtype here.
+            self.cache_dtype = torch.uint8
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
@@ -738,6 +743,12 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
+        # R150 P3: optional KV-pool BYTES cap (default OFF). INT2 pools reserve
+        # 4x tokens per byte vs BF16; vLLM fills all available HBM with blocks
+        # the tested (B, MML) can never use, squeezing prefill workspace.
+        _r150_mcap = float(os.environ.get("R150_MAX_KV_GB", "0"))
+        if _r150_mcap > 0 and self.available_kv_cache_memory_bytes > _r150_mcap * (1 << 30):
+            self.available_kv_cache_memory_bytes = int(_r150_mcap * (1 << 30))
 
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
