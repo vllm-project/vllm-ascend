@@ -25,7 +25,7 @@ _benchmarks_gpqa: &benchmarks_gpqa
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 32768
     batch_size: 64
-    baseline: 72.12
+    baseline: 72.120
     threshold: 5
     temperature: 0.6
     ignore_eos: false
