@@ -455,7 +455,7 @@ class TestDPPaddingEplb(unittest.TestCase):
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_padded_speculative_dummy_preserves_logical_query_lengths(self):
-        # DSA CP rounds 186 tokens to 192 without adding a logical request.
+        # Padding rounds 186 tokens to 192 without adding a logical request.
         # Also cover dispatchers that pad the request count itself.
         for num_tokens, padded_tokens, padded_reqs in ((186, 192, 31), (12, 24, 4), (6, 24, 4), (12, 12, 2)):
             with self.subTest(num_tokens=num_tokens):
@@ -1366,11 +1366,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 "vllm_ascend.model_executor.warmup.nz_warmup",
                 start_nz_warm_thread=MagicMock(),
                 join_nz_warm_thread=MagicMock(),
-            ),
-            patch.multiple(
-                "vllm_ascend.model_executor.warmup.early_kernel_warmup",
-                start_early_kernel_warmup=MagicMock(),
-                join_early_kernel_warmup=MagicMock(),
             ),
             patch(
                 "vllm_ascend.worker.v1.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
@@ -2313,18 +2308,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
 
-    def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
-        cases = (
-            (True, 8, 6, False),
-            (True, 16, 6, False),
-            (True, 8, 6, True),
-            (True, 8, 1, False),
-            (False, 8, 6, True),
-            (False, 16, 6, True),
-            (False, 8, 1, True),
-        )
-        for cp_enabled, tp_size, query_len, enable_sp in cases:
-            with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):
+    def test_sp_decode_dispatch_keys_are_actually_captured(self):
+        cases = ((8, 6), (16, 6), (8, 1))
+        for tp_size, query_len in cases:
+            with self.subTest(tp_size=tp_size, query_len=query_len):
+                enable_sp = True
                 runner = self._build_runner()
                 max_tokens = 32 * query_len
                 config = CompilationConfig(
@@ -2350,7 +2338,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.drafter = None
                 runner.use_aclgraph = False
                 with (
-                    patch("vllm_ascend.worker.v1.model_runner.enable_dsa_cp", return_value=cp_enabled),
                     patch("vllm_ascend.worker.v1.model_runner.enable_sp", return_value=enable_sp),
                     patch("vllm_ascend.worker.v1.model_runner.update_pass_config", return_value=nullcontext()),
                 ):

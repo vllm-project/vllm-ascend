@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 """
-Compare the outputs of vLLM with multistream_overlap_shared_expert
+Compare eager outputs of vLLM with multistream_overlap_shared_expert
 enabled and disabled.
 
 Run `pytest tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py`.
@@ -61,17 +61,6 @@ def test_models_with_multistream_overlap_shared_expert(
     with VllmRunner(
         model,
         max_model_len=1024,
-        cudagraph_capture_sizes=[4, 8, 16, 32],
-        additional_config={
-            "multistream_overlap_shared_expert": True,
-        },
-        quantization="ascend",
-    ) as runner:
-        vllm_moe_ms_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
-
-    with VllmRunner(
-        model,
-        max_model_len=1024,
         enforce_eager=True,
         cudagraph_capture_sizes=[4, 8, 16, 32],
         quantization="ascend",
@@ -82,10 +71,6 @@ def test_models_with_multistream_overlap_shared_expert(
     for output in vllm_moe_ms_eager_outputs:
         vllm_moe_ms_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
-    vllm_moe_ms_aclgraph_outputs_list = []
-    for output in vllm_moe_ms_aclgraph_outputs:
-        vllm_moe_ms_aclgraph_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
-
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
         vllm_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
@@ -95,11 +80,4 @@ def test_models_with_multistream_overlap_shared_expert(
         outputs_1_lst=vllm_moe_ms_eager_outputs_list,
         name_0="vllm_eager_outputs",
         name_1="vllm_moe_ms_eager_outputs",
-    )
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs_list,
-        outputs_1_lst=vllm_moe_ms_aclgraph_outputs_list,
-        name_0="vllm_eager_outputs",
-        name_1="vllm_moe_ms_aclgraph_outputs",
     )

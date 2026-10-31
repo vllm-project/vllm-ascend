@@ -92,11 +92,11 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -187,6 +187,10 @@ class NPUWorker(WorkerBase):
         apply_v2_model_runner_config_patch()
         sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
+
+        from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
+
+        patch_kda_recoverssm(vllm_config)
 
         # Register ops when worker init.
         from vllm_ascend import ops
@@ -796,9 +800,9 @@ class NPUWorker(WorkerBase):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
+        # allocation. For block-compact layouts, Ascend can
         # preserve that contract for attention/Mamba and eligible full/sliding
-        # attention models while exposing contiguous per-layer views. Do not
+        # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -825,7 +829,6 @@ class NPUWorker(WorkerBase):
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
-            and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)
@@ -1220,7 +1223,7 @@ class NPUWorker(WorkerBase):
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
         target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
+        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0

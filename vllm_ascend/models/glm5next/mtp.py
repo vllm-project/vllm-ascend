@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -23,6 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
 from vllm_ascend.utils import is_rot_weight_used
@@ -33,6 +35,39 @@ from .model import (
     Glm5NextMoE,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
+)
+
+
+def glm5next_mtp_eh_norm(
+    positions: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    previous_hidden: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    # Keep the Triton launch opaque to Dynamo. The current Ascend generated-code
+    # cache can retain process-local kernel_side_table indices for directly
+    # captured launches, which cannot be replayed in a fresh process.
+    return fused_eh_norm(positions, inputs_embeds, previous_hidden, enorm_weight, hnorm_weight, eps)
+
+
+def glm5next_mtp_eh_norm_fake(
+    positions: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    previous_hidden: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return inputs_embeds.new_empty((inputs_embeds.shape[0], 2 * inputs_embeds.shape[1]))
+
+
+direct_register_custom_op(
+    op_name="glm5next_mtp_eh_norm",
+    op_func=glm5next_mtp_eh_norm,
+    mutates_args=[],
+    fake_impl=glm5next_mtp_eh_norm_fake,
 )
 
 
@@ -87,7 +122,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
-        eh_input = fused_eh_norm(
+        eh_input = torch.ops.vllm.glm5next_mtp_eh_norm(
             positions,
             inputs_embeds,
             previous_hidden_states,
@@ -197,6 +232,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         return self.logits_processor.get_top_tokens(mtp_layer.shared_head.head, hidden_states)
 
 
+@support_torch_compile
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

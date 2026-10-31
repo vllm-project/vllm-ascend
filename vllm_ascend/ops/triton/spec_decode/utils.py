@@ -15,7 +15,20 @@
 #
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/v1/spec_decode/utils.py
 
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
+
+PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
@@ -63,6 +76,55 @@ def prepare_inputs_padded_kernel(
         index_to_sample = q_last_tok_idx - num_rejected
         tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
         tl.store(num_rejected_tokens_gpu_ptr + offsets, num_rejected, mask=mask)
+
+
+class PrepareInputsPaddedKernel(AscendTritonJitKernel["PrepareInputsPaddedKernel.CompileKey"]):
+    kernel = prepare_inputs_padded_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+
+    def dispatch(self, *, block_size: int) -> "PrepareInputsPaddedKernel.CompileKey":
+        return self.CompileKey(block_size=block_size)
+
+    def get_warmup_keys(self) -> list["PrepareInputsPaddedKernel.CompileKey"]:
+        # ``num_reqs`` is do_not_specialize and BLOCK_SIZE is fixed, so a
+        # single key covers every request count.
+        return self._trace_dispatch(self.dispatch)(block_size=PREPARE_INPUTS_BLOCK_SIZE)
+
+    def warmup_inputs(self, compile_key: "PrepareInputsPaddedKernel.CompileKey") -> dict[str, Any]:
+        return dict(
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32),
+            valid_sampled_tokens_count=TritonWarmupTensor(torch.int64),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            token_indices_to_sample=TritonWarmupTensor(torch.int32),
+            num_rejected_tokens_gpu=TritonWarmupTensor(torch.int32),
+            num_reqs=1,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        cu_num_draft_tokens: torch.Tensor,
+        valid_sampled_tokens_count: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        num_rejected_tokens_gpu: torch.Tensor,
+        *,
+        num_reqs: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            # The kernel argument is query_start_loc_gpu_ptr, which the
+            # name-based auto-binding cannot derive from ``query_start_loc``.
+            query_start_loc_gpu_ptr=query_start_loc,
+            BLOCK_SIZE=PREPARE_INPUTS_BLOCK_SIZE,
+        )
+
+
+_PREPARE_INPUTS_PADDED_KERNEL = PrepareInputsPaddedKernel()
 
 
 @triton.jit
@@ -162,7 +224,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
 
         # Linear KV-cache token index used to look up the physical slot via the
         # block_table. This is kept separate from query_pos for multimodal
-        # (e.g. M-RoPE) inputs: image/vision tokens can carry repeated or
+        # (e.g., M-RoPE) inputs: image/vision tokens can carry repeated or
         # non-contiguous position ids, so the position id != the linear token
         # index and the slot must be derived from the effective sequence length
         # rather than from query_pos. For text-only inputs the two values are

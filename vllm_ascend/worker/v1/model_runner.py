@@ -73,7 +73,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
@@ -129,7 +128,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_views_for_spec,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -156,7 +154,7 @@ from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
@@ -192,7 +190,6 @@ from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
-    enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -558,7 +555,18 @@ class NPUModelRunner(GPUModelRunner):
         _enpu = get_c_env("ENPU_ENABLE")
         self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
-        self._set_up_drafter()
+        # Upstream captures JIT warmup registrations inside GPUModelRunner's
+        # own __init__ windows, which the overrides here bypass. The v1
+        # spec-decode stack (rejection sampler + sampling kernels) is instead
+        # registered in one window around _set_up_drafter, matching upstream's
+        # registration-during-construction style.
+        from vllm_ascend.model_executor.warmup.kernel_warmup import (
+            register_v1_sampling_warmup,
+        )
+
+        with self.jit_warmup_registry.activate():
+            register_v1_sampling_warmup(vllm_config)
+            self._set_up_drafter()
 
         # Backends that consume CPU seq_lens (AscendAttentionBackend,
         # AscendMLABackend, and DSV4 compressed attention metadata) need
@@ -3375,10 +3383,6 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(kept_lens, out=kept_offsets[1:])
             self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
         self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
-        if enable_dsa_cp():
-            self._decoder_replay_num_tokens = round_up(
-                self._decoder_replay_num_tokens, self.parallel_config.tensor_parallel_size
-            )
         self._decoder_replay_counts = None
         if self.parallel_config.data_parallel_size > 1:
             agreed = torch.zeros((2, self.parallel_config.data_parallel_size), dtype=torch.int32)
@@ -3585,9 +3589,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # Native MoE SP and DSA-CP shard tokens at different boundaries, but
-        # both require equal token counts on every TP rank.
-        if enable_sp(self.vllm_config) or enable_dsa_cp():
+        if enable_sp(self.vllm_config):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -4077,7 +4079,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                     )
 
-            if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
+            if isinstance(builder, AscendDSAMetadataBuilder):
                 if for_cudagraph_capture:
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
@@ -4096,7 +4098,6 @@ class NPUModelRunner(GPUModelRunner):
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
-                        AscendDSACPMetadataBuilder,
                         AscendSFADCPMetadataBuilder,
                         v41_metadata_builder_type,
                     ))):
@@ -4683,21 +4684,27 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def _jit_warmup_window(self) -> AbstractContextManager[None]:
+        """Registry collection window; optional for partial runners.
+
+        Unit tests build runners with ``__new__`` (no upstream ``__init__``)
+        and call ``load_model`` directly; those have no registry and the
+        window degrades to a no-op instead of failing on an unrelated
+        attribute.
+        """
+        registry = getattr(self, "jit_warmup_registry", None)
+        return registry.activate() if registry is not None else nullcontext()
+
     def load_model(self) -> None:
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
-            join_early_kernel_warmup,
-            start_early_kernel_warmup,
-        )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
         )
 
-        # Overlap the one-off NZ cast and Triton compile with weight I/O.
-        # Every model goes through here. Both threads are joined before this
-        # method returns, which is before memory profiling.
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here. The thread is joined before this method returns,
+        # which is before memory profiling.
         start_nz_warm_thread("thread")
-        start_early_kernel_warmup()
 
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -4716,7 +4723,10 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
-            self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            # Model construction (e.g. the DSV4.1 indexer) registers its JIT
+            # warmup kernels under this window.
+            with self._jit_warmup_window():
+                self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -4726,7 +4736,7 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                with get_tp_context(self.drafter):
+                with get_tp_context(self.drafter), self._jit_warmup_window():
                     self.drafter.load_model(self.model)
 
             pp_group = get_pp_group()
@@ -4775,7 +4785,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                     if hasattr(inner_model, "model"):
                         inner_model = inner_model.model
-                    from vllm_ascend.patch.worker.patch_eagle3_pp_aux import (
+                    from vllm_ascend.patch.worker.patch_v1.patch_eagle3_pp_aux import (
                         patch_eagle3_pp_aux_propagation,
                     )
 
@@ -4873,7 +4883,6 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data()
 
         join_nz_warm_thread()
-        join_early_kernel_warmup("load_model")
 
         load_model_total_time = time.perf_counter() - load_model_start_time
         logger.info(
@@ -4917,7 +4926,11 @@ class NPUModelRunner(GPUModelRunner):
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
-        self.initialize_attn_backend(kv_cache_config)
+        # Attention backends / metadata builders (e.g. the DSA builder owning
+        # the fused Q-RMS kernel) register their JIT warmup kernels during
+        # construction; keep a registry window open across both creation paths.
+        with self.jit_warmup_registry.activate():
+            self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # K3's packed layout keeps Mamba specs inside UniformType groups, so the
         # old first-spec scan over attn_groups cannot recognize them.
@@ -4927,8 +4940,9 @@ class NPUModelRunner(GPUModelRunner):
         self.kernel_block_sizes = kernel_block_sizes
         # vLLM #57169/main splits metadata-builder creation out of
         # `initialize_attn_backend`; builders need the kernel block sizes.
-        self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
-        self._init_device_metadata_providers()
+        with self.jit_warmup_registry.activate():
+            self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+            self._init_device_metadata_providers()
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # The one replay window the KV cache groups agree on, 0 when nothing
         # replays (the scheduler asserts the same agreement). Read after the
@@ -4945,11 +4959,15 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
-        kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config,
-            kernel_block_sizes=kernel_block_sizes,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        kv_caches = None
+        # Capture warmup registrations that depend on allocated KV-cache
+        # strides (mirrors upstream).
+        with self.jit_warmup_registry.activate():
+            kv_caches = self.initialize_kv_cache_tensors(
+                kv_cache_config,
+                kernel_block_sizes=kernel_block_sizes,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
         # Cache layouts are final and bound now; prepare on disposable
         # scratch storage before any warmup forward, graph capture or request.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
@@ -6449,28 +6467,35 @@ class NPUModelRunner(GPUModelRunner):
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
-            self.input_batch = NPUInputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                is_spec_decode=bool(self.vllm_config.speculative_config),
-                logitsprocs=self.input_batch.logitsprocs,
-                is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=(
-                    self.vllm_config.speculative_config.num_speculative_tokens
-                    if self.vllm_config.speculative_config
-                    else 0
-                ),
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                kv_cache_groups=kv_cache_config.kv_cache_groups,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
-            )
+            # Capture warmup registrations that depend on the final KV-cache
+            # geometry (mirrors upstream's InputBatch window). Runners built
+            # without the upstream __init__ (tests, partial mocks) have no
+            # registry; the window is optional for them.
+            registry = getattr(self, "jit_warmup_registry", None)
+            window = registry.activate() if registry is not None else nullcontext()
+            with window:
+                self.input_batch = NPUInputBatch(
+                    max_num_reqs=self.max_num_reqs,
+                    max_model_len=max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=block_sizes,
+                    is_spec_decode=bool(self.vllm_config.speculative_config),
+                    logitsprocs=self.input_batch.logitsprocs,
+                    is_pooling_model=self.is_pooling_model,
+                    num_speculative_tokens=(
+                        self.vllm_config.speculative_config.num_speculative_tokens
+                        if self.vllm_config.speculative_config
+                        else 0
+                    ),
+                    kernel_block_sizes=kernel_block_sizes,
+                    max_num_blocks_per_req=max_num_blocks,
+                    kv_cache_groups=kv_cache_config.kv_cache_groups,
+                    cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
+                )
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -6830,7 +6855,7 @@ class NPUModelRunner(GPUModelRunner):
         return kv_cache_spec
 
     def _should_align_cudagraph_capture_sizes(self) -> bool:
-        """Align FULL decode keys to LCM(TP, query_len) for stable CP/SP dispatch.
+        """Align FULL decode keys to LCM(TP, query_len) for stable SP dispatch.
 
         Upstream SP sizing uses max(TP, query_len) and does not account for CP.
         Pre-alignment can shrink sizes or fail before a backend-driven downgrade.
@@ -6842,7 +6867,7 @@ class NPUModelRunner(GPUModelRunner):
         pass_sp = False
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or pass_sp)
+            and (enable_sp(self.vllm_config) or pass_sp)
         )
 
     def _check_and_update_cudagraph_mode(

@@ -94,7 +94,6 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
-  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
   - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
   - tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
@@ -113,6 +112,8 @@ runner_mapping:
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
   tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
+    default: a5-4
+  tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1

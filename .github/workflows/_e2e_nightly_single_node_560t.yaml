@@ -172,7 +172,6 @@ jobs:
       HF_HUB_OFFLINE: 1
       TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
-      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
@@ -186,9 +185,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
 
       - name: Install vllm from ref
@@ -257,6 +253,15 @@ jobs:
         if: ${{ inputs.request_id != '' }}
         uses: ./.csrc-cache-workflow/.github/actions/nightly-csrc-l0-restore
         with:
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: inputs.request_id != '' && steps.source-l0.outputs.cache-hit != 'true'
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: csrc/build_cache
           architecture: ${{ runner.arch }}
           soc-version: ${{ inputs.soc_version }}
           source-root: ./temp-vllm-ascend
@@ -632,8 +637,8 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
-          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -650,6 +655,7 @@ jobs:
 
       - name: Upload AISBench outputs
         if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: aisbench-outputs-single-node-${{ steps.bench_ts.outputs.effective_name }}-${{ github.run_id }}-${{ github.run_attempt }}

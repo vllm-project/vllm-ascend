@@ -13,12 +13,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -177,7 +177,7 @@ def test_prefetch_count_can_be_overridden():
     assert layout.num_prefetch_layers == 3
 
 
-def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
+def test_reuse_config_is_scoped_to_layerwise_backend_connector():
     ascend_store_config = {
         "backend": "memcache",
         "use_layerwise": True,
@@ -312,7 +312,7 @@ def test_physical_layer_index_supports_mtp_names(
     layer_name,
     expected,
 ):
-    assert get_layerwise_physical_layer_index(layer_name, 4) == expected
+    assert get_physical_layer_index(layer_name, 4) == expected
 
 
 def test_main_spec_controls_reuse_regardless_of_indexer():

@@ -15,11 +15,26 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-a3-openeuler24.03-py3.12
+FROM quay.io/ascend/cann:9.2.1-a3-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
 SHELL ["/bin/bash", "-c"]
+
+# Install CANN A3 ops-transformer package.
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            OPS_TRANSFORMER_URL="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/package/master/20261028/aarch64/cann-A3-ops-transformer_9.3.0_linux-aarch64.run" ;; \
+        "linux/amd64"|"x86_64") \
+            OPS_TRANSFORMER_URL="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/package/master/20261028/x86_64/cann-A3-ops-transformer_9.3.0_linux-x86_64.run" ;; \
+        *) echo "Skipping unsupported architecture: $ARCH" && exit 0 ;; \
+    esac && \
+    wget --quiet "$OPS_TRANSFORMER_URL" -O /tmp/cann-A3-ops-transformer.run && \
+    chmod +x /tmp/cann-A3-ops-transformer.run && \
+    /tmp/cann-A3-ops-transformer.run --full --quiet --install-for-all && \
+    rm -f /tmp/cann-A3-ops-transformer.run
 
 # Install clang-15 (for triton-ascend)
 RUN yum update -y && \
@@ -63,7 +78,6 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
-    python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
@@ -87,8 +101,8 @@ ARG MEMFABRIC_VERSION="1.3.0"
 ARG MEMFABRIC_DATE="20261024.1"
 ARG TORCH_NPU_VERSION="26.2.0"
 ARG TORCH_NPU_DATE="20261015.5"
-ARG FLA_VERSION="26.9.1+dev5cc6990"
-ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
+ARG FLA_VERSION="26.9.1"
+ARG FLA_RELEASE_TAG="v26.9.1-release"
 ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 ARG HYBRID_OBS_BASE="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com"
 ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
@@ -116,29 +130,35 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-    echo "Install triton-ascend..." && \
-    python3 -m pip install "$TRITON_ASCEND_URL" && \
+#     echo "Install triton-ascend..." && \
+#     python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
-    python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
 # Install memfabric_hybrid kernels (A3/A5)
     case "${SOC_VERSION:-}" in \
         ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
+        ascend910b1) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 ;; \
     esac && \
 # Install flash-linear-attention-npu
-    wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
-    echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
-    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
+    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a3/${FLA_WHL}" && \
+    if [[ -n "${GIT_PROXY}" ]]; then \
+      wget --quiet --proxy="${GIT_PROXY}" "${URL}" -O "/tmp/${FLA_WHL}"; \
+    else \
+      wget --quiet "${URL}" -O "/tmp/${FLA_WHL}"; \
+    fi && \
+    # echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
+    python3 -m pip install --force-reinstall --no-deps "/tmp/${FLA_WHL}"
 # Install torch-npu
-    mkdir -p /tmp/torch_npu && \
-    wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
-        -O /tmp/torch_npu/torch_npu.tar.gz \
-        "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
-    tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
-    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
-    rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
-    python3 -m pip cache purge
+#     mkdir -p /tmp/torch_npu && \
+#     wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
+#         -O /tmp/torch_npu/torch_npu.tar.gz \
+#         "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
+#     tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
+#     python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+#     rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
+#     python3 -m pip cache purge
 
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
@@ -150,5 +170,25 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 setup.py install && \
     cd /workspace && \
     rm -rf /tmp/flash-attention-npu
-
+# Print component versions
+RUN echo -e "\n===== Component Version Info =====" && \
+    echo "CANN:" && (cat /usr/local/Ascend/ascend-toolkit/version.info 2>/dev/null || cat /usr/local/Ascend/latest/version.info 2>/dev/null || echo "CANN version file not found") && \
+    echo "torch-npu:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('torch-npu'))" 2>/dev/null || echo "torch-npu get version failed" && \
+    echo "triton-ascend:" && python3 -c "import triton; print(triton.__version__)" 2>/dev/null || echo "triton-ascend get version failed" && \
+    echo "memcache_hybrid:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('memcache_hybrid'))" 2>/dev/null || echo "memcache_hybrid get version failed" && \
+    echo "memfabric_hybrid:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('memfabric_hybrid'))" 2>/dev/null || echo "memfabric_hybrid get version failed" && \
+    echo "mooncake-transfer-engine:" && python3 -c "import importlib.metadata; print(importlib.metadata.version('mooncake-transfer-engine'))" 2>/dev/null || echo "mooncake-transfer-engine get version failed" && \
+    echo "flash-linear-attention-npu(FLA):" && \
+    python3 -c "
+    import importlib.metadata
+    for pkg in ['flash-linear-attention-npu-a2','flash-linear-attention-npu-a3','flash-linear-attention-npu-a5']:
+        try:
+            print(importlib.metadata.version(pkg))
+            break
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    else:
+        print('flash-linear-attention-npu get version failed')
+    " && \
+    echo "================================="
 CMD ["/bin/bash"]

@@ -83,8 +83,7 @@ entry validation, that key assumes a fixed compiler-image registry and
 immutable tags. Changing the registry or republishing a tag with different
 contents requires a new L0 key namespace or the full image identity in the
 key; an L1 identity check cannot make an already accepted L0 artifact safe.
-Image Docker builds keep consuming L0; L1-assisted production runs in the
-existing CPU producer before the Docker build, outside the final image.
+This PR does not change image-build L0 behavior or add L1 to Docker builds.
 
 ## Build flow
 
@@ -327,7 +326,7 @@ Only the central csrc producer publishes L1 in this integration. Image and
 release-wheel Docker builds retain their existing behavior and do not restore,
 export, or save persistent L1.
 
-Regular source-consuming jobs are read-only L1 consumers: they may restore a compatible
+Source-consuming jobs are read-only L1 consumers: they may restore a compatible
 snapshot before their existing source installation, but they do not publish.
 Exact-artifact consumers use the central L0 output; an L0 miss continues to the
 ordinary source build without making persistent L1 transport a prerequisite.
@@ -430,39 +429,10 @@ the selected source tree. A historical tree without `build_cache.py` reports
 
 ### Docker builds
 
-Image consumers obtain final native artifacts through L0 in GitHub Actions
-Cache. The existing coordinator resolves the actual Dockerfile FROM/SOC and
-pins the source checkout. The existing CPU producer restores L1 only for
-missing L0 artifacts. Dockerfiles, release-wheel builds and image publication
-remain unchanged; this integration does not copy persistent L1 into images.
-
-PR nightly and weekly requests run the producer once per requested SOC before
-single-node tests. It uses the corresponding published nightly runtime and
-keeps image-pinned dependencies. Trusted full Ubuntu nightly publication also
-seeds this path. PR requests receive no OBS writer credentials. Multi-node
-Pod/PVC caching remains a separate path.
-
-Nightly L0 has a separate namespace including the existing L1 runtime/source
-identity, Python/Torch ABI, compiler versions and relevant compile flags.
-Installed wheel record digests distinguish daily packages sharing a version.
-A shared manifest records native file checksums; consumers validate all files
-before copying artifacts into the PR checkout and disabling compilation.
-Missing or rejected artifacts retain the source-build fallback. Corrupt
-immutable GitHub entries may need separate invalidation; this integration
-does not automatically delete remote caches.
-
-L0 uses `actions/cache` explicitly. L1 retains OBS transport, workspace-relative
-paths and post-build pruning. GitHub cache repository/ref visibility and
-eviction still apply: producer completion does not guarantee later availability.
-
-The design maps responsibilities to existing code, without a runtime class
-hierarchy:
-
-- [Complete baseline workflow network](csrc_cache/01-current-workflow-network.puml)
-- [Baseline cache responsibilities](csrc_cache/02-current-cache-classes.puml)
-- [Target integration classes](csrc_cache/03-target-integration-classes.puml)
-- [HIT/MISS and fallback sequence](csrc_cache/04-target-hit-miss-sequence.puml)
-- [Storage and trust boundaries](csrc_cache/05-target-storage-boundaries.puml)
+Image and release-wheel workflows are not L1 consumers or writers in this PR.
+Their existing Docker build, source compilation, and image L0 behavior remain
+unchanged. A later integration must validate the Docker boundary without
+embedding persistent L1 in a published image.
 
 ## Validation summary
 
@@ -474,12 +444,6 @@ hierarchy:
 | Selective invalidation | operator-local mutation with unrelated HITs |
 | Root-independent semantic identity | schema-4 CASE-C regression |
 | Persistent producer | cold/warm producer runs |
-| Nightly L0 identity, integrity and source-checkout handoff | `test_nightly_csrc_l0.py` |
-| CPU L1 cold/warm to L0 binary handoff without consumer recompilation | real C compiler fixture in the same test |
-
-The new nightly/image orchestration still requires CI validation with the
-actual Ascend images and GitHub Cache service. The CPU fixture validates
-content reuse and binary handoff, not Ascend operator correctness or speedup.
 
 Some exact production callers still require release credentials, caller
 registration, or multi-node allocation. Structural and component evidence does

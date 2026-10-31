@@ -5,7 +5,7 @@
 - 算子功能：`_num_nans_kernel` 逐请求（逐行）统计 logits 中的 NaN 数量，
   输出 INT32 计数张量，供采样链路上报 `num_nans_in_logits` 指标（如
   `recompute_scheduler` 依据该指标判断 logits 质量并触发重算）。生产环境经
-  `vllm_ascend/patch/worker/patch_v2/patch_triton.py` 将上游
+  `vllm_ascend/patch/worker/patch_triton.py` 将上游
   `vllm.v1.worker.gpu.metrics.logits.get_num_nans` 整体替换为本实现（包装
   函数为 `get_num_nans`）。
 

@@ -19,9 +19,12 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+# patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers and
+# patch_triton overwrites causal_conv1d_update with the NPU Triton kernel, so
+# the AscendC patch must be imported first.
 if HAS_TRITON:
-    import vllm_ascend.patch.worker.patch_triton
-    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+    import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
+    import vllm_ascend.patch.worker.patch_triton  # noqa
 
 
 # Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
@@ -29,11 +32,19 @@ if HAS_TRITON:
 # worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
 import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 
+# Apply before model construction on every device, including 310P.
+import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
+
+# MRv1-only patches. Every module imported below targets a symbol that is only
+# reachable through the V1 Model Runner, so deleting the `patch_v1` package
+# removes all V1 patch support in one step.
+import vllm_ascend.patch.worker.patch_v1  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
@@ -41,7 +52,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
+    import vllm_ascend.patch.worker.patch_spec_decode_310  # noqa
 # NOTE: the former patch_rejection_sampler.py has been removed.
 # vllm_ascend/sample/rejection_sampler.py subclasses RejectionSampler and
 # defines its own forward, so the upstream vllm.v1.sample.rejection_sampler
@@ -50,27 +61,26 @@ else:
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
-import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Re-apply the default-V2 runner selection (with the V2 feature blacklist)
 # and related V2/V1 feature patches in worker processes.
 # VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
-import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
+import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
-import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_runner  # noqa
+import vllm_ascend.patch.worker.patch_uva  # noqa
+import vllm_ascend.patch.worker.patch_input_batch  # noqa
+import vllm_ascend.patch.worker.patch_model_state  # noqa
+import vllm_ascend.patch.worker.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_model_runner  # noqa
 
-import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dspark  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
+import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
+import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
+import vllm_ascend.patch.worker.patch_dspark  # noqa
+import vllm_ascend.patch.worker.patch_adaptive_verification  # noqa
 
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.

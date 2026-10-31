@@ -97,7 +97,6 @@ jobs:
       image: "${{ inputs.image }}"
       env:
         VLLM_USE_MODELSCOPE: True
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
         UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
@@ -107,9 +106,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
 
       - name: Install vllm from ref
@@ -177,6 +173,15 @@ jobs:
         if: ${{ inputs.request_id != '' }}
         uses: ./.csrc-cache-workflow/.github/actions/nightly-csrc-l0-restore
         with:
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: inputs.request_id != '' && steps.source-l0.outputs.cache-hit != 'true'
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: csrc/build_cache
           architecture: ${{ runner.arch }}
           soc-version: ${{ inputs.soc_version }}
           source-root: ./temp-vllm-ascend

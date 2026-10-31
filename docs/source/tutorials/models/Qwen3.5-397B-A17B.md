@@ -31,8 +31,8 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 | Weight Version                                       | Hardware Requirements | KV Cache Selection | Download Links |
 |------------------------------------------------------|-----------------------|--------------------|----------------|
 | `Qwen3.5-397B-A17B` (BF16 version)                   | 2 950DT Products (96 GB x 8) nodes or 2 Atlas 800I A3 (64 GB x 16) nodes or 4 Atlas 800I A2 (64 GB x 8) nodes | `auto` for the baseline | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
-| `Qwen3.5-397B-A17B-w8a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
-| `Qwen3.5-397B-A17B-w4a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
+| `Qwen3.5-397B-A17B-w8a8-mtp` (quantized version)     | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
+| `Qwen3.5-397B-A17B-w4a8-mtp` (quantized version)     | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
 | `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
 | `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 | `Qwen3.5-397B-A17B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96 GB x 8) node | `mxfp8` for the supported C8 recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8c8-mxfp8) |
@@ -62,6 +62,16 @@ Select an image for your hardware and start a container on each node. Refer to [
 
 For PD deployment, use the same vLLM-Ascend release image and dependency versions on P and D.
 
+Run the following commands as root on the **host** before starting the container. Do not run them inside the serving container: the container mounts `/sys` and `/proc/sys` read-only, so the CPU governor write fails and `sysctl` is silently ignored (it still returns 0), which makes the tuning appear to succeed without taking effect.
+
+```bash
+# Host CPU governor and kernel tuning (run on the host, not in the container).
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+```
+
 === "950DT Products"
 
     Start a Docker container on each node.
@@ -73,7 +83,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -111,7 +122,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -152,7 +164,8 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=1g \
+      --shm-size=64g \
+      --ulimit memlock=-1 \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -173,6 +186,12 @@ For PD deployment, use the same vLLM-Ascend release image and dependency version
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
+
+!!! note
+
+    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1g shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
+
+    The CPU governor and `sysctl` tuning commands must run on the host before starting the container; see the host preparation block at the top of this section. Do not run them inside the serving container, where `/sys` and `/proc/sys` are read-only.
 
 After entering the actual serving container on each node, check the executables, versions, and imported paths:
 
@@ -255,7 +274,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "A3 series"
 
-    Run the following script for online inference with a 128k context on one Atlas 800I A3 node (64 GB x 16). W8A8 deployment requires `--quantization ascend`.
+    Run the following script for online inference with a 133k context on one Atlas 800I A3 node (64 GB x 16). W8A8 deployment requires `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -265,11 +284,6 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_USE_V2_MODEL_RUNNER=0
-
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
 
     # Ensure the model path matches the directory recorded during download
     MODEL_PATH="Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
@@ -297,7 +311,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     For W8A8 deployment, 2 Atlas 800I A2 (64 GB x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
 
 **Key parameters:**
 
@@ -446,7 +460,7 @@ Common Issues Tip: If Ray workers cannot discover each other, check Ray cluster 
 
 ### 5.4 Prefill-Decode Disaggregation (A3)
 
-PD disaggregation separates Prefill and Decode into different service groups. This performance-oriented example deploys 1P1D on one 16-NPU Atlas 800I A3 host with the `Qwen3.5-397B-A17B-w4a8` checkpoint. In this section, 1P1D describes two service groups; it does not mean that P and D must occupy separate hosts.
+PD disaggregation separates Prefill and Decode into different service groups. This performance-oriented example deploys 1P1D on one 16-NPU Atlas 800I A3 host with the `Qwen3.5-397B-A17B-w4a8-mtp` checkpoint. In this section, 1P1D describes two service groups; it does not mean that P and D must occupy separate hosts.
 
 The 16 NPUs are divided into two non-overlapping device sets:
 
@@ -554,6 +568,20 @@ vllm serve "${MODEL_PATH}" \
   }'
 ```
 
+Run the Prefill script:
+
+```shell
+bash run_p.sh
+```
+
+If the Prefill service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44610]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 Common Issues Tip: If the Prefill service does not become ready, confirm that devices 0-7 are available, port 30060 and Mooncake port 55220 are unused, and `local_ip` belongs to `nic_name`.
 
 #### 5.4.2 Decode Service Group
@@ -653,6 +681,20 @@ vllm serve "${MODEL_PATH}" \
       }
     }
   }'
+```
+
+Run the Decode script in a separate terminal:
+
+```shell
+bash run_d.sh
+```
+
+If the Decode service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44611]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
 Common Issues Tip: If Decode fails to initialize, confirm that devices 8-15 are available and that `--data-parallel-size 2`, `--data-parallel-size-local 2`, `--tensor-parallel-size 4`, and the Mooncake topology describe the same TP4/DP2 layout. Ports 30050, 6884, and 56010 must be available.
@@ -799,6 +841,20 @@ vllm serve "${MODEL_PATH}" \
   }'
 ```
 
+Run the Prefill script on the Prefill node:
+
+```shell
+bash run_p.sh
+```
+
+If the Prefill service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44610]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 Common Issues Tip: If Prefill does not become ready, verify the checkpoint metadata, all eight visible NPUs, the selected high-speed IP/NIC pair, port 30060, Mooncake port 55220, and the host-specific `/etc/hixlep` resources.
 
 #### 5.5.2 Decode Node
@@ -895,6 +951,20 @@ vllm serve "${MODEL_PATH}" \
       }
     }
   }'
+```
+
+Run the Decode script on the Decode node:
+
+```shell
+bash run_d.sh
+```
+
+If the Decode service starts successfully, information similar to the following example is displayed:
+
+```text
+INFO:     Started server process [44611]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
 Common Issues Tip: If Decode fails to initialize, confirm that `--data-parallel-size 2`, `--data-parallel-size-local 2`, `--tensor-parallel-size 4`, and the Mooncake topology describe the same DP2/TP4 layout. Verify ports 30050, 6884, and 56010, and confirm that both local DP engines start.
@@ -1093,7 +1163,9 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in Section 5.6.3 to the HTTP ports passed as argument 2 to the respective scripts.
+Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
+
+Prefill uses the self-contained DP1 mode and therefore does not set the DP address or RPC port. Decode explicitly sets `--data-parallel-rank`, so the launcher also supplies its DP control-plane address and RPC port. In this DP1/rank0 example, the Decode address points to the Decode host itself. The Prefill and Decode services are separate vLLM instances and do not share a DP group. Do not mistake the DP RPC port for the HTTP port; the proxy always uses the HTTP ports (argument 2), never the DP RPC port.
 
 ```shell
 # On P:
@@ -1133,8 +1205,8 @@ Use the proxy paired with the actual connector, rather than choosing it by hardw
 
 | Connector | Request Order | Proxy | Scope |
 |-----------|---------------|-------|-------|
-| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in Sections 5.4 and 5.6 |
-| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in Section 5.5 |
+| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
+| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
 
 Equal TP sizes do not make these connectors interchangeable. For unequal TP, verify the direction, divisibility, replicated KV heads, hybrid state layout, and quantization support of the selected implementation. The TP8-to-TP4 example does not imply arbitrary TP ratios or reverse-direction support. Use scripts from the same vLLM-Ascend revision as the serving stack.
 
@@ -1144,7 +1216,7 @@ Use the complete proxy command for the selected deployment:
 - [950DT two-host 1P1D](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
 - [A2 two-host 1P1D](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
 
-Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in Section 6.
+Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in [Section 6](#6-functional-verification).
 
 ## 6 Functional Verification
 
@@ -1235,7 +1307,7 @@ generation_kwargs = dict(
 )
 ```
 
-Set `max_out_len` so that the input length plus output budget does not exceed the service's `--max-model-len`. The A3 PD example in Section 5.4 is configured with `--max-model-len 133120`; keep the prompt length and output budget within that limit.
+Set `max_out_len` so that the input length plus output budget does not exceed the service's `--max-model-len`. The A3 PD example in [Section 5.4](#54-prefill-decode-disaggregation-a3) is configured with `--max-model-len 133120`; keep the prompt length and output budget within that limit.
 
 Run the evaluation:
 
@@ -1244,7 +1316,7 @@ ais_bench --models vllm_api_general_chat \
   --datasets gpqa_gen_0_shot_cot_chat_prompt --debug
 ```
 
-The following result for `Qwen3.5-397B-A17B-w8a8` on `vLLM-Ascend v0.30.0 release` is provided for reference only.
+The following result for `Qwen3.5-397B-A17B-w8a8-mtp` on `vLLM-Ascend v0.30.0 release` is provided for reference only.
 
 | dataset | version | metric   | mode | vllm-api-general-chat |
 | ------- | ------- | -------- | ---- | --------------------- |
@@ -1257,12 +1329,19 @@ Record software and checkpoint versions, and keep the dataset, prompt, chat temp
 Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. For single-node or MP deployment, set `base_url` to the serving API endpoint; for PD deployment, use the proxy endpoint. Replace `127.0.0.1:8000` below with the IP and HTTP port reachable from the evaluation client, and ensure that `model` matches `--served-model-name`.
 
 ```shell
+# Point MODEL_PATH to the local model directory recorded in Section 3.1.
+# lm_eval/Transformers resolve `tokenizer` as a local path or a Hugging Face
+# style model id, so use a local directory rather than a ModelScope repo id.
+MODEL_PATH="/mnt/weight/Qwen3.5-397B-A17B-w8a8-mtp"
+
 lm_eval \
   --model local-completions \
-  --model_args model=qwen3.5,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=qwen3.5,tokenizer="${MODEL_PATH}",base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
+
+In `--model_args`, `model=qwen3.5` is the served model name used to select the model on the serving side (it must match `--served-model-name`), while `tokenizer` is the path or identifier used by lm_eval to load the tokenizer. Do not use the served model name for `tokenizer`: lm_eval tries to resolve it as a tokenizer identifier and fails if it is neither a local folder nor a valid model id. Point `tokenizer` at the local model directory recorded in [Section 3.1](#31-model-weight) so that the tokenizer matches the checkpoint used by the service. A ModelScope repo id such as `Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp` is not resolved the same way by lm_eval/Transformers, so prefer the local directory. If the machine has no direct access to the model hub, configure the Hugging Face mirror or an offline cache (`HF_ENDPOINT`, `HF_HUB_OFFLINE=1`) so that both the tokenizer and the model files resolve from the same location.
 
 ## 8 Performance Evaluation
 
@@ -1272,37 +1351,13 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: benchmark the latency of a single batch of requests.
-- `serve`: benchmark online serving throughput.
-- `throughput`: benchmark offline inference throughput.
-
-Take `serve` as an example:
-
-```shell
-export VLLM_USE_MODELSCOPE=True
-
-vllm bench serve \
-  --model Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --served-model-name qwen3.5 \
-  --dataset-name random \
-  --random-input 200 \
-  --num-prompts 200 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./
-```
-
-After several minutes, you can get the performance evaluation result.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
 
-The table summarizes the deployment examples in Chapter 5. Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
+The table summarizes the deployment examples in [Section 5](#5-online-service-deployment--5-online-service-deployment-). Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
 
 | Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTP Tokens | Prefix Cache |
 | ------------------ | --------- | ---- | -- | ----------------- | ------------- | ------------ | ---------------------- | ---------- | ------------ |
@@ -1331,11 +1386,11 @@ Use the settings in the selected deployment script as a starting point. Merge th
 
 | Optimization | Configuration | Usage |
 | ------------ | ------------- | ----- |
-| MTP | `--speculative-config` with `method=qwen3_5_mtp` | Use the token count in Section 9.1, tuning Prefill and Decode together for PD deployment. |
+| MTP | `--speculative-config` with `method=qwen3_5_mtp` | Use the token count in [Section 9.1](#91-recommended-configurations), tuning Prefill and Decode together for PD deployment. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Used for single-node, MP, and PD Decode examples; PD Prefill uses eager mode. |
 | Fused MC2 | `enable_fused_mc2` | `1`: dispatch-FFN-combine; `2`: CANN MegaMoe with matching operators. `0` disables fusion. The A3 PD performance case uses `2`; the 950DT W4A8C8 and A2 PD examples use `0` or do not enable it. |
 | MoE sequence parallelism | `enable_flashcomm1=true` | Requires `--enable-expert-parallel` and TP greater than 1. |
-| Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in Sections 5.4 and 5.5, and on Prefill in Section 5.6. Requires EP and TP greater than 1; increases weight memory usage. |
+| Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.5](#55-prefill-decode-disaggregation-950dt-products), and on Prefill in [Section 5.6](#56-prefill-decode-disaggregation-a2). Requires EP and TP greater than 1; increases weight memory usage. |
 | Shared expert overlap | `multistream_overlap_shared_expert=true` | Used by the [MP example](#52-multi-node-deployment-with-mp-recommended). |
 | Recompute scheduler | `scheduler_config.recompute_scheduler_enable=true` | Enabled on PD Decode, where `kv_role=kv_consumer`; keep it nested under `scheduler_config`. |
 | CPU binding | `enable_cpu_binding=true` | Explicitly enabled in the single-node, MP, A3 PD, and 950DT W4A8C8 PD scripts. |

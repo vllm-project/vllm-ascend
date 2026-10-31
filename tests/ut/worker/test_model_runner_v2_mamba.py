@@ -370,7 +370,10 @@ def test_prepare_inputs_propagates_padded_request_count():
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("num_spec", [0, 3])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
-def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
+@pytest.mark.parametrize("recover", [False, True])
+def test_prepare_attn_keeps_actual_counts_separate_from_padding(
+    mock_build_attn_metadata, num_spec, graph_mode, recover
+):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
@@ -380,6 +383,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -411,6 +415,8 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     )
 
     assert metadata is expected_metadata
+    if recover:
+        state.recoverssm.record_step.assert_called_once_with(expected_metadata, [], for_capture=False)
     kwargs = mock_build_attn_metadata.call_args.kwargs
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
@@ -435,6 +441,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=None,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,
@@ -898,6 +905,9 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
+
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
@@ -949,6 +959,9 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
+
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1006,7 +1019,10 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         additional_config={},
     )
     layers = {
-        name: SimpleNamespace(get_kv_cache_spec=lambda _config, spec=spec: spec)
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
+        )
         for name, spec in original_specs.items()
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)

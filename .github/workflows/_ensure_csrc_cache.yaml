@@ -25,10 +25,6 @@ on:
         required: false
         default: '[]'
         description: 'JSON array of csrc cache target IDs.'
-      dockerfile:
-        type: string
-        default: ''
-        description: 'Resolve image L0 producer targets from this source Dockerfile.'
       nightly_image:
         type: string
         default: ''
@@ -60,10 +56,6 @@ on:
         required: false
         default: ''
         description: 'Fixed base commit to rebase onto.'
-    outputs:
-      source_ref:
-        description: 'Pinned source checkout for image consumers.'
-        value: ${{ jobs.prepare-cache-checks.outputs.source_ref }}
     secrets:
       HW_OBS_AK:
         required: false
@@ -73,6 +65,14 @@ on:
 defaults:
   run:
     shell: bash -el {0}
+
+env:
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
 
 jobs:
   prepare-cache-checks:
@@ -87,9 +87,9 @@ jobs:
       targets: ${{ steps.targets.outputs.targets }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
       csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
-      source_ref: ${{ steps.hash.outputs.source_ref }}
       missing_targets: ${{ steps.misses.outputs.missing_targets }}
       has_missing: ${{ steps.misses.outputs.has_missing }}
+      has_write_credentials: ${{ steps.writer-credentials.outputs.present }}
     steps:
       - name: Install csrc cache dependencies
         run: |
@@ -167,72 +167,81 @@ jobs:
 
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve requested cache targets
         id: targets
         env:
           TARGET_IDS: ${{ inputs.target_ids }}
-          DOCKERFILE: ${{ inputs.dockerfile }}
           NIGHTLY_IMAGE: ${{ inputs.nightly_image }}
           SOC_VERSION: ${{ inputs.soc_version }}
         run: |
           python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
-            --target-ids "$TARGET_IDS" --dockerfile "$DOCKERFILE" \
-            --nightly-image "$NIGHTLY_IMAGE" --soc-version "$SOC_VERSION"
+            --target-ids "$TARGET_IDS" --nightly-image "$NIGHTLY_IMAGE" --soc-version "$SOC_VERSION"
+
+      - name: Detect OBS writer credentials
+        id: writer-credentials
+        env:
+          HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+          HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
+        run: |
+          if [ -n "$HW_OBS_AK" ] && [ -n "$HW_OBS_SK" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # This coordinator only needs to know whether a cache exists; downloading
       # large artifacts here would add latency before the actual consumer jobs.
       - name: Look up csrc cache (a2-arm64-ubuntu)
         id: lookup-a2
         if: contains(fromJSON(inputs.target_ids), 'a2-arm64-ubuntu')
-        uses: actions/cache/restore@v4
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-910b-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.2.1-910b-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (a3-arm64-ubuntu)
         id: lookup-a3
         if: contains(fromJSON(inputs.target_ids), 'a3-arm64-ubuntu')
-        uses: actions/cache/restore@v4
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-a3-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.2.1-a3-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (310p-arm64-ubuntu)
         id: lookup-310p
         if: contains(fromJSON(inputs.target_ids), '310p-arm64-ubuntu')
-        uses: actions/cache/restore@v4
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.2.1-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (a5-arm64-ubuntu)
         id: lookup-a5
         if: contains(fromJSON(inputs.target_ids), 'a5-arm64-ubuntu')
-        uses: actions/cache/restore@v4
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.1.0-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.2.1-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Summarize csrc cache results
@@ -243,7 +252,7 @@ jobs:
           P310_CACHE_HIT: ${{ steps.lookup-310p.outputs.cache-hit }}
           A5_CACHE_HIT: ${{ steps.lookup-a5.outputs.cache-hit }}
           TARGETS: ${{ steps.targets.outputs.targets }}
-          DYNAMIC: ${{ inputs.dockerfile != '' || inputs.nightly_image != '' }}
+          NIGHTLY_IMAGE: ${{ inputs.nightly_image }}
         run: |
           python3 - <<'PY'
           import json
@@ -258,8 +267,8 @@ jobs:
           targets = json.loads(os.environ["TARGETS"])
           # Lookup steps are intentionally explicit. Fail when configuration
           # expands before this workflow is taught how to check the new target.
-          if os.environ["DYNAMIC"] == "true":
-              # Each producer performs its own GitHub L0 lookup before compilation.
+          if os.environ["NIGHTLY_IMAGE"]:
+              # Nightly producers check their runtime-specific L0 before building.
               cache_hits = {target["id"]: False for target in targets}
           unsupported = sorted(
               target["id"]
@@ -298,7 +307,8 @@ jobs:
     name: Build csrc cache (${{ matrix.target.id }})
     needs: prepare-cache-checks
     if: >-
-      needs.prepare-cache-checks.outputs.has_missing == 'true'
+      needs.prepare-cache-checks.outputs.has_missing == 'true' &&
+      (inputs.nightly_image != '' || needs.prepare-cache-checks.outputs.has_write_credentials == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -310,7 +320,7 @@ jobs:
     with:
       target: ${{ toJSON(matrix.target) }}
       csrc_hash: ${{ needs.prepare-cache-checks.outputs.csrc_hash }}
-      source_ref: ${{ inputs.base_sha != '' && inputs.source_ref || needs.prepare-cache-checks.outputs.source_ref }}
+      source_ref: ${{ inputs.source_ref }}
       repository: ${{ inputs.repository }}
       base_repository: ${{ inputs.base_repository }}
       base_ref: ${{ inputs.base_ref }}

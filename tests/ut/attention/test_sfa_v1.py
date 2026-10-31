@@ -15,7 +15,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
@@ -54,8 +53,6 @@ class TestAscendSFABackend(TestBase):
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
-        self.dsa_patcher = patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False)
-        self.dsa_patcher.start()
 
         self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
         mock_ascend_config = self.ascend_config_patcher.start()
@@ -64,7 +61,6 @@ class TestAscendSFABackend(TestBase):
     def tearDown(self):
         self.ascend_config_patcher.stop()
         self.utils_patcher.stop()
-        self.dsa_patcher.stop()
         self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
@@ -703,7 +699,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.use_torch_npu_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer.use_pcp = False
-        indexer._dsa_cp_active = False
+        indexer._use_fused_cache_store = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
@@ -1166,7 +1162,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
                 self.impl._get_parallel_forward_context = lambda *_args: context
-                self.impl._prepare_native_hidden_states = lambda x, _: x
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(
@@ -1176,7 +1171,6 @@ class TestAscendSFAImpl(TestBase):
                     wait_for_layer=lambda name: events.append(("wait", name))
                 )
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
-                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
                 self.impl._record_query_gather_context = lambda *_args: None
@@ -1623,7 +1617,7 @@ class TestAscendSFAImpl(TestBase):
 
     def test_resolve_path_kv_producer_quantized_goes_prolog_v3(self):
         """KV producer (P-node) + quantized -> PROLOG_V3: prefill steps take
-        the fused path too; enable_dsa_cp remains the P-node CP route."""
+        the fused path too."""
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_producer = True
         self.impl.is_kv_consumer = False
@@ -1659,16 +1653,9 @@ class TestAscendSFAImpl(TestBase):
         self.impl.q_proj = MagicMock()
         self.impl.q_proj._chunk_size = 0
 
-    def test_reasons_dsa_cp_blocked(self):
-        self._setup_prolog_v3_state()
-        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-        impl.__dict__.update(self.impl.__dict__)
-        reasons = impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
-        self.assertTrue(any("DSA-CP" in r for r in reasons))
-
     def test_reasons_kv_producer_not_blocked(self):
         """KV producers take PROLOG_V3 too: the prefill/P-node CP route is
-        selected by enable_dsa_cp (impl selection), not by the reasons."""
+        selected by the implementation, not by the reasons."""
         self._setup_prolog_v3_state()
         self.impl.is_kv_producer = True
 

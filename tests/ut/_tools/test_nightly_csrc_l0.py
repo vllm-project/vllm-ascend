@@ -19,6 +19,7 @@ SCRIPTS = REPO_ROOT / ".github/workflows/scripts"
 def load_script(name, monkeypatch):
     monkeypatch.syspath_prepend(str(SCRIPTS))
     spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -151,36 +152,15 @@ def test_missing_package_record_is_not_assumed_compatible(monkeypatch):
         helper.package_identity("torch-npu")
 
 
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "Dockerfile",
-        "Dockerfile.a3",
-        "Dockerfile.a5",
-        "Dockerfile.310p",
-        "Dockerfile.openEuler",
-        "Dockerfile.a3.openEuler",
-        "Dockerfile.a5.openEuler",
-        "Dockerfile.310p.openEuler",
-    ],
-)
-def test_image_targets_follow_actual_dockerfile(tmp_path, monkeypatch, filename):
-    resolver = load_script("resolve_csrc_cache_targets", monkeypatch)
-    path = REPO_ROOT / filename
-    targets = resolver.resolve_build_targets(dockerfile=str(path))
-    assert {target["cache_arch"] for target in targets} == {"ARM64", "X64"}
-    image = next(line.split()[1] for line in path.read_text().splitlines() if line.startswith("FROM "))
-    assert all(target["image"] == image and not target["nightly"] for target in targets)
-    assert all(target["soc_version"].startswith("ascend") for target in targets)
-
-
 @pytest.mark.parametrize("soc", ["a2", "a3", "a5", "310P"])
 def test_nightly_targets_use_runtime_without_changing_configured_targets(monkeypatch, soc):
     resolver = load_script("resolve_csrc_cache_targets", monkeypatch)
     previous = resolver.resolve_targets(None)
-    targets = resolver.resolve_build_targets(nightly_image="nightly@sha256:exact", soc_version=soc)
+    targets = resolver.resolve_nightly_targets("nightly@sha256:exact", soc)
     assert all(target["nightly"] and target["image"] == "nightly@sha256:exact" for target in targets)
     assert resolver.resolve_targets(None) == previous
+    expected_arches = {"ARM64"} if soc == "a5" else {"ARM64", "X64"}
+    assert {target["cache_arch"] for target in targets} == expected_arches
 
 
 def workflow(name):
@@ -190,18 +170,42 @@ def workflow(name):
 def test_producer_cache_contract_matches_consumer_and_backend_is_explicit():
     producer_steps = workflow("_build_csrc_cache.yaml")["jobs"]["build"]["steps"]
     saves = [step for step in producer_steps if step.get("uses") == "actions/cache/save@v4"]
-    assert len(saves) == 2
+    assert len(saves) == 1
     nightly_save = next(step for step in saves if ".nightly-csrc-l0.json" in step["with"]["path"])
     action = yaml.load(
         (REPO_ROOT / ".github/actions/nightly-csrc-l0-restore/action.yaml").read_text(), Loader=yaml.BaseLoader
     )
     restore = next(step for step in action["runs"]["steps"] if step.get("uses") == "actions/cache/restore@v4")
     assert nightly_save["with"]["path"] == restore["with"]["path"]
-    for path in (REPO_ROOT / ".github/workflows").glob("*.y*ml"):
-        for job in workflow(path.name).get("jobs", {}).values():
-            for step in job.get("steps", []):
-                if "vllm-ascend-build-v2-" in step.get("with", {}).get("key", ""):
-                    assert step["uses"].startswith("actions/cache/"), (path.name, step)
+    # Existing fixed-image L0 keeps its original action, key and writer gate.
+    regular_save = next(step for step in producer_steps if step.get("name") == "Save csrc cache")
+    assert regular_save["uses"] == "runs-on/cache/save@v5"
+    assert "vllm-ascend-build-v2-" in regular_save["with"]["key"]
+    assert "OBS_CACHE_WRITE_ACCESS_KEY_ID != ''" in regular_save["if"]
+    assert regular_save["env"]["AWS_ACCESS_KEY_ID"] == "${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}"
+    lookups = [
+        step
+        for step in workflow("_ensure_csrc_cache.yaml")["jobs"]["prepare-cache-checks"]["steps"]
+        if step.get("id", "").startswith("lookup-")
+    ]
+    assert len(lookups) == 4
+    assert all(step["uses"] == "runs-on/cache/restore@v5" for step in lookups)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["_e2e_nightly_single_node.yaml", "_e2e_nightly_single_node_560t.yaml", "_e2e_nightly_single_node_models.yaml"],
+)
+def test_l0_miss_preserves_existing_l1_fallback(filename):
+    jobs = workflow(filename)["jobs"]
+    steps = next(job["steps"] for job in jobs.values() if "steps" in job)
+    l0 = next(index for index, step in enumerate(steps) if step.get("id") == "source-l0")
+    l1 = next(index for index, step in enumerate(steps) if step.get("id") == "source-l1")
+    move = next(index for index, step in enumerate(steps) if step.get("name", "").startswith("Move "))
+    assert l0 < l1 < move
+    assert "steps.source-l0.outputs.cache-hit != 'true'" in steps[l1]["if"]
+    assert steps[l1]["with"]["cache-dir"] == "csrc/build_cache"
+    assert steps[l1]["with"]["source-root"] == "./temp-vllm-ascend"
 
 
 def test_all_pr_nightly_consumers_wait_for_production_but_keep_fallback():

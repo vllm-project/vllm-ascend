@@ -31,20 +31,61 @@ import torch
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+    AscendStoreConnector,
+    create_kv_pool_worker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
-    LayerBatchBuilder,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    AscendConnectorMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
     LayerTransferTask,
-    LoadSpec,
-    ReqMeta,
     SharedBlockData,
     get_partial_block_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    LoadSpec,
+    ReqMeta,
+)
+
+
+class TestDSparkPrefixRegistration(unittest.TestCase):
+    def test_only_final_pipeline_stage_registers_draft_cache(self):
+        for pp_rank in (0, 1):
+            with self.subTest(pp_rank=pp_rank):
+                worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+                worker._dspark_prefix_keys = MagicMock()
+                worker._dspark_draft_layer_names = {"draft"}
+                worker.pp_rank, worker.pp_size = pp_rank, 2
+                worker.tp_rank = 0
+                worker.block_size = worker.hash_block_size = 16
+                worker.num_blocks = 4
+                worker.original_block_size = [16]
+                worker.m_store = MagicMock()
+                worker.kv_cache_config = SimpleNamespace(
+                    kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])]
+                )
+                draft_caches = {"draft": MagicMock()}
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.DSparkPrefixCache"
+                ) as prefix_cache:
+                    worker._register_dspark_prefix_cache(draft_caches)
+                    if pp_rank == 0:
+                        prefix_cache.assert_not_called()
+                    else:
+                        prefix_cache.assert_called_once_with(
+                            worker._dspark_prefix_keys,
+                            worker.m_store,
+                            worker.tp_rank,
+                            worker.block_size,
+                            worker.hash_block_size,
+                            worker._copy_dspark_prefix,
+                        )
+                        prefix_cache.return_value.register.assert_called_once_with(draft_caches, {"draft": 0}, [16], 4)
 
 
 def start_patch(test: unittest.TestCase, *args, **kwargs):
@@ -135,9 +176,7 @@ def make_worker(
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+    return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
 class TestPCPPoolWorker(unittest.TestCase):
@@ -196,8 +235,8 @@ class TestPCPPoolWorker(unittest.TestCase):
                     kv_cache_config=config,
                 )
                 self.assertEqual(worker.cacheable_group_ids, [0])
-                self.assertEqual(worker.layerwise_offload, reuse)
-                self.assertEqual(worker.prefetch_layer_map, {2: 1, 3: 2} if reuse else {})
+                self.assertEqual(getattr(worker, "layerwise_offload", False), reuse)
+                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: 1, 3: 2} if reuse else {})
                 if reuse:
                     self.assertEqual(set(worker._layerwise_reuse_layout.layer_cache_specs), set(range(4)))
                     self.assertTrue(
@@ -294,7 +333,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
         worker.layer_load_finished_events = [threading.Event()]
         gate = SimpleNamespace(on_start=None, on_finish=None)
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.reset_attention_compute_start_gate",
             return_value=gate,
         ):
             worker.wait_for_layer_load()
@@ -336,7 +375,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
                 full_attention_gate = SimpleNamespace(on_start=None, on_finish=None)
                 with patch(
-                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_compute_start_gate",
                     return_value=full_attention_gate,
                 ):
@@ -346,7 +385,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 worker.current_layer = 1
                 mamba_gate = SimpleNamespace(on_start=None, on_finish=None)
                 with patch(
-                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_compute_start_gate",
                     return_value=mamba_gate,
                 ):
@@ -358,7 +397,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
     def test_backpressure_bounds_send_without_draining_prefetch(self):
         worker = self.make_worker()
         send_queue = worker.kv_send_thread.request_queue
-        limit = worker.layerwise_protocol.send_fence_backlog()
+        limit = worker.layerwise_backend.send_fence_backlog()
         for _ in range(limit + 1):
             send_queue.put(object())
         worker.kv_recv_thread.request_queue.put(object())
@@ -724,7 +763,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_wait_for_layer_load_fallback_waits_for_reuse(self):
-        cls = self._make_worker_class()
+        cls = LayerwiseKVPoolWorker
         worker = cls.__new__(cls)
         worker.use_kvpp = False
         worker.current_layer = 0
@@ -839,7 +878,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 256,
                 [b"h0", b"h1"],
                 [0],
-                use_layerwise=False,
                 include_all_ranks=False,
             )
 
@@ -863,7 +901,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 256,
                 [b"h0", b"h1"],
                 [0],
-                use_layerwise=False,
                 include_all_ranks=False,
                 hbm_hit_tokens=128,
             )
@@ -877,7 +914,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         import torch
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-        cls = self._make_worker_class()
+        cls = LayerwiseKVPoolWorker
         worker = object.__new__(cls)
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
@@ -1199,9 +1236,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def _make_worker(self, kv_role="kv_producer", extra_config=None, use_layerwise=False):
         self._patch_all()
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        worker = KVPoolWorker(config, use_layerwise=use_layerwise)
+        worker = create_kv_pool_worker(config, use_layerwise=use_layerwise)
         return worker
 
     def setUp(self):
@@ -1455,7 +1490,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_handle_released_saves_skips_layerwise_thread(self):
         worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerSendingThread
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+            KVCacheStoreLayerSendingThread,
+        )
 
         # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
         # so a wrong dispatch would raise AttributeError here.
@@ -1519,7 +1556,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_lookup_layerwise(self):
-        worker = self._make_worker()
+        worker = self._make_worker(use_layerwise=True)
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         for method in (worker.lookup, worker.lookup_scheduler):
             with self.subTest(method=method.__name__):
@@ -1671,7 +1708,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     """Test process_layer_data and related layerwise methods."""
 
     def _make_worker(self):
-        return make_worker(self)
+        return make_worker(self, use_layerwise=True, extra_config={"backend": "memcache"})
 
     def _make_gva_worker(self, num_groups=1):
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
@@ -1694,7 +1731,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             # config, so without this the overridden groups would share the
             # legacy single-group key format and collide, which the store
             # never sees in production.
-            worker.layerwise_keys = worker.layerwise_protocol.bind_layerwise_keys(
+            worker.layerwise_keys = worker.layerwise_backend.bind_layerwise_keys(
                 vllm_config=worker.vllm_config,
                 kv_cache_config=worker.kv_cache_config,
                 model_name=worker.model_name,
@@ -1827,7 +1864,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIs(worker.external_slot_release_waiter, waiter)
 
     def test_set_external_slot_release_waiter_updates_running_recv_thread(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
         )
 
@@ -2035,7 +2072,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerSendingThread,
         )
 
@@ -2146,7 +2183,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
 
     def test_shared_load_data_preserves_layer_specific_blocks(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
             LayerBatchBuilder,
         )
@@ -2232,7 +2269,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     )
 
     def test_shared_load_data_without_reuse_keeps_single_build_per_group(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
         )
 
@@ -2597,7 +2634,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
         )
 
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep") as sleep:
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.time.sleep"
+        ) as sleep:
             worker._prepare_load_gvas([request])
 
         partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
@@ -2665,7 +2704,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
 
     def test_committed_blocks_are_skipped_and_missing_blocks_allocated(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
             LAYERWISE_READ_LEASE_TTL_MS,
         )
 
@@ -2699,7 +2738,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
 
     def test_exists_check_failure_fails_open_and_transfers_all(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
             LAYERWISE_READ_LEASE_TTL_MS,
         )
 
@@ -2730,7 +2769,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
 
     def test_allocation_sentinels_are_filtered_before_int64_conversion(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import MEMCACHE_SSD_HIT_GVA
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import MEMCACHE_SSD_HIT_GVA
 
         cases = (
             ([-3102, 0], [0, 0], True),
@@ -2759,7 +2798,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
                 )
 
-                with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.logger"
+                ) as logger:
                     worker._alloc_gvas_for_save([request])
 
                 if has_failure:
@@ -2776,7 +2817,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 self.assertEqual(logger.error.called, has_failure)
 
     def test_partial_allocation_sentinels_are_filtered(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import MEMCACHE_SSD_HIT_GVA
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import MEMCACHE_SSD_HIT_GVA
 
         for gva in (-3102, 0, MEMCACHE_SSD_HIT_GVA):
             with self.subTest(gva=gva):
@@ -2797,7 +2838,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
                 )
 
-                with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as logger:
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.logger"
+                ) as logger:
                     worker._alloc_gvas_for_save([request])
 
                 if gva <= 0:
@@ -2918,9 +2961,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 kv_role=kv_role, extra_config=extra_config, num_kv_heads=num_kv_heads, use_sparse=use_sparse
             )
             cfg.model_config.use_mla = use_mla
-            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-            return KVPoolWorker(cfg, use_layerwise=use_layerwise)
+            return create_kv_pool_worker(cfg, use_layerwise=use_layerwise)
         finally:
             for p in patches:
                 p.stop()
