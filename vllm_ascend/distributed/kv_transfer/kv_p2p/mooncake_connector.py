@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import copy
+import errno
 import hashlib
 import logging
 import math
 import os
 import queue
 import random
+import socket
 import struct
 import threading
 import time
@@ -271,8 +273,105 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
+        self.dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", None)
+        self.dp_local_rank = getattr(vllm_config.parallel_config, "data_parallel_rank_local", None)
 
         self.task_tracker = KVCacheTaskTracker()
+
+    @staticmethod
+    def _native_thread_snapshot() -> str:
+        """Return Linux native thread IDs/names for post-mortem debugging."""
+        task_dir = f"/proc/{os.getpid()}/task"
+        try:
+            native_threads = []
+            for task_id in sorted(os.listdir(task_dir), key=int):
+                with open(f"{task_dir}/{task_id}/comm") as comm_file:
+                    native_threads.append(f"{task_id}:{comm_file.read().strip()}")
+            return ", ".join(native_threads)
+        except (OSError, ValueError) as exc:
+            return f"unavailable ({exc})"
+
+    def _hang_on_port_conflict(
+        self,
+        *,
+        host: str,
+        port: int,
+        path: str,
+        stage: str,
+        error: BaseException,
+    ) -> None:
+        current_thread = threading.current_thread()
+        python_threads = ", ".join(
+            f"{thread.name}(ident={thread.ident},native_id={thread.native_id},alive={thread.is_alive()})"
+            for thread in threading.enumerate()
+        )
+        logger.error(
+            "Mooncake handshake port conflict detected; entering an intentional diagnostic hang. "
+            "stage=%s, path=%s, host=%s, port=%d, pid=%d, "
+            "current_thread=%s, python_thread_ident=%s, native_thread_id=%s, "
+            "dp_rank=%s, dp_local_rank=%s, tp_rank=%d, pp_rank=%d, pcp_rank=%d, error=%r. "
+            "Python threads=[%s]. Native threads=[%s]. "
+            "Inspect the live process with: ss -ltnp 'sport = :%d'; "
+            "ls -l /proc/%d/fd; gdb -p %d -batch -ex 'info threads' "
+            "-ex 'thread apply all bt'. The worker will remain blocked here.",
+            stage,
+            path,
+            host,
+            port,
+            os.getpid(),
+            current_thread.name,
+            current_thread.ident,
+            current_thread.native_id,
+            self.dp_rank,
+            self.dp_local_rank,
+            self.tp_rank,
+            self.pp_rank,
+            self.pcp_rank,
+            error,
+            python_threads,
+            self._native_thread_snapshot(),
+            port,
+            os.getpid(),
+            os.getpid(),
+        )
+        threading.Event().wait()
+
+    def _probe_handshake_port(self, host: str, port: int, path: str) -> None:
+        """Probe for an existing TCP bind before creating the ZMQ listener."""
+        try:
+            addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            logger.warning(
+                "Unable to resolve Mooncake handshake endpoint before ZMQ bind. "
+                "path=%s, error=%r. Deferring validation to ZMQ.",
+                path,
+                exc,
+            )
+            return
+
+        for family, sock_type, protocol, _, sockaddr in addresses:
+            try:
+                with socket.socket(family, sock_type, protocol) as probe_socket:
+                    probe_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    probe_socket.bind(sockaddr)
+                return
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    self._hang_on_port_conflict(
+                        host=host,
+                        port=port,
+                        path=path,
+                        stage="pre-bind probe",
+                        error=exc,
+                    )
+                    return
+                logger.warning(
+                    "Unable to probe Mooncake handshake endpoint before ZMQ bind. "
+                    "path=%s, sockaddr=%s, error=%r. Deferring validation to ZMQ.",
+                    path,
+                    sockaddr,
+                    exc,
+                )
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -290,6 +389,8 @@ class KVCacheSendingThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
+        path = "not-computed"
+        handshake_port = -1
         try:
             # Listen for new requests for metadata. NOTE(rob): we need each rank
             # to have a unique port. This hack to keeps us moving. We will
@@ -298,6 +399,7 @@ class KVCacheSendingThread(threading.Thread):
             device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
+            self._probe_handshake_port(self.side_channel_host, handshake_port, path)
             logger.info(
                 "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
                 path,
@@ -309,6 +411,14 @@ class KVCacheSendingThread(threading.Thread):
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
+            if isinstance(e, zmq.ZMQError) and e.errno == zmq.EADDRINUSE:
+                self._hang_on_port_conflict(
+                    host=self.side_channel_host,
+                    port=handshake_port,
+                    path=path,
+                    stage="ZMQ bind",
+                    error=e,
+                )
             logger.exception(
                 "Mooncake KVCacheSendingThread encountered exception. "
                 "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
