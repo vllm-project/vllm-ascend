@@ -41,6 +41,7 @@ def _make_vllm_config(
     kv_connector: str | None = None,
     kv_role: str | None = None,
     recompute_scheduler_enable: bool = False,
+    use_sequence_parallel_moe: bool = False,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -55,6 +56,7 @@ def _make_vllm_config(
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
+        use_sequence_parallel_moe=use_sequence_parallel_moe,
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
@@ -157,6 +159,21 @@ def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 
     assert afc.get_mc2_tokens_capacity() == 600
+
+
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+def test_set_mc2_tokens_capacity_without_megamoe_uses_ordinary_limit(monkeypatch, enable_fused_mc2):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=enable_fused_mc2),
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    vllm_config = _make_vllm_config(tensor_parallel_size=2)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=2000, uniform_decode_query_len=3)
+
+    assert afc.get_mc2_tokens_capacity() == 512 * 2
 
 
 def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(monkeypatch):
@@ -496,6 +513,64 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
         expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=draft_quant)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [(2048, MoECommType.MC2), (2049, MoECommType.ALLGATHER), (4096, MoECommType.ALLGATHER)],
+)
+def test_select_moe_comm_method_a5_unquantized_draft_four_cards_topk_ten(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=4096,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=4, tensor_parallel_size=4, top_k_experts=10)
+
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
+        == expected
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 1024, 4096])
+def test_select_moe_comm_method_a5_sp_unquantized_draft_uses_allgather(monkeypatch, num_tokens):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch, device_type=AscendDeviceType.A5, capacity=4096, ep_world_size=4, enable_fused_mc2=1
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    config = _make_vllm_config(world_size=4, tensor_parallel_size=2, top_k_experts=10, use_sequence_parallel_moe=True)
+    assert afc.select_moe_comm_method(num_tokens, config) == MoECommType.FUSED_MC2
+    assert (
+        afc.select_moe_comm_method(num_tokens, config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
+        == MoECommType.ALLGATHER
+    )
+
+
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [(1024, MoECommType.MC2), (1025, MoECommType.ALLGATHER)],
+)
+def test_select_moe_comm_method_a5_draft_without_megamoe_keeps_ordinary_capacity(
+    monkeypatch, enable_fused_mc2, num_tokens, expected
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=1024,
+        ep_world_size=4,
+        enable_fused_mc2=enable_fused_mc2,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
+    vllm_config = _make_vllm_config(world_size=4, tensor_parallel_size=2, top_k_experts=10)
+
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
         == expected
     )
 
