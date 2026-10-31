@@ -106,6 +106,50 @@ def save(w, meta):
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_snapshot_identity_uses_each_groups_block_size(self):
+        w = worker()
+        w.num_kv_cache_groups = 2
+        w.grouped_block_size = [256, 128]
+        w.group_uses_align_state = [False, False]
+        w.cache_transfer_granularity = 256
+        meta = ReqMeta(
+            "mixed",
+            target_token_len=514,
+            load_spec=LoadSpec(513, 513, True, layerwise_snapshot_end_token=513, layerwise_snapshot_start_block=1),
+        )
+        self.assertEqual(w._layerwise_load_snapshot_start(meta, 0, 513), 1)
+        self.assertEqual(w._layerwise_load_snapshot_start(meta, 1, 513), 2)
+
+    def test_reused_align_state_restores_partial_and_exact_boundary_endpoints(self):
+        w = worker()
+        w.group_uses_align_state = [True]
+        w._group_reuses_buffer = lambda group: True
+        w.independent_layers = []
+        w.cache_coordinator = None
+        w._compute_reachable_load_masks = module.LayerwiseKVPoolWorker._compute_reachable_load_masks.__get__(w)
+        tracker = RequestTracker("state", 0, allocated_block_ids_by_group=[[1, 2, 3]])
+        previous = None
+        saved = None
+        for end in (127, 128, 129, 131, 256, 257):
+            reset(w)
+            hashes = [f"h{i}" for i in range(end // 128)]
+            meta = step(tracker, end, hashes, previous)
+            if previous is not None:
+                w._prepare_load_gvas([meta])
+                w._process_load_for_layer_batch([meta], 1)
+                # An align-state page is one exact endpoint, including when
+                # a partial page becomes full or its global ID changes.
+                self.assertEqual(transferred(w, False), saved)
+            saved = save(w, meta)
+            endpoint_block = (end - 1) // 128
+            self.assertEqual(set(saved), {meta.block_ids[endpoint_block]})
+            if end % 128:
+                self.assertTrue(any(f":snapshot:{endpoint_block}:{end}" in key for key in meta.save_keys))
+            previous = end
+        # A recurrent state at 257 cannot be sliced back to state 255.
+        meta.load_spec = LoadSpec(255, 255, True, layerwise_snapshot_end_token=257)
+        self.assertEqual(w._resolve_layerwise_load_partial(meta, 0, 255, 128, 2), (1, 255))
+
     def test_crossing_then_hash_promotion(self):
         w = worker()
         t = RequestTracker("r", 0, allocated_block_ids_by_group=[[0, 1, 2, 3]])

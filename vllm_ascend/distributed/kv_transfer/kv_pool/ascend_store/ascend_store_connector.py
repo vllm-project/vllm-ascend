@@ -395,6 +395,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        worker = self.connector_worker
+        if layer_name in getattr(worker.kv_cache_config, "layerwise_draft_layer_names", ()):
+            # Persistent draft caches do not advance the target ring cursor.
+            return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
         layer = self.connector_worker._extract_physical_layer_index(layer_name)
