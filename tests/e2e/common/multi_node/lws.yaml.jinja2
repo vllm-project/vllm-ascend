@@ -31,6 +31,8 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: DEFAULT_DOWNLOAD_PATHS
+                value: {{ default_download_paths | default("[]") | tojson }}
               - name: ASCEND_PROFILE_ROOT
                 value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
 {% for name, value in profile_env.items() %}
@@ -161,6 +163,8 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: DEFAULT_DOWNLOAD_PATHS
+                value: {{ default_download_paths | default("[]") | tojson }}
               - name: ASCEND_PROFILE_ROOT
                 value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
 {% for name, value in profile_env.items() %}

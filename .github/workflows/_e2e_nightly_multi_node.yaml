@@ -282,14 +282,18 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
           OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-          DOWNLOAD_SPEC: ${{ inputs.download_path }}
+          REQUESTED_PATHS: ${{ inputs.download_path }}
         run: |
           set -euo pipefail
 
           size="${{ inputs.size }}"
-          if [ -n "$DOWNLOAD_SPEC" ]; then
-            python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" --list --node-count "$size" > /dev/null
-          fi
+          DOWNLOAD_SPEC="$REQUESTED_PATHS"
+          DEFAULT_DOWNLOAD_PATHS=$(python3 .github/workflows/scripts/collect_download.py "" \
+            --defaults-file .github/workflows/configs/log_download_defaults.json --print-defaults)
+          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" \
+            --defaults-json "$DEFAULT_DOWNLOAD_PATHS" --list --node-count "$size" > /dev/null
+          echo "DOWNLOAD_SPEC=$DOWNLOAD_SPEC" >> "$GITHUB_ENV"
+          echo "DEFAULT_DOWNLOAD_PATHS=$DEFAULT_DOWNLOAD_PATHS" >> "$GITHUB_ENV"
           replicas="${{ inputs.replicas }}"
           image="${{ inputs.image }}"
           config_file_path="${{ inputs.config_file_path }}"
@@ -320,6 +324,7 @@ jobs:
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
             -D download_spec="$DOWNLOAD_SPEC" \
+            -D default_download_paths="$DEFAULT_DOWNLOAD_PATHS" \
             -D size="$size" \
             -D replicas="$replicas" \
             -D image="$image" \
@@ -701,12 +706,11 @@ jobs:
 
       - name: Post process
         if: always()
-        env:
-          DOWNLOAD_PATH: ${{ inputs.download_path }}
         run: |
+          DOWNLOAD_PATH="${DOWNLOAD_SPEC:-}"
           # Archive once after the test finishes, before deleting running pods.
           # The exit trap covers pods that exit earlier.
-          if [ -n "$DOWNLOAD_PATH" ]; then
+          if [ -n "$DOWNLOAD_PATH" ] || [ "${DEFAULT_DOWNLOAD_PATHS:-[]}" != "[]" ]; then
             while IFS=$'\t' read -r node requested_path; do
               index="${node#node}"
               if [ "$index" -eq 0 ]; then
@@ -722,7 +726,8 @@ jobs:
                 echo "::warning::Could not archive $requested_path from $pod before deletion"
               fi
             done < <(python3 .github/workflows/scripts/collect_download.py \
-              "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }})
+              "$DOWNLOAD_PATH" --defaults-json "${DEFAULT_DOWNLOAD_PATHS:-[]}" \
+              --list --node-count ${{ inputs.size }})
           fi
 
           echo "Current pod status:"
@@ -753,19 +758,23 @@ jobs:
           done
 
       - name: Collect requested paths from test pods
-        if: ${{ always() && inputs.download_path != '' }}
+        if: always()
         id: collect_download
         continue-on-error: true
         env:
-          DOWNLOAD_PATH: ${{ inputs.download_path }}
           ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
         run: |
-          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
+          set -e
+          [ -n "${DOWNLOAD_SPEC:-}" ] || [ "${DEFAULT_DOWNLOAD_PATHS:-[]}" != "[]" ] || exit 0
+          python3 .github/workflows/scripts/collect_download.py "${DOWNLOAD_SPEC:-}" \
+            --defaults-json "${DEFAULT_DOWNLOAD_PATHS:-[]}" \
+            --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
           mkdir -p /tmp/download-artifact
           for attempt in $(seq 1 12); do
             pending=0
             while IFS=$'\t' read -r NODE REQUESTED_PATH; do
               [ -f "${LOG_PREFIX}/${NODE}_download.tar.gz" ] && continue
+              [ -f "${LOG_PREFIX}/${NODE}_download.empty" ] && continue
               index="${NODE#node}"
               if [ "$index" -eq 0 ]; then
                 pod="${LWS_NAME}-0"
@@ -782,25 +791,33 @@ jobs:
             sleep 5
           done
           copied=0
+          missing=0
           while IFS=$'\t' read -r NODE REQUESTED_PATH; do
             source_archive="${LOG_PREFIX}/${NODE}_download.tar.gz"
             if [ -f "$source_archive" ]; then
               cp "$source_archive" "/tmp/download-artifact/${NODE}.tar.gz"
               echo "Collected ${NODE}: ${REQUESTED_PATH} -> ${NODE}.tar.gz ($(wc -c < "$source_archive") bytes)"
               copied=$((copied + 1))
+            elif [ -f "${LOG_PREFIX}/${NODE}_download.empty" ]; then
+              echo "No configured paths existed on ${NODE}; skipping its archive"
             else
               echo "::warning::No archive from ${NODE} for ${REQUESTED_PATH}"
+              missing=$((missing + 1))
             fi
           done < /tmp/download-paths.tsv
           if [ "$copied" -eq 0 ]; then
-            echo "::warning::No requested paths were archived by test pods"
-            exit 1
+            if [ "$missing" -gt 0 ]; then
+              echo "::warning::No requested paths were archived by test pods"
+              exit 1
+            fi
+            echo "No configured paths existed on the test pods"
+            exit 0
           fi
           safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
           echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
 
       - name: Upload requested paths
-        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        if: ${{ always() && steps.collect_download.outputs.name != '' }}
         id: upload_download
         continue-on-error: true
         uses: actions/upload-artifact@v7
