@@ -7,6 +7,7 @@
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -75,17 +76,14 @@ class AscendMambaManager(MambaManager):
             apply_admission_cap=apply_admission_cap,
             prefill_end=prefill_end,
         )
-        # When external KV cache is loaded synchronously with new
-        # tokens, allocate_new_computed_blocks() allocates one
-        # extra block to hold the external cache content. Account
-        # for it here so the free-capacity check is accurate.
-        # (External tokens exist when total_computed_tokens exceeds
-        # what local prefix-cache hits cover; sync loading when
-        # num_tokens_main_model exceeds total_computed_tokens.)
         has_external_tokens = total_computed_tokens > local_hit_tokens
-        has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
-        if has_external_tokens and has_new_scheduled_tokens:
-            # one more block for external computed tokens
+        needs_extra_external_block = num_tokens_main_model > total_computed_tokens
+        if self.mamba_cache_mode == "align":
+            # Same-block continuation reuses the received recurrent state.
+            needs_extra_external_block = cdiv(num_tokens_main_model, self.block_size) > cdiv(
+                total_computed_tokens, self.block_size
+            )
+        if has_external_tokens and needs_extra_external_block:
             num_new_blocks += 1
         return num_new_blocks
 
