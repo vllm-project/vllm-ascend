@@ -2,15 +2,25 @@ import torch
 
 from vllm_ascend.utils import vllm_version_is
 
+# Peak sampling memory includes softmax probs, a sorted copy, int64 sort
+# indices, the top-p cumsum, and boolean masks. Budget 24 bytes per logit so
+# large speculative verification batches stay bounded.
+_MAX_SAMPLING_CHUNK_BYTES = 2**30
+_SAMPLING_TEMP_BYTES_PER_ELEMENT = 24
+
+
+def _get_max_sampling_rows(vocab_size: int) -> int:
+    return max(1, _MAX_SAMPLING_CHUNK_BYTES // (vocab_size * _SAMPLING_TEMP_BYTES_PER_ELEMENT))
+
 
 # Canonical sort-based top-k/top-p masking implementation.
 # It lives under the MRv2 worker because vllm_ascend.sample is MRv1-only and is
 # scheduled for deletion: MRv1 imports it from here, so the dependency only ever
 # points from the dying code to the surviving code.
-def _apply_top_k_top_p_pytorch(
+def _apply_top_k_top_p_chunk(
     logits: torch.Tensor,  # [B, V_local]
-    k: torch.Tensor,  # [B] or None
-    p: torch.Tensor,  # [B] or None
+    k: torch.Tensor | None,  # [B] or None
+    p: torch.Tensor | None,  # [B] or None
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
@@ -40,6 +50,29 @@ def _apply_top_k_top_p_pytorch(
         elements_to_discard = probs < top_p_cutoff
         logits.masked_fill_(elements_to_discard, -float("inf"))
 
+    return logits
+
+
+def _apply_top_k_top_p_pytorch(
+    logits: torch.Tensor,  # [B, V_local]
+    k: torch.Tensor | None,  # [B] or None
+    p: torch.Tensor | None,  # [B] or None
+) -> torch.Tensor:
+    if p is None and k is None:
+        return logits
+
+    max_rows = _get_max_sampling_rows(logits.shape[1])
+    if logits.shape[0] <= max_rows:
+        return _apply_top_k_top_p_chunk(logits, k, p)
+
+    # Apply row-wise in slices so the full-vocab sort temporaries stay bounded.
+    for start in range(0, logits.shape[0], max_rows):
+        end = min(start + max_rows, logits.shape[0])
+        _apply_top_k_top_p_chunk(
+            logits[start:end],
+            None if k is None else k[start:end],
+            None if p is None else p[start:end],
+        )
     return logits
 
 
