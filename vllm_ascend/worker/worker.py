@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.v1.worker.gpu_worker import Worker as VllmWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -393,18 +394,13 @@ class NPUWorker(WorkerBase):
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
 
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """Initialize the HCCL weight transfer process group with the trainer."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+    _check_weight_transfer_engine = VllmWorker._check_weight_transfer_engine
+    init_weight_transfer_engine = VllmWorker.init_weight_transfer_engine
+    get_draft_model = VllmWorker.get_draft_model
+    supports_draft_weight_updates = VllmWorker.supports_draft_weight_updates
+    _set_draft_weight_update_target = VllmWorker._set_draft_weight_update_target
+    start_weight_update = VllmWorker.start_weight_update
+    start_draft_weight_update = VllmWorker.start_draft_weight_update
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -415,33 +411,6 @@ class NPUWorker(WorkerBase):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def get_draft_model(self) -> nn.Module | None:
-        """Let the model runner resolve and unwrap its speculative model."""
-        return self.model_runner.get_draft_model()
-
-    def supports_draft_weight_updates(self) -> bool:
-        engine = self.weight_transfer_engine
-        speculative_config = self.speculative_config
-        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
-        return (
-            engine is not None
-            and engine.supports_draft_weight_update
-            and callable(get_draft_model)
-            and get_draft_model() is not None
-            and speculative_config is not None
-            and speculative_config.draft_model_config is not None
-        )
-
-    def _set_draft_weight_update_target(self) -> None:
-        assert self.weight_transfer_engine is not None
-        draft_model = self.get_draft_model()
-        if draft_model is None:
-            raise RuntimeError("Draft model weight update requested, but no draft model is configured.")
-        speculative_config = self.speculative_config
-        if speculative_config is None or speculative_config.draft_model_config is None:
-            raise RuntimeError("Draft model weight update requested, but no draft model config is configured.")
-        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
-
     def _share_source_lm_heads(self, draft_model: nn.Module) -> None:
         # V2 may hold online-quantized copies of the target head.
         share_source_lm_heads(draft_model)
@@ -450,9 +419,7 @@ class NPUWorker(WorkerBase):
             return
 
         children = [
-            (module, name, child)
-            for module in draft_model.modules()
-            for name, child in module.named_children()
+            (module, name, child) for module in draft_model.modules() for name, child in module.named_children()
         ]
 
         has_use_cuda_graph = hasattr(drafter, "use_cuda_graph")
@@ -469,9 +436,7 @@ class NPUWorker(WorkerBase):
             # Keep the original modules alive: captured graphs still refer to
             # their tensors. Also record partial swaps if sharing raises.
             self._draft_lm_head_swaps = [
-                (module, name, child)
-                for module, name, child in children
-                if getattr(module, name) is not child
+                (module, name, child) for module, name, child in children if getattr(module, name) is not child
             ]
 
     def restore_source_lm_head(self, refresh: bool = True) -> None:
@@ -486,11 +451,7 @@ class NPUWorker(WorkerBase):
         """Undo the temporary source-head sharing for a draft update."""
         self.restore_source_lm_head(refresh=refresh)
 
-    def start_draft_weight_update(self) -> None:
-        """Begin a weight update targeting the speculative draft model."""
-        self.start_weight_update(is_draft=True)
-
-    def start_weight_update(self, is_draft: bool = False) -> None:
+    def _start_weight_update(self, is_draft: bool = False) -> None:
         """Begin a target or draft update; prepare the selected model for reload."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -506,18 +467,17 @@ class NPUWorker(WorkerBase):
 
         self._check_nz_disabled()
         draft_model = self.get_draft_model() if is_draft else None
-        with set_current_vllm_config(self.vllm_config):
-            try:
-                if is_draft:
-                    self._set_draft_weight_update_target()
-                if draft_model is not None:
-                    self._share_source_lm_heads(draft_model)
-                self.weight_transfer_engine.start_weight_update()
-            except BaseException:
-                self.weight_transfer_engine.reset_weight_update_target()
-                if draft_model is not None:
-                    self.restore_share_lm_head(refresh=False)
-                raise
+        try:
+            if is_draft:
+                self._set_draft_weight_update_target()
+            if draft_model is not None:
+                self._share_source_lm_heads(draft_model)
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            if draft_model is not None:
+                self.restore_share_lm_head(refresh=False)
+            raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 

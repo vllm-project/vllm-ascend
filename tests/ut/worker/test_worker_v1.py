@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig, get_current_vllm_config
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -1216,8 +1216,6 @@ class TestNPUWorker(TestBase):
         worker.get_kv_cache_spec.assert_called_once_with()
 
     def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
-        from vllm.config import get_current_vllm_config
-
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
@@ -2312,6 +2310,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.start_weight_update()
         with self.assertRaises(RuntimeError):
+            worker.start_draft_weight_update()
+        with self.assertRaises(RuntimeError):
             worker.update_weights({})
         with self.assertRaises(RuntimeError):
             worker.finish_weight_update()
@@ -2354,8 +2354,37 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        with self.assertRaises(ValueError):
-            worker.start_weight_update()
+        for entrypoint in (worker.start_weight_update, worker.start_draft_weight_update):
+            with self.subTest(entrypoint=entrypoint.__name__):
+                with self.assertRaisesRegex(ValueError, "FRACTAL_NZ"):
+                    entrypoint()
+                engine.start_weight_update.assert_not_called()
+                self.assertFalse(worker._weight_update_active)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_start_draft_weight_update_selects_draft_in_current_config(self, mock_get_ascend_config):
+        from vllm.config import get_current_vllm_config
+
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        draft = torch.nn.Linear(2, 2)
+        draft_config = MagicMock()
+        worker.speculative_config = SimpleNamespace(draft_model_config=draft_config)
+        worker.model_runner.get_draft_model.return_value = draft
+        worker.model_runner.drafter = None
+
+        def begin_update():
+            self.assertIs(get_current_vllm_config(), worker.vllm_config)
+
+        engine.start_weight_update.side_effect = begin_update
+
+        worker.start_draft_weight_update()
+
+        engine.set_weight_update_target.assert_called_once_with(draft, draft_config)
+        engine.start_weight_update.assert_called_once_with()
+        self.assertTrue(worker._weight_update_active)
+        self.assertTrue(worker._weight_update_is_draft)
 
     def test_update_weights_requires_start(self):
         engine = MagicMock()
