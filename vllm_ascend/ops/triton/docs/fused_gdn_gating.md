@@ -12,7 +12,7 @@
     - `beta_output[t, h] = sigmoid(b[t, h])` (stored in `b`'s dtype)
 - **Algorithm flow** (processed row by row, independently):
   1. Grid `(num_vectorcore, seq_len=1)`: each program owns `ceil(num_tokens / num_vectorcore)` token rows, iterated in `ROW_ITER` tiles of `BLK_BATCHES=64` rows.
-  2. Within a row tile, heads are tiled by `BLK_HEADS=8` (`COL_ITER = ceil(num_heads / 8)` iterations); per tile, load the `A_log` / `dt_bias` head slices and the `a` / `b` blocks with row/head masks.
+  2. Within a row tile, heads are tiled by `BLK_HEADS=16` (`COL_ITER = ceil(num_heads / 16)` iterations); per tile, load the `A_log` / `dt_bias` head slices and the `a` / `b` blocks with row/head masks.
   3. Compute `softplus`, `exp`, `sigmoid` in fp32 and store `g` and `beta_output` element-wise.
 - **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products (the A2/950PR&950DT Products `DeviceOperator` entries route to this same Triton kernel). Used by the GDN recurrent-attention path of `vllm_ascend/ops/gdn.py`; works in both eager and graph-capture modes.
 
@@ -36,7 +36,7 @@
 
 - `a`, `b`: `[num_tokens, num_heads]`; `A_log`, `dt_bias`: `[num_heads]` with the same `num_heads`. All inputs are indexed with flat offsets and must be contiguous.
 - The wrapper fixes `seq_len = 1` (decode-style flattened token batch); internal computation is fp32 regardless of input dtype.
-- Kernel-internal tiling constants: `BLK_HEADS=8`, `BLK_BATCHES=64`, `ROW_ITER = ceil(ceil(num_tokens / num_vectorcore) / 64)`.
+- Kernel-internal tiling constants: `BLK_HEADS=16`, `BLK_BATCHES=64`, `ROW_ITER = ceil(ceil(num_tokens / num_vectorcore) / 64)`.
 - `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` are `do_not_specialize`, so varying token counts or head counts do not trigger Triton recompilation.
 - Only for inference (prefill/decode) on NPU.
 
@@ -48,6 +48,12 @@
     - Modified for a specific vllm-ascend logic or different input parameters: returns `g` pre-shaped `[1, num_tokens, num_heads]` and forced to fp32 as expected by the Ascend recurrent gated-delta-rule kernel, while `beta_output` keeps `b`'s dtype.
 
 ## Test Cases
+
+The standalone Triton operator test uses an independent CPU PyTorch reference and covers fp16, bf16, and fp32 inputs, `num_tokens` in `{1, 37, 65}`, and `num_heads` in `{8, 16, 24, 32}`. It checks output shapes, dtypes, devices, and precision, including partial head tiles. The tolerance for `g` is `rtol=1e-3`, `atol=1e-4`; for `beta_output` it is `rtol=1e-2`, `atol=1e-3`.
+
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating_triton.py
+```
 
 The test compares the Triton kernel (through its 1:1 wrapper `fused_gdn_gating_patch`) against the independent PyTorch reference `fused_gdn_gating_pytorch` (from `vllm_ascend/_310p/ops/fla/fused_gdn_gating.py`) for both outputs, fp16 inputs, `num_tokens=37`, `num_heads=8`, unified elementwise tolerance `rtol=atol=1e-2`.
 
