@@ -22,13 +22,49 @@ setter mixin, and the ``AttnMetadataRouter`` routing logic (via duck-typed
 metadata objects).
 """
 
+import subprocess
+import sys
 import types
 import unittest
+from unittest.mock import MagicMock
 
 import torch
 
-from vllm_ascend.xlite import utils as xlite_utils
-from vllm_ascend.xlite.utils import (
+
+def _ensure_xlite_C_importable() -> None:
+    """Make the native ``xlite._C`` extension stand-in importable, if needed.
+
+    ``vllm_ascend.xlite.utils`` imports ``xlite._C`` at module scope. Outside an
+    Ascend/CANN environment that native extension aborts the interpreter with a
+    C++ ``std::logic_error`` while importing, so it cannot be imported (or even
+    probed) in the CPU-only CI image. The helpers under test in this module are
+    pure python and never touch the native module at runtime, so probe the
+    native import in a subprocess and, only when it is broken, install a
+    ``MagicMock`` for ``xlite._C`` before importing the module under test. When
+    the native extension imports cleanly (a full CANN environment) nothing is
+    touched.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "import xlite._C"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=300,
+    )
+    if probe.returncode == 0:
+        return
+    try:
+        import xlite
+    except ImportError:
+        xlite = types.ModuleType("xlite")
+        sys.modules["xlite"] = xlite
+    xlite._C = MagicMock(name="xlite._C")
+    sys.modules["xlite._C"] = xlite._C
+
+
+_ensure_xlite_C_importable()
+
+from vllm_ascend.xlite import utils as xlite_utils  # noqa: E402
+from vllm_ascend.xlite.utils import (  # noqa: E402
     AttnMetadataRouter,
     AttributeSetterMixin,
     _TensorRepr,
