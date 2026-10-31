@@ -16,8 +16,6 @@
 #
 from __future__ import annotations
 
-import weakref
-
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -31,7 +29,6 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -126,23 +123,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.mc2_group = get_mc2_group()
 
         self.ascend_shared_experts = None
-        if get_ascend_config().deepgemm_mega_moe:
-            if (
-                shared_expert_gate is not None
-                or routed_input_transform is not None
-                or routed_output_transform is not None
-            ):
-                raise ValueError("V4.1 DeepGEMM requires shared and routed experts to use the same input")
-            # Keep shared parameters registered for checkpoint loading, while
-            # the fused kernel owns their execution and final accumulation.
-            if shared_experts is not None:
-                routed_experts._deepgemm_v41_shared_experts = weakref.ref(shared_experts)
-                shared_experts.gate_up_proj._deepgemm_v41_shared_linear = True
-                shared_experts.down_proj._deepgemm_v41_shared_linear = True
-            routed_experts._deepgemm_v41_routed_scaling_factor = self.routed_scaling_factor
-            self.routed_scaling_factor = 1.0
-            self._forward_entry = torch.ops.vllm.moe_forward
-        elif shared_experts is not None:
+        if shared_experts is not None:
             routed_experts.return_with_event = True
             self.ascend_shared_experts = AscendSharedExperts(
                 shared_experts,

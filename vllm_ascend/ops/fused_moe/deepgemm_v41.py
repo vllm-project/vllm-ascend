@@ -171,16 +171,13 @@ class DeepGemmV41Experts:
         self.num_shared_experts = count
         shared._deepgemm_v41_weights_transformed = True
 
-    def apply(self, layer, x, topk_weights, topk_ids):
-        from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
-
+    def forward(self, layer, x, topk_weights, topk_ids):
         if x.dtype != torch.bfloat16 or x.ndim != 2:
             raise ValueError("V4.1 MegaMoE expects local BF16 [tokens, hidden] input")
         count = x.shape[0]
         if count > self.max_tokens:
             raise ValueError(f"V4.1 MegaMoE token count {count} exceeds {self.max_tokens}")
 
-        before = torch.npu.current_stream().record_event()
         quantized, scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
         self.buffer.x[:count].copy_(quantized)
         self.buffer.x_sf[:count].copy_(scale.reshape(count, self.hidden // 32).view(torch.int16))
@@ -201,11 +198,4 @@ class DeepGemmV41Experts:
             shared_l2_weights=self.shared_l2_weights,
             activation_clamp=self.activation_clamp,
         )
-        after = torch.npu.current_stream().record_event()
-        return FusedExpertsResult(
-            routed_out=out,
-            before_dispatch_evt=before,
-            before_gmm2_evt=before,
-            before_combine_evt=after,
-            shared_activation_overlap_start_evt=before,
-        )
+        return out
