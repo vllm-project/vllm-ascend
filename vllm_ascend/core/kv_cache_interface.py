@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -156,6 +157,18 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
         return False
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
+
+
+def requires_shared_backing_layout(kv_cache_tensors: Iterable[KVCacheTensor]) -> bool:
+    """Whether descriptors reference one shared backing allocation.
+
+    This is a generic descriptor-layout capability. It deliberately does not
+    identify a model; model-specific feature checks are applied by callers.
+    """
+    descriptors = list(kv_cache_tensors)
+    if not descriptors:
+        return False
+    return len({descriptor.size for descriptor in descriptors}) == 1
 
 
 def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
