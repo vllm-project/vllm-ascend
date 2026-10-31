@@ -10,3 +10,7 @@ entries:
     text: >-
       Preserve caller SIGTERM and SIGINT handlers during Ascend SDK initialization
       and graph capture so lazy imports do not replace engine shutdown handlers.
+  - category: bugfix
+    text: >-
+      Avoid unmapping an already-released CaMem physical allocation when tensors
+      are deleted while sleeping, including shutdown after a failed wake.
