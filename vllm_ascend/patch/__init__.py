@@ -211,6 +211,22 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+# ** File: platform/patch_minimax_m3_reasoning.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.reasoning.minimax_m3_reasoning_parser.MiniMaxM3ReasoningParser`
+#    Why:
+#       Prompt instructions and earlier assistant turns can contain </mm:think>.
+#       Treating these as the current turn's reasoning end leaks reasoning into
+#       streamed content and starts structured-output constraints too early.
+#    How:
+#       Scope both reasoning-end checks to tokens after the last ]~b] message
+#       boundary. Keep output-only IDs and non-streaming extraction unchanged.
+#       Skip the backport when the upstream helper already exists.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/63492
+#    Future Plan:
+#       Remove when all supported vLLM versions include the upstream fix.
+#
 # ** File: platform/patch_glm53_reasoning.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
