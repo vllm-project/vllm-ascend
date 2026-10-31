@@ -402,6 +402,28 @@
 #       1. Remove this patch once the supported upstream revision includes
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
+#   2. Registered MambaManager/FullAttentionManager._cache_partial_tail_block
+#    Why:
+#       Exact-PMU-length prefills can omit the last reusable common boundary.
+#    How:
+#       Extend native Mamba tail registration and restore the matching attention
+#       alias after native tail caching. Patch registry-selected classes, retaining
+#       upstream allocation, CoW and connector handoff records.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/18582
+#    Future Plan:
+#       Remove when upstream caches the exact-PMU reusable boundary itself.
+#
+#   Companion: platform/patch_mamba_block_aligned_split.py
+#    Why:
+#       The fallback must materialize that boundary before the final prompt token.
+#    How:
+#       Integrate the split into the existing scheduler patch for dense standalone
+#       and pure-producer prefills only; reuse native in-query checkpoints when valid.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/18582
+#    Future Plan:
+#       Remove this fallback when upstream materializes the reusable boundary.
 #
 # ** 14. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
