@@ -572,6 +572,10 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        from vllm_ascend.device_allocator.sleep_mode_backend import normalize_sleep_mode_backend
+
+        normalize_sleep_mode_backend(vllm_config.model_config)
+
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).

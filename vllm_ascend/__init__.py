@@ -77,6 +77,12 @@ def register():
     return "vllm_ascend.platform.NPUPlatform"
 
 
+def register_sleep_mode_backend():
+    from .device_allocator.sleep_mode_backend import register_sleep_mode_backends
+
+    register_sleep_mode_backends()
+
+
 def register_connector():
     _ensure_global_patch()
 
