@@ -146,6 +146,11 @@ class AscendPCPManager(PCPManager):
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
 
+    def set_vllm_config(self, vllm_config: VllmConfig) -> None:
+        """Align the upstream splitter with Ascend's model-specific PCP policy."""
+        self.vllm_config = vllm_config
+        self.shard_decode_requests = self.shard_decode_requests and self.is_decode_sharded
+
     # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
     # vLLM includes #52162, which shards decode requests upstream.
     def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:

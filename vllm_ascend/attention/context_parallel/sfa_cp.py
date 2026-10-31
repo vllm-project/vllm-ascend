@@ -285,6 +285,35 @@ class AscendSFAPCPImpl(AscendSFAImpl):
 
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
+    def _store_parallel_kv(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        slot_mapping_sfa: torch.Tensor,
+        attn_metadata: M,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if (
+            self.uses_packed_sfa_main_cache
+            and k_nope is not None
+            and slot_mapping_sfa.numel() != k_nope.shape[0]
+            and needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded)
+        ):
+            replicated_tokens = get_pcp_num_replicated_tokens(
+                attn_metadata.num_decode_tokens, self.is_pcp_decode_sharded
+            )
+            if replicated_tokens:
+                pcp_size = get_pcp_group().world_size
+                local_tokens = attn_metadata.num_input_tokens
+                rank_slots = slot_mapping_sfa[: pcp_size * local_tokens].view(pcp_size, local_tokens)
+                # Native preprocessing returns deduplicated KV; its deferred
+                # packed-cache write must use the same decode/prefill order.
+                slot_mapping_sfa = torch.cat(
+                    (rank_slots[0, :replicated_tokens], rank_slots[:, replicated_tokens:].reshape(-1))
+                )
+        return super()._store_parallel_kv(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
+
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
     """Return a byte view for FP8 tensors, preserving their bit patterns."""
