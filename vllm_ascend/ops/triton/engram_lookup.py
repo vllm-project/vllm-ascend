@@ -65,6 +65,81 @@ def _engram_int8_gather_dequant_kernel(
 
 
 @triton.jit
+def _engram_layers_gather_dequant_kernel(
+    codes_ptrs,
+    scales_ptrs,
+    out_ptrs,
+    ids,
+    rows_per_layer,
+    chunk_stride,
+    vocab_starts,
+    vocab_ends,
+    ids_stride_t,
+    ids_stride_l,
+    CHUNK: tl.constexpr,
+    WIDTH: tl.constexpr,
+    GROUP: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    QUANTIZED: tl.constexpr,
+    MXFP8: tl.constexpr,
+):
+    """Gather every Engram layer's shard in one launch.
+
+    ``ids`` is the [tokens, layers, n_hash_cols] hash buffer (any layout with a
+    unit inner stride); ``codes_ptrs``/``scales_ptrs`` are [layers,
+    chunk_stride] device pointer tables whose slot ``l * chunk_stride + c``
+    addresses rows ``[c * CHUNK, (c + 1) * CHUNK)`` of layer ``l`` (HostUvaBuffer
+    device addresses or device-weight base addresses, chunked identically);
+    ``vocab_starts``/``vocab_ends`` bound each layer's rows; ``out_ptrs`` holds
+    one bf16 base pointer per layer whose first ``rows_per_layer`` rows of
+    ``WIDTH`` elements receive that rank's own head shard, packed at column 0.
+
+    Every output row is written, out-of-range ids included (they store
+    zeroes), matching the per-layer kernels' contract.
+    """
+    row = tl.program_id(0)
+    layer = tl.program_id(1)
+    if row >= rows_per_layer:
+        return
+    token = row // LOCAL_HEADS
+    head_local = row % LOCAL_HEADS
+    index = tl.load(ids + token * ids_stride_t + layer * ids_stride_l + HEAD_START + head_local).to(tl.int64)
+    vocab_start = tl.load(vocab_starts + layer)
+    vocab_end = tl.load(vocab_ends + layer)
+    owned = (index >= vocab_start) & (index < vocab_end)
+    local_row = tl.where(owned, index - vocab_start, 0)
+    chunk = local_row // CHUNK
+    local = local_row % CHUNK
+    ptr_slot = layer * chunk_stride + chunk
+    if MXFP8:
+        codes = tl.load(codes_ptrs + ptr_slot).to(tl.pointer_type(tl.float8e4nv))
+    elif QUANTIZED:
+        codes = tl.load(codes_ptrs + ptr_slot).to(tl.pointer_type(tl.int8))
+    else:
+        codes = tl.load(codes_ptrs + ptr_slot).to(tl.pointer_type(tl.bfloat16))
+    col = tl.arange(0, WIDTH)
+    value = tl.load(codes + local * WIDTH + col).to(tl.float32)
+    if QUANTIZED:
+        if MXFP8:
+            scales = tl.load(scales_ptrs + ptr_slot).to(tl.pointer_type(tl.uint8))
+            # Read and decode each group scale once, then broadcast to its
+            # values instead of gathering WIDTH repeated bytes.
+            groups = tl.arange(0, WIDTH // GROUP)
+            scale = tl.load(scales + local * (WIDTH // GROUP) + groups)
+            scale = _decode_e8m0(scale)
+            value = tl.reshape(value, (WIDTH // GROUP, GROUP)) * scale[:, None]
+            value = tl.reshape(value, (WIDTH,))
+        else:
+            scales = tl.load(scales_ptrs + ptr_slot).to(tl.pointer_type(tl.float32))
+            scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
+            value = value * scale
+    result = value.to(tl.bfloat16)
+    out_base = tl.load(out_ptrs + layer).to(tl.pointer_type(tl.bfloat16))
+    tl.store(out_base + row * WIDTH + col, tl.where(owned, result, tl.zeros_like(result)))
+
+
+@triton.jit
 def _engram_host_uva_gather_dequant_kernel(
     codes_ptrs,
     scales_ptrs,
