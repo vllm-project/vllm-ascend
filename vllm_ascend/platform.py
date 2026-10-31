@@ -602,9 +602,17 @@ class NPUPlatform(Platform):
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
+        from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
         from vllm_ascend.quantization.methods.kv_cache.turboquant.config import validate_turboquant
 
         validate_turboquant(vllm_config)
+        if (
+            is_turboquant(vllm_config)
+            and getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "deepseek_v4"
+        ):
+            # Ascend DSV4 has its own cache layout; skip layers would
+            # incorrectly trigger heterogeneous-page alignment.
+            vllm_config.cache_config.kv_cache_dtype_skip_layers = []
         if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
             assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 

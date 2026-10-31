@@ -1229,6 +1229,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(kwargs["in_profile_run"])
 
+    @patch("vllm_ascend.quantization.methods.kv_cache.turboquant.config.validate_turboquant")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -1238,7 +1239,7 @@ class TestNPUPlatform(TestBase):
     @patch("os.environ", {})
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_basic_config_update(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect, mock_validate_turboquant
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -1258,9 +1259,19 @@ class TestNPUPlatform(TestBase):
 
         importlib.reload(platform)
 
-        self.platform.check_and_update_config(vllm_config)
+        for model_type, cache_dtype, expected in (
+            ("deepseek_v4", "turboquant_4bit_nc", []),
+            ("llama", "turboquant_4bit_nc", ["0", "1", "6", "7"]),
+            ("deepseek_v4", "auto", ["0", "1", "6", "7"]),
+        ):
+            with self.subTest(model_type=model_type, cache_dtype=cache_dtype):
+                vllm_config.model_config.hf_text_config.model_type = model_type
+                vllm_config.cache_config.cache_dtype = cache_dtype
+                vllm_config.cache_config.kv_cache_dtype_skip_layers = ["0", "1", "6", "7"]
+                self.platform.check_and_update_config(vllm_config)
+                self.assertEqual(vllm_config.cache_config.kv_cache_dtype_skip_layers, expected)
 
-        mock_init_ascend.assert_called_once_with(vllm_config)
+        mock_init_ascend.assert_called_with(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
