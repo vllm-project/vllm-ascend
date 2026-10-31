@@ -1504,9 +1504,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
     def test_a5_megamoe_other_models_keep_legacy_config_rules(self, _mock_profile):
+        # The unified check reads routed_expert_hidden_size unconditionally, so
+        # the fixture must not plant a K3-only field with a non-K3 value (real
+        # non-K3 configs do not carry that field at all).
         text_config = SimpleNamespace(
             hidden_size=4096,
-            routed_expert_hidden_size=896,
             moe_intermediate_size=1024,
             intermediate_size=1024,
             num_experts_per_tok=4,
