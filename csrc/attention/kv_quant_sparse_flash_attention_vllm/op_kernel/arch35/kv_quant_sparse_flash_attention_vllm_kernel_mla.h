@@ -25,17 +25,24 @@
 #include "kv_quant_sparse_flash_attention_vllm_service_vector_mla.h"
 #include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
 #include "kv_quant_sparse_flash_attention_vllm_kvcache.h"
-#if __has_include("../../common/op_kernel/CopyInL1.h")
+// The installed AscendC package flattens each dependency's op_kernel directory.
+#if __has_include("../../common/CopyInL1.h")
+#include "../../common/CopyInL1.h"
+#elif __has_include("../../common/op_kernel/CopyInL1.h")
 #include "../../common/op_kernel/CopyInL1.h"
 #else
 #include "../../../common/op_kernel/CopyInL1.h"
 #endif
-#if __has_include("../../common/op_kernel/matmul.h")
+#if __has_include("../../common/matmul.h")
+#include "../../common/matmul.h"
+#elif __has_include("../../common/op_kernel/matmul.h")
 #include "../../common/op_kernel/matmul.h"
 #else
 #include "../../../common/op_kernel/matmul.h"
 #endif
-#if __has_include("../../common/op_kernel/FixpipeOut.h")
+#if __has_include("../../common/FixpipeOut.h")
+#include "../../common/FixpipeOut.h"
+#elif __has_include("../../common/op_kernel/FixpipeOut.h")
 #include "../../common/op_kernel/FixpipeOut.h"
 #else
 #include "../../../common/op_kernel/FixpipeOut.h"
