@@ -121,10 +121,14 @@ a transient single-shard partition for that invocation.
 | Recommended | `--test-list-file <file>` | PR precision testing (coverage/AST recommendation) |
 | Explicit | `--explicit-e2e-tests <path>...` | `/e2e` PR comment command |
 | Full suite | `--all-tests` | `ready-all` / `main2main` PRs, scheduled full scans |
+| Curated | `--curated <name>` | Curated suites (e.g. A5) |
 
 The `main2main` PR label reuses the full-suite selection and executes it twice,
 against both the verified vLLM main commit and the matched vLLM release tag.
-| Curated | `--curated <name>` | Curated suites (e.g. A5) |
+Release branches (`releases/v*`) are frozen, so their PRs run tests against the
+matched vLLM release tag only. The `pre-commit` job still checks out the
+branch's pinned `.github/vllm-main-verified.commit` for the static checks
+(mypy), because mypy must resolve every `import vllm...` target at once.
 
 `test_config.yaml` holds the routing metadata consumed by all modes:
 
