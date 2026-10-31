@@ -614,10 +614,15 @@ def find_hccl_library() -> str:
     if so_file:
         logger.info("Found hccl from environment variable HCCL_SO_PATH=%s", so_file)
     else:
-        if torch.version.cann is not None:
+        if getattr(torch.version, "cann", None) is not None:
             so_file = "libhccl.so"
         else:
-            raise ValueError("HCCL only supports Ascend NPU backends.")
+            raise ValueError(
+                "HCCL only supports Ascend NPU backends; "
+                "torch.version.cann is not available, which may indicate that "
+                "PyTorch was not built with torch-npu support. Install torch-npu "
+                "or point HCCL_SO_PATH at libhccl.so explicitly."
+            )
         logger.info("Found hccl from library %s", so_file)
     return so_file
 

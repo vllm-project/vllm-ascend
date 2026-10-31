@@ -182,6 +182,22 @@ class TestUtils(TestBase):
         with mock.patch("torch.version.cann", "Ascend910"):
             self.assertEqual(utils.find_hccl_library(), "libhccl.so")
 
+    def test_find_hccl_library_without_cann_attribute(self):
+        """A CPU-only torch build has no ``torch.version.cann`` attribute at all.
+        ``find_hccl_library`` must raise the friendly ValueError rather than an
+        ``AttributeError`` from the bare ``torch.version.cann`` access."""
+        # Patch torch.version with a spec that exposes no attributes, so accessing
+        # ``torch.version.cann`` raises AttributeError as on a CPU-only build. Using
+        # mock.patch avoids reassigning the global torch.version (which can leak into
+        # other tests if the test errors before restoring it).
+        class _VersionWithoutCann:
+            pass
+
+        with mock.patch("torch.version", _VersionWithoutCann(), spec=_VersionWithoutCann):
+            with self.assertRaises(ValueError) as ctx:
+                utils.find_hccl_library()
+            self.assertIn("torch-npu", str(ctx.exception))
+
     def test_current_stream(self):
         utils._CURRENT_STREAM = None
         mock_stream = mock.MagicMock(name="npu_stream")

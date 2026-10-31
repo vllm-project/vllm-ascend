@@ -605,8 +605,19 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.methods.kv_cache.turboquant.config import validate_turboquant
 
         validate_turboquant(vllm_config)
-        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
-            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+        # cache_config / attention_config can be None in some deployment or testing scenarios
+        # (guarded elsewhere in this file, e.g. lines 832 / 920). Use getattr so a missing config
+        # skips the fp8 check instead of raising AttributeError at startup.
+        cache_dtype = getattr(vllm_config.cache_config, "cache_dtype", None)
+        indexer_kv_dtype = getattr(vllm_config.attention_config, "indexer_kv_dtype", None)
+        if cache_dtype == "fp8" or indexer_kv_dtype == "fp8":
+            hardware_profile = get_current_hardware_profile()
+            if not hardware_profile.supports(HardwareCapability.FP8_ATTENTION):
+                raise ValueError(
+                    f"FP8 KV cache is not supported on "
+                    f"device_type={getattr(hardware_profile, 'device_type', '?')}. "
+                    f"Please specify a supported --kv-cache-dtype."
+                )
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -1435,8 +1446,7 @@ def _setup_compile_backend(
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
-                "cudagraph_mode=%s",
-                compilation_config.cudagraph_mode,
+                f"cudagraph_mode={compilation_config.cudagraph_mode}."
             )
         compilation_config.set_splitting_ops_for_v1(
             all2all_backend=vllm_config.parallel_config.all2all_backend,
