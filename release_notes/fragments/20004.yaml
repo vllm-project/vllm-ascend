@@ -1,0 +1,4 @@
+pr: 20004
+entries:
+  - category: bugfix
+    text: Fixed recurrent-state corruption when cached prompt tails receive speculative padding in the V1 runners.
