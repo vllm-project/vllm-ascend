@@ -16,6 +16,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
@@ -29,6 +30,31 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
         self.addCleanup(format_cast.stop)
         format_cast.start()
+
+    def test_overlap_preserves_already_quantized_inputs(self):
+        quantized, scale = torch.ones(2, 32), torch.ones(2, 1)
+        inputs = [(quantized, scale), PreparedLinearInput(quantized, scale, torch.bfloat16)]
+        with patch.object(self.scheme, "_quantize_input") as quantize:
+            for value in inputs:
+                with self.subTest(input_type=type(value)):
+                    self.assertIsNone(self.scheme.prepare_input_for_overlap(nn.Module(), value))
+            quantize.assert_not_called()
+
+    def test_overlap_quantizes_two_dimensional_tensor_once(self):
+        layer, value = nn.Module(), torch.ones(2, 32)
+        quantized, scale = torch.zeros_like(value), torch.ones(2, 1)
+        with patch.object(self.scheme, "_quantize_input", return_value=(quantized, scale)) as quantize:
+            prepared = self.scheme.prepare_input_for_overlap(layer, value)
+        quantize.assert_called_once_with(layer, value)
+        self.assertIsInstance(prepared, PreparedLinearInput)
+        self.assertIs(prepared.quantized, quantized)
+        self.assertIs(prepared.scale, scale)
+        self.assertEqual(prepared.output_dtype, value.dtype)
+
+    def test_overlap_preserves_higher_dimensional_fallback(self):
+        with patch.object(self.scheme, "_quantize_input") as quantize:
+            self.assertIsNone(self.scheme.prepare_input_for_overlap(nn.Module(), torch.ones(2, 3, 32)))
+        quantize.assert_not_called()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
