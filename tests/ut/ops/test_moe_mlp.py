@@ -339,6 +339,43 @@ class TestW4A8SituPath(unittest.TestCase):
         self.assertEqual(mock_situ.call_args.kwargs["linear_beta"], 25.0)
 
 
+class TestW4A8Gmm1Path(unittest.TestCase):
+    def test_gmm1_uses_per_channel_scale_layout_without_bias(self):
+        method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+        method.use_expert_weight_list = False
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(1, 8, 16),
+            w13_weight_scale=torch.randn(1, 8),
+            w13_scale_bias=torch.randn(1, 8),
+            w2_weight=torch.randn(1, 16, 8),
+            w2_weight_scale=torch.randn(1, 16),
+            activation="silu",
+        )
+        mlp_compute_input = _mlp_compute_input(
+            layer=layer,
+            fusion=False,
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+        )
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=("qx", torch.ones(2)), create=True),
+            patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
+        ):
+            out = method.apply_gmm1(mlp_compute_input)
+
+        self.assertEqual(out, "bf16_out")
+        # Per-channel W4A8 must pass the scale in [E, 1, N] layout
+        # (unsqueeze(-2)); a flattened [E, N] scale makes the A8W4 tiling
+        # read it as quantGroupNum and compute out-of-bounds addresses.
+        gmm_scale = mock_gmm.call_args.kwargs["scale"][0]
+        self.assertEqual(gmm_scale.ndim, 3)
+        self.assertEqual(gmm_scale.shape, (1, 1, 8))
+        # The standalone npu_grouped_matmul has no per-channel offset input;
+        # passing the flattened scale_bias here corrupts the tiling input
+        # parsing just like the flattened scale does.
+        self.assertIsNone(mock_gmm.call_args.kwargs["bias"])
+        self.assertEqual(mock_gmm.call_args.kwargs["output_dtype"], torch.bfloat16)
+
+
 class TestW4A16FusedMoEMethod(unittest.TestCase):
     def _make_method(self):
         return AscendW4A16FusedMoEMethod.__new__(AscendW4A16FusedMoEMethod)
