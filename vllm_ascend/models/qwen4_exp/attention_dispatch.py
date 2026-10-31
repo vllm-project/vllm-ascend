@@ -26,7 +26,7 @@ class QSARequest:
     @property
     def use_fia(self) -> bool:
         """Whether this Prefill chunk starts below the FIA KV limit."""
-        return self.is_prefill and self.fia_query_end > self.query_start
+        return self.fia_query_end > self.query_start
 
     @property
     def fia_query_end(self) -> int:
@@ -48,7 +48,7 @@ class QSARequest:
     @property
     def gbsa_query_start(self) -> int:
         """First row routed to GBSA; Decode starts at the request boundary."""
-        return self.fia_query_end if self.is_prefill else self.query_start
+        return self.fia_query_end
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,7 @@ def build_qsa_request_plan(
     phases = is_prefilling_cpu.tolist()
     if len(lengths) < len(starts) - 1 or len(phases) < len(starts) - 1:
         raise ValueError("QSA phase and KV metadata must cover every request")
-    requests = []
+    requests: list[QSARequest] = []
     for request_index, (start, end) in enumerate(zip(starts, starts[1:])):
         start = min(max(start, 0), num_actual_tokens)
         end = min(max(end, start), num_actual_tokens)
