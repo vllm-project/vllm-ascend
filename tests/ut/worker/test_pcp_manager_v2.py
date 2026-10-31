@@ -124,6 +124,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     np.testing.assert_array_equal(
         manager.replicated_requests(counts, prefilling), [not expected_sharding, not expected_sharding]
     )
+    assert manager.shard_decode_requests is expected_sharding
     expected = [(1, 0, 1)] if expected_sharding else [(0, 0, 1), (1, 0, 1)]
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
@@ -178,6 +179,7 @@ def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, upstream_dec
 
     assert not is_pcp_decode_sharding_enabled(config)
     np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
+    assert not manager.shard_decode_requests
     assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, query_len), (1, 0, query_len)]
 
 
@@ -401,7 +403,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
 
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
-    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager = AscendPCPManager.__new__(AscendPCPManager)
     decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
     draft_decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
     prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)

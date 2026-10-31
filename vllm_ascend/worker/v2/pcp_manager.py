@@ -64,7 +64,7 @@ class AscendPCPAttentionContext:
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
-    _vllm_config: VllmConfig
+    vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig | None = None
     _hidden_restore_idx: torch.Tensor | None
     _global_batch_slot_mappings: torch.Tensor | None
@@ -146,19 +146,11 @@ class AscendPCPManager(PCPManager):
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
 
-    @property
-    def vllm_config(self) -> VllmConfig:
-        return self._vllm_config
-
-    @vllm_config.setter
-    def vllm_config(self, vllm_config: VllmConfig) -> None:
-        self._vllm_config = vllm_config
-        self.shard_decode_requests = self.shard_decode_requests and self.is_decode_sharded
-
     # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
     # vLLM includes #52162, which shards decode requests upstream.
     def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
         """Sharded decodes have a single owner, so none of them is replicated."""
+        self.shard_decode_requests = self.shard_decode_requests and self.is_decode_sharded
         replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
         if self.is_decode_sharded:
             replicated &= np.asarray(is_prefilling, dtype=np.bool_)
