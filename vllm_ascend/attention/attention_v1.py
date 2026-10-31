@@ -49,9 +49,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
+    FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
     AscendCommonAttentionMetadata,
+    _maybe_b1_paged_verify,
     _select_seq_lens,
+    build_paged_verify_mask,
     is_dcp_enabled,
+    maybe_route_512_capture,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -119,6 +123,19 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
+        # Gemma4-style head_dim=512 global attention cannot be served by FIA TND
+        # on A2/A3, so those layers are captured through FIA-v2 BNSD paged ops,
+        # which need the Hkv-major [blocks, heads, block, dim] cache. Every
+        # other layer keeps the natural [blocks, block, heads, dim] layout that
+        # the stock FIA TND path slices into [blocks, block, heads*dim].
+        # The bytes per page are identical, so mixing the two layouts across a
+        # model only changes the per-layer cache views, not the block table.
+        if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+            # Lazy import: the device config probes the runtime SoC version.
+            from vllm_ascend.utils import is_950
+
+            if not is_950():
+                return (2, num_blocks, num_kv_heads, block_size, head_size)
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -212,6 +229,12 @@ class AscendMetadata:
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
     block_tables: torch.Tensor = None
+
+    # B1: [B, 1, k+1, block_table_width * block_size] bool verify mask for the
+    # 512-dim MTP verify capture (True = masked out). Only the 512-dim group
+    # builds it, and only for runtime SpecDecoding steps; the graph-update
+    # provider rebinds it every replay.
+    paged_verify_mask: torch.Tensor | None = None
 
     # The indices of the token slots that input tokens will be stored into.
     # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the
@@ -435,6 +458,28 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
+        # B1: build the shared [B, 1, k+1, W] verify mask for the head_dim=512
+        # global-attention group on real SpecDecoding steps. The FULL-graph
+        # update provider rebinds it into the captured FIA-v2 BNSD paged task
+        # every replay, so it must be computed here (default stream) rather
+        # than inside the graph-task-update stream region. Graph-capture dummy
+        # metadata is not labeled SpecDecoding (it is ChunkedPrefill), so the
+        # capture path binds an all-visible placeholder of the same shape.
+        paged_verify_mask = None
+        if (
+            attn_state == AscendAttentionState.SpecDecoding
+            and self.speculative_config is not None
+            and block_table is not None
+            and getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        ):
+            paged_verify_mask = build_paged_verify_mask(
+                seq_lens,
+                block_table,
+                self.speculative_config.num_speculative_tokens,
+                self.kv_cache_spec.block_size,
+                self.device,
+            )
+
         backend_metadata = self._build_backend_metadata(
             common_attn_metadata,
             block_table=block_table,
@@ -447,6 +492,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
+            paged_verify_mask=paged_verify_mask,
             query_start_loc=query_start_loc,
             query_start_loc_gpu=common_attn_metadata.query_start_loc,
             seq_lens_gpu=common_attn_metadata.seq_lens,
@@ -551,6 +597,46 @@ class FIAV2ParamProvider:
 
 
 @dataclass(frozen=True, slots=True)
+class FIAPagedVerifyParamProvider:
+    """Runtime args for the B1 FIA-v2 BNSD paged capture.
+
+    Only the args that change per step are returned; query/KV/workspace/output
+    stay bound to the captured buffers. block_table and the mask are re-bound
+    to the current step's buffers, mirroring FIAParamProvider/PAParamProvider.
+
+    The provider deliberately has no query-length field: the draft registers
+    one task per step with the same provider instance, and SharedSource maps
+    them back by (provider, registration order). A query-length field would
+    split that identity and break the mapping. The query length is instead read
+    from the runtime metadata.
+    """
+
+    layer_name: str | None
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        verify_mask = metadata.paged_verify_mask
+        query_lengths = metadata.actual_seq_lengths_q
+        # AscendMetadata defaults this field to None; guard before indexing.
+        query_len = int(query_lengths[0]) if query_lengths else 0
+        params = {
+            "block_table": metadata.block_tables,
+            "actual_seq_kvlen": metadata.seq_lens_list,
+        }
+        if verify_mask is not None and verify_mask.shape[2] == query_len:
+            params["atten_mask"] = verify_mask
+        elif query_len > 1:
+            raise RuntimeError(
+                "B1 paged verify replay requires a matching paged_verify_mask in the runtime metadata of "
+                f"layer {self.layer_name!r} (query_len={query_len}); the 512-dim group builder must "
+                "label this step SpecDecoding."
+            )
+        # A single-query row needs no mask: the capture bound an all-visible
+        # placeholder, which stays correct for every step.
+        return params
+
+
+@dataclass(frozen=True, slots=True)
 class PAParamProvider:
     layer_name: str | None
 
@@ -596,7 +682,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.kv_cache_layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
+        # Keep this in lockstep with AscendAttentionBackend.get_kv_cache_shape:
+        # head_dim=512 layers are allocated in BNSD on A2/A3 even when the
+        # model-wide layout (and every other layer) stays natural.
         self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
+        if not self.use_bnsd_kv_cache and self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+            from vllm_ascend.utils import is_950
+
+            self.use_bnsd_kv_cache = not is_950()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -820,6 +913,129 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         return output, num_tokens
 
+    def full_graph_fia_v2_paged_verify(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """B1: capture a 512-dim paged step as FIA-v2 BNSD.
+
+        Op contract: query [B, Hq, qlen, D] BNSD against the paged KV cache
+        views [num_blocks, Hkv, block_size, D], per-seq block_table (NO
+        per-query expansion), plain per-request actual_seq_qlen/kvlen lists,
+        explicit [B, 1, qlen, W] bool mask (True = masked out), sparse_mode=0.
+        TND is not an option at head_dim=512 (FIA rejects the layout), which is
+        why the default FIA capture paths cannot serve this layer.
+
+        qlen is derived from the captured token count: the target MTP verify
+        step runs k+1 queries per request, the KV-sharing draft runs step 0
+        with the same verify layout and its later steps with one query per
+        request. Sequence lengths must be uniform across requests, which holds
+        for every FULL_DECODE_ONLY capture shape.
+        """
+        num_tokens = query.shape[0]
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        num_reqs = len(actual_seq_lengths_q)
+        if num_reqs == 0 or num_tokens % num_reqs:
+            raise RuntimeError(
+                f"B1 paged verify needs num_tokens divisible by the request count; got "
+                f"{num_tokens} tokens for {num_reqs} requests."
+            )
+        qlen = num_tokens // num_reqs
+        if [qlen * (i + 1) for i in range(num_reqs)] != actual_seq_lengths_q:
+            raise RuntimeError(f"B1 paged verify requires a uniform query length, got {actual_seq_lengths_q}.")
+
+        if not self.use_bnsd_kv_cache:
+            raise RuntimeError(
+                "B1 paged verify requires the head_dim=512 layers to be allocated "
+                "in BNSD (see AscendAttentionBackend.get_kv_cache_shape); got the "
+                "natural layout, whose permuted view the FIA-v2 paged op rejects."
+            )
+        _, _, block_size, _ = self.key_cache.shape  # type: ignore
+        key = self.key_cache
+        value = self.value_cache
+        if not (key.is_contiguous() and value.is_contiguous()):  # type: ignore
+            raise RuntimeError(
+                "B1 paged verify requires contiguous K/V buffers, but the runner "
+                "allocated block-interleaved views. requires_contiguous_pa_kv_cache "
+                "must keep head_dim=512 layers on private split (k, v) allocations."
+            )
+        # [num_tokens, Hq*D] -> [B, Hq, qlen, D]; contiguous() is a captured op
+        # that re-reads the static query buffer on every replay.
+        q_bnsd = query.view(num_reqs, qlen, self.num_heads, self.head_size).permute(0, 2, 1, 3).contiguous()
+        block_table = attn_metadata.block_tables
+        verify_mask = attn_metadata.paged_verify_mask
+        if verify_mask is None or verify_mask.shape[2] != qlen:
+            # Capture-time dummy metadata is not labeled SpecDecoding, so
+            # build() skipped the shared mask. Single-query draft steps do get
+            # one (build() always sizes it for k+1 queries), but with the wrong
+            # query dimension. The real mask needs a seq_lens H2D, illegal on
+            # the capture stream: bind an all-visible placeholder of the right
+            # shape. Target replays and draft step 0 rebind the real mask via
+            # the task update; a single query row is always fully causal, so the
+            # placeholder stays correct for the other draft steps.
+            verify_mask = torch.zeros(
+                (num_reqs, 1, qlen, block_table.shape[1] * block_size),
+                dtype=torch.bool,
+                device=query.device,
+            )
+        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        attn_output = torch.empty(
+            num_reqs, self.num_heads, qlen, self.head_size, dtype=query.dtype, device=query.device
+        )
+        actual_seq_qlen = [qlen] * num_reqs
+        actual_seq_kvlen = attn_metadata.seq_lens_list
+
+        # Shared int ws key: B1 must always compete for byte-max; plain-FIA
+        # first-capture would undersize it (capture_end 107033).
+        workspace = get_capture_resource(
+            _FIA_V2_WORKSPACE_KEY,
+            lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=q_bnsd,
+                key=key,
+                value=value,
+                atten_mask=verify_mask,
+                block_table=block_table,
+                input_layout="BNSD",
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_qlen,
+                actual_seq_kvlen=actual_seq_kvlen,
+                num_key_value_heads=self.num_kv_heads,
+                softmax_scale=self.scale,
+                num_query_heads=self.num_heads,
+                sparse_mode=0,
+            ),
+            use_max_workspace=True,
+        )
+        register_task(
+            torch_npu.npu_fused_infer_attention_score_v2.out,
+            {
+                "query": q_bnsd,
+                "key": key,
+                "value": value,
+                "atten_mask": verify_mask,
+                "block_table": block_table,
+                "input_layout": "BNSD",
+                "block_size": block_size,
+                "actual_seq_qlen": actual_seq_qlen,
+                "actual_seq_kvlen": actual_seq_kvlen,
+                "num_key_value_heads": self.num_kv_heads,
+                "num_query_heads": self.num_heads,
+                "sparse_mode": 0,
+                "softmax_scale": self.scale,
+                "workspace": workspace,
+                "out": [attn_output, softmax_lse],
+            },
+            FIAPagedVerifyParamProvider(self._layer_name),
+        )
+        # [B, Hq, qlen, D] -> [num_tokens, Hq*D]; captured copy op, replays
+        # from the attn_output buffer the updated FIA task refills every step.
+        output.view(num_reqs, qlen, self.num_heads * self.head_size).copy_(
+            attn_output.permute(0, 2, 1, 3).reshape(num_reqs, qlen, self.num_heads * self.head_size)
+        )
+        return output
+
     def full_graph_pa(
         self,
         query: torch.Tensor,
@@ -923,6 +1139,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
+            # head_dim=512 global attention (Gemma4) cannot use FIA TND during
+            # graph capture, so route to PagedAttention. The helper self-gates
+            # on head_size==512 (A5 is skipped via is_950); no outer model gate
+            # is needed -- during draft forward _EXTRA_CTX.vllm_config is the
+            # draft config, which has no speculative_config.
+            if maybe_route_512_capture(self, attn_metadata):
+                # Dispatch note: MTP capture metadata is not labeled
+                # SpecDecoding, so forward_impl's PA gate never routes here;
+                # full_graph_pa is called directly and B1 hooks in first.
+                if _maybe_b1_paged_verify(self, attn_metadata, query.shape[0]):
+                    return self.full_graph_fia_v2_paged_verify(query, attn_metadata, output)
+                return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1144,6 +1372,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
+            # B1: target-model head_dim=512 MTP verify captures as a FIA-v2
+            # BNSD paged op (per-seq block_table, no per-query expansion).
+            # Draft layers and non-verify shapes keep the PA capture.
+            if _maybe_b1_paged_verify(self, attn_metadata, query.shape[0]):
+                return self.full_graph_fia_v2_paged_verify(query, attn_metadata, output)
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,

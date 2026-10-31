@@ -674,14 +674,46 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             )
                         )
                         continue
-                    update_params.append(
-                        {
-                            "layer_name": layer_name,
-                            "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                            "actual_seq_lengths_kv": metadata.seq_lens_list,
-                            "block_table": metadata.block_tables,
-                        }
+                    # The metadata carries query lengths in the TND convention
+                    # (cumulative). The FIA-v2 paged op runs the BNSD layout and
+                    # rejects any entry above Q_S: "actual_seq_lengths[1](8) must
+                    # not be greater than Q_S(4) when the layout of query is not
+                    # TND or NTD". Convert to the per-batch form it expects
+                    # (verify: k+1 per request, later draft steps: 1 each).
+                    cumulative_qlen = metadata.actual_seq_lengths_q
+                    # AscendMetadata defaults this field to None; treat that
+                    # like an empty list before indexing.
+                    query_lengths = (
+                        [cumulative_qlen[0]] + [b - a for a, b in zip(cumulative_qlen, cumulative_qlen[1:])]
+                        if cumulative_qlen
+                        else []
                     )
+                    params = {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        # FIA-v2 ops name the KV lengths differently; bind()
+                        # drops whichever of the two names the captured op
+                        # does not take.
+                        "actual_seq_kvlen": metadata.seq_lens_list,
+                        # The B1 paged-verify op takes its query lengths under
+                        # the FIA-v2 name too. Without this, bind() leaves the
+                        # capture-time list in place and every replay keeps the
+                        # captured batch/query split.
+                        "actual_seq_qlen": query_lengths,
+                        "block_table": metadata.block_tables,
+                    }
+                    verify_mask = getattr(metadata, "paged_verify_mask", None)
+                    if (
+                        verify_mask is not None
+                        and len(query_lengths) > 0
+                        and verify_mask.shape[2] == int(query_lengths[0])
+                    ):
+                        # head_dim=512 verify-layout steps (draft step 0) must
+                        # refresh the causal mask every replay. Single-query
+                        # steps keep their all-visible capture placeholder.
+                        params["atten_mask"] = verify_mask
+                    update_params.append(params)
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
@@ -704,6 +736,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             values = getattr(common_attn_metadata, field, None)
             if values is not None:
                 setattr(common_attn_metadata, field, self._adjust_tensor(values[:num_actual_reqs], num_reqs))
+
+    def _single_query_draft_dummy_metadata(self, common_attn_metadata, draft_index):
+        """Return the capture metadata later draft steps replay, or None.
+
+        At runtime ``attn_update_stack_num_spec_norm`` rebuilds the metadata for
+        draft steps >= 1 with ``num_reqs == num_input_tokens`` and
+        ``query_start_loc == arange``: every padded token slot becomes its own
+        single-query request. The draft FULL graph must be captured with that
+        same layout. The head_dim=512 BNSD paged op freezes its batch and query
+        dimensions in the captured query tensor, so a verify-layout capture
+        cannot be updated with the one-query metadata that replays it.
+
+        The running loop metadata is left untouched: the caller only builds this
+        step's attention metadata from the returned copy.
+        """
+        if self.dcp_size > 1 or draft_index == 0 or self.parallel_drafting:
+            # The DCP path already rewrites these fields, and parallel drafting
+            # never rebuilds later-step metadata.
+            return None
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        capture_metadata = self.shallow_copy_metadata(common_attn_metadata)
+        capture_metadata.num_reqs = num_input_tokens
+        capture_metadata.query_start_loc = self.arange[: num_input_tokens + 1]
+        capture_metadata.query_start_loc_cpu = torch.from_numpy(self.token_arange_np[: num_input_tokens + 1]).clone()
+        capture_metadata.max_query_len = 1
+        capture_metadata.num_input_tokens = num_input_tokens
+        return capture_metadata
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
@@ -908,8 +967,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                     if dcp_manager is not None:
                         dcp_manager.prepare_common_attn_metadata(common_attn_metadata)
+                    # Later draft steps replay a one-query-per-slot layout; build
+                    # their metadata in that same layout. Only the copy is
+                    # adjusted so the loop's running buffers keep their sizes.
+                    capture_metadata = self._single_query_draft_dummy_metadata(common_attn_metadata, draft_index)
+                    if capture_metadata is None:
+                        capture_metadata = common_attn_metadata
                     per_layer_attn_metadata = self._build_multi_group_graph_capture_metadata(
-                        common_attn_metadata, draft_index
+                        capture_metadata, draft_index
                     )
                     if per_layer_attn_metadata is not None:
                         multi_steps_attn_metadata.append(per_layer_attn_metadata)
@@ -919,7 +984,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         builder = attn_group.get_metadata_builder()
                         if not self.use_compress or draft_index == 0:
                             attn_metadata_eagle = builder.build_for_graph_capture(
-                                common_attn_metadata,
+                                capture_metadata,
                                 AscendAttentionState.SpecDecoding
                                 if self.method == "mtp"
                                 else AscendAttentionState.ChunkedPrefill,
@@ -927,7 +992,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             )
                         else:
                             attn_metadata_eagle = builder.build_for_drafting(
-                                common_attn_metadata,
+                                capture_metadata,
                                 draft_index,
                                 **extra_attn_metadata_args,
                             )
