@@ -1,0 +1,2700 @@
+[
+  {
+    "id": "prefill-r4-d128",
+    "fused_us": 50.771,
+    "serial_us": 72.80449999999999,
+    "ratio": 0.6973607400641445,
+    "cube_share": 0.4607668317537835,
+    "fused_spread": 0.06730220007484591,
+    "serial_spread": 0.04277208139606761,
+    "samples": {
+      "fused": {
+        "raw_sha256": "9b2ac21166c2da47441d43c2271bf830b3f0ee13def40ef89cf84fe445c144ec",
+        "raw_file": "raw/prefill-r4-d128-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 53.027,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 50.356,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 50.369,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 52.28,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 49.687,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 51.718,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 50.057,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 49.61,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 51.316,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 51.173,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          53.027,
+          50.356,
+          50.369,
+          52.28,
+          49.687,
+          51.718,
+          50.057,
+          49.61,
+          51.316,
+          51.173
+        ],
+        "median_total_us": 50.771,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.06730220007484591
+      },
+      "serial": {
+        "raw_sha256": "802ca942b93e96086390282721882237ea611ed69f550c7e8dd67ef0a621d99b",
+        "raw_file": "raw/prefill-r4-d128-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.333,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 34.17,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 11.287,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.428,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.023,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.624,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 10.879,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.328,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.22,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.118,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 12.417,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.729,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.222,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.37,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 11.556,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.607,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.89,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.246,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 11.376,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.021,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.915,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.892,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 12.302,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.568,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.058,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 34.284,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 11.803,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.343,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.529,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 32.811,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 10.836,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.611,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.05,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.333,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 10.627,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.24,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.732,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 33.847,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 12.38,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 17.942,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          73.218,
+          72.854,
+          72.48400000000001,
+          72.755,
+          72.533,
+          73.677,
+          73.488,
+          70.787,
+          71.25,
+          73.90100000000001
+        ],
+        "median_total_us": 72.80449999999999,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          34.17,
+          33.624,
+          33.118,
+          33.37,
+          33.246,
+          33.892,
+          34.284,
+          32.811,
+          33.333,
+          33.847
+        ],
+        "vector_us": [
+          39.048,
+          39.23,
+          39.36600000000001,
+          39.385,
+          39.287,
+          39.785000000000004,
+          39.204,
+          37.976000000000006,
+          37.917,
+          40.05400000000001
+        ],
+        "cube_share": [
+          0.4666885192165861,
+          0.46152579130864474,
+          0.45690083328734615,
+          0.4586626348704556,
+          0.4583568858312768,
+          0.4600078721989223,
+          0.4665251469627694,
+          0.4635173125008829,
+          0.4678315789473684,
+          0.45800462781288476
+        ],
+        "median_cube_share": 0.4607668317537835,
+        "spread_fraction": 0.04277208139606761
+      }
+    },
+    "stable": true,
+    "target_met": false,
+    "acceptance": "valid"
+  },
+  {
+    "id": "prefill-r4-d512",
+    "fused_us": 57.2615,
+    "serial_us": 140.82750000000001,
+    "ratio": 0.4066073742699401,
+    "cube_share": 0.6232977706586946,
+    "fused_spread": 0.041930441919963736,
+    "serial_spread": 0.029667501020752315,
+    "samples": {
+      "fused": {
+        "raw_sha256": "071d420cd87d3cf907b51c9279a93b794d9933a41e2c6925701f13050f293c4f",
+        "raw_file": "raw/prefill-r4-d512-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 58.136,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 57.938,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 57.43,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 57.453,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 56.522,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 56.898,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 57.496,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 55.735,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 57.093,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 56.738,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          58.136,
+          57.938,
+          57.43,
+          57.453,
+          56.522,
+          56.898,
+          57.496,
+          55.735,
+          57.093,
+          56.738
+        ],
+        "median_total_us": 57.2615,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.041930441919963736
+      },
+      "serial": {
+        "raw_sha256": "8d347db60dc0db312187202cb251e4a5c72bf96107435cba3759784c523b637c",
+        "raw_file": "raw/prefill-r4-d512-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.411,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 89.064,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.846,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 19.713,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.597,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.821,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 25.009,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.669,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.26,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 88.078,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.825,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 19.254,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.987,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.713,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 25.184,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 19.99,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.113,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.76,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.757,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 20.078,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.346,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.625,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 25.204,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.734,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.75,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.801,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.335,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 19.117,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.626,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 88.111,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.797,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 19.212,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.514,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.752,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.186,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.404,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.889,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 87.61,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 23.938,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 18.982,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          143.034,
+          141.096,
+          140.417,
+          142.874,
+          141.708,
+          140.90900000000002,
+          140.003,
+          140.746,
+          138.856,
+          140.41899999999998
+        ],
+        "median_total_us": 140.82750000000001,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          89.064,
+          87.821,
+          88.078,
+          87.713,
+          87.76,
+          87.625,
+          87.801,
+          88.111,
+          87.752,
+          87.61
+        ],
+        "vector_us": [
+          53.97,
+          53.275000000000006,
+          52.339,
+          55.161,
+          53.94799999999999,
+          53.28400000000002,
+          52.201999999999984,
+          52.635000000000005,
+          51.104,
+          52.80899999999998
+        ],
+        "cube_share": [
+          0.6226771257183606,
+          0.6224201961784884,
+          0.627260232023188,
+          0.613918557610202,
+          0.6193016625737432,
+          0.6218552399066063,
+          0.6271365613593995,
+          0.626028448410612,
+          0.6319640490868238,
+          0.6239184155990287
+        ],
+        "median_cube_share": 0.6232977706586946,
+        "spread_fraction": 0.029667501020752315
+      }
+    },
+    "stable": true,
+    "target_met": false,
+    "acceptance": "valid"
+  },
+  {
+    "id": "prefill-r128-d512",
+    "fused_us": 82.119,
+    "serial_us": 101.196,
+    "ratio": 0.8114846436618048,
+    "cube_share": 0.5219162189412772,
+    "fused_spread": 0.027971602187069948,
+    "serial_spread": 0.0181528914186329,
+    "samples": {
+      "fused": {
+        "raw_sha256": "823526a99a2afaa888b7255f3f626da7b68840f160a7f6d7d3edef1120630dc8",
+        "raw_file": "raw/prefill-r128-d512-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 83.387,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.727,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 81.09,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.268,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.118,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.081,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.228,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 81.421,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 82.12,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 81.506,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          83.387,
+          82.727,
+          81.09,
+          82.268,
+          82.118,
+          82.081,
+          82.228,
+          81.421,
+          82.12,
+          81.506
+        ],
+        "median_total_us": 82.119,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.027971602187069948
+      },
+      "serial": {
+        "raw_sha256": "4db4968e853830537317d7312e165df859c9301a922c151ddf510ce2fede3e4e",
+        "raw_file": "raw/prefill-r128-d512-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.548,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 53.015,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.116,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.523,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.441,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 53.402,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.94,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.589,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.722,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.526,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.769,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.955,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 10.142,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.478,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.975,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.58,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.609,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 53.176,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.402,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.544,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.634,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.151,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.854,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.918,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.863,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.986,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.437,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.904,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.882,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.863,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 22.119,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.857,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.742,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 53.155,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 21.726,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.769,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li16384EEvPhS0_m",
+              "duration_us": 9.882,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 52.936,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi512EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 22.794,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 16.782,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          101.202,
+          101.372,
+          100.972,
+          101.175,
+          100.73100000000001,
+          100.55700000000002,
+          101.19,
+          101.721,
+          101.392,
+          102.39399999999999
+        ],
+        "median_total_us": 101.196,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          53.015,
+          53.402,
+          52.526,
+          52.478,
+          53.176,
+          52.151,
+          52.986,
+          52.863,
+          53.155,
+          52.936
+        ],
+        "vector_us": [
+          48.187,
+          47.97,
+          48.44599999999999,
+          48.696999999999996,
+          47.55500000000001,
+          48.40600000000001,
+          48.204,
+          48.858000000000004,
+          48.236999999999995,
+          49.45799999999999
+        ],
+        "cube_share": [
+          0.523853283531946,
+          0.5267924081600442,
+          0.520203620805768,
+          0.5186854460093897,
+          0.5279010433729437,
+          0.5186212794733335,
+          0.5236288170767862,
+          0.5196862004895744,
+          0.5242524065014992,
+          0.5169834169970897
+        ],
+        "median_cube_share": 0.5219162189412772,
+        "spread_fraction": 0.0181528914186329
+      }
+    },
+    "stable": true,
+    "target_met": true,
+    "acceptance": "valid"
+  },
+  {
+    "id": "decode-r4-d128",
+    "fused_us": 21.907,
+    "serial_us": 27.218000000000004,
+    "ratio": 0.8048717760305679,
+    "cube_share": 0.3547332107407019,
+    "fused_spread": 0.07422285114347017,
+    "serial_spread": 0.06686751414505133,
+    "samples": {
+      "fused": {
+        "raw_sha256": "2d0b93c7a5d8d2a03ff16f7a6f4035c2f2f3948c02050c7297aeae6030a98c30",
+        "raw_file": "raw/decode-r4-d128-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.14,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.1,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.568,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.853,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.961,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.601,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.233,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.326,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.942,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.056,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          21.14,
+          22.1,
+          22.568,
+          21.853,
+          21.961,
+          21.601,
+          21.233,
+          22.326,
+          20.942,
+          22.056
+        ],
+        "median_total_us": 21.907,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.07422285114347017
+      },
+      "serial": {
+        "raw_sha256": "44c90e4ff857f6807ce362635f900b3803af57cc678cca977f2cf34a9e69a8d1",
+        "raw_file": "raw/decode-r4-d128-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.813,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 10.223,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.377,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.756,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.405,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.68,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.664,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.522,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.592,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.422,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.079,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.576,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.345,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.591,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.761,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.495,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.594,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.341,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.078,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.336,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.5,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.618,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.512,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.614,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.419,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.645,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 7.862,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.555,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.375,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.981,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.141,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.579,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.388,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.594,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.719,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.607,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.423,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 9.845,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.319,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.489,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          28.169000000000004,
+          27.271,
+          27.669000000000004,
+          27.192,
+          26.348999999999997,
+          27.244000000000003,
+          26.481,
+          27.076,
+          27.308,
+          27.076000000000004
+        ],
+        "median_total_us": 27.218000000000004,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          10.223,
+          9.68,
+          9.422,
+          9.591,
+          9.341,
+          9.618,
+          9.645,
+          9.981,
+          9.594,
+          9.845
+        ],
+        "vector_us": [
+          17.946000000000005,
+          17.591,
+          18.247000000000003,
+          17.601,
+          17.007999999999996,
+          17.626000000000005,
+          16.836000000000002,
+          17.095,
+          17.714,
+          17.231
+        ],
+        "cube_share": [
+          0.3629166814583407,
+          0.3549558138682116,
+          0.3405254978495789,
+          0.3527140335392762,
+          0.3545106076131922,
+          0.3530318602261048,
+          0.36422340546051885,
+          0.3686290441719604,
+          0.3513256188662663,
+          0.3636061456640567
+        ],
+        "median_cube_share": 0.3547332107407019,
+        "spread_fraction": 0.06686751414505133
+      }
+    },
+    "stable": true,
+    "target_met": true,
+    "acceptance": "valid"
+  },
+  {
+    "id": "decode-r4-d512",
+    "fused_us": 22.0235,
+    "serial_us": 35.8595,
+    "ratio": 0.6141608220973521,
+    "cube_share": 0.48877513899641,
+    "fused_spread": 0.11247076985946816,
+    "serial_spread": 0.08115004392141524,
+    "samples": {
+      "fused": {
+        "raw_sha256": "ea690bbfb1df7f4480b26311b61b6916194d229e6a19d09d5840380499b5799e",
+        "raw_file": "raw/decode-r4-d512-fused-repeat.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.617,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.859,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.067,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.796,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.391,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.656,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.797,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 23.336,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.891,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.705,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          21.617,
+          20.859,
+          21.067,
+          22.796,
+          22.391,
+          21.656,
+          22.797,
+          23.336,
+          20.891,
+          22.705
+        ],
+        "median_total_us": 22.0235,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.11247076985946816
+      },
+      "serial": {
+        "raw_sha256": "e92efa29f6e7885971a4a5050a75f6d2fb028c36a7d52c236a67aa1a5fe247c2",
+        "raw_file": "raw/decode-r4-d512-serial-repeat.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.595,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 18.003,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.692,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.517,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.392,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 18.319,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.952,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.769,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.822,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 16.548,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.277,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.886,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.37,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 16.638,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.955,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.665,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.376,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 18.445,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.428,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.867,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.463,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 16.866,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.713,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.48,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.473,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 16.925,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.714,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.5,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.355,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.923,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.28,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.938,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.379,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.832,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.805,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 7.089,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.363,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.155,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.788,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.917,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          36.807,
+          37.431999999999995,
+          34.533,
+          34.628,
+          37.116,
+          34.522000000000006,
+          34.612,
+          36.496,
+          37.105000000000004,
+          35.223
+        ],
+        "median_total_us": 35.8595,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          18.003,
+          18.319,
+          16.548,
+          16.638,
+          18.445,
+          16.866,
+          16.925,
+          17.923,
+          17.832,
+          17.155
+        ],
+        "vector_us": [
+          18.804000000000002,
+          19.112999999999996,
+          17.985000000000003,
+          17.99,
+          18.671,
+          17.656000000000006,
+          17.687,
+          18.573000000000004,
+          19.273000000000003,
+          18.067999999999998
+        ],
+        "cube_share": [
+          0.48911891759719617,
+          0.4893941013036974,
+          0.4791938146121101,
+          0.4804782257132956,
+          0.49695549089341523,
+          0.48855802097213363,
+          0.48899225702068644,
+          0.4910949145111792,
+          0.48058213178816866,
+          0.48703971836584053
+        ],
+        "median_cube_share": 0.48877513899641,
+        "spread_fraction": 0.08115004392141524
+      }
+    },
+    "initial_attempt": {
+      "fused": {
+        "raw_sha256": "7b28c85bc950865204bde166d24d8c3690b0c72a0f5cca9fd5346c1d6f3962fe",
+        "raw_file": "raw/decode-r4-d512-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.392,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.335,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.055,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.568,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.874,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.629,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.607,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.432,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.922,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.73,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          22.392,
+          20.335,
+          22.055,
+          21.568,
+          21.874,
+          22.629,
+          22.607,
+          21.432,
+          21.922,
+          20.73
+        ],
+        "median_total_us": 21.898,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.10475842542697966
+      },
+      "serial": {
+        "raw_sha256": "164b301262d864deb8193aab973cafc709bc60fa061f1b5f55afa2b3bf7e2d3f",
+        "raw_file": "raw/decode-r4-d512-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.535,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.901,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.072,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.494,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.409,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.417,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.938,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.694,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.429,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.25,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.072,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.133,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.548,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.432,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.171,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.45,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.623,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.13,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 10.245,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.709,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.408,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 16.739,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.691,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.861,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.432,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.029,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.626,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.464,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.372,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.317,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.639,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.474,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.382,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.605,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 9.747,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.88,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.406,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 17.411,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 8.582,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.158,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          36.001999999999995,
+          36.458000000000006,
+          34.884,
+          35.601,
+          36.706999999999994,
+          35.699,
+          35.550999999999995,
+          35.802,
+          36.614000000000004,
+          34.557
+        ],
+        "median_total_us": 35.7505,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          17.901,
+          17.417,
+          17.25,
+          17.432,
+          17.13,
+          16.739,
+          17.029,
+          17.317,
+          17.605,
+          17.411
+        ],
+        "vector_us": [
+          18.100999999999996,
+          19.041000000000004,
+          17.634,
+          18.169,
+          19.576999999999995,
+          18.959999999999997,
+          18.521999999999995,
+          18.485,
+          19.009000000000004,
+          17.146
+        ],
+        "cube_share": [
+          0.497222376534637,
+          0.4777277963684239,
+          0.49449604403164776,
+          0.4896491671582259,
+          0.46666848285068246,
+          0.46889268606963785,
+          0.4790019971308825,
+          0.48368806211943466,
+          0.48082700606325446,
+          0.5038342448707932
+        ],
+        "median_cube_share": 0.48225753409134453,
+        "spread_fraction": 0.06013901903469857
+      }
+    },
+    "verification_repeat_reason": "Initial fused spread (max-min)/median exceeded 10 percent; both paths repeated without code changes; all samples retained.",
+    "stable": false,
+    "target_met": false,
+    "acceptance": "invalid_unstable"
+  },
+  {
+    "id": "decode-r128-d512",
+    "fused_us": 21.9065,
+    "serial_us": 49.308,
+    "ratio": 0.4442788188529245,
+    "cube_share": 0.24361273854115312,
+    "fused_spread": 0.09011024125259627,
+    "serial_spread": 0.04435385738622531,
+    "samples": {
+      "fused": {
+        "raw_sha256": "663d0dce8683ce11df86f93c22c02f261d435c228fd9aac33d7c9c80454b32cc",
+        "raw_file": "raw/decode-r128-d512-fused.csv",
+        "mode": "fused",
+        "samples": [
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.748,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.088,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.622,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.568,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.597,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.258,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.133,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 21.725,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 22.545,
+              "stage": "fused"
+            }
+          ],
+          [
+            {
+              "name": "Compressor",
+              "duration_us": 20.774,
+              "stage": "fused"
+            }
+          ]
+        ],
+        "total_us": [
+          22.748,
+          22.088,
+          21.622,
+          21.568,
+          21.597,
+          22.258,
+          22.133,
+          21.725,
+          22.545,
+          20.774
+        ],
+        "median_total_us": 21.9065,
+        "sample_count": 10,
+        "tasks_per_sample": 1,
+        "spread_fraction": 0.09011024125259627
+      },
+      "serial": {
+        "raw_sha256": "d22de8794eeb69a2f8a07a7732c3269e1caa5ecf389b208dca9f01f6d48533a2",
+        "raw_file": "raw/decode-r128-d512-serial.csv",
+        "mode": "serial",
+        "samples": [
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.576,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.699,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 28.735,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.607,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.39,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.054,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 29.026,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.813,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.362,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 11.492,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 28.324,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 7.043,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.391,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.151,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 28.746,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.971,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.359,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.181,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 27.846,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.478,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.356,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.074,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 27.756,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.377,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.403,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 12.487,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 27.969,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 7.001,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.51,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 11.899,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 28.513,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.473,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.361,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 11.761,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 27.97,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.338,
+              "stage": "vector"
+            }
+          ],
+          [
+            {
+              "name": "_Z11serial_castIu6__bf16Li4096EEvPhS0_m",
+              "duration_us": 2.679,
+              "stage": "vector"
+            },
+            {
+              "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+              "duration_us": 11.991,
+              "stage": "cube"
+            },
+            {
+              "name": "_Z11serial_poolILi128EEvPhS0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 28.067,
+              "stage": "vector"
+            },
+            {
+              "name": "_Z15serial_finalizeIu6__bf16Li256EEvPhS0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_S0_",
+              "duration_us": 6.33,
+              "stage": "vector"
+            }
+          ]
+        ],
+        "total_us": [
+          50.617,
+          50.283,
+          49.221000000000004,
+          50.259,
+          48.864,
+          48.563,
+          49.86,
+          49.394999999999996,
+          48.43,
+          49.067
+        ],
+        "median_total_us": 49.308,
+        "sample_count": 10,
+        "tasks_per_sample": 4,
+        "cube_us": [
+          12.699,
+          12.054,
+          11.492,
+          12.151,
+          12.181,
+          12.074,
+          12.487,
+          11.899,
+          11.761,
+          11.991
+        ],
+        "vector_us": [
+          37.918,
+          38.229,
+          37.729,
+          38.108000000000004,
+          36.683,
+          36.489000000000004,
+          37.373,
+          37.495999999999995,
+          36.669,
+          37.076
+        ],
+        "cube_share": [
+          0.2508840903253848,
+          0.23972316687548476,
+          0.23347758070742164,
+          0.2417676436061203,
+          0.24928372626064177,
+          0.24862549677738194,
+          0.250441235459286,
+          0.24089482741168133,
+          0.24284534379516826,
+          0.24438013328713798
+        ],
+        "median_cube_share": 0.24361273854115312,
+        "spread_fraction": 0.04435385738622531
+      }
+    },
+    "stable": true,
+    "target_met": false,
+    "acceptance": "valid"
+  }
+]
