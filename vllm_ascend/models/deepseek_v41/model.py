@@ -1922,9 +1922,16 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader, like
+                # deepseek_v4 does (see vllm-ascend#16958).  A live weight update
+                # runs inside vLLM's layerwise reload, which parks the layer on
+                # the meta device and only replays loads made through
+                # ``weight_loader``; a direct ``param.data.copy_`` bypasses that
+                # buffer and is lost.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 # Handle attention sinks (distributed across ranks)
                 narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import json
 import math
+import os
 import shutil
 import tempfile
 import time
@@ -40,6 +41,14 @@ class WeightUpdateModelCase:
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
+    weight_source_factory: Callable[[Any, torch.device], WeightSource] | None = None
+    """Build this case's payload source.
+
+    Defaults to ``FixedRandomWeightSource``, which enumerates a Transformers meta
+    model.  DeepSeek-V4.1 overrides it: Transformers has no ``deepseek_v41``, so
+    its layout is read from the published checkpoint's safetensors headers
+    instead (see ``deepseek_v41_weight_source``).
+    """
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
     skip_reason: str | None = None
@@ -146,6 +155,30 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
+def _dsv41_engram_args() -> tuple[str, ...]:
+    """``--engram-config`` for the V4.1 lane, or nothing when engram is off.
+
+    Gated because ``EngramConfig.verify_model_config()`` rejects an engram config
+    for a model with no n-gram embeddings, so a lane served from a config with
+    ``engram_layer_ids == []`` must not pass it at all.  ``cpu_offload`` is
+    switchable to test whether the host/UVA-backed table survives the level-2
+    sleep the one-card lane performs.
+    """
+    if os.environ.get("DSV41_ENGRAM", "1") != "1":
+        return ()
+    offload = "true" if os.environ.get("DSV41_ENGRAM_CPU_OFFLOAD", "1") == "1" else "false"
+    return ("--engram-config", f'{{"cpu_offload": {offload}}}')
+
+
+def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+    """Payload source for DeepSeek-V4.1, which has no Transformers meta model."""
+    from tests.e2e.pull_request.rlhf.deepseek_v41_weight_source import (
+        DeepseekV41WeightSource,
+    )
+
+    return DeepseekV41WeightSource(case, device)
+
+
 MODEL_CASES = (
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
@@ -187,6 +220,42 @@ MODEL_CASES = (
             "the attention-sink fix that lives in #16355, and the two-card HCCL "
             "lane has an open problem with the model as well"
         ),
+    ),
+    WeightUpdateModelCase(
+        id="deepseek-v4.1-flash-bf16-moe-layout",
+        # V4.1 cannot be enumerated through Transformers, so this lane is served
+        # from a local copy of the released config (plus its tokenizer) rather
+        # than a repo id. The payload still comes from the published checkpoint's
+        # headers, by way of ``deepseek_v41_weight_source``. All 40 layers and the
+        # released shape parameters are kept so those headers stay authoritative;
+        # only expert count, engram vocabulary and the MTP stages are reduced.
+        # No repo id to fall back on: Transformers cannot enumerate the
+        # architecture, so the lane needs a locally trimmed checkpoint. Skip
+        # rather than point at a directory that only exists on one host.
+        model=os.environ.get("DSV41_MODEL_DIR", ""),
+        skip_reason=(
+            None if os.environ.get("DSV41_MODEL_DIR") else "set DSV41_MODEL_DIR to a DeepSeek-V4.1 checkpoint directory"
+        ),
+        # The reduction lives in the model directory's own config.json, not in
+        # ``--hf-overrides``. vLLM's ``DeepseekV41Config`` flattens the released
+        # ``text_config`` onto the top-level object, so a *nested* override
+        # replaces that sub-config and drops every field it does not restate
+        # (``num_attention_heads`` among them), which ``ModelConfig`` rejects:
+        # "The text_config extracted from the model config does not have
+        # `num_attention_heads`". Flat overrides do work, but restating values
+        # the config already carries would be a second source of truth.
+        hf_overrides={},
+        extra_server_args=(
+            "--tokenizer-mode",
+            "deepseek_v4",
+            # Engram stays in the model (all 40 layers are kept), but the tables
+            # live in pinned host memory. vLLM only offloads when an
+            # ``EngramConfig`` is present at all — ``engram_cpu_offload()`` tests
+            # ``engram_config is not None`` — so the flag, not the default value
+            # of ``cpu_offload``, is what turns the offload on.
+            *_dsv41_engram_args(),
+        ),
+        weight_source_factory=_deepseek_v41_weight_source,
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
@@ -485,7 +554,24 @@ def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
     return max(max_tensor_bytes + 128 * 2**20, 2**30)
 
 
-FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
+def make_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+    """Build the payload source a case declares, or the default random one.
+
+    Cases whose architecture Transformers can enumerate use
+    ``FixedRandomWeightSource``.  DeepSeek-V4.1 cannot — ``AutoConfig`` raises
+    ``KeyError: 'deepseek_v41'`` — so it names a source that reads the
+    checkpoint's safetensors headers instead.  ``packed_buffer_size_for`` works
+    on either, because both answer ``metadata()`` with the same ``ParamMeta``.
+    """
+    if case.weight_source_factory is not None:
+        return case.weight_source_factory(case, device)
+    return FixedRandomWeightSource(case, device)
+
+
+FULL_DECODE_ONLY_CONFIG = os.environ.get(
+    "VLLM_RL_TEST_COMPILATION_CONFIG",
+    '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}',
+)
 
 
 def _common_serve_args(
