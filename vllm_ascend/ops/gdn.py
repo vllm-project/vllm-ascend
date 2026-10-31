@@ -194,6 +194,249 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
+# The fla_npu AscendC recurrent GDN kernel sizes its UB buffers for this many
+# tokens per sequence and returns without writing any output when a sequence is
+# longer (recurrent_gated_delta_rule.h: `if (seqLen > MAX_MTP) { return; }`).
+# vLLM applies the same cap to its fused GDN MTP decode kernel
+# (MAX_FUSED_GDN_MTP_TOKENS in qwen_gdn_linear_attn.py), so speculative decoding
+# with a wider draft window has to be replayed in chunks of this size.
+_MAX_RECURRENT_GDN_TOKENS = 8
+
+
+def _validate_spec_query_lengths(
+    query_start_loc_cpu: torch.Tensor | None,
+    num_seqs: int,
+    num_tokens: int,
+) -> list[int]:
+    """Validate host request boundaries and return their lengths."""
+    if query_start_loc_cpu is None:
+        raise ValueError("query_start_loc_cpu is required for speculative GDN decode")
+    if query_start_loc_cpu.device.type != "cpu":
+        raise ValueError("query_start_loc_cpu must be a CPU tensor to avoid an NPU synchronization")
+    if query_start_loc_cpu.ndim != 1:
+        raise ValueError(f"query_start_loc_cpu must be one-dimensional, got shape {tuple(query_start_loc_cpu.shape)}")
+    if query_start_loc_cpu.numel() < num_seqs + 1:
+        raise ValueError(
+            "query_start_loc_cpu is shorter than the number of speculative sequences: "
+            f"{query_start_loc_cpu.numel()} entries for {num_seqs} sequences"
+        )
+    query_start_loc = query_start_loc_cpu[: num_seqs + 1].to(torch.int64)
+    if int(query_start_loc[0]) != 0:
+        raise ValueError(f"speculative query_start_loc must start at zero, got {int(query_start_loc[0])}")
+    lengths = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
+    if any(length < 0 for length in lengths):
+        raise ValueError(f"speculative query_start_loc must be non-decreasing, got {query_start_loc.tolist()}")
+    if int(query_start_loc[-1]) != num_tokens:
+        raise ValueError(
+            "speculative query_start_loc does not match the flat token count: "
+            f"{int(query_start_loc[-1])} positions for {num_tokens} tokens"
+        )
+    return lengths
+
+
+def _chunked_recurrent_gated_delta_rule(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    actual_seq_lengths: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    lengths: list[int],
+) -> torch.Tensor:
+    """Recurrent GDN over a draft window wider than ``_MAX_RECURRENT_GDN_TOKENS``.
+
+    ``recurrent_gated_delta_rule`` handles at most ``_MAX_RECURRENT_GDN_TOKENS``
+    tokens per sequence, so a longer speculative window is replayed as a chain
+    of calls of that size.
+
+    Rectangular verify windows keep a view-and-slice fast path. Dynamic
+    speculative decoding can also produce packed, non-rectangular windows such
+    as ``[9, 7]``; those are replayed one request at a time so an average window
+    width can never hide a real sequence boundary.
+
+    Every prefix position keeps its own state slot, so a chunk can only start
+    from the state the previous chunk wrote for its last token. That state is
+    copied into the chunk's first slot, which lets the kernel walk the chunk
+    from position 0 (``num_accepted_tokens = 1``).
+    """
+    num_seqs = num_accepted_tokens.shape[0]
+    if len(set(lengths)) != 1:
+        return _chunked_ragged_spec_decode(
+            query,
+            key,
+            value,
+            state,
+            g=g,
+            beta=beta,
+            scale=scale,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            lengths=lengths,
+        )
+
+    tokens_per_seq = lengths[0]
+
+    def per_seq(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.view(num_seqs, tokens_per_seq, *tensor.shape[1:])
+
+    slots_rows = ssm_state_indices.view(num_seqs, tokens_per_seq)
+    queries, keys, values = per_seq(query), per_seq(key), per_seq(value)
+    gates, betas = per_seq(g), per_seq(beta)
+    out = torch.empty_like(value)
+    out_rows = out.view(num_seqs, tokens_per_seq, *value.shape[1:])
+    # Each chunk is handed its own start state and walks its tokens from
+    # position 0, so every call reports one accepted token.
+    chunk_accepted = torch.ones_like(num_accepted_tokens)
+    for start in range(0, tokens_per_seq, _MAX_RECURRENT_GDN_TOKENS):
+        chunk = min(_MAX_RECURRENT_GDN_TOKENS, tokens_per_seq - start)
+        if start == 0:
+            # The kernel resumes from the state of the last accepted token,
+            # which may sit past the first chunk when the whole draft window
+            # was accepted, so the resume row is picked inside the full window.
+            resume = (num_accepted_tokens.to(torch.int64) - 1).clamp_(min=0, max=tokens_per_seq - 1)
+            resume_slots = slots_rows.gather(1, resume.unsqueeze(1)).squeeze(1)
+        else:
+            resume_slots = slots_rows[:, start - 1]
+        # Seed the state this chunk starts from into the chunk's first slot; the
+        # kernel starts there and overwrites the slot with token 0's state.
+        state.index_copy_(0, slots_rows[:, start], state.index_select(0, resume_slots))
+        chunk_lengths = torch.full((num_seqs + 1,), chunk, dtype=torch.int32, device=value.device)
+        chunk_lengths[0] = 0
+        stop = start + chunk
+        out_rows[:, start:stop] = recurrent_gated_delta_rule(
+            queries[:, start:stop].reshape(-1, *query.shape[1:]),
+            keys[:, start:stop].reshape(-1, *key.shape[1:]),
+            values[:, start:stop].reshape(-1, *value.shape[1:]),
+            state,
+            g=gates[:, start:stop].reshape(-1, *g.shape[1:]),
+            beta=betas[:, start:stop].reshape(-1, *beta.shape[1:]),
+            scale=scale,
+            actual_seq_lengths=chunk_lengths,
+            ssm_state_indices=slots_rows[:, start:stop].reshape(-1),
+            num_accepted_tokens=chunk_accepted,
+        ).view(num_seqs, chunk, *value.shape[1:])
+    return out
+
+
+def _chunked_ragged_spec_decode(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    lengths: list[int],
+) -> torch.Tensor:
+    """Replay packed, variable-length verify windows without mixing requests."""
+    lengths_tensor = torch.tensor(lengths, dtype=torch.int64, device=value.device)
+    ends = lengths_tensor.cumsum(0)
+    starts = ends - lengths_tensor
+    resume = (num_accepted_tokens.to(torch.int64) - 1).clamp_(min=0)
+    resume = torch.minimum(resume, (lengths_tensor - 1).clamp_(min=0))
+    # Graph padding appends zero-length requests. Their start offset points one
+    # past the final valid token, so only index state rows for live requests.
+    positive = lengths_tensor > 0
+    resume_slots = torch.zeros_like(starts)
+    resume_slots[positive] = ssm_state_indices.index_select(
+        0,
+        (starts + resume)[positive],
+    )
+    out = torch.empty_like(value)
+    one_accepted = torch.ones(1, dtype=torch.int32, device=value.device)
+
+    token_start = 0
+    for seq, length in enumerate(lengths):
+        if length == 0:
+            continue
+        resume_slot = resume_slots[seq : seq + 1]
+        for chunk_start in range(0, length, _MAX_RECURRENT_GDN_TOKENS):
+            chunk = min(_MAX_RECURRENT_GDN_TOKENS, length - chunk_start)
+            chunk_token_start = token_start + chunk_start
+            chunk_token_stop = chunk_token_start + chunk
+            chunk_slots = ssm_state_indices[chunk_token_start:chunk_token_stop]
+            state.index_copy_(
+                0,
+                chunk_slots[:1],
+                state.index_select(0, resume_slot),
+            )
+            out[chunk_token_start:chunk_token_stop] = recurrent_gated_delta_rule(
+                query[chunk_token_start:chunk_token_stop],
+                key[chunk_token_start:chunk_token_stop],
+                value[chunk_token_start:chunk_token_stop],
+                state,
+                g=g[chunk_token_start:chunk_token_stop],
+                beta=beta[chunk_token_start:chunk_token_stop],
+                scale=scale,
+                actual_seq_lengths=torch.tensor([0, chunk], dtype=torch.int32, device=value.device),
+                ssm_state_indices=chunk_slots,
+                num_accepted_tokens=one_accepted,
+            )
+            resume_slot = chunk_slots[-1:]
+        token_start += length
+    return out
+
+
+def _spec_decode_recurrent_gated_delta_rule(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    actual_seq_lengths: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+) -> torch.Tensor:
+    """Recurrent GDN for speculative decode, chunked over the kernel token cap."""
+    num_seqs = num_accepted_tokens.shape[0]
+    lengths = _validate_spec_query_lengths(query_start_loc_cpu, num_seqs, value.shape[0])
+    if not value.shape[0]:
+        return torch.empty_like(value)
+    if max(lengths) <= _MAX_RECURRENT_GDN_TOKENS:
+        return recurrent_gated_delta_rule(
+            query,
+            key,
+            value,
+            state,
+            g=g,
+            beta=beta,
+            scale=scale,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+    if value.shape[0] != ssm_state_indices.shape[0]:
+        raise ValueError(
+            "speculative decode expects one state slot per recurrent token: "
+            f"{value.shape[0]} tokens, {ssm_state_indices.shape[0]} state slots"
+        )
+    return _chunked_recurrent_gated_delta_rule(
+        query,
+        key,
+        value,
+        state,
+        g=g,
+        beta=beta,
+        scale=scale,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        lengths=lengths,
+    )
+
+
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -713,9 +956,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+            query_start_loc_cpu = spec_causal_conv1d_meta.query_start_loc_cpu
+            if query_start_loc_cpu is None:
+                raise RuntimeError("Expected query_start_loc_cpu for Ascend GDN speculative recurrent path.")
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
+            core_attn_out_spec = _spec_decode_recurrent_gated_delta_rule(
                 query_spec.squeeze(0),
                 key_spec.squeeze(0),
                 value_spec.squeeze(0),
@@ -730,6 +976,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     spec_causal_conv1d_meta.query_start_loc,
                 ),
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                query_start_loc_cpu=query_start_loc_cpu,
             ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None

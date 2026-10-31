@@ -93,11 +93,13 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
             self._stage_spec(metadata, m.num_reqs)
             state_indices = metadata.spec_state_indices_tensor[:, 0]
             starts = metadata.spec_query_start_loc
+            query_start_loc_cpu = self._spec_cpu_starts(m, metadata, num_decode_draft_tokens_cpu)
             metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
                 spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                     query_start_loc=starts,
                     cache_indices=state_indices,
                     num_accepted_tokens=metadata.num_accepted_tokens,
+                    query_start_loc_cpu=query_start_loc_cpu,
                 ),
                 actual_seq_lengths=None,
             )
@@ -144,6 +146,15 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         spec = ((draft_counts >= 0) | ((~m.is_prefilling) & (lengths > 0))) & (lengths <= self.num_spec + 1)
         non_spec_lengths = lengths[(~spec) & (lengths > 0)]
         return torch.cat((torch.zeros(1, dtype=lengths.dtype), non_spec_lengths.cumsum(0)))
+
+    def _spec_cpu_starts(self, m, metadata, draft_counts):
+        query_start_loc_cpu = m.query_start_loc_cpu[: metadata.spec_query_start_loc.numel()]
+        if draft_counts is None:
+            return query_start_loc_cpu
+        lengths = m.query_start_loc_cpu.diff()
+        spec = ((draft_counts >= 0) | ((~m.is_prefilling) & (lengths > 0))) & (lengths <= self.num_spec + 1)
+        spec_lengths = lengths[spec]
+        return torch.cat((spec_lengths.new_zeros(1), spec_lengths.cumsum(0))).to(torch.int64)
 
     def _stage_spec(self, metadata, batch_size):
         if (

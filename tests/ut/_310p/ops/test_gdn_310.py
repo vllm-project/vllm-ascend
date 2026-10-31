@@ -143,7 +143,10 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests(overflow):
         return
 
     builder._pad_spec_decode_metadata(attn_metadata, graph_request_count=4)
-    builder._attach_spec_decode_metadata(attn_metadata)
+    builder._attach_spec_decode_metadata(
+        attn_metadata,
+        query_start_loc_cpu=torch.tensor([0, 4, 8, 8, 8], dtype=torch.int32),
+    )
 
     # 310P pads with PAD_SLOT_ID (-1), not NULL_BLOCK_ID (0), so FULL replay
     # does not write into mamba block 0. Pad accepted tokens stay 1 (not 0).
@@ -158,6 +161,7 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests(overflow):
     assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
     spec_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
     assert spec_meta.query_start_loc.data_ptr() == attn_metadata.spec_query_start_loc.data_ptr()
+    assert spec_meta.query_start_loc_cpu.tolist() == [0, 4, 8, 8, 8]
     assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
     assert spec_meta.num_accepted_tokens.data_ptr() == attn_metadata.num_accepted_tokens.data_ptr()
     assert attn_metadata.spec_decode_metadata.actual_seq_lengths is None

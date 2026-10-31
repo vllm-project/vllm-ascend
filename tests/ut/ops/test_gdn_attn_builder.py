@@ -1440,6 +1440,9 @@ def test_graph_attaches_once_after_padding_and_reuses_final_buffers(builder_cls,
         assert conv.cache_indices.data_ptr() == state_buffer.data_ptr()
         assert conv.query_start_loc.data_ptr() == query_buffer.data_ptr()
         assert conv.query_start_loc.tolist() == [i * width for i in range(count + 1)] + [count * width] * (4 - count)
+        if spec:
+            assert conv.query_start_loc_cpu is not None
+            assert conv.query_start_loc_cpu.tolist() == conv.query_start_loc.tolist()
         pointers.append((conv.cache_indices.data_ptr(), conv.query_start_loc.data_ptr()))
         if is_common:
             assert actual_lengths.tolist() == [0] + [width] * count + [0] * (4 - count)

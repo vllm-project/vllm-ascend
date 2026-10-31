@@ -1,0 +1,4 @@
+pr: 16292
+entries:
+  - category: bugfix
+    text: Fixed speculative GDN decoding with variable-length or graph-padded verify windows wider than eight tokens.

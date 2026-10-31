@@ -145,6 +145,7 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    query_start_loc_cpu: torch.Tensor | None = None
     output_buffer: torch.Tensor | None = None
 
 
@@ -508,6 +509,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata: GDNAttentionMetadata,
         actual_seq_lengths: torch.Tensor | None = None,
         cache_indices: torch.Tensor | None = None,
+        query_start_loc_cpu: torch.Tensor | None = None,
     ) -> GDNAttentionMetadata:
         attn_metadata.spec_decode_metadata = None
         if attn_metadata.spec_sequence_masks is None:
@@ -519,6 +521,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected spec_state_indices_tensor for Ascend GDN speculative conv1d path.")
         if attn_metadata.num_accepted_tokens is None:
             raise RuntimeError("Expected num_accepted_tokens for Ascend GDN speculative conv1d path.")
+        if query_start_loc_cpu is None:
+            raise RuntimeError("Expected query_start_loc_cpu for Ascend GDN speculative recurrent path.")
 
         num_sequences = attn_metadata.num_spec_decodes
         actual_seq_lengths_buffer = None
@@ -526,6 +530,27 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_sequences = attn_metadata.spec_query_start_loc.size(0) - 1
             actual_seq_lengths_buffer = self.spec_actual_seq_lengths
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
+        if query_start_loc_cpu.ndim != 1:
+            raise ValueError(
+                f"query_start_loc_cpu must be one-dimensional, got shape {tuple(query_start_loc_cpu.shape)}"
+            )
+        query_start_loc_cpu = query_start_loc_cpu.to(torch.int64)
+        if not query_start_loc_cpu.numel():
+            query_start_loc_cpu = query_start_loc_cpu.new_zeros(spec_num_rows + 1)
+        if int(query_start_loc_cpu[0]) != 0:
+            raise ValueError(f"speculative query_start_loc must start at zero, got {int(query_start_loc_cpu[0])}")
+        lengths = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        if bool((lengths < 0).any()):
+            raise ValueError(f"speculative query_start_loc must be non-decreasing, got {query_start_loc_cpu.tolist()}")
+        if query_start_loc_cpu.numel() < spec_num_rows + 1:
+            query_start_loc_cpu = torch.cat(
+                (
+                    query_start_loc_cpu,
+                    query_start_loc_cpu[-1].repeat(spec_num_rows + 1 - query_start_loc_cpu.numel()),
+                )
+            )
+        else:
+            query_start_loc_cpu = query_start_loc_cpu[: spec_num_rows + 1]
 
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
@@ -534,6 +559,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     :spec_num_rows
                 ],
                 num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
+                query_start_loc_cpu=query_start_loc_cpu,
             ),
             actual_seq_lengths=(
                 actual_seq_lengths[: num_sequences + 1]
@@ -816,6 +842,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_spec_decodes,
             )
 
+        spec_query_start_loc_cpu: torch.Tensor | None = None
         if spec_sequence_masks is None:
             spec_token_indx = None
             non_spec_token_indx = None
@@ -853,6 +880,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
+                spec_query_start_loc_cpu = query_start_loc_cpu[: num_spec_decodes + 1]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
@@ -897,6 +925,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_query_lens,
                     dim=0,
                     out=spec_query_start_loc[1:],
+                )
+                spec_query_lens_cpu = torch.diff(query_start_loc_cpu)[spec_sequence_masks_cpu]
+                spec_query_start_loc_cpu = torch.cat(
+                    (
+                        spec_query_lens_cpu.new_zeros(1),
+                        spec_query_lens_cpu.cumsum(0),
+                    )
                 )
                 non_spec_query_start_loc = torch.zeros(
                     query_lens.size(0) - num_spec_decodes + 1,
@@ -1012,7 +1047,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
         )
-        self._attach_spec_decode_metadata(attn_metadata)
+        self._attach_spec_decode_metadata(
+            attn_metadata,
+            query_start_loc_cpu=spec_query_start_loc_cpu,
+        )
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return self._finalize_metadata(attn_metadata)
 
@@ -1142,6 +1180,20 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         if self.use_full_cuda_graph and self.use_spec_decode and not num_spec_decodes:
             self._reset_spec_decode_graph_inputs(graph_request_count)
 
+        spec_query_start_loc_cpu = None
+        if spec_sequence_masks_cpu is not None:
+            query_lens_cpu = torch.diff(m.query_start_loc_cpu)
+            if mixed_spec:
+                spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
+                spec_query_start_loc_cpu = torch.cat(
+                    (
+                        spec_query_lens_cpu.new_zeros(1),
+                        spec_query_lens_cpu.cumsum(0),
+                    )
+                )
+            else:
+                spec_query_start_loc_cpu = m.query_start_loc_cpu[: spec_rows + 1]
+
         # Reuse captured addresses; larger eager batches need only fresh views.
         def buffer_view(buffer: torch.Tensor, rows: int) -> torch.Tensor:
             return buffer[:rows] if rows <= buffer.shape[0] else buffer.new_empty((rows, *buffer.shape[1:]))
@@ -1247,7 +1299,12 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
                 build_device_metadata=False,
             )
         self._attach_non_spec_prefill_metadata(metadata, chunk, non_spec_states)
-        self._attach_spec_decode_metadata(metadata, spec_lengths, self._spec_conv_indices)
+        self._attach_spec_decode_metadata(
+            metadata,
+            spec_lengths,
+            self._spec_conv_indices,
+            query_start_loc_cpu=spec_query_start_loc_cpu,
+        )
         self._attach_non_spec_decode_metadata(metadata, non_spec_states, non_spec_lengths)
         return self._finalize_metadata(metadata, fused=True)
 
