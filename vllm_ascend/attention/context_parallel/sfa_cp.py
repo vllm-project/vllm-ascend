@@ -6,7 +6,9 @@ from typing import Any, ClassVar, NamedTuple, TypeVar
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -250,26 +252,24 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         )
         return result
 
+    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+        return slots
+
     def _start_main_kv_gather(
         self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata
     ) -> Callable[[], tuple] | None:
-        # First prototype: eager NoPE BF16 PCP prefill, TP1/PCP8/DCP1.
-        # Decode, packed/quantized caches, graph and other layouts stay on the
-        # established path. All ranks gate on the global prefill flag.
+        # Match the synchronous PCP cache-input gather. Select by this call's
+        # execution mode and layout, not the model's configured graph policy,
+        # cache dtype, or TP/DCP sizes. All ranks use the global prefill flag.
         if (
-            not self.vllm_config.model_config.enforce_eager
-            or self.qk_rope_head_dim != 0
-            or self.enable_sparse_sfa_c8
-            or kv_no_split.dtype != torch.bfloat16
-            or kv_cache[0].dtype != torch.bfloat16
-            or get_pcp_group().world_size != 8
-            or get_tp_group().world_size != 1
-            or get_dcp_group().world_size != 1
+            get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or get_pcp_group().world_size <= 1
             or not (attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill)
             or not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded)
         ):
             return None
-        local_rows = attn_metadata.num_input_tokens
+        slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
+        local_rows = attn_metadata.num_input_tokens if self.qk_rope_head_dim == 0 else kv_no_split.shape[0]
         replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
         # Match _gather_prefill_cache_inputs' non-collective branches.
         if slots.shape[0] <= local_rows or replicated == local_rows:
@@ -280,23 +280,32 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         if pad:
             kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad))
         assert 0 <= replicated <= local_rows
-        send = kv_no_split[replicated:].contiguous()
-        gathered, work = all_gather_async(send, get_pcp_group())
+        inputs = (kv_no_split,) if self.qk_rope_head_dim == 0 else (kv_no_split, cos, sin)
+        assert all(value.shape[0] == local_rows for value in inputs)
+        # RoPE inputs have the same row layout and collective order as KV.
+        # Keep all send tensors alive through their completion handles.
+        sends = tuple(value[replicated:].contiguous() for value in inputs)
+        pending = tuple(all_gather_async(send, get_pcp_group()) for send in sends)
         gathered_slots = slots[: get_pcp_group().world_size * local_rows]
-        prefix = kv_no_split[:replicated]
         if replicated:
             rank_slots = gathered_slots.view(get_pcp_group().world_size, local_rows)
             gathered_slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
         logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
 
         def finish():
-            # Explicitly retain both input views and the output until wait.
-            _ = send
-            assert work is not None
-            work.wait()
-            values = torch.cat((prefix, gathered), dim=0) if replicated else gathered
-            assert values.shape[0] == gathered_slots.numel()
-            return super(AscendSFAPCPImpl, self).exec_kv(values, cos, sin, kv_cache, gathered_slots, attn_metadata)
+            _ = sends
+            for _, work in pending:
+                assert work is not None
+                work.wait()
+            values = tuple(
+                torch.cat((value[:replicated], gathered), dim=0) if replicated else gathered
+                for value, (gathered, _) in zip(inputs, pending)
+            )
+            assert values[0].shape[0] == gathered_slots.numel()
+            gathered_cos, gathered_sin = values[1:] if self.qk_rope_head_dim else (cos, sin)
+            return super(AscendSFAPCPImpl, self).exec_kv(
+                values[0], gathered_cos, gathered_sin, kv_cache, gathered_slots, attn_metadata
+            )
 
         return finish
 
@@ -1411,6 +1420,13 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
 
+    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+        if self._has_prefill(attn_metadata):
+            assert isinstance(attn_metadata, AscendSFADCPMetadata)
+            assert attn_metadata.dcp_context is not None
+            return attn_metadata.dcp_context.slot_mapping
+        return slots
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1420,10 +1436,7 @@ class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if self._has_prefill(attn_metadata):
-            assert isinstance(attn_metadata, AscendSFADCPMetadata)
-            assert attn_metadata.dcp_context is not None
-            slots = attn_metadata.dcp_context.slot_mapping
+        slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
         return super().exec_kv(
             kv_no_split,
             cos,

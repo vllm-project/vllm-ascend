@@ -515,6 +515,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
+    # This forward-contract fixture stubs cache writes; async cache preparation
+    # is exercised separately with real PCP/DCP slot mappings.
+    impl._start_main_kv_gather = MagicMock(return_value=None)
     impl._store_parallel_kv = MagicMock(return_value=(None, None))
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_query_gather_context = MagicMock()

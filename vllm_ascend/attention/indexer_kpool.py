@@ -631,9 +631,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         restore_indices = indexer_metadata.pcp_hidden_restore_indices
         if restore_indices is None:
             return k_hidden_states
-        num_tokens = k_hidden_states.shape[0]
-        if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
-            num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
+        num_tokens = min(k_hidden_states.shape[0], indexer_metadata.num_actual_tokens)
         k_hidden = k_hidden_states[:num_tokens]
         padding = indexer_metadata.pcp_local_token_count - num_tokens
         if padding < 0:

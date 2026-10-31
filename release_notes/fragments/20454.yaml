@@ -6,7 +6,8 @@ entries:
       communication and uses KDA output ReduceScatter. Eligible MoE AllGather
       paths overlap DP/PCP hidden communication with the gate during eager
       execution while retaining full-logit gathering and existing expert
-      selection. End-to-end text equivalence
-      remains under validation.
+      selection. Main KV overlap follows the active PCP/DCP layout and original
+      cache preprocessing without fixed topology or BF16-only restrictions.
+      End-to-end text equivalence remains under validation.
     model: glm-5.3-flash
     hardware: [A5]

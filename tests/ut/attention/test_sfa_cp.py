@@ -913,14 +913,17 @@ def test_sfa_pcp_dcp_builder_slots_match_kv_gather(rank, num_decode_tokens, num_
     torch.testing.assert_close(expanded_slots, original_slots)
 
 
+@pytest.mark.parametrize("early", [False, True])
 @pytest.mark.parametrize("num_decode_tokens", [0, 2, 5])
 @pytest.mark.parametrize(
     "cache_mode,rope_dim,num_input_tokens", [("c8", 0, 5), ("c8", 0, 8), ("c8", 2, 5), ("tq4", 2, 5)]
 )
 def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
-    num_decode_tokens, cache_mode, rope_dim, num_input_tokens
+    num_decode_tokens, cache_mode, rope_dim, num_input_tokens, early
 ):
     impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
+    if not early:
+        impl._start_main_kv_gather = Mock(return_value=None)
     impl.is_pcp_decode_sharded = False
     impl.qk_rope_head_dim = rope_dim
     impl.kv_lora_rank = 3
@@ -1021,6 +1024,15 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     # Reuse metadata across layers: gather reads the original DCP mapping,
     # while cache stores use the builder's mapping without replacing it.
     with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=group),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE),
+        ),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async",
+            side_effect=lambda values, _: (group.all_gather(values, 0), SimpleNamespace(wait=lambda: None)),
+        ),
         patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
         patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.turboquant_kv_rmsnorm_rope", side_effect=quantize),
