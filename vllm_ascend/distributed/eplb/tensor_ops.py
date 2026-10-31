@@ -48,4 +48,3 @@ def count_allgather_tokens(
     counts = torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
     counts.scatter_add_(0, indices, eligible.to(torch.int64).reshape(-1))
     return counts
-
