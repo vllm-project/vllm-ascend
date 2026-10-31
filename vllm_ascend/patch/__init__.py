@@ -38,12 +38,21 @@
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
 #   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
-#        while Ascend also implements it for GLM-Next.
-#   How: Validate GLM's supported execution/cache/PD contract and derive
+#        while Ascend also implements it for GLM-Next and Qwen GDN.
+#   How: Validate each model's supported execution/cache/PD contract and derive
 #        use_kda_recoverssm from the existing use_replayssm flag. Other models
 #        and disabled configurations retain the upstream validator.
 #   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
-#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+#   Future plan: Remove when upstream supports backend-specific RecoverSSM selection.
+# --------------------------------
+# * worker/patch_qwen3_5.py (RecoverSSM):
+#   Target: QwenGatedDeltaNetAttention state descriptors and Ascend forward.
+#   Why: Qwen GDN has scalar gates and grouped Q/K heads, unlike KDA.
+#   How: Select AscendGDNRecoverSSMBackend and five paged states only when enabled.
+#        Keep use_kda_recoverssm as the paired upstream's generic lifecycle flag;
+#        the GDN builder creates its own context without patching Kimi's kernels.
+#   Related PR: No upstream GDN RecoverSSM implementation in the paired checkout.
+#   Future plan: Remove the selector patch when upstream exposes GDN recovery hooks.
 # --------------------------------
 # * Platform Patch:
 # ==========#
