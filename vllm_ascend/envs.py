@@ -72,6 +72,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Select the DeepSeek V4.1 Engram backing path. Valid values are auto
+    # (default), gva, and uva. This setting is not sensitive.
+    "VLLM_ASCEND_ENGRAM_GVA_MODE": lambda: os.getenv("VLLM_ASCEND_ENGRAM_GVA_MODE", "auto").strip().lower(),
 }
 
 # end-env-vars-definition

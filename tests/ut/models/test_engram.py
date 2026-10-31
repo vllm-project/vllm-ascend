@@ -5,6 +5,7 @@
 
 import ctypes
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -497,3 +498,60 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+def test_checkpoint_identity_ignores_mtime(tmp_path):
+    key = "layers.1.engram.embed.weight"
+    index = {"weight_map": {key: "model.safetensors"}}
+    save_file({key: torch.arange(128).reshape(4, 32).bfloat16()}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    identity = embedding_mod.engram_checkpoint_identity(tmp_path, [1])
+    os.utime(tmp_path / "model.safetensors", ns=(10_000_000_000, 10_000_000_000))
+
+    assert embedding_mod.engram_checkpoint_identity(tmp_path, [1]) == identity
+
+
+@pytest.mark.parametrize("source_format", ["int8", "mxfp8", "bf16"])
+def test_owner_row_loader_offsets_storage_from_owner_start(tmp_path, source_format):
+    key = "layers.1.engram.embed.weight"
+    scale_key = "layers.1.engram.embed.scale"
+    rows, width = 112, 64
+    if source_format == "int8":
+        codes = torch.arange(rows * width).reshape(rows, width).remainder(127).to(torch.int8)
+        scales = torch.arange(rows * 2, dtype=torch.float32).reshape(rows, 2)
+        save_file({key: codes, scale_key: scales}, tmp_path / "model.safetensors")
+        indexed_keys = [key, scale_key]
+        target_dtype = torch.int8
+        expected_codes, expected_scales = codes[103:106], scales[103:106]
+    elif source_format == "mxfp8":
+        codes = torch.linspace(-16, 16, rows * width).reshape(rows, width).to(torch.float8_e4m3fn)
+        scales = torch.full((rows, 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        save_file({key: codes, scale_key: scales}, tmp_path / "model.safetensors")
+        indexed_keys = [key, scale_key]
+        target_dtype = torch.int8
+        expected_codes, expected_scales = npu.quantize_engram_rows(
+            (codes[103:106].float().unflatten(-1, (-1, 32)) * scales[103:106].float().unsqueeze(-1)).flatten(-2)
+        )
+    else:
+        source = torch.linspace(-1, 1, rows * width).reshape(rows, width).bfloat16()
+        save_file({key: source}, tmp_path / "model.safetensors")
+        indexed_keys = [key]
+        target_dtype = torch.int8
+        expected_codes, expected_scales = npu.quantize_engram_rows(source[103:106].float())
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {name: "model.safetensors" for name in indexed_keys}})
+    )
+
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.vocab_start_idx, table.vocab_end_idx = 100, 112
+    table.layer_hash_index = 0
+    table.block_size = 32
+    table._gva_pool = SimpleNamespace(owner_range=lambda layer: (3, 6))
+    table.weight = torch.nn.Parameter(torch.empty((3, width), dtype=target_dtype), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.empty((3, 2), dtype=torch.float32), requires_grad=False)
+
+    table._load_into_storage(tmp_path, key, chunk_rows=2, owner_rows=True)
+
+    torch.testing.assert_close(table.weight, expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(table.weight_scale_inv, expected_scales, rtol=0, atol=0)

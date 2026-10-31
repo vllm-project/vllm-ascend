@@ -124,6 +124,51 @@ def gather_dequantize_engram_int8(
     return output
 
 
+def gather_dequantize_engram_gva(
+    pool,
+    layer_hash_index: int,
+    ids: torch.Tensor,
+    width: int,
+    *,
+    head_start: int = 0,
+    local_heads: int = 1,
+    pad_heads: int | None = None,
+    output: torch.Tensor | None = None,
+    vocab_start: int = 0,
+    vocab_end: int | None = None,
+) -> torch.Tensor:
+    """Gather packed A5 FP8/E8M0 rows through node-local GVA, then decode."""
+    pad_heads = local_heads if pad_heads is None else pad_heads
+    vocab_end = vocab_start + pool.table(layer_hash_index).global_rows if vocab_end is None else vocab_end
+    tokens = ids.shape[0]
+    rows = tokens * local_heads
+    if output is None:
+        output = torch.empty((tokens * pad_heads, width), dtype=torch.bfloat16, device=ids.device)
+    if rows == 0:
+        return output
+    codes, scales = pool.gather(layer_hash_index, ids, vocab_start, vocab_end, head_start, local_heads)
+    from vllm_ascend.ops.triton.engram_lookup import _engram_gva_staged_gather_dequant_kernel
+
+    _engram_gva_staged_gather_dequant_kernel[(rows,)](
+        codes,
+        scales,
+        ids,
+        output,
+        rows,
+        vocab_start,
+        vocab_end,
+        ids.stride(0),
+        ROW_STRIDE=pool.row_bytes,
+        WIDTH=width,
+        GROUP=SCALE_GROUP,
+        HEAD_START=head_start,
+        LOCAL_HEADS=local_heads,
+        PAD_HEADS=pad_heads,
+        num_warps=4,
+    )
+    return output
+
+
 @cache
 def _host_library() -> ctypes.CDLL:
     """The CANN runtime entry points that publish host memory to the device."""

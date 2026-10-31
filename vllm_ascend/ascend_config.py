@@ -28,6 +28,7 @@ from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
@@ -687,11 +688,17 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        # A backend comparison may explicitly force the registered UVA path.
+        # Keep an explicit dp_shared_memory=False in that case; V2 normally
+        # promotes it to shared mode, which otherwise routes the comparison
+        # back to the shared GVA storage path in the model.
+        force_engram_uva = envs.VLLM_ASCEND_ENGRAM_GVA_MODE == "uva"
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
+            and not force_engram_uva
         ):
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.

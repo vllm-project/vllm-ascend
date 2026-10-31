@@ -2233,3 +2233,15 @@ class TestEngramSharedMemoryDefaults(TestBase):
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)
+
+    def test_uva_backend_override_preserves_explicit_unshared_config(self):
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+        config.parallel_config.data_parallel_size = 8
+        config.engram_config = SimpleNamespace(dp_shared_memory=False)
+        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+        with (
+            patch.dict("os.environ", {"VLLM_ASCEND_ENGRAM_GVA_MODE": "uva"}),
+            patch.object(_VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True),
+        ):
+            ascend_config.derive_and_validate(config)
+        self.assertFalse(config.engram_config.dp_shared_memory)

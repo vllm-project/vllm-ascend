@@ -91,11 +91,13 @@ from .engram import (
 from .engram.common import load_engram_rotation_block
 from .engram.embedding import (
     AscendParallelEngramEmbedding,
+    engram_checkpoint_identity,
     engram_storage_dtype,
     preflight_engram_checkpoint,
 )
+from .engram.gva import EngramGvaPool, make_engram_gva_local_tables, use_engram_gva
 from .engram.layer import AscendEngram
-from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
+from .engram.parallel import gather_engram_hashes, get_engram_dp_group, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
 
@@ -1045,8 +1047,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.engram_weight_root, config.engram_layer_ids, AscendParallelEngramEmbedding
                 )
             native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
+            table_specs = []
+            storage_dtypes = []
             for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
                 head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
+                table_specs.append((slot, layer_id, rows, head_sizes))
                 storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
                 if vllm_config.load_config.load_format != "dummy":
                     storage_dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
@@ -1054,6 +1059,51 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         storage_dtype = torch.int8
                 elif native_mxfp8 and vllm_config.quant_config is not None:
                     storage_dtype = torch.float8_e4m3fn
+                storage_dtypes.append(storage_dtype)
+
+            gva_pool = None
+            share_group = get_engram_dp_group() if self.engram_dp_shared_memory else None
+            gva_eligible = (
+                cpu_offload
+                and native_mxfp8
+                and self.engram_dp_shared_memory
+                and share_group is not None
+                and share_group.world_size > 1
+                and all(dtype == torch.float8_e4m3fn for dtype in storage_dtypes)
+            )
+            if use_engram_gva(
+                gva_eligible,
+                sparse_kv_offload=get_ascend_config().sparse_kv_offload_config.enabled,
+            ):
+                if config.engram_head_dim % 32:
+                    raise ValueError("A5 Engram GVA requires an Engram head dimension divisible by 32")
+                local_gva_rows, local_gva_table_ids, local_gva_heads = make_engram_gva_local_tables(
+                    [f"layers.{layer_id}.engram.embed" for _, layer_id, _, _ in table_specs],
+                    [head_sizes for _, _, _, head_sizes in table_specs],
+                    get_tensor_model_parallel_rank(),
+                    get_tensor_model_parallel_world_size(),
+                )
+                engram_max_tokens = max(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+                )
+                gva_pool = EngramGvaPool(
+                    list(local_gva_rows),
+                    config.engram_head_dim + config.engram_head_dim // 32,
+                    config.engram_head_dim,
+                    engram_max_tokens * local_gva_heads,
+                    torch.device("npu", torch.npu.current_device()),
+                    share_group,
+                    checkpoint_identity=(
+                        f"dummy:{self.engram_weight_root}"
+                        if vllm_config.load_config.load_format == "dummy"
+                        else engram_checkpoint_identity(self.engram_weight_root, config.engram_layer_ids)
+                    ),
+                    table_ids=list(local_gva_table_ids),
+                )
+            self.engram_gva_pool = gva_pool
+
+            for (slot, layer_id, rows, head_sizes), storage_dtype in zip(table_specs, storage_dtypes):
                 embed = AscendParallelEngramEmbedding(
                     rows,
                     config.engram_head_dim,
@@ -1062,6 +1112,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     storage_dtype=storage_dtype,
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
+                    gva_pool=gva_pool,
                 )
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
