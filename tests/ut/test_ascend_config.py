@@ -455,6 +455,58 @@ class TestAscendConfig(TestBase):
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.is_megamoe_supported_by_config", return_value=True)
+    @patch("vllm_ascend.ascend_config.logger.warning_once")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_is_disabled_for_speculative_decoding(
+        self,
+        mock_fix_incompatible_config,
+        mock_warning_once,
+        mock_is_megamoe,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+        test_vllm_config.additional_config = {
+            "enable_fused_mc2": 1,
+            "multistream_overlap_shared_expert": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
+        self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        mock_is_megamoe.assert_not_called()
+        mock_warning_once.assert_any_call(
+            "Fused MC2 dispatch_ffn_combine is not supported with speculative decoding; "
+            "VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.is_megamoe_supported_by_config", return_value=True)
+    @patch("vllm_ascend.ascend_config.logger.warning_once")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_is_kept_when_speculative_tokens_are_zero(
+        self,
+        mock_fix_incompatible_config,
+        mock_warning_once,
+        mock_is_megamoe,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=0)
+        test_vllm_config.additional_config = {"enable_fused_mc2": 1}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.enable_fused_mc2, 1)
+        mock_is_megamoe.assert_called_once_with(test_vllm_config)
+        self.assertFalse(
+            any(
+                call.args and call.args[0].startswith("Fused MC2 dispatch_ffn_combine is not supported")
+                for call in mock_warning_once.call_args_list
+            )
+        )
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True)
     def test_enable_flashcomm1_config_overrides_disabled_env(self, mock_fix_incompatible_config):
