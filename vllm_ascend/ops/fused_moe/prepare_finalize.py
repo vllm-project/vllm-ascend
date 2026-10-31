@@ -374,17 +374,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     """
 
     def is_large_payload(self, bytes_per_row: int) -> bool:
-        """Amortize eager launch/packing overhead using rank-invariant traffic.
+        """Use rank-invariant hidden traffic for conservative eager overlap.
 
-        The 768 KiB budget avoids the small-payload regressions seen in DP/PCP
-        microbenchmarks. It scales with expert/hidden width and dtype instead
-        of imposing one token threshold on every model. This is a conservative
-        performance heuristic, not a routing correctness requirement.
+        This is a performance heuristic, not a correctness requirement or a
+        guarantee of speedup. Sequence-parallel hidden overlap is unsupported.
         """
-        if self._use_ep_sequence_parallel():
-            rows = _EXTRA_CTX.max_tokens_across_dp or 0
-            rows = (rows + self.moe_config.tp_size - 1) // self.moe_config.tp_size
-        elif self.moe_config.dp_size > 1:
+        if self.moe_config.dp_size > 1:
             rows = _EXTRA_CTX.max_tokens_across_dp or 0
         else:
             rows = _EXTRA_CTX.max_tokens_across_pcp or 0
@@ -421,10 +416,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
-        hidden_states, pertoken_scale = self._quantize_ep_hidden(hidden_states, quant_type)
-        return self._gather_ep_inputs(hidden_states, router_logits, pertoken_scale)
-
-    def _quantize_ep_hidden(self, hidden_states, quant_type):
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -441,9 +432,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 round_mode="round",
             )
 
-        return hidden_states, pertoken_scale
-
-    def _gather_ep_inputs(self, hidden_states, router_logits, pertoken_scale):
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
 
@@ -459,42 +447,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             padded_hidden_states_shape=None,
             pertoken_scale=pertoken_scale,
         )
-
-    def prepare_local_topk(self, hidden_states, router_logits, select_experts, pending=None, quant_type=QuantType.NONE):
-        """Gather row-local routes using the same layout and quantization as prepare."""
-        local_rows = hidden_states.shape[0]
-        # Some fused routers cannot accept an empty local shard. The dummy row
-        # is removed before communication; padding follows the normal prepare.
-        route_hidden, route_logits = hidden_states, router_logits
-        if local_rows == 0:
-            route_hidden = nn.functional.pad(hidden_states, (0, 0, 0, 1))
-            route_logits = nn.functional.pad(router_logits, (0, 0, 0, 1))
-        pertoken_scale = None
-        if self._use_ep_sequence_parallel():
-            # Match the original router's input layout, including packed FP4
-            # width, and quantize once before gathering hidden and scales.
-            route_hidden, pertoken_scale = self._quantize_ep_hidden(route_hidden, quant_type)
-        weights, ids = select_experts(route_hidden, route_logits, False)
-        weights, ids = weights[:local_rows], ids[:local_rows]
-        weight_dtype, id_dtype = weights.dtype, ids.dtype
-        # FP16/BF16 -> FP32 is exact. Bit reinterpretation keeps every ID bit,
-        # including INT64 IDs beyond FP32's exact integer range, in one AG.
-        wire_weights = weights if weights.element_size() >= 4 else weights.float()
-        weight_words = wire_weights.contiguous().view(torch.int32)
-        id_words = ids.contiguous().view(torch.int32)
-        packed = torch.cat((weight_words, id_words), dim=-1)
-        if self._use_ep_sequence_parallel():
-            assert pending is None
-            if pertoken_scale is not None:
-                pertoken_scale = pertoken_scale[:local_rows]
-            output = self._gather_ep_inputs(route_hidden[:local_rows], packed, pertoken_scale)
-        else:
-            output = pending(packed) if pending is not None else self.prepare(hidden_states, packed)
-        packed = output.router_logits
-        split = weight_words.shape[-1]
-        weights = packed[:, :split].contiguous().view(wire_weights.dtype).to(weight_dtype)
-        ids = packed[:, split:].contiguous().view(id_dtype)
-        return output, weights, ids
 
     def start_pcp_hidden_gather(self, hidden_states: torch.Tensor) -> Callable:
         """Start the first DP/PCP hidden AG and finish in the normal prepare order."""

@@ -119,17 +119,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
 
-    @property
-    def supports_local_routing(self) -> bool:
-        # Token-ID routing gathers IDs inside the router; arbitrary callbacks
-        # may also depend on the complete batch rather than individual rows.
-        return (
-            super().supports_local_routing
-            and self.custom_routing_function is None
-            and self.tid2eid is None
-            and self.bias_vl is None
-        )
-
     def is_fused_supported(
         self,
         hidden_states: torch.Tensor,

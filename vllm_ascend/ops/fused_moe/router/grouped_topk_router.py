@@ -38,15 +38,6 @@ class AscendGroupedTopKRouter(BaseRouter):
         self.use_grouped_topk = use_grouped_topk
 
     @property
-    def supports_local_routing(self) -> bool:
-        """Whether routing can run before gathering tokens across ranks.
-
-        Scores, groups and correction bias act independently on each row.
-        EPLB mapping and capture callbacks require the established global rows.
-        """
-        return self.eplb_state is None and getattr(self, "capture_fn", None) is None
-
-    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,
