@@ -93,3 +93,94 @@ def test_send_inline_image_with_string_system_message(monkeypatch):
 
     assert post.call_args.kwargs["json"]["messages"] == messages
     load_image.assert_not_called()
+
+
+@pytest.mark.parametrize("content", [None, "", [{"type": "text", "text": "hello"}]])
+def test_message_metadata_and_null_content_are_preserved(content):
+    messages = [
+        {
+            "role": "assistant",
+            "content": content,
+            "name": "helper",
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "result", "tool_call_id": "call-1"},
+    ]
+    mm = {"messages": messages}
+    original = deepcopy(mm)
+
+    assert not send_mm_request._messages_need_preload(mm)
+    assert send_mm_request._build_messages(mm, []) == messages
+    assert mm == original
+
+
+@pytest.mark.parametrize("mm", [{}, {"messages": None}, {"messages": []}])
+def test_absent_or_empty_messages_keep_default_prompt(mm):
+    assert not send_mm_request._messages_need_preload(mm)
+    assert send_mm_request._build_messages(mm, []) == [
+        {"role": "user", "content": [{"type": "text", "text": send_mm_request.DEFAULT_TEXT_PROMPT}]}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("messages", "error"),
+    [
+        ({}, "messages must be a list or null"),
+        ("hello", "messages must be a list or null"),
+        ([None], "messages[0] must be an object"),
+        ([{"content": 0}], "messages[0].content must be a string, list, or null"),
+        ([{"content": False}], "messages[0].content must be a string, list, or null"),
+        ([{"content": {}}], "messages[0].content must be a string, list, or null"),
+        ([{"content": [None]}], "messages[0].content[0] must be an object"),
+        ([{"content": ["text"]}], "messages[0].content[0] must be an object"),
+        ([{"content": [{"type": "text", "text": "valid"}, 1]}], "messages[0].content[1] must be an object"),
+    ],
+)
+def test_invalid_message_containers_fail_explicitly(messages, error):
+    mm = {"messages": messages}
+    original = deepcopy(mm)
+
+    for build in (lambda: send_mm_request._messages_need_preload(mm), lambda: send_mm_request._build_messages(mm, [])):
+        with pytest.raises(ValueError) as failure:
+            build()
+        assert str(failure.value) == error
+    assert mm == original
+
+
+def test_invalid_later_message_fails_before_image_loading_or_http(monkeypatch):
+    messages = [
+        {"content": [{"type": "image_url", "image_url": {"url": "/tmp/image.png"}}]},
+        {"content": [None]},
+    ]
+    config = SimpleNamespace(model="test-model", mm_request={"messages": messages}, expected_response={})
+    original = deepcopy(config.mm_request)
+    load_image = Mock(side_effect=AssertionError("invalid messages must not load images"))
+    post = Mock(side_effect=AssertionError("invalid messages must not be submitted"))
+    monkeypatch.setattr(send_mm_request, "_load_image_data", load_image)
+    monkeypatch.setattr(send_mm_request.requests, "post", post)
+
+    with pytest.raises(ValueError) as failure:
+        send_mm_request.send_image_request(config, SimpleNamespace())
+
+    assert str(failure.value) == "messages[1].content[0] must be an object"
+    assert config.mm_request == original
+    load_image.assert_not_called()
+    post.assert_not_called()
+
+
+def test_send_null_assistant_content_preserves_tool_call_metadata(monkeypatch):
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "type": "function"}]},
+        {"role": "tool", "content": "done", "tool_call_id": "call-1"},
+    ]
+    config = SimpleNamespace(model="test-model", mm_request={"messages": messages}, expected_response={})
+    response_json = {"choices": [{"message": {"content": "Done."}}]}
+    post = Mock(return_value=SimpleNamespace(status_code=200, json=lambda: response_json))
+    load_image = Mock(side_effect=AssertionError("null content must not load images"))
+    monkeypatch.setattr(send_mm_request.requests, "post", post)
+    monkeypatch.setattr(send_mm_request, "_load_image_data", load_image)
+    server = SimpleNamespace(url_for=lambda *parts: "http://localhost/" + "/".join(parts))
+
+    assert send_mm_request.send_image_request(config, server) == response_json
+    assert post.call_args.kwargs["json"]["messages"] == messages
+    load_image.assert_not_called()

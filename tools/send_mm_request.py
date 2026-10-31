@@ -61,11 +61,32 @@ def _load_images(paths: list[str | None], default_path: str | None = None) -> li
     return [_load_image_data(p or default_path) for p in paths]
 
 
+def _validated_messages(mm: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate message containers before image loading or request submission."""
+    messages = mm.get("messages")
+    if messages is None:
+        return []
+    if not isinstance(messages, list):
+        raise ValueError("messages must be a list or null")
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"messages[{message_index}] must be an object")
+        content = message.get("content", [])
+        if content is None or isinstance(content, str):
+            continue
+        if not isinstance(content, list):
+            raise ValueError(f"messages[{message_index}].content must be a string, list, or null")
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict):
+                raise ValueError(f"messages[{message_index}].content[{part_index}] must be an object")
+    return messages
+
+
 def _messages_need_preload(mm: dict[str, Any]) -> bool:
     """Return True only when at least one image_url needs base64 preloading."""
-    for msg in mm.get("messages") or []:
+    for msg in _validated_messages(mm):
         content = msg.get("content", [])
-        if isinstance(content, str):
+        if content is None or isinstance(content, str):
             continue
         for part in content:
             if part.get("type") != "image_url":
@@ -81,7 +102,7 @@ def _messages_need_preload(mm: dict[str, Any]) -> bool:
 
 
 def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict[str, Any]]:
-    raw = mm.get("messages")
+    raw = _validated_messages(mm)
 
     if not raw:
         parts: list[dict[str, Any]] = [{"type": "text", "text": mm.get("text_prompt", DEFAULT_TEXT_PROMPT)}]
@@ -92,8 +113,10 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
     messages: list[dict[str, Any]] = []
     for msg in raw:
         content = msg.get("content", [])
-        if isinstance(content, str):
-            messages.append({"role": msg.get("role", "user"), "content": content})
+        message = {**msg, "role": msg.get("role", "user")}
+        if content is None or isinstance(content, str):
+            message["content"] = content
+            messages.append(message)
             continue
         content_parts: list[dict[str, Any]] = []
         for part in content:
@@ -115,7 +138,8 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
                 img["url"] = url
                 p["image_url"] = img
             content_parts.append(p)
-        messages.append({"role": msg.get("role", "user"), "content": content_parts})
+        message["content"] = content_parts
+        messages.append(message)
     return messages
 
 
