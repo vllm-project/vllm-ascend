@@ -121,11 +121,10 @@ jobs:
           fi
           echo "::endgroup::"
 
-          # =========== Register problem matchers =================
-          echo "::group::Register problem matchers"
+          # =========== Copy problem matchers =====================
+          echo "::group::Copy problem matchers"
           for matcher in actionlint markdownlint mypy; do
             cp ".github/workflows/matchers/$matcher.json" "$RUNNER_TEMP/$matcher.json"
-            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
           done
           echo "::endgroup::"
 
@@ -134,6 +133,14 @@ jobs:
           PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
           echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "::endgroup::"
+
+      # Keep a step boundary so the Kubernetes runner can synchronize the files
+      # before processing add-matcher outside the job container.
+      - name: Register problem matchers
+        run: |
+          for matcher in actionlint markdownlint mypy; do
+            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
+          done
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
