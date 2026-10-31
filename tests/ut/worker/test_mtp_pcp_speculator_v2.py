@@ -254,8 +254,10 @@ def test_capture_follows_upstream_contract() -> None:
         mgr.capture.side_effect = lambda fn, *args, **kwargs: events.append((name, (fn, args, kwargs)))
         return mgr
 
-    speculator.prefill_cudagraph_manager = manager("prefill")
-    speculator.decode_cudagraph_manager = manager("decode")
+    prefill_manager = manager("prefill")
+    decode_manager = manager("decode")
+    speculator.prefill_cudagraph_manager = prefill_manager
+    speculator.decode_cudagraph_manager = decode_manager
     with patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()):
         speculator.capture()
 
@@ -270,7 +272,8 @@ def test_capture_follows_upstream_contract() -> None:
         "decode",
         "on_multi_step_decode_end",
     ]
-    prefill_fn, prefill_args, prefill_kwargs = events[1][1]
+    prefill_fn, *prefill_args = prefill_manager.capture.call_args.args
+    prefill_kwargs = prefill_manager.capture.call_args.kwargs
     # Prefill captures the routine the runtime replays, with target metadata.
     assert prefill_fn == speculator._prefill
     assert prefill_args[0] is speculator.model_state
@@ -278,7 +281,8 @@ def test_capture_follows_upstream_contract() -> None:
     assert prefill_args[3] is speculator.target_attn_groups
     # Its dummy is staged PCP-locally, like the target capture.
     assert prefill_kwargs["pcp_manager"] is speculator.pcp_manager
-    decode_fn, decode_args, decode_kwargs = events[4][1]
+    decode_fn, *decode_args = decode_manager.capture.call_args.args
+    decode_kwargs = decode_manager.capture.call_args.kwargs
     assert "pcp_manager" not in decode_kwargs
     assert decode_fn == speculator._multi_step_decode
     assert decode_args[1] is speculator.input_buffers
