@@ -313,12 +313,19 @@ def test_glm_producer_mtp_uses_known_prompt_tail_instead_of_sampling(tail):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = scheduler._force_known_prompt_tail = True
     original = SamplingParams(
-        max_tokens=8, min_tokens=1, stop_token_ids=[tail],
-        allowed_token_ids=[5], logit_bias={tail: -100}, seed=17,
+        max_tokens=8,
+        min_tokens=1,
+        stop_token_ids=[tail],
+        allowed_token_ids=[5],
+        logit_bias={tail: -100},
+        seed=17,
     )
     request = make_request(
-        prompt_token_ids=[1, 2, tail], _all_token_ids=[1, 2, tail],
-        num_prompt_tokens=3, max_tokens=8, sampling_params=original,
+        prompt_token_ids=[1, 2, tail],
+        _all_token_ids=[1, 2, tail],
+        num_prompt_tokens=3,
+        max_tokens=8,
+        sampling_params=original,
         kv_transfer_params={"do_remote_decode": True},
         structured_output_request=object(),
         status=RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,

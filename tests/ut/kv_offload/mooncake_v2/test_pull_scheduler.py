@@ -464,9 +464,7 @@ def test_update_after_alloc_and_build_metadata() -> None:
     )
 
     scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
-    metadata = scheduler.build_connector_meta(
-        SimpleNamespace(num_scheduled_tokens={}, scheduled_spec_decode_tokens={})
-    )
+    metadata = scheduler.build_connector_meta(SimpleNamespace(num_scheduled_tokens={}, scheduled_spec_decode_tokens={}))
 
     assert request.kv_transfer_params["do_remote_prefill"] is False
     assert metadata.reqs_in_batch == {"request-d"}
@@ -873,8 +871,7 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
 
 @pytest.mark.parametrize(
     ("drafts", "outputs", "placeholders", "remaining"),
-    [([-1] * 5, 0, 0, 1), ([11, 12, 13, 14, 15], 0, 0, 6),
-     ([-1] * 5, 1, 0, 6), ([-1] * 5, 0, 1, 6), ([], 0, 0, 6)],
+    [([-1] * 5, 0, 0, 1), ([11, 12, 13, 14, 15], 0, 0, 6), ([-1] * 5, 1, 0, 6), ([-1] * 5, 0, 1, 6), ([], 0, 0, 6)],
 )
 def test_remote_prefill_bootstrap_only_removes_unproposed_drafts(drafts, outputs, placeholders, remaining):
     scheduler = make_pull_scheduler()
@@ -883,7 +880,8 @@ def test_remote_prefill_bootstrap_only_removes_unproposed_drafts(drafts, outputs
     )
     scheduler._remote_prefill_bootstraps = {"remote": request}
     output = SimpleNamespace(
-        num_scheduled_tokens={"remote": 6, "other": 6}, total_num_scheduled_tokens=12,
+        num_scheduled_tokens={"remote": 6, "other": 6},
+        total_num_scheduled_tokens=12,
         scheduled_spec_decode_tokens={"remote": list(drafts), "other": [-1] * 5},
     )
     scheduler._prepare_remote_prefill_bootstraps(output)
@@ -901,8 +899,11 @@ def test_remote_prefill_bootstrap_waits_for_load_and_only_changes_first_forward(
     loading = SimpleNamespace(num_scheduled_tokens={"remote": 0})
     scheduler._prepare_remote_prefill_bootstraps(loading)
     assert scheduler._remote_prefill_bootstraps == {"remote": request}
-    output = SimpleNamespace(num_scheduled_tokens={"remote": 6}, total_num_scheduled_tokens=6,
-                             scheduled_spec_decode_tokens={"remote": [-1] * 5})
+    output = SimpleNamespace(
+        num_scheduled_tokens={"remote": 6},
+        total_num_scheduled_tokens=6,
+        scheduled_spec_decode_tokens={"remote": [-1] * 5},
+    )
     scheduler._prepare_remote_prefill_bootstraps(output)
     assert output.num_scheduled_tokens["remote"] == 1
     output.num_scheduled_tokens["remote"] = output.total_num_scheduled_tokens = 6

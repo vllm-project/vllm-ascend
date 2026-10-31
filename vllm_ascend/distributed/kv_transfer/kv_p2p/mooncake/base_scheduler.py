@@ -226,9 +226,13 @@ class MooncakeBaseConnectorScheduler:
                 # sampling constraints and consumes the original prompt.
                 original = request.sampling_params
                 request.sampling_params = SamplingParams(
-                    temperature=0, max_tokens=1, ignore_eos=True,
-                    allowed_token_ids=[tail_token], seed=original.seed,
-                    logprobs=original.logprobs, prompt_logprobs=original.prompt_logprobs,
+                    temperature=0,
+                    max_tokens=1,
+                    ignore_eos=True,
+                    allowed_token_ids=[tail_token],
+                    seed=original.seed,
+                    logprobs=original.logprobs,
+                    prompt_logprobs=original.prompt_logprobs,
                     detokenize=original.detokenize,
                     skip_special_tokens=original.skip_special_tokens,
                     spaces_between_special_tokens=original.spaces_between_special_tokens,

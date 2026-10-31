@@ -359,9 +359,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             local_groups = [
                 [group for group in groups if not _is_mamba_attention_group(group)] for groups in attn_groups
             ]
-            mamba_groups = [
-                [group for group in groups if _is_mamba_attention_group(group)] for groups in attn_groups
-            ]
+            mamba_groups = [[group for group in groups if _is_mamba_attention_group(group)] for groups in attn_groups]
             local_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
                 self,
                 input_batch,
