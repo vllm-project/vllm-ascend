@@ -67,7 +67,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
-  tests/e2e/pull_request/one_card/test_ec_mooncake_fallback.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
@@ -144,6 +143,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
+  tests/e2e/pull_request/four_card/test_ec_mooncake_cross_encoder_store.py: 900
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 600
