@@ -432,13 +432,19 @@ def test_moe_uses_factory_expert_counts(monkeypatch, enable_eplb):
     )
     factory = MagicMock(return_value=runner)
     monkeypatch.setattr(k3_module, "FusedMoEFactory", factory)
-    monkeypatch.setattr(
-        k3_module, "GateLinear", lambda input_size, output_size, **kwargs: nn.Linear(input_size, output_size)
-    )
+
+    def make_gate(input_size, output_size, **kwargs):
+        gate = nn.Linear(input_size, output_size)
+        gate.out_dtype = kwargs["out_dtype"]
+        return gate
+
+    monkeypatch.setattr(k3_module, "GateLinear", make_gate)
 
     moe = k3_module.AscendKimiMoE(config=config, vllm_config=SimpleNamespace(parallel_config=parallel))
 
     assert factory.call_args.kwargs["enable_eplb"] == enable_eplb
     assert factory.call_args.kwargs["num_redundant_experts"] == (8 if enable_eplb else 0)
+    assert factory.call_args.kwargs["gate"] is moe.gate
+    assert factory.call_args.kwargs["router_logits_dtype"] == torch.float32
     assert moe.n_physical_experts == runner.moe_config.num_experts
     assert moe.n_local_physical_experts == runner.moe_config.num_local_experts

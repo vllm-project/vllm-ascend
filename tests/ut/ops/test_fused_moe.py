@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -22,6 +23,7 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import eplb as eplb_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import moe_comm_method as moe_comm_method_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
@@ -30,7 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl
+from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl, MoECommMethod
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -2770,7 +2772,6 @@ def test_internal_router_releases_shared_stream_after_input_cast(monkeypatch):
         runner._prepare_router_and_milestones(
             prepared_shared_input,
             hidden_states,
-            hidden_states,
         )
     )
 
@@ -2793,7 +2794,8 @@ def test_internal_router_without_precast_keeps_registered_gate_forward(monkeypat
     nn.Module.__init__(runner)
     hidden_states = MagicMock()
     hidden_states.float.side_effect = AssertionError("fallback must not allocate an unused FP32 input")
-    prepared_input = PreparedSharedExpertInput(hidden_states)
+    # SP shared input can be all-gathered; the router still sees local tokens.
+    prepared_input = PreparedSharedExpertInput(torch.randn(8, 4))
     shared_input_ready = object()
     router_output_ready = object()
     prepared_execution = object()
@@ -2841,7 +2843,7 @@ def test_internal_router_without_precast_keeps_registered_gate_forward(monkeypat
         lambda: SimpleNamespace(multistream_overlap_shared_expert=True),
     )
 
-    result = runner._prepare_router_and_milestones(prepared_input, hidden_states, object())
+    result = runner._prepare_router_and_milestones(prepared_input, hidden_states)
 
     assert result == (gate_logits, shared_input_ready, router_output_ready, submitted_gate_up)
     assert operation_order == [
@@ -3060,6 +3062,215 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     }
     assert result[0] is shared_out
     assert result[1] is routed_out
+
+
+@pytest.mark.parametrize("record_done_event", [False, True])
+def test_shared_gate_up_records_done_event_only_for_arbitration(monkeypatch, record_done_event):
+    shared = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared.multistream_overlap = True
+    shared.layer = SimpleNamespace(gate_up_proj=MagicMock(return_value=(torch.randn(2, 4),)))
+    shared._select_mlp_path = lambda: SharedExpertMLPPath.LINEAR_WRAPPER
+    shared._wait_for_milestone = MagicMock()
+    shared.part1 = MagicMock(return_value=torch.randn(2, 4))
+    stream = MagicMock()
+    done_event = object()
+    stream.record_event.return_value = done_event
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: stream)
+
+    prepared = PreparedSharedExpertExecution(torch.randn(2, 4), torch.randn(2, 4), None)
+    submitted = shared.enqueue_gate_up_after_router(prepared, object(), record_done_event=record_done_event)
+
+    assert submitted.gate_up_done is (done_event if record_done_event else None)
+    assert stream.record_event.call_count == int(record_done_event)
+    shared.part1.assert_called_once_with(prepared.gate_up_input)
+
+
+@pytest.mark.parametrize("has_barrier", [False, True])
+def test_shared_gate_up_barrier_is_after_dispatch_and_before_routed_mlp(monkeypatch, has_barrier):
+    gate_up_done = object() if has_barrier else None
+    order: list[str | tuple[str, object]] = []
+    dispatch_output = SimpleNamespace(group_list=None, group_list_type=None, combine_metadata=None)
+
+    def dispatch(**_kwargs):
+        order.append("dispatch")
+        return dispatch_output
+
+    def combine(**_kwargs):
+        order.append("combine")
+        return torch.empty(2, 4)
+
+    def apply_mlp(*_args):
+        order.append("routed_gmm1")
+        return torch.empty(2, 4), None
+
+    dispatcher = SimpleNamespace(token_dispatch=dispatch, token_combine=combine)
+    comm = SimpleNamespace(
+        token_dispatcher=dispatcher,
+        moe_config=object(),
+        shared_activation_overlaps_routed_gmm1=False,
+    )
+    context = SimpleNamespace(moe_comm_method=comm, shared_gate_up_done=gate_up_done)
+    stream = SimpleNamespace(wait_event=lambda event: order.append(("wait", event)))
+    monkeypatch.setattr(moe_comm_method_module, "_EXTRA_CTX", context)
+    monkeypatch.setattr(moe_comm_method_module.torch.npu, "current_stream", lambda: stream)
+    monkeypatch.setattr(moe_comm_method_module, "maybe_record_event", lambda: None)
+    monkeypatch.setattr(moe_comm_method_module, "build_token_dispatch_input", lambda **_kwargs: object())
+    monkeypatch.setattr(moe_comm_method_module, "build_mlp_compute_input", lambda **_kwargs: object())
+    monkeypatch.setattr(moe_comm_method_module, "apply_moe_mlp", apply_mlp)
+
+    MoECommMethod.fused_experts(
+        comm,
+        fused_experts_input=SimpleNamespace(hidden_states=torch.empty(2, 4)),
+        quant_method=object(),
+    )
+
+    expected: list[str | tuple[str, object]] = ["dispatch"]
+    if gate_up_done is not None:
+        expected.append(("wait", gate_up_done))
+    assert order == [*expected, "routed_gmm1", "combine"]
+
+
+@pytest.mark.parametrize("missing_event", [False, True])
+def test_runner_scopes_optional_gate_up_barrier_to_routed_forward(monkeypatch, missing_event):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    gate_up_done = None if missing_event else object()
+    previous_event = object()
+    context = SimpleNamespace(shared_gate_up_done=previous_event)
+    submitted = SimpleNamespace(gate_up_done=gate_up_done)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    observed_events = []
+
+    def routed_forward(**_kwargs):
+        observed_events.append(context.shared_gate_up_done)
+        return routed_out, RoutedMoEMilestones()
+
+    runner.routed_experts = SimpleNamespace(forward_impl=routed_forward)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
+    runner.ascend_shared_experts = SimpleNamespace(
+        prepare_input_before_routed=lambda states: PreparedSharedExpertInput(states),
+        forward=MagicMock(return_value=shared_out),
+    )
+    runner._sequence_parallel_context = lambda: nullcontext()
+    runner._can_overlap_sp_shared_with = lambda _transform: False
+    runner._should_serialize_shared_gate_up = lambda: True
+    runner._prepare_router_and_milestones = MagicMock(return_value=(router_logits, object(), object(), submitted))
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", context)
+
+    if missing_event:
+        with pytest.raises(RuntimeError, match="did not expose its completion event"):
+            runner._forward_impl(hidden_states, router_logits)
+        assert observed_events == []
+    else:
+        result = runner._forward_impl(hidden_states, router_logits)
+        assert result[0] is shared_out
+        assert result[1] is routed_out
+        assert observed_events == [gate_up_done]
+    assert context.shared_gate_up_done is previous_event
+    runner._prepare_router_and_milestones.assert_called_once()
+    assert runner._prepare_router_and_milestones.call_args.kwargs == {"record_gate_up_done": True}
+
+
+@pytest.mark.parametrize(
+    "routed_quant,comm_type,parallel_mode,shared_dtype,fused_kernel,has_transform,expected",
+    [
+        (
+            QuantType.W4A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int8,
+            False,
+            True,
+            True,
+        ),
+        (
+            QuantType.W4A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int8,
+            False,
+            False,
+            False,
+        ),
+        (
+            QuantType.W8A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int8,
+            False,
+            True,
+            False,
+        ),
+        (
+            QuantType.W4A8,
+            MoECommType.FUSED_MC2,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int8,
+            False,
+            True,
+            False,
+        ),
+        (
+            QuantType.W4A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP,
+            torch.int8,
+            False,
+            True,
+            False,
+        ),
+        (
+            QuantType.W4A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int32,
+            False,
+            True,
+            False,
+        ),
+        (
+            QuantType.W4A8,
+            MoECommType.ALLTOALL,
+            SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+            torch.int8,
+            True,
+            True,
+            False,
+        ),
+    ],
+)
+def test_gate_up_cube_arbitration_selects_only_supported_stages(
+    monkeypatch, routed_quant, comm_type, parallel_mode, shared_dtype, fused_kernel, has_transform, expected
+):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.quant_type = routed_quant
+    runner.routed_input_transform = object() if has_transform else None
+    runner.routed_experts = SimpleNamespace(activation=MoEActivation.SITU)
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=lambda: parallel_mode,
+        layer=SimpleNamespace(
+            gate_up_proj=SimpleNamespace(weight=torch.empty(1, dtype=shared_dtype)),
+            down_proj=SimpleNamespace(weight=torch.empty(1, dtype=shared_dtype)),
+        ),
+        situ_activation=object(),
+        lora_context=None,
+        _select_mlp_path=lambda: SharedExpertMLPPath.A8_INT_FUSED,
+    )
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=comm_type))
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda _: fused_kernel),
+    )
+
+    assert runner._should_serialize_shared_gate_up() is expected
 
 
 def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):

@@ -447,6 +447,7 @@ class _ExtraForwardContextProxy:
         "capturing",
         "moe_comm_type",
         "moe_comm_method",
+        "shared_gate_up_done",
         "is_decode_only_node",
         "use_mega_moe",
         "mmrs_fusion",

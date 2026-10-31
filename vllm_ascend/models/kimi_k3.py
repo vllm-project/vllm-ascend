@@ -344,6 +344,7 @@ class AscendKimiMoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
+            gate=self.gate,
             num_experts=num_experts,
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
@@ -359,6 +360,7 @@ class AscendKimiMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=config.moe_router_activation_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            router_logits_dtype=self.gate.out_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
@@ -378,7 +380,12 @@ class AscendKimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
+        if self.experts.is_internal_router:
+            # Keep the original token-local input for the gate even when the
+            # routed input is transformed and shared input is all-gathered.
+            router_logits = hidden_states
+        else:
+            router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
