@@ -521,9 +521,11 @@ class NPUModelRunner(GPUModelRunner):
         prepare_v41_source_rope(self)
         # Recreate along with KV initialization: profiling capture owns a
         # throwaway model state and must not leak event/buffer bindings.
+        # Allocate independently of the configured graph modes. Model state
+        # selects synchronous/deferred metadata for each runtime batch.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if (uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM")
             else None
         )
 

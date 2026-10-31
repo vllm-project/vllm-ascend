@@ -221,7 +221,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             with communicator_switch():
                 return super().capture(
                     model,
-                    model_state,
+                    CaptureModelState(model_state),
                     input_buffers,
                     intermediate_tensors,
                     block_tables,
@@ -237,6 +237,27 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:
                 metadata.finish()
+
+
+class CaptureModelState:
+    """Preserve the capture execution mode while upstream prepares metadata.
+
+    Upstream calls prepare_attn with NONE for both captures and identifies
+    FULL with for_capture=True. The other case prepares a PIECEWISE graph,
+    including its eager warmup; it must not bind deferred metadata producers.
+    Runtime NONE batches still go directly to the original model state.
+    """
+
+    def __init__(self, model_state):
+        self.model_state = model_state
+
+    def __getattr__(self, name):
+        return getattr(self.model_state, name)
+
+    def prepare_attn(self, input_batch, cudagraph_mode, *args, **kwargs):
+        if not kwargs.get("for_capture", False):
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
+        return self.model_state.prepare_attn(input_batch, cudagraph_mode, *args, **kwargs)
 
 
 class ModelWithContext(nn.Module):
@@ -265,7 +286,7 @@ class ModelWithContext(nn.Module):
             _EXTRA_CTX.is_draft_model_prefill = True
 
         try:
-            if self.device_metadata is not None:
+            if self.device_metadata is not None and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
                 self.device_metadata.begin_forward()
             return self.original_model(*args, **kwargs)
         finally:

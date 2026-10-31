@@ -407,3 +407,36 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     assert kwargs["max_query_len"] == 2
     assert kwargs["query_start_loc_cpu"].tolist() == [0, 2]
     assert kwargs["seq_lens_np"].tolist() == [2]
+
+
+def test_metadata_selection_follows_runtime_mode_across_mixed_steps(buffers):
+    from vllm_ascend.worker.v2.aclgraph_utils import CaptureModelState
+
+    with patch.object(buffers, "dummy_num_tokens", 2), patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(1, 16, buffers)
+    state = AscendModelState.__new__(AscendModelState)
+    state.decoder_replay = None
+    state.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        num_speculative_tokens=0,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE),
+    )
+    state.model_config = SimpleNamespace(max_model_len=128)
+    state.pcp_manager = state.kvpp_runtime = None
+    state.kvpp_is_dummy_run = False
+    resource = Mock()
+    resource.run_build.side_effect = lambda build, **kwargs: build(**kwargs)
+    state.device_metadata = resource
+    capture = CaptureModelState(state)
+    with patch("vllm_ascend.worker.v2.model_states.default.build_attn_metadata", return_value={}):
+        for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            resource.reset_mock()
+            state.prepare_attn(batch, mode, (), torch.full((1, 16), -1), [], None)
+            assert resource.run_build.call_count == int(mode != CUDAGraphMode.PIECEWISE)
+            assert state.device_metadata is resource
+            state.finish_execution(failed=False)
+        for full in (True, False, True, False):
+            resource.reset_mock()
+            capture.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.full((1, 16), -1), [], None, for_capture=full)
+            assert resource.run_build.call_count == int(full)
+            state.finish_execution(failed=False)

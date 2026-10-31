@@ -62,6 +62,29 @@ These checks document the subset of upstream graph behavior that the current Asc
 
 ## Key Ascend-Specific Mechanisms
 
+### DeepSeek V4.1 Engram in MRV2 breakable PIECEWISE graphs
+
+`EngramModelState` stages lookback tokens, request boundaries and the valid token
+count in persistent device buffers. The model's `forward()` computes Engram
+hashes and the keep mask in a graph segment. An `eager_break_during_capture`
+prefetch boundary then runs table lookup and any required communication, writing
+to persistent row buffers. With Engram overlap enabled, this work runs on an
+auxiliary stream while the earlier decoder layers execute. Each Engram consumer
+waits on its layer's ordinary event at an eager boundary before consuming rows
+in the next graph segment. The graph manager needs no Engram preparation hook.
+
+Capture uses the same device hash path as replay, including when the initial
+batch is dummy. The device valid token count masks padding and idle DP ranks;
+it must not become a Python branch specialized to the capture inputs. Row
+buffers and ready events remain stable across replays of a token bucket.
+
+Metadata resources are allocated independently of the configured graph mode.
+Each batch's runtime mode selects synchronous metadata for PIECEWISE and the
+existing deferred protocol for FULL or NONE. This distinction also applies
+when the configuration is `FULL_AND_PIECEWISE`. During upstream capture setup,
+`CaptureModelState` preserves the PIECEWISE mode that would otherwise be passed
+as NONE; full capture continues to be identified by `for_capture=True`.
+
 ### Host-side attention parameter update for full graph replay
 
 Full graph replay on Ascend has an extra problem that upstream generic documentation does not cover in detail: some attention operators need runtime metadata updates even when the overall graph is static. The Ascend implementation handles this by separating graph capture from host-side task parameter updates.
