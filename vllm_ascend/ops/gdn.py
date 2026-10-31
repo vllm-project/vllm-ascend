@@ -64,6 +64,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
 
+    def rearrange_mixed_qkv(self, mixed_qkv):
+        """Avoid torch.cat: for c=1 decode the split slices are already
+        contiguous in the last dim, so direct .reshape() returns views.
+        This eliminates 30 ConcatD kernel launches per step (~123us)."""
+        if mixed_qkv is None:
+            return None, None, None
+        seq_len = mixed_qkv.shape[0]
+        q_dim = self.key_dim // self.tp_size
+        k_dim = self.key_dim // self.tp_size
+        v_dim = self.value_dim // self.tp_size
+        query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+        query = query.reshape(1, seq_len, -1, self.head_k_dim)
+        key = key.reshape(1, seq_len, -1, self.head_k_dim)
+        value = value.reshape(1, seq_len, -1, self.head_v_dim)
+        return query, key, value
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -179,6 +195,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        # Cache transposed contiguous conv_weights to avoid per-step
+        # aclnnContiguous_Transpose kernel (~4.3us * 30 layers = 129us/step).
+        # The weight is a fixed parameter, so the cache never goes stale.
+        if not hasattr(self, "_conv_weights_T") or self._conv_weights_T_ptr != self.conv1d.weight.data_ptr():
+            self._conv_weights_T = conv_weights.transpose(0, 1).contiguous()
+            self._conv_weights_T_ptr = self.conv1d.weight.data_ptr()
+        conv_weights_T = self._conv_weights_T
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -192,7 +215,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
@@ -221,7 +243,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
                 if get_pcp_group().world_size > 1:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
@@ -264,7 +285,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             -1, ...
                         ].transpose(-1, -2)
                 else:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                     torch.ops._C_ascend.npu_causal_conv1d_custom(
@@ -283,7 +303,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
@@ -420,8 +439,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            # For c=1 decode, fuse query+key l2norm into a single call by
+            # creating a combined contiguous view [1, 2, heads, head_dim]
+            # from the conv output buffer (q and k are adjacent in memory
+            # when seq_len==1). Saves ~60us/step. For c>1 the data layout
+            # is per-token interleaved so the view is invalid; fall back
+            # to separate l2norm calls.
+            if query_non_spec is not None and query_non_spec.shape[1] == 1:
+                qk_dim = 2 * (self.key_dim // self.tp_size)
+                qk = mixed_qkv_non_spec[:, :qk_dim].reshape(
+                    1, 2, -1, self.head_k_dim
+                )
+                qk = l2norm_fwd(qk)
+                query_non_spec = qk[:, :1]
+                key_non_spec = qk[:, 1:]
+            else:
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(

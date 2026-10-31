@@ -176,12 +176,9 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
-        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
-            self.multistream_overlap_shared_expert = False
-            logger.warning_once(
-                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
-                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
-            )
+        # Allow enable_fused_mc2 and multistream_overlap_shared_expert to coexist.
+        # The overlap path runs shared experts on a side stream while routed experts
+        # run on the default stream, and fused_mc2 optimizes the AllReduce communication.
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",

@@ -150,6 +150,8 @@ class BlockTable:
         num_reqs: int,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
+        positions_cpu: np.ndarray | None = None,
+        query_start_loc_cpu: np.ndarray | None = None,
     ) -> None:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
@@ -161,6 +163,30 @@ class BlockTable:
                 output_size=num_tokens,
             )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
+        elif (
+            positions_cpu is not None
+            and query_start_loc_cpu is not None
+            and num_tokens <= 80
+        ):
+            # CPU fast-path for decode batches: the triton
+            # _compute_slot_mapping_kernel has ~131us fixed launch overhead
+            # on Ascend (dispatch-dominated, not compute). For small batches
+            # the slot-mapping is trivial integer arithmetic. When the caller
+            # supplies CPU-side positions and query_start_loc (already
+            # available on host), we can compute on CPU and issue a single
+            # non-blocking H2D copy — avoiding both the kernel launch and any
+            # host-device synchronization.
+            req_idx = np.repeat(
+                np.arange(num_reqs, dtype=np.int32),
+                query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
+            )
+            pos_arr = positions_cpu[:num_tokens].astype(np.int64)
+            pos_block = pos_arr // self.block_size
+            pos_offset = pos_arr % self.block_size
+            block_ids = self.block_table.np[req_idx, pos_block].astype(np.int64)
+            slots = (block_ids * self.block_size + pos_offset).astype(np.int32)
+            self.slot_mapping.np[:num_tokens] = slots
+            self.slot_mapping.copy_to_gpu(num_tokens)
         else:
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
@@ -276,9 +302,13 @@ class BlockTable:
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
+        staging = getattr(self, "_bt_pinned", None)
+        if staging is None or staging.shape != self.block_table.cpu.shape:
+            staging = torch.empty_like(self.block_table.cpu, pin_memory=True)
+            self._bt_pinned = staging
+        staging[:num_reqs].copy_(self.block_table.cpu[:num_reqs])
         self.block_table.gpu[:num_reqs].copy_(
-            self.block_table.cpu[:num_reqs].clone().pin_memory(),
-            non_blocking=True,
+            staging[:num_reqs], non_blocking=True,
         )
 
     def clear(self) -> None:
@@ -424,6 +454,8 @@ class MultiGroupBlockTable:
         positions: torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
+        positions_cpu: np.ndarray | None = None,
+        query_start_loc_cpu: np.ndarray | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
             if block_table.is_mamba_group:
@@ -431,7 +463,13 @@ class MultiGroupBlockTable:
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
-                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+                block_table.compute_slot_mapping(
+                    num_reqs,
+                    query_start_loc,
+                    positions,
+                    positions_cpu=positions_cpu,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                )
 
     def compute_slot_mapping_draft(
         self,

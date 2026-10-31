@@ -4,6 +4,7 @@ import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
@@ -87,6 +88,38 @@ class AscendSampler(Sampler):
 
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        predict_bonus_token: bool = False,
+        logprobs_mode_override=None,
+    ) -> SamplerOutput:
+        # Fast path: pure greedy with no logprobs, no penalties, no masks.
+        # Skip the bf16->fp32 cast: argmax ordering is preserved because
+        # every bf16 value is exactly representable in fp32, so
+        # argmax(bf16) == argmax(bf16.to(fp32)). This saves one full-vocab
+        # cast kernel (~248K elements) per decode step.
+        if (
+            sampling_metadata.all_greedy
+            and not sampling_metadata.all_random
+            and sampling_metadata.max_num_logprobs is None
+            and not sampling_metadata.logprob_token_ids
+            and sampling_metadata.no_penalties
+            and sampling_metadata.allowed_token_ids_mask is None
+            and not sampling_metadata.bad_words_token_ids
+            and not sampling_metadata.logitsprocs.non_argmax_invariant
+            and sampling_metadata.thinking_budget_state_holder is None
+        ):
+            sampled = self.greedy_sample(logits).to(torch.int32)
+            return SamplerOutput(
+                sampled_token_ids=sampled.unsqueeze(-1),
+                logprobs_tensors=None,
+            )
+        return super().forward(
+            logits, sampling_metadata, predict_bonus_token, logprobs_mode_override
+        )
 
     def do_async_exponential(self, b_s, head_dim, generators):
         # Calculating exponential randoms in a different stream
