@@ -1455,8 +1455,8 @@ class TestNPUWorker(TestBase):
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = "npu:0"
 
-            # Test should throw assertion error
-            with self.assertRaises(AssertionError) as cm:
+            # Test should raise now that the validation raises ValueError
+            with self.assertRaises(ValueError) as cm:
                 worker.determine_available_memory()
 
             self.assertIn("Error in memory profiling", str(cm.exception))
