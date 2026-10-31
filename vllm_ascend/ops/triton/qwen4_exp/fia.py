@@ -89,6 +89,8 @@ def _prepare_qsa_mask_words_kernel(
     has_selection,
     stride_row,
     stride_column,
+    scatter_stride_row,
+    updates_stride_row,
     kv_length,
     mask_words,
     update_width,
@@ -123,8 +125,8 @@ def _prepare_qsa_mask_words_kernel(
     target = tl.where(dummy, 0, target)
     value = tl.where(dummy, 0x01010100, value)
     store_mask = columns < update_width
-    tl.store(scatter_indices + row * update_width + columns, target.to(tl.int64), store_mask)
-    tl.store(updates + row * update_width + columns, value, store_mask)
+    tl.store(scatter_indices + row * scatter_stride_row + columns, target.to(tl.int64), store_mask)
+    tl.store(updates + row * updates_stride_row + columns, value, store_mask)
     tl.store(has_selection + row, selected)
 
 
@@ -177,6 +179,8 @@ def build_qsa_fia_mask(
         selected,
         compact_indices.stride(0),
         compact_indices.stride(1),
+        indices.stride(0),
+        updates.stride(0),
         kv_length=kv_length,
         mask_words=mask_words,
         update_width=update_width,

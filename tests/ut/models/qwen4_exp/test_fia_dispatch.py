@@ -39,6 +39,24 @@ def test_mask_discards_invalid_and_duplicate_indices(implementation):
     torch.testing.assert_close(mask[0, 0], expected)
 
 
+def test_mask_broadcasts_one_effective_length_per_batch(implementation):
+    indices = torch.tensor(
+        [
+            [[0, 2, 4], [1, 3, 5]],
+            [[0, 2, 4], [1, 3, 5]],
+        ]
+    )
+    mask = implementation["build_selected_token_mask"](indices, torch.tensor([3, 5]), 6)
+    expected = torch.tensor(
+        [
+            [[1, 0, 1, 0, 0, 0], [0, 1, 0, 0, 0, 0]],
+            [[1, 0, 1, 0, 1, 0], [0, 1, 0, 1, 0, 0]],
+        ],
+        dtype=torch.bool,
+    )
+    torch.testing.assert_close(mask[:, 0], expected)
+
+
 @pytest.mark.parametrize("visible", range(12))
 def test_compact_groups_and_implicit_tail_respect_each_query_position(implementation, visible):
     # Deliberately poison explicit tail slots: GBSA derives its tail from visibility.

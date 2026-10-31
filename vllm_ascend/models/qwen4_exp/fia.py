@@ -22,7 +22,8 @@ def build_selected_token_mask(
     if isinstance(effective_kv_length, int) and not 0 <= effective_kv_length <= kv_length:
         raise ValueError("effective_kv_length must be between zero and kv_length")
     lengths = torch.as_tensor(effective_kv_length, device=selected_token_indices.device)
-    valid = (selected_token_indices >= 0) & (selected_token_indices < lengths.unsqueeze(-1))
+    lengths = lengths.reshape(lengths.shape + (1,) * (selected_token_indices.ndim - lengths.ndim))
+    valid = (selected_token_indices >= 0) & (selected_token_indices < lengths)
     valid &= selected_token_indices < kv_length
     scatter_indices = torch.where(valid, selected_token_indices, kv_length).long()
     mask = torch.zeros(
@@ -157,7 +158,7 @@ def qsa_fia_attention(
             allowed = build_selected_token_mask(selected.unsqueeze(0), visible.unsqueeze(0), mask_kv_length)
             has_selection = allowed.any(dim=-1).flatten()
             atten_mask = (~allowed).contiguous()
-            atten_mask[..., 0] &= has_selection.reshape(1, 1, -1)
+            atten_mask[..., 0] &= has_selection.view_as(atten_mask[..., 0])
         query_length = (end - start) // batch_size
         atten_mask = atten_mask.reshape(batch_size, 1, query_length, mask_kv_length)
         result, _ = torch_npu.npu_fused_infer_attention_score_v2(
