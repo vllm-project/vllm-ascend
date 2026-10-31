@@ -39,6 +39,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.dp_rpc_port import check_dp_rpc_port_available
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
@@ -599,6 +600,11 @@ class NPUPlatform(Platform):
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
         _validate_aux_output_config(vllm_config)
+
+        # 3.Fail fast when the data parallel RPC port is still held by a
+        # stale engine, otherwise the startup handshake fails later with a
+        # bare "Address already in use".
+        check_dp_rpc_port_available(vllm_config.parallel_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
