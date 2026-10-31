@@ -29,6 +29,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 from vllm_ascend.utils import is_950
@@ -158,15 +159,8 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             num_tokens = torch.tensor(EPLB_ROWS, device=device)
             state.num_unpadded_tokens_tensors = [num_tokens]
             state.allgather_source_is_padding = padding
-            gather_mask = prepare.all_gather_eplb_mask
-            mask = None
-
-            def capture_mask(source_mask):
-                nonlocal mask
-                mask = gather_mask(source_mask)
-                return mask
-
-            prepare.all_gather_eplb_mask = capture_mask
+            layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+            layer.moe_config = SimpleNamespace(is_sequence_parallel=False)
 
             def forward():
                 prepared = prepare.prepare(hidden, logits)
@@ -182,13 +176,12 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                 )
                 # Identity experts isolate dispatch/combine ownership from FFN numerics.
                 output = dispatcher.token_combine(dispatched.hidden_states, dispatched.combine_metadata)
+                mask = layer._make_eplb_token_mask(EPLB_ROWS, state, prepare)
                 state.record_load(
                     dispatched.group_list,
                     dispatched.group_list_type,
                     topk_ids=physical,
-                    num_source_tokens=EPLB_ROWS,
-                    is_sequence_parallel=False,
-                    prepare_finalize=prepare,
+                    token_mask=mask,
                 )
                 assert mask is not None
                 owners = ((physical >= start) & (physical < start + EPLB_LOCAL_EXPERTS)).to(torch.int32)
