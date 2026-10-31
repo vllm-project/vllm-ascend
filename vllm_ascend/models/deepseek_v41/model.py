@@ -837,7 +837,12 @@ class DeepseekV41DecoderLayer(nn.Module):
         has_engram = _engram_enabled_for_runtime(config, vllm_config)
         self.engram: AscendEngram | None
         if has_engram and not is_draft_layer and self.layer_idx in config.engram_layer_ids:
-            self.engram = AscendEngram(config, quant_config, f"{prefix}.engram")
+            self.engram = AscendEngram(
+                config,
+                quant_config,
+                f"{prefix}.engram",
+                use_sequence_parallel=self.use_sequence_parallel,
+            )
         else:
             self.engram = None
 
