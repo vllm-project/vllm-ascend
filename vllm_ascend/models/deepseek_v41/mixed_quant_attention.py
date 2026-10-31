@@ -280,8 +280,27 @@ def qsmla(
     else:
         cmp_indices = None
         cmp_lengths = None
-    task_metadata = metadata.swa.smla_metadata
-    wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(task_metadata))
+    # FD planning consumes row lengths, so its task table must match this
+    # layer's actual SWA/long-context inputs after the indexer has produced them.
+    # Keep planning on the attention stream so graph replay observes fresh lengths.
+    planner_cmp_lengths = cmp_lengths
+    if has_cmp and planner_cmp_lengths is None:
+        planner_cmp_lengths = (cmp_indices >= 0).sum(dim=-1, dtype=torch.int32)
+    elif not has_cmp:
+        planner_cmp_lengths = torch.zeros_like(ori_lengths)
+    task_metadata = ops.mixed_quant_sparse_flash_mla_metadata(
+        ori_lengths.contiguous(),
+        planner_cmp_lengths.contiguous(),
+        cu_seqlens_q=metadata.swa.query_start_loc,
+        num_heads_q=64,
+        num_heads_kv=1,
+        head_dim=512,
+        quant_mode=1,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=has_cmp,
+    )
     output, _ = ops.mixed_quant_sparse_flash_mla(
         q,
         ori_kv=ori_kv,
