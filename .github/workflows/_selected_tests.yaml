@@ -415,12 +415,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: ./tests/coverage.json
-
       - name: Generate Cobertura XML from coverage data
         run: |
           python -m slipcover --merge ./tests/coverage.json \
@@ -433,12 +427,12 @@ jobs:
             --fail-under=80 \
             --markdown-report ./tests/diff_coverage.md
 
-      - name: Post diff coverage as PR comment
-        uses: thollander/actions-comment-pull-request@v2.5.0
+      - name: Upload diff coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
         with:
-          filePath: ./tests/diff_coverage.md
-          pr_number: ${{ github.event.number }}
-          comment_tag: ./tests/diff-coverage # 用于后续更新同一条评论
+          name: coverage-report
+          path: ./tests/diff_coverage.md
 
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}
