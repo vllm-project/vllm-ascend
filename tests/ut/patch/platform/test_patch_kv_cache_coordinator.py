@@ -37,6 +37,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import vllm.envs as envs_vllm
 from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -364,6 +365,81 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+# ---------------------------------------------------------------------------
+# Fix: test prefix_cache_retention_interval must be divisible by scheduler_block_size
+# ---------------------------------------------------------------------------
+def _make_coordinator_with_retention_interval_and_scheduler_block_size(
+    monkeypatch, retention_interval, scheduler_block_size
+):
+    # if retention_interval < 0, we are in the old vLLM version where KVCacheConfig does not have retention property
+    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    kv_cache_config = _hybrid_config()
+    if retention_interval is None or retention_interval >= 0:
+        kv_cache_config.prefix_cache_retention_interval = retention_interval
+
+    else:
+        # correspond to older vLLM version where retention_interval is not defined in configs, but in env
+        monkeypatch.delattr(kv_cache_config, "prefix_cache_retention_interval")
+        monkeypatch.delattr(KVCacheConfig, "prefix_cache_retention_interval", raising=False)
+
+    # The kv-transfer config is attached by the
+    # get_kv_cache_config_from_groups builder in real engine startup.
+    return AscendHybridKVCacheCoordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=scheduler_block_size,
+    )
+
+
+def test_prefix_cache_retention_interval_indivisible_by_scheduler_block_size(monkeypatch):
+    with pytest.raises(ValueError, match="scheduler_block_size") as exec_info:
+        _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, 4096, 1536)
+    assert "4096" in str(exec_info.value)
+    assert "1536" in str(exec_info.value)
+
+
+def test_prefix_cache_retention_interval_divisible_by_scheduler_block_size(monkeypatch):
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, 4096, 1024)
+    assert coordinator.retention_interval == 4096
+    assert coordinator.scheduler_block_size == 1024
+
+
+def test_default_prefix_cache_retention_interval(monkeypatch):
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, 0, 1536)
+    assert coordinator.retention_interval == 0
+    assert coordinator.scheduler_block_size == 1536
+
+
+def test_none_prefix_cache_retention_interval(monkeypatch):
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, None, 1536)
+    assert coordinator.retention_interval is None
+    assert coordinator.scheduler_block_size == 1536
+
+
+def test_prefix_cache_retention_interval_default_legacy_env(monkeypatch):
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, -1, 64)
+    assert coordinator.retention_interval == 0
+
+
+def test_prefix_cache_retention_interval_legacy_env(monkeypatch):
+    monkeypatch.setattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", 4096, raising=False)
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, -1, 64)
+    assert coordinator.retention_interval == 4096
+
+
+def test_prefix_cache_retention_interval_cli_overrides_legacy_env(monkeypatch):
+    monkeypatch.setattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", 4096, raising=False)
+    coordinator = _make_coordinator_with_retention_interval_and_scheduler_block_size(monkeypatch, 1024, 64)
+    assert coordinator.retention_interval == 1024
 
 
 if __name__ == "__main__":

@@ -7,8 +7,6 @@ from dataclasses import replace
 from math import lcm
 
 import vllm
-import vllm.envs as envs_vllm
-import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -137,13 +135,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # behavior. The scheduler always supplies the real value at runtime.
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        self.retention_interval = getattr(kv_cache_config, "prefix_cache_retention_interval", 0)
+        if self.retention_interval == 0:
+            import vllm.envs as envs_vllm
+
+            self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", 0)
+
         validate_retention_interval = getattr(
-            vllm_kv_cache_coordinator,
+            sys.modules.get("vllm.v1.core.kv_cache_coordinator"),
             "_validate_prefix_cache_retention_interval",
             None,
         )
-        if self.retention_interval is not None and validate_retention_interval is not None:
+        if validate_retention_interval is not None:
             validate_retention_interval(
                 self.retention_interval,
                 self.scheduler_block_size,
