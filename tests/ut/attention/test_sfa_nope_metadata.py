@@ -284,7 +284,6 @@ def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
     assert result is dispatch.return_value
 
 
-
 @pytest.mark.parametrize("a5", [False, True])
 def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypatch, a5):
     query = torch.ones(3, 2, 128)
