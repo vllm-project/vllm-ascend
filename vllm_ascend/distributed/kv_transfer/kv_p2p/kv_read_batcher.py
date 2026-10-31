@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import deque
 from collections.abc import Iterator
 from typing import Any
 
@@ -23,8 +24,7 @@ class KVReadBatcher:
         self.max_bytes = max_bytes
         self.max_descriptors = max_descriptors
         self._condition = threading.Condition()
-        self._issued = 0
-        self._serving = 0
+        self._waiters: deque[object] = deque()
 
     def _batches(
         self, sources: list[int], destinations: list[int], sizes: list[int]
@@ -33,7 +33,9 @@ class KVReadBatcher:
             raise ValueError("KV read descriptor counts differ")
         if any(size < 0 for size in sizes):
             raise ValueError("KV read sizes must be nonnegative")
-        batch_src, batch_dst, batch_sizes = [], [], []
+        batch_src: list[int] = []
+        batch_dst: list[int] = []
+        batch_sizes: list[int] = []
         used = 0
         for source, destination, size in zip(sources, destinations, sizes):
             source, destination, size = int(source), int(destination), int(size)
@@ -63,17 +65,20 @@ class KVReadBatcher:
         if not self.max_bytes:
             return engine.batch_transfer_sync_read(session, sources, destinations, sizes)
         for src, dst, lengths in self._batches(sources, destinations, sizes):
-            with self._condition:
-                ticket = self._issued
-                self._issued += 1
-                while ticket != self._serving:
-                    self._condition.wait()
+            ticket = object()
             try:
+                with self._condition:
+                    self._waiters.append(ticket)
+                    while self._waiters[0] is not ticket:
+                        self._condition.wait()
                 result = engine.batch_transfer_sync_read(session, src, dst, lengths)
                 if result < 0:
                     return result
             finally:
                 with self._condition:
-                    self._serving += 1
+                    # A canceled waiter must remove only its own admission,
+                    # without releasing the reader currently at the head.
+                    if ticket in self._waiters:
+                        self._waiters.remove(ticket)
                     self._condition.notify_all()
         return 0

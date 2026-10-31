@@ -105,6 +105,51 @@ def test_fifo_admission_between_chunks():
     assert calls == ["first", "second", "first"]
 
 
+@pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])
+def test_interrupted_waiter_does_not_release_active_reader_or_stall_queue(interruption):
+    batcher = KVReadBatcher(256)
+    active = threading.Event()
+    release = threading.Event()
+    successor_waiting = threading.Event()
+    calls = []
+    original_wait = batcher._condition.wait
+    wait_count = 0
+
+    def wait(timeout=None):
+        nonlocal wait_count
+        wait_count += 1
+        if wait_count == 1:
+            raise interruption("canceled admission")
+        successor_waiting.set()
+        return original_wait(timeout)
+
+    batcher._condition.wait = wait
+
+    def read(session, sources, destinations, sizes):
+        calls.append(session)
+        if session == "active":
+            active.set()
+            assert release.wait(5)
+        return 0
+
+    engine = Mock(batch_transfer_sync_read=read)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first = executor.submit(batcher.read, engine, "active", [0], [0], [256])
+        try:
+            assert active.wait(5)
+            canceled = executor.submit(batcher.read, engine, "canceled", [0], [0], [256])
+            with pytest.raises(interruption, match="canceled admission"):
+                canceled.result(timeout=5)
+            successor = executor.submit(batcher.read, engine, "successor", [0], [0], [256])
+            assert successor_waiting.wait(5)
+            assert calls == ["active"]
+        finally:
+            release.set()
+        assert first.result(timeout=5) == successor.result(timeout=5) == 0
+    assert calls == ["active", "successor"]
+    assert not batcher._waiters
+
+
 @pytest.mark.parametrize("size", [-1, 1, 255, True, 256.0])
 def test_reject_invalid_byte_limit(size):
     with pytest.raises(ValueError, match="kv_read_batch_bytes"):
