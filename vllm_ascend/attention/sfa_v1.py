@@ -2020,6 +2020,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         # inside the indexer's forward would leave their gate closed.
         with attention_transfer_window():
             if has_local_query:
+                if self.qk_rope_head_dim == 0 and topk_indices.shape[0] < ql_nope.shape[0]:
+                    # PCP/TP collective rows can exceed the indexer's actual
+                    # query rows. SFA still requires matching T dimensions;
+                    # append invalid selections without changing valid rows.
+                    if topk_indices.shape[0] < attn_metadata.num_actual_tokens:
+                        raise ValueError("NoPE sparse indices are missing actual query rows.")
+                    topk_indices = torch.nn.functional.pad(
+                        topk_indices, (0, 0, 0, 0, 0, ql_nope.shape[0] - topk_indices.shape[0]), value=-1
+                    )
                 attn_output = self._execute_sparse_flash_attention_process(
                     ql_nope,
                     q_pe,
