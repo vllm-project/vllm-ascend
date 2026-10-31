@@ -27,6 +27,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
@@ -56,6 +57,21 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
+
+def _get_graph_update_backend(
+    attn_groups: list[list[AttentionGroup]],
+) -> type[AttentionBackend]:
+    for groups in attn_groups:
+        for group in groups:
+            backend = group.backend
+            try:
+                impl_cls = backend.get_impl_cls()
+            except NotImplementedError:
+                # Metadata-only backends such as GDN have no attention impl.
+                continue
+            if impl_cls is not None:
+                return backend
+    raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
