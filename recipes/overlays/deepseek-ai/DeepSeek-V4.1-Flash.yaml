@@ -1,0 +1,117 @@
+# Source: https://github.com/vllm-project/vllm/blob/5535506742d57a82fcaa200d81ed3bec81baa776/recipes/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml
+# Migrated from vllm-project/vllm#62794 with vllm-project/recipes@63a12c0cf8e9e94af9e14fb8dcc4f4c516bd5ea6.
+variants:
+  ascend_w8a8:
+    model_id: Eco-Tech/DeepSeek-V4.1-Flash-w8a8
+    label: W8A8 (Ascend A3)
+    precision: int8
+    # Capacity estimate (552B x 1.2), not a measured HBM requirement.
+    vram_minimum_gb: 663
+    description: 'ModelSlim W8A8 with Engram host offload on one Atlas 800 A3: DP4/TP4/EP16 across 16 logical devices.'
+    supported_hardware:
+      - ascend_910c
+    min_vllm_version: 0.30.0
+    tp:
+      ascend_910c: 4
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--host'
+      - 0.0.0.0
+      - '--port'
+      - '8900'
+      - '--max-model-len'
+      - '150000'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--safetensors-load-strategy'
+      - lazy
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load":true,"num_threads":128}'
+      - '--block-size'
+      - '128'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--async-scheduling'
+      - '--engram-config'
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - '--additional-config'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+meta:
+  hardware:
+    ascend_910c: verified
+hardware_overrides:
+  npu:
+    extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: '0'
+      VLLM_ENGINE_READY_TIMEOUT_S: '36000'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+hardware_notes:
+  ascend_910c:
+    title: DeepSeek-V4.1-Flash on Atlas 800 A3
+    body: >-
+      Use the tutorial's ModelSlim W8A8 checkpoint with INT8 Engram storage and
+      quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3. One A3 server uses 8
+      physical NPUs (16 logical devices) with DP4/TP4/EP16. Keep the Python
+      frontend and VLLM_USE_V2_MODEL_RUNNER=0. Engram tables are offloaded to host
+      memory and shared by local DP ranks; retain --ipc=host and provide
+      sufficient host RAM. This recipe keeps the tutorial's 150000-token serving
+      limit. Optional DSpark uses five speculative tokens with eager draft
+      execution. See the tutorial for checkpoint preparation, verification,
+      A2 multi-node deployment and the A3 PD reference example.
+    link:
+      label: DeepSeek-V4.1-Flash on vLLM-Ascend
+      href: https://github.com/vllm-project/vllm-ascend/blob/ff62595360a069343ecdc3b2cd3a0daf45b4f1f0/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md
+strategy_hardware:
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+strategy_overrides:
+  single_node_tp:
+    hardware_overrides:
+      ascend_910c:
+        # Preserve DP4/TP4/EP16 after generic strategy sizing.
+        extra_args:
+          - '--data-parallel-size'
+          - '4'
+          - '--tensor-parallel-size'
+          - '4'
+          - '--enable-expert-parallel'
+  single_node_tep:
+    hardware_overrides:
+      ascend_910c:
+        extra_args:
+          - '--data-parallel-size'
+          - '4'
+          - '--tensor-parallel-size'
+          - '4'
+          - '--enable-expert-parallel'
+features:
+  spec_decoding:
+    hardware_overrides:
+      npu:
+        args:
+          - '--speculative-config'
+          - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
