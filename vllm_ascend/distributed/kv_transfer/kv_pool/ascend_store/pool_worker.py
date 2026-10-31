@@ -335,9 +335,11 @@ class KVPoolWorker:
         real_backend = getattr(backend_module, backend_name)
 
         backend_kwargs = {}
-        # lazy_init is requested only for compressed models. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor it.
-        backend_kwargs["lazy_init"] = self.use_compress
+        # lazy_init is requested for compressed models and sparse-indexer
+        # (use_sparse) models. Each backend owns the hardware/protocol checks
+        # that decide whether it can honor it (Mooncake honors it under fabric
+        # memory, Memcache under device_sdma).
+        backend_kwargs["lazy_init"] = self.use_compress or self.use_sparse
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
