@@ -87,6 +87,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to split the fused Qwen3.5 GDN input projection `in_proj_qkvz` into
+    # two separate linears `in_proj_qkv` + `in_proj_z`, which avoids the
+    # split/reshape on the fused output at the cost of one extra matmul.
+    # 0 (default): keep the upstream fused `in_proj_qkvz` layout.
+    # 1: use the split `in_proj_qkv` + `in_proj_z` layout.
+    "VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT", "0"))),
 }
 
 # end-env-vars-definition
