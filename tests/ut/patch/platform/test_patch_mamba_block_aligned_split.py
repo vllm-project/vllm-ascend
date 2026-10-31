@@ -298,3 +298,33 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    ("computed", "local_hit", "external_hit"),
+    [(640, 0, 0), (0, 640, 0), (0, 0, 640)],
+)
+@pytest.mark.parametrize("prompt_tokens", [128359, 640])
+def test_kv_both_continues_aligning_prefill_and_replay(computed, local_hit, external_hit, prompt_tokens):
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.block_size = 640
+    scheduler.use_eagle = False
+    request = _request(
+        num_computed_tokens=computed,
+        num_prompt_tokens=prompt_tokens,
+        num_tokens=128359,
+    )
+
+    result = _mamba_block_aligned_split(scheduler, request, 4096, local_hit, external_hit)
+
+    # A prior chunk or partial hit must not disable checkpoint creation.
+    assert result == 3840
+    assert (computed + local_hit + external_hit + result) % scheduler.block_size == 0
+
+
+@pytest.mark.parametrize("remaining_tokens", [0, 1])
+def test_kv_both_preserves_final_token_and_decode_window(remaining_tokens):
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
+    request = _request(num_computed_tokens=380 - remaining_tokens)
+
+    assert _mamba_block_aligned_split(scheduler, request, 8) == 8
