@@ -37,31 +37,6 @@ The Ascend-adapted W8A8 and W8A8-MXFP8 weights above are published on ModelScope
 
 Record the downloaded model directories, for example `/models/MiniMax-M3.1-Flash-W8A8` and `/models/MiniMax-M3.1-Flash-W8A8-MXFP8`, and ensure they are accessible inside the container. The commands in this guide use the placeholders `<MINIMAX_M31_FLASH_W8A8_PATH>` and `<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>` in Section 4.1, and the `MODEL_PATH` variable in Section 5. Replace them with the paths you recorded.
 
-On A2/A3, compatible ordinary MiniMax target attention and paired DSpark/EAGLE3
-draft attention can automatically select the optional ecosystem FA3 package
-(`flash_attn_npu_3`, scheduler API from `flash-attention-npu` 0.4.2.post2).
-Install a build compatible with the local CANN and hardware before serving.
-This is a separate package/API from the training-consistency `flash_attn_npu_v3`
-backend. Without the optional package, the existing backend remains selected.
-Sparse/indexer attention retains its dedicated implementation.
-
-This selection requires FP16/BF16 queries, unquantized KV, decoder attention,
-and PP/PCP/DCP size 1; sinks, multimodal prefixes, adaptive verification,
-batch-invariant mode and per-head KV scales are excluded. A5 never selects this
-optional backend automatically and retains its CANN path. KV allocation follows
-the existing runner policy without additional contiguity overrides. DSpark keeps
-the fused sparse QKNorm/RoPE/cache preparation path for supported BF16 and FP8
-caches; the separate QK-norm/RoPE graph fusion pass remains disabled for DSpark.
-Native draft loading reuses the normal plugin; no external adapter,
-offline draft conversion, or manual vLLM core patch is required.
-
-CPU tests cover routing, metadata padding, prefill bounds, graph storage and KV
-write ordering. The A2/A3 numerical test is
-`tests/e2e/pull_request/one_card/test_minimax_ecosystem_fa3.py`; real-weight
-accuracy, graph replay and performance on the combined branch still require
-hardware validation. Loader format support alone does not establish that a
-particular quantized checkpoint works on every hardware generation.
-
 ### 3.2 Verify Multi-node Communication
 
 Prepare the business network and the NPU interconnect by following
