@@ -33,6 +33,13 @@ class KPoolQueryPlan:
     dense: KPoolDensePlan | None = None
 
 
+def _copy_plan_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    # Pageable host storage synchronizes NPU copies even with non_blocking=True.
+    if device.type != "cpu" and tensor.numel():
+        tensor = tensor.pin_memory()
+    return tensor.to(device, non_blocking=True)
+
+
 def build_kpool_query_plan(
     common,
     topk: int | None,
@@ -90,9 +97,9 @@ def build_kpool_query_plan(
     return KPoolQueryPlan(
         num_tokens,
         tuple(full_ranges),
-        rows.to(device, non_blocking=True),
-        selection_index.to(device, non_blocking=True),
-        torch.tensor(ends, dtype=torch.int64, device="cpu").to(device, non_blocking=True),
+        _copy_plan_tensor(rows, device),
+        _copy_plan_tensor(selection_index, device),
+        _copy_plan_tensor(torch.tensor(ends, dtype=torch.int64, device="cpu"), device),
         _build_dense_plan(common, starts, lengths, topk, device) if plan_dense_attention else None,
     )
 
@@ -130,9 +137,9 @@ def _build_dense_plan(common, starts, lengths, topk: int, device: torch.device) 
     pages = (seq_len + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
     return KPoolDensePlan(
         request,
-        torch.arange(begin, begin + count, device="cpu").to(device, non_blocking=True),
-        sparse_rows.to(device, non_blocking=True),
-        torch.tensor(sparse_ends, dtype=torch.int32, device="cpu").to(device, non_blocking=True),
+        _copy_plan_tensor(torch.arange(begin, begin + count, device="cpu"), device),
+        _copy_plan_tensor(sparse_rows, device),
+        _copy_plan_tensor(torch.tensor(sparse_ends, dtype=torch.int32, device="cpu"), device),
         torch.arange(pages, dtype=torch.int32, device=device).unsqueeze(0),
         seq_len,
     )

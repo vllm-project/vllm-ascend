@@ -142,6 +142,7 @@ def test_query_plan_transfers_host_metadata_without_blocking(dense):
     target = torch.device("meta")
     original_tensor, original_to = torch.tensor, torch.Tensor.to
     transfers = []
+    pinned = set()
 
     def host_tensor(*args, **kwargs):
         assert torch.device(kwargs.get("device", "cpu")).type == "cpu"
@@ -150,11 +151,20 @@ def test_query_plan_transfers_host_metadata_without_blocking(dense):
     def transfer(tensor, device, *args, **kwargs):
         if device == target:
             assert kwargs.get("non_blocking") is True
+            assert not tensor.numel() or id(tensor) in pinned
             transfers.append(tensor)
             return tensor
         return original_to(tensor, device, *args, **kwargs)
 
-    with patch.object(torch, "tensor", side_effect=host_tensor), patch.object(torch.Tensor, "to", new=transfer):
+    def pin_memory(tensor):
+        pinned.add(id(tensor))
+        return tensor
+
+    with (
+        patch.object(torch, "tensor", side_effect=host_tensor),
+        patch.object(torch.Tensor, "pin_memory", new=pin_memory),
+        patch.object(torch.Tensor, "to", new=transfer),
+    ):
         plan = build_kpool_query_plan(common, 2048, target, plan_dense_attention=dense)
     assert plan is not None
     assert any(x.dtype == torch.int64 and x.tolist() == [6144] for x in transfers)
