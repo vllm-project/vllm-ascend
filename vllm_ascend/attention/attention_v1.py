@@ -48,6 +48,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.kv_cache_view import (
+    dense_paged_kv_views,
+    dense_paged_kv_write_views,
+    remap_paged_block_table,
+    remap_paged_slots,
+    validate_paged_block_table_buffer,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -59,6 +66,7 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
+    ParamProvider,
     get_capture_resource,
     register_task,
 )
@@ -538,6 +546,30 @@ class FIAParamProvider:
             }
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class DensePagedFIAParamProvider(ParamProvider):
+    layer_name: str | None
+    sliding_window: int | None
+    is_draft_model: bool
+    mapped_block_table: torch.Tensor
+
+    def resolve(self, attn_metadata: Any) -> dict[str, Any]:
+        params = FIAParamProvider(self.layer_name, self.sliding_window, self.is_draft_model).resolve(attn_metadata)
+        params["block_table"] = self.mapped_block_table
+        return params
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class DensePagedBlockTableParamProvider(ParamProvider):
+    layer_name: str | None
+    mapped_block_table: torch.Tensor
+
+    def resolve(self, attn_metadata: Any) -> dict[str, Any]:
+        block_table = attn_metadata[self.layer_name].block_tables
+        validate_paged_block_table_buffer(block_table, self.mapped_block_table)
+        return {"input": block_table}
+
+
 @dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
     layer_name: str | None
@@ -695,6 +727,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
 
+        mapped_block_table = None
+        if self._use_dense_paged_fia(attn_metadata, block_table):
+            source_block_table = block_table
+            key, value, block_stride = dense_paged_kv_views(key, value, source_block_table)
+            if block_stride > 1:
+                mapped_block_table = get_capture_resource(
+                    ("dense_paged_block_table", id(self)),
+                    lambda: torch.empty_like(source_block_table),
+                )
+                register_task(
+                    torch.mul,
+                    {"input": source_block_table, "other": block_stride, "out": mapped_block_table},
+                    DensePagedBlockTableParamProvider(self._layer_name, mapped_block_table),
+                )
+                block_table = mapped_block_table
+
         if block_table is None:
             key = key.contiguous()
             value = value.contiguous()
@@ -722,6 +770,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             ),
             use_max_workspace,
         )
+        fia_param_provider: ParamProvider
+        if mapped_block_table is not None:
+            fia_param_provider = DensePagedFIAParamProvider(
+                self._layer_name,
+                self.sliding_window,
+                _EXTRA_CTX.is_draft_model,
+                mapped_block_table,
+            )
+        else:
+            fia_param_provider = FIAParamProvider(
+                self._layer_name,
+                self.sliding_window,
+                _EXTRA_CTX.is_draft_model,
+                is_non_pa=block_table is None,
+            )
         register_task(
             torch_npu.npu_fused_infer_attention_score.out,
             {
@@ -744,12 +807,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
                 **extra_args,
             },
-            FIAParamProvider(
-                self._layer_name,
-                self.sliding_window,
-                _EXTRA_CTX.is_draft_model,
-                is_non_pa=block_table is None,
-            ),
+            fia_param_provider,
         )
         return output, num_tokens
 
@@ -867,6 +925,48 @@ class AscendAttentionBackendImpl(AttentionImpl):
             _, _, block_size, _ = key.shape
         return key, value, block_size
 
+    def _supports_dense_paged_kv(self) -> bool:
+        vllm_config = getattr(self, "vllm_config", None)
+        return (
+            type(self) is AscendAttentionBackendImpl
+            and vllm_config is not None
+            and getattr(vllm_config, "speculative_config", None) is None
+            and not _EXTRA_CTX.is_draft_model
+            and self.attn_type == AttentionType.DECODER
+            and not self.use_bnsd_kv_cache
+            and not getattr(self, "use_pcp", False)
+            and not is_dcp_enabled()
+            and not self.enable_c8_quant
+            and self.sliding_window is None
+            and self.sinks is None
+            and self.kv_sharing_target_layer_name is None
+        )
+
+    def _use_dense_paged_fia(self, attn_metadata, block_table) -> bool:
+        if (
+            attn_metadata.attn_state != AscendAttentionState.DecodeOnly
+            or not attn_metadata.causal
+            or block_table is None
+            or self.key_cache is None
+            or self.value_cache is None
+            or (self.key_cache.is_contiguous() and self.value_cache.is_contiguous())
+        ):
+            return False
+        return self._supports_dense_paged_kv()
+
+    def _kv_cache_write_params(self, slot_mapping: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        key_cache, value_cache = self.key_cache, self.value_cache
+        if key_cache is None or value_cache is None:
+            raise RuntimeError("KV cache must be initialized before cache writes")
+        if key_cache.is_contiguous() and value_cache.is_contiguous():
+            return key_cache, value_cache, slot_mapping
+        if not self._supports_dense_paged_kv():
+            return key_cache, value_cache, slot_mapping
+        key, value, block_stride = dense_paged_kv_write_views(key_cache, value_cache, slot_mapping)
+        if block_stride == 1:
+            return key_cache, value_cache, slot_mapping
+        return key, value, remap_paged_slots(slot_mapping, key_cache.shape[1], block_stride)
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -935,6 +1035,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
+        if self._use_dense_paged_fia(attn_metadata, block_table):
+            key, value, block_stride = dense_paged_kv_views(key, value, block_table)
+            if block_stride > 1:
+                block_table = remap_paged_block_table(block_table, block_stride)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -1196,11 +1300,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
+        key_cache, value_cache, slot_mapping = self._kv_cache_write_params(slot_mapping)
         DeviceOperator.reshape_and_cache(
             key=key,
             value=value,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
+            key_cache=key_cache,
+            value_cache=value_cache,
             slot_mapping=slot_mapping,
             use_bnsd=self.use_bnsd_kv_cache,
         )
@@ -1230,11 +1335,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
+            key_cache, value_cache, slots_to_cache = self._kv_cache_write_params(slots_to_cache)
             DeviceOperator.reshape_and_cache(
                 key=key_to_cache,
                 value=value_to_cache,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
+                key_cache=key_cache,
+                value_cache=value_cache,
                 slot_mapping=slots_to_cache,
                 use_bnsd=self.use_bnsd_kv_cache,
             )
