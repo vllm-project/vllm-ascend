@@ -394,6 +394,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
+    def _configure_decode_metadata_update(self) -> None:
+        # Ascend records the Python decode loop and updates FIA metadata per
+        # step. The upstream fused loop requires a different attention contract.
+        self.supports_decode_metadata_update = False
+
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -446,6 +451,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 self.attn_groups,
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
+                specialize_spec_tokens=self.speculative_config.uses_dynamic_speculative_decoding(),
             )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
@@ -485,7 +491,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """Thin override: delegate to upstream single-step ``_generate_draft``,
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
-        # vLLM #60335 added `num_speculative_steps` on main.
+        if num_speculative_steps is None:
+            num_speculative_steps = self.num_speculative_steps
         super()._generate_draft(
             num_reqs,
             num_tokens_padded,
@@ -519,7 +526,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
-        # vLLM #60335 added `num_speculative_steps` on main.
+        if num_speculative_steps is None:
+            num_speculative_steps = self.num_speculative_steps
         super()._multi_step_decode(
             num_reqs,
             skip_attn,
@@ -642,9 +650,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs_padded: int,
         num_tokens_padded: int,
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
+        if attn_metadata is None:
+            raise RuntimeError("Draft attention metadata is required for ACL graph replay")
         attn_metadata = {
             name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
         }
@@ -660,7 +671,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             assert prepared_attn_metadata is not None
             return [prepared_attn_metadata]
 
-        draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
+        runtime_kwargs = {}
+        if num_speculative_steps is not None:
+            runtime_kwargs["num_speculative_steps"] = num_speculative_steps
+        draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded, **runtime_kwargs)
 
         for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
             step = i + 1
@@ -669,10 +683,15 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
         return draft_attn_metadatas
 
-    def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
+    def _init_decode_draft_attn_metadatas(
+        self,
+        attn_metadata: dict[str, Any] | None,
+        num_reqs_padded: int,
+        num_speculative_steps: int | None = None,
+    ):
         """Initialize per-step decode attention metadata for graph mode."""
         if attn_metadata is None:
-            return
+            return []
 
         # DSA and SFA own their per-step sparse-attention state in their
         # metadata builders and do not use draft graph metadata updates.
@@ -699,14 +718,17 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 step=1,
             )
             if attn_metadata is None:
-                return
+                return []
 
         attn_state = AscendAttentionState.DecodeOnly
 
         draft_attn_metadatas = []
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
-        for seq_lens_cpu in self.input_buffers.draft_seq_lens_cpus:
+        seq_lens_cpus = self.input_buffers.draft_seq_lens_cpus
+        if num_speculative_steps is not None:
+            seq_lens_cpus = seq_lens_cpus[: max(0, num_speculative_steps - 1)]
+        for seq_lens_cpu in seq_lens_cpus:
             per_step_attn_metadata = {k: copy(v) for k, v in attn_metadata.items()}
 
             seq_lens_cpu = seq_lens_cpu[:num_reqs_padded]
@@ -774,10 +796,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
+            return self.build_fia_params_dcp(
+                num_reqs_padded,
+                draft_attn_metadata,
+                is_draft_model_prefill,
+                num_speculative_steps=num_speculative_steps,
+            )
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -793,7 +821,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        num_steps = self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+        for step in range(1, num_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
@@ -814,6 +843,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all GQA DCP draft steps' history/current or cache parameters."""
         assert self.dcp_manager is not None
@@ -834,7 +864,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        num_steps = self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps
+        for step in range(1, num_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]

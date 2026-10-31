@@ -1,0 +1,4 @@
+pr: 17980
+entries:
+  - category: bugfix
+    text: Model Runner V2 MTP and EAGLE now select GQA draft decode graphs and attention updates by runtime draft length. Shorter drafts use eager decode on legacy MLA, DSA, and SFA graph update pools.

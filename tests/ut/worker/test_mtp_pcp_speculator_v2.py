@@ -869,6 +869,7 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool, num_steps: 
     speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
     speculator.max_num_reqs = 2
     speculator.num_speculative_steps = num_steps
+    speculator.speculative_config = SimpleNamespace(uses_dynamic_speculative_decoding=lambda: False)
     speculator.share_mtp_topk_indices = True
     speculator.model = SimpleNamespace(model=MagicMock())
     speculator.prefill_cudagraph_manager = MagicMock(use_breakable_cg=False)
