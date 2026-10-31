@@ -268,6 +268,10 @@ def patch_upstream_ple_short_conv() -> None:
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
 
+    from .ple_embedding import AscendPLEHostEmbedding
+
+    upstream_ple_layer.Qwen4ExpPLEPinnedHostEmbedding = AscendPLEHostEmbedding
+
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
         original = Qwen4ExpPLELayer._short_conv

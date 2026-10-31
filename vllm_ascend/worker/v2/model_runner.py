@@ -587,7 +587,18 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
+        # Retain owners on the runner across graph teardown and failed closes.
+        if not hasattr(self, "_pending_host_offload"):
+            model = getattr(self, "model", None)
+            self._pending_host_offload = (
+                [module for module in model.modules() if callable(getattr(module, "close_host_offload", None))]
+                if model is not None
+                else []
+            )
         super().shutdown()
+        while self._pending_host_offload:
+            self._pending_host_offload[-1].close_host_offload()
+            self._pending_host_offload.pop()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

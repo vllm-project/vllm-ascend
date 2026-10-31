@@ -84,7 +84,24 @@ def init_ascend_model_parallel(
         global_tp_size,
     )
 
-    if engram_config is not None and global_pcp_size > 1:
+    # Engram Tensor Parallel (ETP) group shards the PLE/Engram embedding table.
+    get_etp_size = getattr(engram_config, "get_parallel_size", None) if engram_config is not None else None
+    etp_size = get_etp_size(parallel_config) if get_etp_size is not None else global_tp_size
+    if etp_size != global_tp_size and (
+        vllm_parallel_state._ETP is None or vllm_parallel_state._ETP is vllm_parallel_state.get_tp_group()
+    ):
+        etp_ranks = all_ranks.permute(0, 2, 3, 1, 4).reshape(-1, etp_size).unbind(0)
+        vllm_parallel_state._ETP = init_model_parallel_group(
+            [ranks.tolist() for ranks in etp_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="etp",
+        )
+
+    if engram_config is not None and (
+        global_pcp_size > 1
+        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+    ):
         # Worker initialization defers the upstream DP-only group so the final
         # DP x PCP group is created once. Upstream owns its getter and teardown.
         assert vllm_parallel_state.get_engram_dp_group() is None

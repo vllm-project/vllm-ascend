@@ -1839,7 +1839,11 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     ):
         # Qwen4Exp PLE is managed by its model-specific implementation, not
         # the DeepSeek V4.1 Engram runtime.
-        vllm_config.engram_config = None
+        if engram_config is not None and engram_config.cpu_offload:
+            if engram_config.embedding_across_dp or engram_config.use_thp:
+                raise ValueError("Qwen PLE offload requires ETP=TP without THP")
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError("Qwen PLE offload requires model runner v2")
         return
     if engram_config is None:
         if (

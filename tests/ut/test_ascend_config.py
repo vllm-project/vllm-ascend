@@ -23,7 +23,7 @@ from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
@@ -2206,6 +2206,24 @@ class TestKVPPConfig(TestBase):
 
 
 class TestEngramSharedMemoryDefaults(TestBase):
+    def test_qwen_ple_keeps_private_host_tables_with_dp(self):
+        for architecture in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP"):
+            with self.subTest(architecture=architecture):
+                config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                config.parallel_config.data_parallel_size = 4
+                config.model_config = MagicMock(
+                    architecture=architecture,
+                    architectures=[architecture],
+                    is_deepseek_mla=False,
+                    enforce_eager=False,
+                    is_moe=True,
+                )
+                config.engram_config = SimpleNamespace(dp_shared_memory=False)
+                ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                with patch.object(_VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True):
+                    ascend_config.derive_and_validate(config)
+                self.assertFalse(config.engram_config.dp_shared_memory)
+
     def test_shared_tables_are_derived_for_mrv2_dp_or_pcp(self):
         topologies = (
             (1, 1, False),
