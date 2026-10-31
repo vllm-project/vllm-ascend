@@ -727,7 +727,9 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             hidden_states=hidden_states,
             positions=positions,
         )
-        if self.use_sequence_parallel:
+        # The fused O-projection also returns a token shard on its fallback
+        # path. Reducing it again would shrink the prefix relative to the bank.
+        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         if prefix_sum is None:
