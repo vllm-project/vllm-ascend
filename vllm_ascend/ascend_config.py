@@ -1094,10 +1094,18 @@ class AscendConfig:
             )
             return False
 
-        # num_experts must divide evenly across the EP group.
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-        )
+        # Speculative draft setup can reconstruct VllmConfig with a different
+        # execution topology (for example, PCP=1 for replicated draft runs).
+        # Routed experts still use the target model's EP group, so validate
+        # MegaMoe against the target topology whenever it is available.
+        parallel_config = vllm_config.parallel_config
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        target_parallel_config = None
+        if speculative_config is not None:
+            target_parallel_config = getattr(speculative_config, "target_parallel_config", None)
+        if target_parallel_config is not None:
+            parallel_config = target_parallel_config
+        ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
         if ep_world_size < 2:
             return False
         if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
