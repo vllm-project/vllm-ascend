@@ -212,7 +212,8 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::Init(GM_ADDR ex
 {
     int64_t blockNum = GetBlockNum() * 2;
     this->pipe = tPipe;
-    this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
+    this->blockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+        AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
 
     this->coreNum = tilingData->coreNum;
     this->totalLength = tilingData->n * tilingData->k;
