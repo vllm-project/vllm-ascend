@@ -15,9 +15,13 @@
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
 from dataclasses import replace
-from typing import Protocol, TypeAlias, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 import torch
+from torch import nn
+from transformers import Qwen4ExpTextConfig
+from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.models.qwen4_exp.amd import (
@@ -32,11 +36,25 @@ from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import (
     QSAForwardMetadata,
 )
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
+    kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
@@ -160,8 +178,172 @@ def apply_qsa_rope(
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
 
+class AscendQSAMetadataBuilder(qsa_cache.QSAMetadataBuilder):
+    """Build side-cache metadata with the portable Torch implementation."""
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: Any,
+        fast_build: bool = False,
+    ) -> QSAForwardMetadata:
+        del common_prefix_len, fast_build
+        num_tokens = common_attn_metadata.num_actual_tokens
+        decode_threshold = self.reorder_batch_threshold
+        assert decode_threshold is not None
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            qsa_cache.split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=decode_threshold,
+                require_uniform=True,
+            )
+        )
+        decode_query_len = 0
+        if num_decodes > 0:
+            query_lens_cpu = torch.diff(
+                common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+            )
+            nonzero_query_lens = query_lens_cpu[query_lens_cpu > 0]
+            if nonzero_query_lens.numel() > 0:
+                decode_query_len = int(nonzero_query_lens.tolist()[0])
+                assert torch.all(nonzero_query_lens == decode_query_len)
+
+        build_k_work = not self.is_circular_buffer and self.compress_ratio != 1
+        k_work_metadata = self.k_work_metadata_buffer
+        request_capacity = None
+        if build_k_work:
+            num_requests = common_attn_metadata.query_start_loc.shape[0] - 1
+            request_capacity = self.request_capacity
+            max_num_work = (
+                num_tokens + (self.compress_ratio - 1) * num_requests
+            ) // self.compress_ratio
+            k_work_metadata = self.k_work_metadata_buffer[:max_num_work]
+        token_to_req, logical_positions, visible_blocks, slot_mapping = (
+            qsa_cache._build_qsa_metadata_torch(  # noqa: SLF001
+                common_attn_metadata,
+                self.token_to_req_buffer,
+                self.logical_positions_buffer,
+                self.visible_blocks_buffer,
+                self.slot_mapping_buffer,
+                storage_block_size=self.storage_block_size,
+                compress_ratio=self.compress_ratio,
+                circular_buffer_size=(
+                    self.kv_cache_spec.block_size if self.is_circular_buffer else 0
+                ),
+                k_work_metadata_buffer=k_work_metadata if build_k_work else None,
+                request_capacity=request_capacity,
+            )
+        )
+        return QSAForwardMetadata(
+            block_table=common_attn_metadata.block_table_tensor,
+            slot_mapping=slot_mapping,
+            seq_lens=common_attn_metadata.seq_lens,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            token_to_req=token_to_req,
+            logical_positions=logical_positions,
+            visible_blocks=visible_blocks,
+            k_work_metadata=k_work_metadata,
+            num_actual_tokens=num_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            max_query_len=common_attn_metadata.max_query_len,
+            decode_query_len=decode_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            storage_block_size=self.storage_block_size,
+            compress_ratio=self.compress_ratio,
+        )
+
+
+class AscendQSAStateBackend(qsa_cache.QSAStateBackend):
+    """Descriptor-backed side-cache backend owned by the Ascend model."""
+
+    uses_descriptor_cache_view = True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendQSAMetadataBuilder]:
+        return AscendQSAMetadataBuilder
+
+
+class AscendQSAKeyStateCache(qsa_cache.QSAKeyStateCache):
+    def get_attn_backend(self) -> type[AscendQSAStateBackend]:
+        return AscendQSAStateBackend
+
+
+class AscendQSACompressedKeyCache(qsa_cache.QSACompressedKeyCache):
+    def get_attn_backend(self) -> type[AscendQSAStateBackend]:
+        return AscendQSAStateBackend
+
+
 class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     """QSA indexer using NPU-compatible cache, RoPE and top-k operators."""
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: Qwen4ExpTextConfig,
+        layer_id: int,
+        rotary_emb: nn.Module,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        if vllm_config.cache_config is None:
+            raise ValueError("QSA requires a paged KV cache")
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+
+        self.layer_id = int(layer_id)
+        self.index_n_heads = int(config.indexer_n_heads)
+        self.index_kv_heads = int(config.indexer_kv_heads)
+        self.index_head_dim = int(config.indexer_head_dim)
+        self.token_topk = int(config.indexer_budget)
+        self.compress_ratio = int(config.indexer_compress_ratio)
+        self.rotary_emb = rotary_emb
+        self.use_fused_pre_indexer = upstream_indexer.supports_fused_pre_indexer(
+            rotary_emb,
+            self.index_head_dim,
+            self.index_kv_heads,
+            self.compress_ratio,
+        )
+        self.prefix = prefix
+        self.skip_topk = False
+        self.index_qk_proj = ReplicatedLinear(
+            int(config.hidden_size),
+            (self.index_n_heads + self.index_kv_heads) * self.index_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.index_qk_proj" if prefix else "index_qk_proj",
+        )
+        self.q_layernorm = GemmaRMSNorm(
+            self.index_head_dim,
+            eps=float(getattr(config, "rms_norm_eps", 1e-6)),
+        )
+        self.k_layernorm = GemmaRMSNorm(
+            self.index_head_dim,
+            eps=float(getattr(config, "rms_norm_eps", 1e-6)),
+        )
+        cache_config = vllm_config.cache_config
+        cache_prefix = f"{prefix}." if prefix else ""
+        self.raw_key_cache = AscendQSAKeyStateCache(
+            head_size=self.index_head_dim,
+            dtype=torch.bfloat16,
+            cache_rope_positions=vllm_config.model_config.uses_mrope,
+            prefix=f"{cache_prefix}raw_key_cache",
+            cache_config=cache_config,
+            compress_ratio=self.compress_ratio,
+            vllm_config=vllm_config,
+        )
+        self.compressed_key_cache = AscendQSACompressedKeyCache(
+            head_size=self.index_head_dim,
+            dtype=torch.bfloat16,
+            compress_ratio=self.compress_ratio,
+            prefix=f"{cache_prefix}compressed_key_cache",
+            cache_config=cache_config,
+            vllm_config=vllm_config,
+        )
 
     def _metadata(
         self,
@@ -488,28 +670,149 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
         return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
-# The upstream owner resolves these names from its module globals during
-# construction. Replace only the platform-specific components, leaving model
-# structure, cache specifications and weight mapping in upstream vLLM.
-upstream_indexer.apply_qsa_rope = apply_qsa_rope
-upstream_qsa.QSAIndexer = AscendQSAIndexer
-upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl
-upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
-
-
-# Side-cache descriptors use the same block-outermost layout as main QSA KV.
-# Their physical block stride is honored by the runner, so no compact copy is
-# required before LightningIndexer or the Triton QSA selector consumes them.
-qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
-
-
-# qsa_cache selects its Triton metadata builder at import time. The upstream
-# kernel uses CUDA PDL intrinsics, so Ascend must use the equivalent Torch path.
-qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
-
-
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: Qwen4ExpTextConfig,
+        layer_id: int,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if cache_config is None:
+            raise ValueError("Qwen4Exp QSA requires a paged KV cache")
+        if model_config.dtype != torch.bfloat16:
+            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        if cache_config.cache_dtype not in ("auto", "bfloat16"):
+            raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
+        if getattr(quant_config, "kv_cache_scheme", None) is not None:
+            raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            or parallel_config.decode_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Qwen4Exp QSA does not support context parallelism"
+            )
+        if not getattr(config, "is_causal", True):
+            raise NotImplementedError("Qwen4Exp QSA requires causal decoder attention")
+
+        self.config = config
+        self.hidden_size = int(config.hidden_size)
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = int(config.num_attention_heads)
+        if self.total_num_heads % tp_size:
+            raise ValueError("QSA attention heads must be divisible by TP size")
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = int(config.num_key_value_heads)
+        if self.total_num_kv_heads >= tp_size:
+            if self.total_num_kv_heads % tp_size:
+                raise ValueError("QSA KV heads must be divisible by TP size")
+        elif tp_size % self.total_num_kv_heads:
+            raise ValueError("TP size must be divisible by replicated QSA KV heads")
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = int(config.head_dim or self.hidden_size // self.total_num_heads)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.dual_chunk_attention_config = getattr(
+            config, "dual_chunk_attention_config", None
+        )
+        if self.dual_chunk_attention_config is not None:
+            raise NotImplementedError("Qwen4Exp QSA does not support dual-chunk RoPE")
+        self.attn_output_gate = True
+        self.qkv_proj = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads * (1 + self.attn_output_gate),
+            self.total_num_kv_heads,
+            bias=False,
+            quant_config=_upstream_model.without_modelopt_fp4(quant_config),
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=False,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+        self.rotary_emb = get_rope(
+            head_size=self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
+        )
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        mm_config = model_config.multimodal_config
+        text_only = mm_config is None or mm_config.language_model_only
+        self.use_fused_qk_norm_rope_gate = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and current_platform.is_cuda()
+            and text_only
+        )
+        self.layer_name = f"{prefix}.attn"
+        self.attn_type = AttentionType.DECODER
+        self.kv_cache_dtype = cache_config.cache_dtype
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, model_config
+        )
+        if self.kv_cache_torch_dtype != torch.bfloat16:
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 cache storage")
+        self.kv_sharing_target_layer_name = None
+        self.kv_cache = torch.tensor([])
+        set_default_quant_scales(self, register_buffer=True)
+        self.attn_backend = AscendQSABackend
+        self.impl = AscendQSAImpl(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            None,
+            None,
+            self.kv_cache_dtype,
+            None,
+            AttentionType.DECODER,
+            None,
+        )
+        self.indexer = AscendQSAIndexer(
+            vllm_config=vllm_config,
+            config=config,
+            layer_id=layer_id,
+            rotary_emb=self.rotary_emb,
+            quant_config=quant_config,
+            prefix=f"{prefix}.indexer",
+        )
+        self.use_fused_qsa_prepare = (
+            self.attn_output_gate
+            and self.indexer.use_fused_pre_indexer
+            and self.head_dim & (self.head_dim - 1) == 0
+        )
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.register_buffer(
+            "topk_indices_buffer",
+            torch.empty(
+                max_tokens,
+                self.indexer.output_width,
+                dtype=torch.int32,
+            ),
+            persistent=False,
+        )
+        static_context = vllm_config.compilation_config.static_forward_context
+        if self.layer_name in static_context:
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
+        static_context[self.layer_name] = self
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
