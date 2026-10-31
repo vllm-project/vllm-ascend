@@ -117,6 +117,9 @@ def _fixture(names=("cancel",), *, admit=True):
     scheduler._dspark_context_requests = {}
     scheduler._dspark_context_groups = (2,)
     scheduler._reqs_need_recv = set()
+    scheduler.prefix_cache_enabled = False
+    scheduler.prefix_cache_tokens = {}
+    scheduler._prefix_pending_recv = set()
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(len(names))

@@ -77,6 +77,11 @@ def register_connector():
     KVConnectorFactory.register_connector(
         "MultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
     )
+    KVConnectorFactory.register_connector(
+        "SfaPrefixOffloadingConnector",
+        "vllm_ascend.distributed.kv_transfer.sparse_kv_offload.prefix_connector",
+        "SfaPrefixOffloadingConnector",
+    )
 
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"

@@ -174,6 +174,7 @@ class SfaPDConsumerReqMeta:
     tail_block_index: int = 0
     kv_tokens: int = 0
     dense: bool = False
+    cached_prefix_tokens: int = 0
     dspark_context_descriptor: DSparkContextDescriptor | None = None
     dspark_draft_group_ids: tuple[int, ...] = ()
     dspark_draft_block_ids_by_group: dict[int, tuple[int, ...]] | None = None
@@ -204,6 +205,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
         tail_block_index: int = 0,
         kv_tokens: int = 0,
         dense: bool = False,
+        cached_prefix_tokens: int = 0,
         dspark_context_descriptor: DSparkContextDescriptor | None = None,
         dspark_draft_group_ids: tuple[int, ...] = (),
         dspark_draft_block_ids_by_group: dict[int, tuple[int, ...]] | None = None,
@@ -218,6 +220,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
                 tail_block_index=tail_block_index,
                 kv_tokens=kv_tokens,
                 dense=dense,
+                cached_prefix_tokens=cached_prefix_tokens,
                 dspark_context_descriptor=dspark_context_descriptor,
                 dspark_draft_group_ids=tuple(dspark_draft_group_ids),
                 dspark_draft_block_ids_by_group=(

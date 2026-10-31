@@ -239,6 +239,10 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
 
 def _make_layout_worker(kv_cache_config, monkeypatch: pytest.MonkeyPatch):
+    kv_cache_config.hisparse_host_num_blocks = None
+    kv_cache_config.prefix_cacheable_group_ids = tuple(range(len(kv_cache_config.kv_cache_groups)))
+    for group in kv_cache_config.kv_cache_groups:
+        group.host_resident = False
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
