@@ -225,7 +225,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if self.need_expert_scale:
             stage1_kwargs.update(
                 {
-                    "expert_scales": topk_weights.to(torch.float32),
+                    "expert_scales": (
+                        torch.ops._C_ascend.npu_static_cast(
+                            topk_weights, "bfloat16", "float32"
+                        )
+                        if topk_weights.dtype == torch.bfloat16
+                        else topk_weights.to(torch.float32)
+                    ),
                 }
             )
 
@@ -295,7 +301,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         kwargs_mc2 = {
             "expand_x": hidden_states,
             "expert_ids": topk_ids,
-            "expert_scales": topk_weights.to(torch.float32),
+            "expert_scales": (
+                torch.ops._C_ascend.npu_static_cast(
+                    topk_weights, "bfloat16", "float32"
+                )
+                if topk_weights.dtype == torch.bfloat16
+                else topk_weights.to(torch.float32)
+            ),
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
