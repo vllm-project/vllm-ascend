@@ -18,7 +18,8 @@ Nightly images are built from the version metadata kept in each
 ``vllm-ascend`` commit:
 
 * ``.github/vllm-release-tag.commit`` selects the vLLM release;
-* ``requirements.txt`` selects the torch-npu distribution.
+* ``pyproject.toml`` runtime dependencies (or the legacy ``requirements.txt``)
+  select the torch-npu distribution.
 """
 
 import importlib.metadata
@@ -128,14 +129,15 @@ def _read_torch_npu_requirement(content: str | None) -> str | None:
     return None
 
 
-def _read_torch_npu_from_pyproject(content: str | None) -> str | None:
+def _read_torch_npu_from_pyproject(content: str | None, table: str = "build-system") -> str | None:
     if not content:
         return None
     try:
         data = tomllib.loads(content)
     except tomllib.TOMLDecodeError:
         return None
-    requires = data.get("build-system", {}).get("requires", [])
+    field = "dependencies" if table == "project" else "requires"
+    requires = data.get(table, {}).get(field, [])
     return _read_torch_npu_requirement("\n".join(requires))
 
 
@@ -149,10 +151,13 @@ def _file_content(repo: Path, commit: str | None, relative_path: str) -> str | N
 def expected_versions(repo: Path, commit: str | None = None) -> PackageVersions:
     """Versions declared by the working tree, or by ``commit`` when given."""
     vllm_tag = (_file_content(repo, commit, VLLM_TAG_FILE) or "").strip() or None
-    torch_npu = _read_torch_npu_requirement(
-        _file_content(repo, commit, TORCH_NPU_REQUIREMENTS_FILE),
-    ) or _read_torch_npu_from_pyproject(
-        _file_content(repo, commit, TORCH_NPU_PYPROJECT_FILE),
+    pyproject = _file_content(repo, commit, TORCH_NPU_PYPROJECT_FILE)
+    torch_npu = (
+        _read_torch_npu_from_pyproject(pyproject, "project")
+        or _read_torch_npu_requirement(
+            _file_content(repo, commit, TORCH_NPU_REQUIREMENTS_FILE),
+        )
+        or _read_torch_npu_from_pyproject(pyproject)
     )
     return PackageVersions(vllm=vllm_tag, torch_npu=torch_npu)
 
