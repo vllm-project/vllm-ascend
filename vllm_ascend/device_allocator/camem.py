@@ -36,6 +36,7 @@ camem_available = False
 try:
     from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
         init_module,
+        python_check_free_error,
         python_create_and_map,
         python_unmap_and_release,
     )
@@ -45,6 +46,7 @@ try:
 except ImportError as e:
     logger.warning("Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e)
     init_module = None
+    python_check_free_error = None
     python_create_and_map = None
     python_unmap_and_release = None
     lib_name = None
@@ -61,8 +63,12 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
+    python_free_complete_func: Callable[[int], None] | None = None,
 ) -> torch.npu.memory.NPUPluggableAllocator:
-    init_module(python_malloc_fn, python_free_func)
+    if python_free_complete_func is None:
+        init_module(python_malloc_fn, python_free_func)
+    else:
+        init_module(python_malloc_fn, python_free_func, python_free_complete_func)
     new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, "my_malloc", "my_free")
     return new_alloc
 
@@ -71,8 +77,9 @@ def get_pluggable_allocator(
 def use_memory_pool_with_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
+    python_free_complete_func: Callable[[int], None] | None = None,
 ):
-    new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
+    new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func, python_free_complete_func)
     mem_pool = torch.npu.memory.MemPool(new_alloc._allocator)
     with torch.npu.memory.use_mem_pool(mem_pool):
         yield mem_pool, new_alloc
@@ -141,8 +148,14 @@ class CaMemAllocator(CuMemAllocator):
         self.current_tag: str = CaMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
         self._unmap_failed = False
+        self._pending_free: dict[int, AllocationData] = {}
+        # The extension borrows callback references; keep this bound method
+        # alive as long as the inherited malloc/free callback attributes.
+        self.python_free_complete_callback = self._python_free_complete_callback
 
     def _check_memory_state(self) -> None:
+        if python_check_free_error is not None:
+            python_check_free_error()
         if self._unmap_failed:
             raise RuntimeError("CaMem mapping state is unknown after an unmap failure; restart the worker")
 
@@ -196,9 +209,11 @@ class CaMemAllocator(CuMemAllocator):
         """Internal method to look up the allocation data
         when memory is freed in the memory pool.
         """
-        data = self.pointer_to_data.pop(ptr)
-        if data.cpu_backup_tensor is not None:
-            data.cpu_backup_tensor = None
+        # Keep ownership until native cleanup succeeds, but remove a retiring
+        # allocation from the active offload/resource inventory before unmap.
+        # The separate pending record survives a void deleter failure until
+        # worker restart; it must never be restored or read as live storage.
+        data = self.pointer_to_data[ptr]
         # Drain pending kernels before the C extension's aclrtUnmapMem.
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
@@ -206,13 +221,18 @@ class CaMemAllocator(CuMemAllocator):
         # races the unmap and surfaces as ACL error.
         if not data.is_asleep:
             torch.npu.synchronize(data.handle[0])
+        self._pending_free[ptr] = self.pointer_to_data.pop(ptr)
         logger.debug(
-            "Freed %s bytes for %s with address %s from camem allocator",
+            "Freeing %s bytes for %s with address %s from camem allocator",
             data.handle[1],
             data.tag,
             ptr,
         )
         return data.handle
+
+    def _python_free_complete_callback(self, ptr: int) -> None:
+        data = self._pending_free.pop(ptr)
+        data.cpu_backup_tensor = None
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
@@ -356,7 +376,9 @@ class CaMemAllocator(CuMemAllocator):
         The caller must serialize capture with all other allocator use.
         """
         if ACL_GRAPH_TAG not in self.allocator_and_pools:
-            allocator = get_pluggable_allocator(self.python_malloc_callback, self.python_free_callback)
+            allocator = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback, self.python_free_complete_callback
+            )
             pool = torch.npu.memory.MemPool(allocator._allocator)
             self.allocator_and_pools[ACL_GRAPH_TAG] = (pool, allocator)
         old_tag = self.current_tag
@@ -373,13 +395,15 @@ class CaMemAllocator(CuMemAllocator):
         permits cleanup of a partially restored or entirely asleep pool.
         """
         entry = self.allocator_and_pools.pop(ACL_GRAPH_TAG, None)
-        if entry is None:
-            return
-        pool, allocator = entry
-        del entry, pool
-        gc.collect()
-        del allocator
-        if any(data.tag == ACL_GRAPH_TAG for data in self.pointer_to_data.values()):
+        if entry is not None:
+            pool, allocator = entry
+            del entry, pool
+            gc.collect()
+            del allocator
+        self._check_memory_state()
+        if any(data.tag == ACL_GRAPH_TAG for data in self.pointer_to_data.values()) or any(
+            data.tag == ACL_GRAPH_TAG for data in self._pending_free.values()
+        ):
             raise RuntimeError("ACL graph allocations still have live owners after graph teardown")
 
     @contextmanager
@@ -399,7 +423,9 @@ class CaMemAllocator(CuMemAllocator):
         old_tag = self.current_tag
         self.current_tag = tag
         try:
-            with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
+            with use_memory_pool_with_allocator(
+                self.python_malloc_callback, self.python_free_callback, self.python_free_complete_callback
+            ) as data:
                 # start to hit another PyTorch bug in PyTorch 2.6,
                 # possibly because of gc-related issue w.r.t. the allocator and
                 # the memory pool.

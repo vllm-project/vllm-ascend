@@ -62,11 +62,31 @@ def serialized_model_execution(method):
     def wrapped(worker, *args, **kwargs):
         manager = getattr(worker, "sleep_wakeup_manager", None)
         if not isinstance(manager, SleepWakeupManager) or manager.graph_reuse is None:
-            return method(worker, *args, **kwargs)
+            # Sleep pools also exist with reuse disabled. Do not instantiate
+            # an allocator for ordinary workers, but never continue inference
+            # after an existing pool's void deleter reported a terminal error.
+            allocator = CaMemAllocator.instance
+            if allocator is not None:
+                allocator._check_memory_state()
+            result = method(worker, *args, **kwargs)
+            if allocator is not None:
+                allocator._check_memory_state()
+            return result
         with manager.transition_lock:
             if manager.graph_reuse.state != "READY":
                 raise RuntimeError(f"Inference is unavailable during sleep graph state {manager.graph_reuse.state}")
-            return method(worker, *args, **kwargs)
+            try:
+                # A native void free callback reports terminal failures via a
+                # sticky query instead of unwinding through tensor destruction.
+                # No rank collective is added to the per-step hot path.
+                allocator = CaMemAllocator.get_instance()
+                allocator._check_memory_state()
+                result = method(worker, *args, **kwargs)
+                allocator._check_memory_state()
+                return result
+            except Exception:
+                manager.graph_reuse.state = "ERROR"
+                raise
 
     return wrapped
 
