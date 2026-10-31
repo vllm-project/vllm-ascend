@@ -137,9 +137,10 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.engram.EngramConfig.verify_model_config`
 #    Why:
-#       Upstream Engram model validation requires CUDA before the platform hook.
+#       vLLM 0.31.0 Engram model validation requires CUDA before the platform hook.
 #    How:
-#       Keep upstream model/layer checks and lift only the CUDA requirement.
+#       On 0.31.0, keep model/layer checks and lift only the CUDA requirement.
+#       On main, retain native model validation.
 #       Use the native EngramConfig and resolver. Ascend's normal platform hook
 #       supplies missing defaults and checks its model, topology and loader limits.
 #       Skip this patch when vLLM does not provide EngramConfig.
@@ -148,9 +149,19 @@
 #       Tracks https://github.com/vllm-project/vllm/issues/59169.
 #       Removes CUDA-alike restrictions from model validation and defaults.
 #    Future Plan:
-#       Once the pinned vLLM includes that change, remove this patch and
+#       Once the release includes that change, remove this model override and
 #       platform-side default creation. Keep Ascend's
 #       model, topology and loader restrictions in the normal platform hook.
+#   2. `vllm.config.engram.EngramConfig.verify_parallel_config`
+#    Why:
+#       Upstream shared-table validation counts only DP peers, not PCP peers.
+#    How:
+#       Validate PCP-only sharing as DP sharing using a shallow config copy;
+#       delegate all checks to upstream without changing the actual topology.
+#    Related PR (if no, explain why):
+#       Ascend's DP x PCP shared groups are not yet supported upstream.
+#    Future Plan:
+#       Remove once all supported vLLM versions validate shared PCP tables.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
