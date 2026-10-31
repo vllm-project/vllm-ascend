@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import regex as re
+import requests
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
@@ -736,3 +737,34 @@ def assert_weight_update_matches_reference(
     assert reloaded_signature == reference_signature, (
         f"{case.id}: repeated live reload changed model behavior away from normal startup loading"
     )
+
+
+CONTROL_TIMEOUT = 60
+RELOAD_TIMEOUT = 300
+
+
+def post_route(server, route: str, *, json=None, params=None, timeout=CONTROL_TIMEOUT):
+    """POST to a dev-mode server route and raise for HTTP errors."""
+    response = requests.post(server.url_for(route), json=json, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+
+def weight_checker(server, action: str, baseline: dict[str, str] | None = None) -> requests.Response:
+    """Call POST /weight_checker with the given action (baseline required for compare)."""
+    body: dict[str, Any] = {"action": action}
+    if baseline is not None:
+        body["baseline"] = baseline
+    return requests.post(server.url_for("weight_checker"), json=body, timeout=RELOAD_TIMEOUT)
+
+
+def checksums(server) -> dict[str, str]:
+    """Return the server's per-parameter weight checksums."""
+    response = weight_checker(server, "checksum")
+    response.raise_for_status()
+    return response.json()["checksums"]
+
+
+def ranks(keys) -> set[str]:
+    """Extract the dp:pp:pcp:tp rank prefixes from weight-checksum keys."""
+    return {key.rsplit(":", 1)[0] for key in keys}

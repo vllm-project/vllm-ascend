@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -74,6 +75,15 @@ from vllm.v1.worker.startup_plan import (
 )
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
+
+try:
+    from vllm.model_executor.model_loader.weight_checksum import (  # type: ignore[import-not-found]
+        compute_tensor_digests,
+        zero_weights,
+    )
+except ImportError:  # The paired vLLM does not include PR #51350.
+    compute_tensor_digests = None
+    zero_weights = None
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
@@ -156,6 +166,24 @@ class _V1ModelRunnerFactory:
 
 
 NPUModelRunner = _V1ModelRunnerFactory()
+
+
+def _weight_checksum_utils() -> tuple[
+    Callable[[nn.Module], dict[str, str]],
+    Callable[[nn.Module], None],
+]:
+    """Return the upstream weight-checksum helpers.
+
+    The helpers ship with the paired vLLM (PR #51350). Raise a clear error
+    when an older vLLM is paired instead of failing at module import time.
+    """
+    if compute_tensor_digests is None or zero_weights is None:
+        raise RuntimeError(
+            "Weight Checker requires a paired vLLM that includes PR #51350 "
+            "(merge commit 42d9f8ccdb, released in v0.31.1rc0). "
+            "Upgrade the paired vLLM or disable this feature."
+        )
+    return compute_tensor_digests, zero_weights
 
 
 class NPUWorker(WorkerBase):
@@ -1107,6 +1135,40 @@ class NPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def _weight_checksum_model(self) -> nn.Module:
+        # The v1 model runner exposes get_model(); the v2 runner (still under
+        # development) only exposes the model attribute.
+        get_model = getattr(self.model_runner, "get_model", None)
+        if callable(get_model):
+            return get_model()
+        return self.model_runner.model
+
+    def _weight_checksum_prefix(self) -> str:
+        # Aligned with upstream gpu_worker: data_parallel_rank is reset to 0
+        # in dense workers; only data_parallel_index keeps DP keys unique.
+        # (locals renamed from upstream's dp/pp/pcp/tp: dp is this module's
+        # dynamic_profile alias)
+        dp_rank = self.parallel_config.data_parallel_index
+        pp_rank = get_pp_group().rank_in_group
+        pcp_rank = get_pcp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        digests_fn, _ = _weight_checksum_utils()
+        prefix = self._weight_checksum_prefix()
+        digests = digests_fn(self._weight_checksum_model())
+        return {prefix + name: digest for name, digest in digests.items()}
+
+    def reset_weights(self) -> None:
+        _, zero_fn = _weight_checksum_utils()
+        if get_ascend_config().weight_nz_mode:
+            logger.warning(
+                "weight_nz_mode is enabled: weight transfer update is unavailable, "
+                "reset weights can only be restored via checkpoint reload (reload_weights)."
+            )
+        zero_fn(self._weight_checksum_model())
 
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
