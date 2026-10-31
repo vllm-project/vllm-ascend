@@ -1,0 +1,10 @@
+pr: 20437
+entries:
+  - category: performance
+    text: Enabled CANN GBSA for MiniMax-M3 on A3 with shared decode metadata and fused block ordering, while retaining the in-tree SAS attention backend on A5 and other profiles.
+    model: MiniMax-M3
+    hardware: [A3]
+  - category: bugfix
+    text: Normalized valid selected blocks in the MiniMax-M3 A3 GBSA path to prevent invalid KV-page tails from affecting partial-page attention.
+    model: MiniMax-M3
+    hardware: [A3]
