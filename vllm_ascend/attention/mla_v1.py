@@ -54,6 +54,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     AscendDeviceType,
     get_ascend_device_type,
+    is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
 )
@@ -409,6 +410,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             metadata_cls if metadata_cls is not None else AscendMLAMetadata,
             supports_dcp_with_varlen,
         )
+        self.dcp_enabled = enable_dcp()
 
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
@@ -597,7 +599,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=common_attn_metadata.context_parallel_metadata is None,
+                treat_short_extends_as_decodes=(
+                    common_attn_metadata.context_parallel_metadata is None
+                    # Only DCP needs the PD last-token recompute override.
+                    # Use the builder's config outside the current-config context.
+                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                ),
             )
         )
         self.set_num_actual_tokens(common_attn_metadata)
