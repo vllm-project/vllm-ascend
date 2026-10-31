@@ -47,6 +47,10 @@ import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_replayssm_config  # noqa
 
+# UNO shared-model speculative decoding (method="uno"). Deliberately separate
+# from patch_speculative_config.py so the two cannot conflict.
+import vllm_ascend.patch.platform.patch_uno_config  # noqa: F401
+
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 

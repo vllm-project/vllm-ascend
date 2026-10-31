@@ -392,6 +392,16 @@ class NPUPlatform(Platform):
                 for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
+            # Same pattern for --spec-method: its choices were built from the
+            # upstream SpeculativeMethod Literal before patch_uno_config.py
+            # widened it, so append the Ascend-only method here.
+            method_action = parser._option_string_actions.get("--spec-method")
+            if method_action and hasattr(method_action, "choices") and method_action.choices:
+                from vllm.config.speculative import SpeculativeConfig
+
+                for method in get_args(SpeculativeConfig.__dataclass_fields__["method"].type):
+                    if method is not None and method not in method_action.choices:
+                        method_action.choices.append(method)
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401

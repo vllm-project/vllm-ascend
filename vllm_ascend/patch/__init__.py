@@ -1836,3 +1836,87 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** 37. File: platform/patch_uno_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.speculative.SpeculativeMethod` /
+#      `SpeculativeConfig.__annotations__["method"]` /
+#      `SpeculativeConfig.__dataclass_fields__["method"].type`
+#    Why:
+#       UNO (shared-model speculative decoding) drafts with the target model
+#       plus a gated LoRA adapter instead of a separate draft checkpoint, so it
+#       needs its own method name. Upstream `method` is a closed pydantic
+#       Literal with no `| str` escape hatch, so `method="uno"` is rejected with
+#       `literal_error` before any Ascend code runs.
+#    How:
+#       Rebind all three holders of the Literal (the module-level symbol, the
+#       class annotation, and the stdlib dataclass field that pydantic's
+#       `collect_dataclass_fields` and `arg_utils._compute_kwargs` actually
+#       read), then call `rebuild_dataclass(force=True)` to regenerate the
+#       validator. Idempotent: no-ops once `"uno"` is present.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55947 (UNO core, open).
+#    Future Plan:
+#       Remove once #55947 lands and the CI pin contains `"uno"` in
+#       `SpeculativeMethod`.
+#
+#   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
+#    Why:
+#       With the Literal widened, `__post_init__` is the second gate: the
+#       drafter-free branch raises `ValueError("num_speculative_tokens was
+#       provided but without speculative model.")` and the trailing dispatch
+#       raises `NotImplementedError("Unsupported speculative method: 'uno'")`.
+#       pydantic compiles `__post_init__` into `__init__` and re-raises those as
+#       `ValidationError(type=value_error)`, so a literal-only fix cannot be
+#       detected from the exception type alone.
+#    How:
+#       Wrap `__post_init__`, capturing the previous implementation at call time
+#       (not import time, so import order does not matter) and chaining it. The
+#       UNO branch returns early and sets `model`/`draft_model_config`/
+#       `draft_parallel_config`/`parallel_drafting`/`draft_sample_method`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55947 (UNO core, open).
+#    Future Plan:
+#       Remove together with entry 1.
+#
+#   3. `vllm.config.vllm.VllmConfig.num_lookahead_tokens`
+#    Why:
+#       The margin is derived from `use_eagle()` / `uses_draft_model()`; UNO is
+#       neither, so it returns 0 and the scheduler never allocates the K KV
+#       positions the draft pass writes, making the draft forward read
+#       unallocated blocks.
+#    How:
+#       Replace the property: return `num_speculative_tokens` for UNO, delegate
+#       to the original getter otherwise.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55947 (UNO core, open).
+#    Future Plan:
+#       Remove together with entry 1.
+#
+#   4. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
+#    Why:
+#       Only the V2 speculator implements UNO. Ascend replaces
+#       `use_v2_model_runner` so V2 is the default, but an explicit
+#       `VLLM_USE_V2_MODEL_RUNNER=0` would fall through to V1 and fail deep
+#       inside drafter setup with a misleading error.
+#    How:
+#       Append `"uno speculative decoding"` to the returned list so
+#       `_validate_v1_model_runner` raises at config build time.
+#    Related PR (if no, explain why):
+#       No, UNO is Ascend-first until #55947 lands.
+#    Future Plan:
+#       Remove together with entry 1.
+#
+#   5. `vllm.v1.engine.input_processor.InputProcessor._validate_lora`
+#    Why:
+#       UNO registers its gated adapter as the engine's single active adapter.
+#       A request-scoped adapter would take over that slot and silently corrupt
+#       the draft distribution.
+#    How:
+#       After the original validation, raise for any non-None `lora_request`
+#       when `method == "uno"`, with an actionable message.
+#    Related PR (if no, explain why):
+#       No, UNO is Ascend-first until #55947 lands.
+#    Future Plan:
+#       Remove once UNO multiplexes the LoRA slot with user adapters.
+#

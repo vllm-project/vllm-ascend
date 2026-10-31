@@ -21,6 +21,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
+        # The prefill metadata buffers below are sized by the number of
+        # *consecutive LoRA runs* in a batch, not by the number of requests, and
+        # one run can never be shorter than one token. A batch layout with more
+        # runs than requests (Uno's draft block alternates a base-weighted seed
+        # row with adapter rows, i.e. two runs per request) therefore overflowed
+        # _seq_start_locs and failed the NPU copy with 161002. Size the buffers
+        # by the token count, which upper-bounds the run count for any mapping.
+        max_batches = max(max_batches, max_num_batched_tokens)
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self._max_num_batched_tokens = max_num_batched_tokens
@@ -593,7 +601,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
 
-        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        # Upstream routes the logits LoRA delta with ``_sampler_indices``, one
+        # entry per sampled position. That mapping is exact for the plain
+        # decode/prefill path, but speculative verification and Uno's k draft
+        # rows hand this function more rows than the sampler mapping holds. The
+        # kernel then reads LoRA ids past ``indices_len[1]`` from a
+        # ``torch.empty`` buffer and traps the NPU vector core in IndexCheck
+        # (bound = max_loras). Keep the upstream mapping whenever it already
+        # matches the row count, otherwise fall back to the token-major
+        # mapping, which always spans the full batch.
+        indices = self.sampler_indices
+        if indices.numel() != x.size(0):
+            indices = torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
         if y.size(1) < r:
             # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).

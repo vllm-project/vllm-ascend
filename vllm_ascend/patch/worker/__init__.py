@@ -68,6 +68,11 @@ import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 # VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
 import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
+# Re-apply the UNO config patch (pydantic schema widening + VllmConfig.
+# num_lookahead_tokens + InputProcessor._validate_lora). Class-level patches
+# are not carried by pickled configs, so each worker interpreter needs them.
+import vllm_ascend.patch.worker.patch_uno_config  # noqa: F401
+
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_uva  # noqa
