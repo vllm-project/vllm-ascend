@@ -176,9 +176,9 @@ extra:
   release_hdk_version: "26.0.RC1"
   release_cann_version: "9.1.0"
   release_pytorch_version: "2.10.0"
-  release_torch_npu_version: "2.10.0.post4"
+  release_torch_npu_version: "2.10.0.post7"
   release_nnal_version: "9.1.0"
-  release_triton_ascend_version: "3.2.2"
+  release_triton_ascend_version: "3.6.0.post2"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
   # Update this group when repository requirements or the verified main build image changes.
@@ -186,10 +186,10 @@ extra:
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
   main_pytorch_version: "2.10.0"
-  main_torch_npu_version: "2.10.0.post4"
-  main_torchvision_version: "0.25.0"
+  main_torch_npu_version: "2.10.0.post7"
+  main_torchvision_version: "0.29.2+cpu"
   main_torchaudio_version: "2.10.0"
-  main_triton_ascend_version: "3.2.2"
+  main_triton_ascend_version: "3.6.0.post2"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
