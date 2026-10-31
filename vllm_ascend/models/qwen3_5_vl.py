@@ -61,6 +61,8 @@ from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
+from vllm_ascend.models.qwen_gdn_recoverssm import QwenGDNRecoverSSMModelMixin
+
 # Marker stored in the mm_kwargs dicts produced by select_encoder_cudagraph_items
 # once device-side preprocessing has been applied. The graph manager re-packs
 # sub-batches (and the DP path re-selects rank-local subsets), so without this
@@ -402,5 +404,7 @@ class AscendQwen3_5ForConditionalGeneration(_AscendVLPreprocessMixin, Qwen3_5For
     info=AscendQwen3_5MoeProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class AscendQwen3_5MoeForConditionalGeneration(_AscendVLPreprocessMixin, Qwen3_5MoeForConditionalGeneration):
+class AscendQwen3_5MoeForConditionalGeneration(
+    QwenGDNRecoverSSMModelMixin, _AscendVLPreprocessMixin, Qwen3_5MoeForConditionalGeneration
+):
     pass

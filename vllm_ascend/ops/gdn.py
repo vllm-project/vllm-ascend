@@ -44,10 +44,13 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.models.qwen_gdn_recoverssm import append_gdn_record_dtypes, append_gdn_record_shapes
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_recoverssm_metadata import AscendGDNRecoverSSMBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.gdn_recoverssm import gdn_recoverssm_verify
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 from vllm_ascend.utils import vllm_version_is
@@ -357,8 +360,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+    ) -> tuple[tuple[int, ...], ...]:
+        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
@@ -367,6 +370,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
+        if getattr(self, "use_gdn_recoverssm", False):
+            return append_gdn_record_shapes(shapes, self.num_k_heads // self.tp_size, self.num_spec + 1)
+        return shapes
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        dtypes = GatedDeltaNetAttention.get_state_dtype(self)
+        return append_gdn_record_dtypes(dtypes) if getattr(self, "use_gdn_recoverssm", False) else dtypes
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         return
@@ -375,6 +385,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if getattr(self, "use_gdn_recoverssm", False):
+            return AscendGDNRecoverSSMBackend
         return AscendGDNFusedAttentionBackend
 
     def forward(
@@ -488,6 +500,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         spec_sequence_masks = attn_metadata.spec_sequence_masks
+        use_recoverssm = getattr(self, "use_gdn_recoverssm", False)
+        # Kimi's shared builder no longer materializes the mask. This forward
+        # only uses it as a branch sentinel; token indices still partition rows.
+        if use_recoverssm and attn_metadata.num_spec_decodes:
+            spec_sequence_masks = True
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
@@ -715,22 +732,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    spec_state_indices_tensor,
-                    query_spec.shape[1],
+            if use_recoverssm:
+                core_attn_out_spec = gdn_recoverssm_verify(
+                    query_spec,
+                    key_spec,
+                    value_spec,
+                    g_spec,
+                    beta_spec,
+                    ssm_state,
+                    *self_kv_cache[2:],
                     spec_causal_conv1d_meta.query_start_loc,
-                ),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+                    spec_state_indices_tensor[:, 0],
+                    self.num_spec + 1,
+                )
+            else:
+                core_attn_out_spec = recurrent_gated_delta_rule(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 

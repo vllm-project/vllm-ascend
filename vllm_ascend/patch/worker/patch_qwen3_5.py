@@ -34,6 +34,7 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.qwen_gdn_recoverssm import use_qwen_gdn_recoverssm
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
@@ -205,11 +206,19 @@ if Qwen3_5MultiTokenPredictor is not None:
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+_GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention.get_state_dtype
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
 if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
+    @wraps(_GDN_ORIGINAL_INIT)
+    def _gdn_init_without_recoverssm(self, *args, **kwargs):
+        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        if use_qwen_gdn_recoverssm(self.vllm_config):
+            raise ValueError("Qwen GDN RecoverSSM is not supported on 310P")
+
+    _GDN_PATCH_TARGET.__init__ = _gdn_init_without_recoverssm
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
@@ -218,6 +227,7 @@ else:
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        self.use_gdn_recoverssm = use_qwen_gdn_recoverssm(self.vllm_config)
         initialize_packed_conv_weight(self)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
