@@ -86,15 +86,17 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Read verified vLLM refs
+      - name: Prepare CI metadata
         id: vllm
         env:
           # The main2main label requests a dual-version run: full NPU tests on
           # both the verified vLLM main commit and the matched release tag.
           HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
         run: |
+          # =========== Read verified vLLM refs ===================
+          echo "::group::Read verified vLLM refs"
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
@@ -117,16 +119,28 @@ jobs:
           else
             echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
           fi
+          echo "::endgroup::"
 
-      - name: cp problem matchers
+          # =========== Copy problem matchers =====================
+          echo "::group::Copy problem matchers"
+          for matcher in actionlint markdownlint mypy; do
+            cp ".github/workflows/matchers/$matcher.json" "$RUNNER_TEMP/$matcher.json"
+          done
+          echo "::endgroup::"
+
+          # =========== Calculate pre-commit cache key ============
+          echo "::group::Calculate pre-commit cache key"
+          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      # Keep a step boundary so the Kubernetes runner can synchronize the files
+      # before processing add-matcher outside the job container.
+      - name: Register problem matchers
         run: |
-          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
-          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
-          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
-
-      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+          for matcher in actionlint markdownlint mypy; do
+            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
+          done
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -208,12 +222,6 @@ jobs:
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
 
-      - name: Get pre-commit config hash
-        id: get_hash
-        run: |
-          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
-
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
         env:
@@ -224,7 +232,7 @@ jobs:
           AWS_REGION: ap-southeast-1
         with:
           path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
+          key: pre-commit-${{ steps.vllm.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
         env:
@@ -240,16 +248,12 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Run mypy
+      - name: Run mypy for Python 3.10, 3.11 and 3.12 in parallel
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
+          python3 .github/workflows/scripts/run_mypy_parallel.py
 
   cpu-ut:
     # Always run tests/ut twice in parallel: once on the verified vLLM main
@@ -275,19 +279,17 @@ jobs:
 
   recommend-tests:
     name: Recommend tests
-    needs: [pre-commit, cpu-ut]
-    # The recommendation only runs under the ready-precise label: that is the
-    # only mode whose result depends on it. ready-all and main2main run
-    # --all-tests and unlabeled runs select nothing, so all of them skip this
-    # job. The pre-commit + cpu-ut checks are explicit so the job can never be
-    # made to run after a failed upstream by adding !cancelled().
+    needs: [pre-commit]
+    # The recommendation only runs under the ready-precise label. Runs without
+    # that label skip this job, including ready-all and main2main alone.
+    # Prepare E2E tests in parallel with CPU UT after pre-commit succeeds;
+    # each NPU entry point separately requires CPU UT to succeed.
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
     env:
@@ -387,16 +389,15 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - cpu-ut
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It runs only when a run-enabling label (ready-precise / ready-all /
     # main2main) asks for test execution; unlabeled runs skip it and ci-gate
     # decides whether that is allowed (no src paths) or requires a label (src or
-    # ci_pipeline paths present). !cancelled() keeps it out of the graph only
-    # when the workflow itself is cancelled; the explicit pre-commit + cpu-ut
-    # success check stops it from running when either failed (!cancelled() alone
-    # would override the transitive skip).
+    # ci_pipeline paths present). !cancelled() allows skipped recommendations
+    # while the explicit pre-commit success check preserves the first gate.
+    # Selection and cache preparation can finish even if the parallel CPU UT
+    # fails; each NPU entry point still requires CPU UT to succeed.
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
@@ -407,14 +408,13 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -615,8 +615,10 @@ jobs:
   run-selected-tests:
     needs:
       - pre-commit
+      - cpu-ut
       - select-tests
       - prepare-csrc-cache
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all or main2main) through select-tests, without
     # running after workflow cancel.
@@ -624,6 +626,8 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
+        needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
@@ -651,14 +655,18 @@ jobs:
   run-selected-tests-upstream:
     needs:
       - pre-commit
+      - cpu-ut
       - select-tests
       - prepare-csrc-cache
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
+        needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
@@ -679,13 +687,15 @@ jobs:
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   run-selected-tests-a5:
-    needs: [pre-commit, select-tests]
+    needs: [pre-commit, cpu-ut, select-tests]
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-a5')
