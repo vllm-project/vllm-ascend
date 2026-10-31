@@ -159,6 +159,27 @@ __aicore__ inline void DispatchKernelDtype310(
 }
 #endif
 
+#if (__CCE_AICORE__ != 310)
+template <typename Q, int FLASH_DECODE, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE,
+          bool NO_ROPE, bool ADAPTIVE_ADDRESSES>
+__aicore__ inline void DispatchKernelArch22(
+    __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+    __gm__ uint8_t *sparseIndices, __gm__ uint8_t *keyScale, __gm__ uint8_t *valueScale,
+    __gm__ uint8_t *blocktable, __gm__ uint8_t *actualSeqLengthsQuery, __gm__ uint8_t *actualSeqLengthsKV,
+    __gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum,
+    __gm__ uint8_t *user, __gm__ uint8_t *tiling, TPipe &tPipe)
+{
+    using BaseType = QSFAType<Q, int8_t, Q, FLASH_DECODE, static_cast<QSFA_LAYOUT>(LAYOUT_T),
+                              static_cast<QSFA_LAYOUT>(KV_LAYOUT_T), TEMPLATE_MODE, NO_ROPE>;
+    using KernelType = typename QSFAAddressTableType<BaseType, ADAPTIVE_ADDRESSES>::type;
+    KvQuantSparseFlashAttentionVllmMla<KernelType> op;
+    GET_TILING_DATA_WITH_STRUCT(KvQuantSparseFlashAttentionVllmTilingDataMla, tilingData, tiling);
+    op.Init(query, key, value, sparseIndices, keyScale, valueScale, blocktable, actualSeqLengthsQuery,
+            actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, &tilingData, tiling, &tPipe);
+    op.Process();
+}
+#endif
+
 template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G>
  __global__ __aicore__ void
 kv_quant_sparse_flash_attention_vllm(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
@@ -177,15 +198,24 @@ kv_quant_sparse_flash_attention_vllm(__gm__ uint8_t *query, __gm__ uint8_t *key,
         query, key, value, sparseIndices, keyScale, valueScale, blocktable,
         actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling, tPipe);
 #else
-    if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_INT8 &&
-                  ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        QSFA_OP_IMPL(KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla, half, int8_t,
-            half, FLASH_DECODE, static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            TEMPLATE_MODE);
-    } else { // bf16
-        QSFA_OP_IMPL(KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla, bfloat16_t, int8_t,
-            bfloat16_t, FLASH_DECODE, static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            TEMPLATE_MODE);
+    using Q = typename std::conditional<ORIG_DTYPE_QUERY == DT_FLOAT16, half, bfloat16_t>::type;
+    __gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *meta =
+        reinterpret_cast<__gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *>(tiling);
+    if (meta->baseParams.dSizeVInput == 528) {
+        if (meta->baseParams.sparseBlockCount >= 256 &&
+            (meta->baseParams.maxBlockNumPerBatch > 256 || meta->baseParams.sparseBlockCount > 2560)) {
+            DispatchKernelArch22<Q, FLASH_DECODE, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE, true, true>(
+                query, key, value, sparseIndices, keyScale, valueScale, blocktable, actualSeqLengthsQuery,
+                actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling, tPipe);
+        } else {
+            DispatchKernelArch22<Q, FLASH_DECODE, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE, true, false>(
+                query, key, value, sparseIndices, keyScale, valueScale, blocktable, actualSeqLengthsQuery,
+                actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling, tPipe);
+        }
+    } else {
+        DispatchKernelArch22<Q, FLASH_DECODE, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE, false, false>(
+            query, key, value, sparseIndices, keyScale, valueScale, blocktable, actualSeqLengthsQuery,
+            actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling, tPipe);
     }
 #endif
 }

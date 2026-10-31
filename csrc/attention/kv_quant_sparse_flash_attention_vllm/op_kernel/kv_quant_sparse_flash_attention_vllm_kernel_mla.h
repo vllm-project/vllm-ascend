@@ -101,7 +101,7 @@ private:
     static constexpr uint64_t kvHeadNum = 1ULL;
     static constexpr uint64_t headDim = 512ULL;
     static constexpr uint64_t headDimAlign = 512ULL;
-    static constexpr uint64_t headDimRope = 64ULL;
+    static constexpr uint64_t headDimRope = QSFAT::noRope ? 0ULL : 64ULL;
     static constexpr uint32_t msdIterNum = 2U;
 
     static constexpr uint32_t dbWorkspaceRatio = PRELOAD_NUM;
@@ -664,7 +664,6 @@ KvQuantSparseFlashAttentionVllmMla<QSFAT>::Bmm2DataCopyOut(uint64_t attenOutOffs
     DataCopyPad(attentionOutGm[attenOutOffset + (mSizeVStart + startRow) * actualColumnCount], attenOutUb,
                 dataCopyParams);
 }
-
 
 template <typename QSFAT>
 __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::CalcParams(uint32_t loop, uint64_t s2Start,
