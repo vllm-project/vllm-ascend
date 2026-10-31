@@ -1063,14 +1063,27 @@ class KVCacheRecvingThread(threading.Thread):
                 req_meta["remote_request_id"],
                 ret,
             )
+            logger.warning(
+                "KV_XFER_FAIL request_id=%s ret=%d local_blocks=%d local_ip=%s local_device_id=%s remote_session_id=%s",
+                remote_request_id,
+                ret,
+                num_local_blocks,
+                get_ip(),
+                self.tp_rank,
+                session_id,
+            )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
+        transfer_bytes = sum(length_list)
         logger.info(
-            "KV cache transfer for request %s took %.2f ms. local_ip %s local_device_id %s remote_session_id %s",
+            "KV_XFER_METRIC request_id=%s elapsed_ms=%.2f bytes=%d local_blocks=%d "
+            "local_ip=%s local_device_id=%s remote_session_id=%s",
             remote_request_id,
             req_transfer_elapsed,
+            transfer_bytes,
+            num_local_blocks,
             get_ip(),
             self.tp_rank,
             session_id,
