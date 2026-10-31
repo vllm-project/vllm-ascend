@@ -70,8 +70,14 @@ def register_service_profiling():
 
 
 def register_model():
+    _ensure_global_patch()
+
+    from vllm_ascend.models.qwen4_exp.config import register_qwen4_exp_config
+    from vllm_ascend.models.qwen4_exp.vllm_config import register_qwen4_exp_vllm_config
     from vllm_ascend.transformers_utils.configs.kimi_k3 import register_kimi_k3_config
 
+    register_qwen4_exp_config()
+    register_qwen4_exp_vllm_config()
     register_kimi_k3_config()
 
     from vllm_ascend.patch.hunyuan_vl_processor_compat import (
