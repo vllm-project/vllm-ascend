@@ -5,6 +5,7 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -248,7 +249,12 @@ def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementat
 
 def test_decode_sentinel_bypasses_request_planner(implementation):
     calls = []
-    implementation["qsa_gbsa_attention"] = lambda *args: calls.append(args) or args[-1]
+
+    def gbsa(*args):
+        calls.append(args)
+        return args[-1]
+
+    implementation["qsa_gbsa_attention"] = gbsa
     q = torch.zeros(4, 3, 8)
     implementation["dispatch_qsa_attention"](
         q, q, q, q, q, torch.zeros(4, 7), torch.zeros(1, 1), torch.zeros(4), torch.arange(4), torch.tensor([4]), q, None
@@ -288,7 +294,7 @@ def load_builder():
         plans.append(args)
         return ("prefill-plan",)
 
-    namespace = dict(
+    namespace: dict[str, Any] = dict(
         upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
@@ -358,7 +364,7 @@ def test_runner_keeps_qwen_prompt_tails_out_of_decode_graph(architecture, has_pr
         def gather_batch_req_state(self, *args):
             return state, 1
 
-    namespace = dict(Base=Base)
+    namespace: dict[str, Any] = dict(Base=Base)
     child = ast.ClassDef(
         name="Runner", bases=[ast.Name(id="Base", ctx=ast.Load())], keywords=[], body=[method], decorator_list=[]
     )
@@ -376,12 +382,12 @@ def test_runner_keeps_qwen_prompt_tails_out_of_decode_graph(architecture, has_pr
 def test_fia_helper_tiles_mask_memory_for_eligible_prefill(implementation):
     calls = []
     implementation["QSA_FIA_MASK_BUDGET_BYTES"] = 64
-    implementation["torch_npu"] = SimpleNamespace(
-        npu_fused_infer_attention_score_v2=lambda **kwargs: (
-            calls.append(kwargs) or torch.ones_like(kwargs["query"]),
-            None,
-        )
-    )
+
+    def fia(**kwargs):
+        calls.append(kwargs)
+        return torch.ones_like(kwargs["query"]), None
+
+    implementation["torch_npu"] = SimpleNamespace(npu_fused_infer_attention_score_v2=fia)
     query = torch.zeros(5, 2, 4, dtype=torch.bfloat16)
     key = torch.zeros(32, 1, 4, dtype=query.dtype)
     implementation["qsa_fia_attention"](

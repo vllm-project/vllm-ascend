@@ -33,6 +33,7 @@ class _Language:
     int32, int64, float32 = np.int32, np.int64, np.float32
     constexpr = object
     static_range = staticmethod(range)
+    row = 0
 
     def program_id(self, axis):
         return _value(self.row)
@@ -139,16 +140,18 @@ def make_inputs(groups, tail, pattern, dtype, rows=7):
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("heads", [1, 2])
 def test_kernel_integer_semantics(groups, tail, pattern, dtype, heads):
-    args = make_inputs(groups, tail, pattern, dtype)
-    expected = reference_prepare(*args, heads)
-    actual = load_cpu_preparation()(*args, heads)
+    compact, positions, lengths, requests, table = make_inputs(groups, tail, pattern, dtype)
+    expected = reference_prepare(compact, positions, lengths, requests, table, heads)
+    actual = load_cpu_preparation()(compact, positions, lengths, requests, table, heads)
     for result, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
 def test_empty_preparation():
-    args = make_inputs(512, 1, "holes", torch.int32, rows=0)
-    for result, reference in zip(load_cpu_preparation()(*args, 2), reference_prepare(*args, 2), strict=True):
+    compact, positions, lengths, requests, table = make_inputs(512, 1, "holes", torch.int32, rows=0)
+    actual = load_cpu_preparation()(compact, positions, lengths, requests, table, 2)
+    expected = reference_prepare(compact, positions, lengths, requests, table, 2)
+    for result, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
@@ -156,12 +159,13 @@ def test_empty_preparation():
 def test_pack_wide_positions_and_strided_buffers(dtype):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/qsa.py"
     module = ast.parse(source.read_text())
-    module.body = [
+    kernel_node = next(
         node
         for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name == "_pack_qsa_group_indices_kernel"
-    ]
-    module.body[0].decorator_list = []
+    )
+    kernel_node.decorator_list = []
+    module.body = [kernel_node]
     language = _Language()
     namespace = {"tl": language}
     exec(compile(module, str(source), "exec"), namespace)
