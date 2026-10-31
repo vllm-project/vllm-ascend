@@ -74,9 +74,14 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
             return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
 
-        grouped_groups = _get_ascend_grouped_groups(kv_cache_spec)
-        if grouped_groups is not None:
-            return grouped_groups
+        if is_deepseek_v41_cache(kv_cache_spec):
+            return make_cache_groups(group_cache_specs(kv_cache_spec))
+
+        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+        if grouped_specs is not None and len(grouped_specs) >= 2:
+            # A uniform spec is not a mixed-page-size layout; grouping it here
+            # would drop the C128 bucket the shared-tuple layout depends on.
+            return _get_kv_cache_groups_uniform_groups(grouped_specs)
 
         kimi_k3_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
         if kimi_k3_groups is not None:
@@ -107,27 +112,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if _is_deepseek_v4_groups(kv_cache_groups):
             return _deepseek_v4_pool_bytes_per_block(kv_cache_groups)
         return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
-
-
-def _get_ascend_grouped_groups(
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec] | None:
-    """Group DSV4.1 or mixed C4/C128/SWA-MLA layers into shared slots.
-
-    Returns None when the spec is not an Ascend multi-page-size layout, so the
-    caller can keep using vLLM's generic grouping.
-    """
-    if is_deepseek_v41_cache(kv_cache_spec):
-        groups = make_cache_groups(group_cache_specs(kv_cache_spec))
-    else:
-        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
-        if grouped_specs is None or len(grouped_specs) < 2:
-            # A uniform spec is not a mixed-page-size layout; grouping it here
-            # would drop the C128 bucket the shared-tuple layout depends on.
-            return None
-        groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-
-    return groups
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
