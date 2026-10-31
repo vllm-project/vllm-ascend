@@ -51,6 +51,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from vllm_ascend.ops.triton.qwen4_exp.qsa_metadata import build_qsa_metadata_triton
 
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
@@ -508,9 +509,9 @@ upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
 qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
 
 
-# qsa_cache selects its Triton metadata builder at import time. The upstream
-# kernel uses CUDA PDL intrinsics, so Ascend must use the equivalent Torch path.
-qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
+# The upstream kernel uses CUDA PDL intrinsics. Keep the same persistent-buffer
+# contract with an Ascend producer instead of the Torch fallback.
+qsa_cache.build_qsa_metadata = build_qsa_metadata_triton
 
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
