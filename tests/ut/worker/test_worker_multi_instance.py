@@ -267,9 +267,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         )
 
     @patch("vllm_ascend.worker.worker.logger")
-    def test_assert_raises_when_free_memory_increases_after_profile(self, mock_logger):
+    def test_raises_value_error_when_free_memory_increases_after_profile(self, mock_logger):
         """
-        determine_available_memory() must raise AssertionError when free memory
+        determine_available_memory() must raise ValueError when free memory
         after profiling is greater than before (external process released memory
         during profiling, invalidating the measurement).
         """
@@ -284,7 +284,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result), self.assertRaises(AssertionError) as ctx:
+        with self._patch_memory_profiling(profile_result), self.assertRaises(ValueError) as ctx:
             worker.determine_available_memory()
 
         self.assertIn("Error in memory profiling", str(ctx.exception))

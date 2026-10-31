@@ -1,0 +1,5 @@
+pr: 18389
+entries:
+  - category: bugfix
+    text: Fixed startup failures when memory-virtualized Ascend devices report unchanged free memory during profiling.
+    hardware: [A2]
