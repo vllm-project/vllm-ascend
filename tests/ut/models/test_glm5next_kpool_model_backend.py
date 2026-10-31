@@ -255,7 +255,9 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
     torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
 
 
-def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch):
+@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch, device, quantized):
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
@@ -271,20 +273,28 @@ def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch):
         softmax_scale=1.0,
         index_kpool_compress_ape=torch.zeros(4, 128),
         index_kpool_compress_gate=torch.zeros(128, 128),
-        k_cache=SimpleNamespace(dtype=torch.float8_e4m3fn),
+        k_cache=SimpleNamespace(dtype=torch.float8_e4m3fn if quantized else torch.bfloat16),
         tail_cache=SimpleNamespace(),
         topk_indices_buffer=None,
     )
+    profile = get_hardware_profile(device)
     hardware = SimpleNamespace(
-        attention_backend_family=backend_module.AttentionBackendFamily.STANDARD, supports=MagicMock(return_value=False)
+        attention_backend_family=profile.attention_backend_family, supports=MagicMock(wraps=profile.supports)
     )
     monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
     init = MagicMock()
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
-    with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
+    if quantized and device != AscendDeviceType.A5:
+        with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
+            Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+        init.assert_not_called()
+    else:
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
-    hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
-    init.assert_not_called()
+        init.assert_called_once_with()
+    if quantized:
+        hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
+    else:
+        hardware.supports.assert_not_called()
 
 
 def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
