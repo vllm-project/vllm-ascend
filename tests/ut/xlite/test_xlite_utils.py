@@ -66,8 +66,8 @@ def _ensure_xlite_C_importable() -> None:
     class _StubModelConfig:
         """Plain stand-in for ``xlite._C.ModelConfig`` (native module unavailable)."""
 
-    xlite_C.Model = _StubModel
-    xlite_C.ModelConfig = _StubModelConfig
+    xlite_C.Model = _StubModel  # type: ignore[attr-defined]
+    xlite_C.ModelConfig = _StubModelConfig  # type: ignore[attr-defined]
     xlite._C = xlite_C
     sys.modules["xlite._C"] = xlite_C
 
