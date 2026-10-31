@@ -888,7 +888,11 @@ class NPUModelRunner(GPUModelRunner):
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
         # Create a tensor for num_tokens_after_padding
-        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
+        comm_method = select_moe_comm_method(
+            max_tokens_across_dp,
+            self.vllm_config,
+            cudagraph_runtime_mode=synced_cudagraph_mode,
+        )
         needs_uniform_moe_input = comm_method in {MoECommType.ALLGATHER, MoECommType.MC2}
         needs_uniform_mega_moe_input = comm_method == MoECommType.FUSED_MC2 and use_cann_megamoe(self.vllm_config)
         finegrained_tp = self.ascend_config.finegrained_tp_config
