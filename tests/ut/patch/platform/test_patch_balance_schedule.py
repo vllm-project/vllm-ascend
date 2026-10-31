@@ -648,7 +648,7 @@ _MODEL = "Qwen/Qwen3-0.6B"
 _BLOCK_SIZE = 16
 
 
-def _create_requests(num_requests, num_tokens=10, max_tokens=16, id_offset=0):
+def _create_requests(num_requests, num_tokens=10, max_tokens=16, id_offset=0, prompt_token_ids=None):
     from vllm.sampling_params import SamplingParams
     from vllm.utils.hashing import sha256
     from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -659,7 +659,7 @@ def _create_requests(num_requests, num_tokens=10, max_tokens=16, id_offset=0):
     return [
         Request(
             request_id=f"{i + id_offset}",
-            prompt_token_ids=[i] * num_tokens,
+            prompt_token_ids=(list(prompt_token_ids) if prompt_token_ids is not None else [i] * num_tokens),
             sampling_params=sampling_params,
             pooling_params=None,
             block_hasher=get_request_block_hasher(_BLOCK_SIZE, sha256),
@@ -804,6 +804,60 @@ def test_balance_gather_all_gathers_when_enabled():
     with patch.object(pbs.dist, "all_gather") as mock_gather:
         scheduler.balance_gather()
     mock_gather.assert_not_called()
+
+
+def test_balance_schedule_records_local_prefix_cache_stats():
+    """A known prefix hit is recorded only when the request is admitted."""
+    prompt = [7] * 32
+    scheduler = _make_balance_scheduler()
+    seed, waiting = _create_requests(2, num_tokens=32, max_tokens=8, prompt_token_ids=prompt)
+    cached_tokens = _BLOCK_SIZE
+    assert scheduler.kv_cache_manager.allocate_slots(seed, cached_tokens) is not None
+    scheduler.kv_cache_manager.cache_blocks(seed, cached_tokens)
+    scheduler.kv_cache_manager.free(seed)
+    _, expected_hits, _ = scheduler.kv_cache_manager.get_computed_blocks(waiting)
+    assert expected_hits == cached_tokens
+
+    calls = []
+    original_record = scheduler.kv_cache_manager.record_prefix_cache_stats
+    original_allocate = scheduler.kv_cache_manager.allocate_slots
+    failures_left = {"n": 1}
+
+    def record(request, num_hits):
+        calls.append((request.request_id, num_hits))
+        return original_record(request, num_hits)
+
+    def allocate_slots(*args, **kwargs):
+        if failures_left["n"]:
+            failures_left["n"] -= 1
+            return None
+        return original_allocate(*args, **kwargs)
+
+    scheduler.kv_cache_manager.record_prefix_cache_stats = record
+    scheduler.kv_cache_manager.allocate_slots = allocate_slots
+    scheduler.add_request(waiting)
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    requests_before, queries_before, hits_before = (
+        stats.requests,
+        stats.queries,
+        stats.hits,
+    )
+
+    scheduler.schedule()
+    assert calls == []
+    assert (stats.requests, stats.queries, stats.hits) == (
+        requests_before,
+        queries_before,
+        hits_before,
+    )
+    assert waiting.request_id not in {req.request_id for req in scheduler.running}
+
+    scheduler.schedule()
+    assert calls == [(waiting.request_id, expected_hits)]
+    assert stats.requests == requests_before + 1
+    assert stats.queries == queries_before + waiting.num_tokens
+    assert stats.hits == hits_before + expected_hits
 
 
 def test_balance_schedule_waiting_and_running_paths():
