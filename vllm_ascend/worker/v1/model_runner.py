@@ -19,11 +19,105 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+
+# R194_CEPROF (DIAGNOSTIC_ONLY/NEVER_PROMOTE/default OFF): cProfile the
+# importing thread (EngineCore main) from import time; a daemon dumps pstats
+# every 30s (EngineCore is SIGKILLed at shutdown -> atexit cannot run).
+try:
+    if os.environ.get("R194_CEPROF", "0") == "1":
+        import cProfile as _cp194m
+        import threading as _th194m
+
+        _prof194 = _cp194m.Profile()
+        _prof194.enable()
+        _prof194_n = [0]
+
+        def _r194_dump():
+            while True:
+                time.sleep(30)
+                _prof194_n[0] += 1
+                try:
+                    _prof194.disable()
+                    _prof194.dump_stats("/tmp/r194_ceprof_{}.pstats".format(_prof194_n[0]))
+                    _prof194.enable()
+                except Exception:
+                    pass
+
+        _th194m.Thread(target=_r194_dump, daemon=True).start()
+except Exception:
+    pass
+# R195_HPROF (DIAGNOSTIC_ONLY/NEVER_PROMOTE/default OFF): per-step host phase
+# marks to decompose the B32@4K ~218ms decode host gap (433 TPOT = run_model
+# 222.7 + update 2.5 + ~208 OUTSIDE model_runner.execute_model). Wraps
+# NPUModelRunner.execute_model / sample_tokens with wall marks written to
+# /tmp/r195_hprof.jsonl (same EngineCore thread; append-only). Regions:
+#   mrx_in->rm_in = mr input prep; rm wall covers :275 sync + replay enqueue
+#   (R156_HOSTPROF splits sync/enq separately);
+#   mrx_out->st_in = EngineCore glue (batch queue / grammar / executor);
+#   st_in->st_out = sampler + sampled-token D2H wait (autoregressive dep);
+#   st_out->mrx_in(next) = scheduler.update_from_output + IPC + schedule(i+1)
+#   + input build.
+# R195_CPROF_WARM: start a cProfile of the EngineCore thread after N
+# consecutive small-schedule steps (pure decode), profile R195_CPROF_LEN
+# steps, dump /tmp/r195_cprof.pstats, disable. 0 = off.
+try:
+    _R195_HP = os.environ.get("R195_HPROF", "0") == "1"
+    _R195_CPROF_WARM = int(os.environ.get("R195_CPROF_WARM", "0") or 0)
+    _R195_CPROF_LEN = int(os.environ.get("R195_CPROF_LEN", "24") or 24)
+    _R195_ST: dict = {"n": 0, "small": 0, "prof": None, "prof_n": 0, "path": None}
+
+    def _r195_mark(tag, ntp=0):
+        if not _R195_HP:
+            return
+        try:
+            with open("/tmp/r195_hprof.jsonl", "a") as _f195:
+                _f195.write(
+                    '{{"n": {}, "tag": "{}", "ntp": {}, "t": {:.6f}}}\n'.format(
+                        _R195_ST["n"], tag, int(ntp), time.perf_counter()
+                    )
+                )
+        except Exception:
+            pass
+
+    def _r195_maybe_cprof(ntp):
+        # decode-gated cProfile: enable after WARM consecutive small steps.
+        # R195_CPROF_BIG=1 inverts the gate: profile BIG prefill-class steps
+        # (ntp>=4096) instead — targets the 2nd-prefill 2.5x slowdown.
+        _big_gate = os.environ.get("R195_CPROF_BIG", "0") == "1"
+        if _R195_CPROF_WARM <= 0 or _R195_ST["prof"] is not None:
+            return
+        if _big_gate:
+            _hit = ntp >= 4096
+        else:
+            _hit = ntp <= 48
+        if _hit:
+            _R195_ST["small"] += 1
+        else:
+            _R195_ST["small"] = 0
+        if _R195_ST["small"] >= _R195_CPROF_WARM and _R195_ST["prof"] is None and _R195_ST["prof_n"] == 0:
+            import cProfile as _cp195
+
+            _pf195 = _cp195.Profile()
+            _R195_ST["prof"] = _pf195
+            _pf195.enable()
+            _R195_ST["prof_n"] = _R195_ST["n"]
+
+    def _r195_maybe_cprof_stop():
+        if _R195_ST["prof"] is not None and _R195_ST["n"] - _R195_ST["prof_n"] >= _R195_CPROF_LEN:
+            try:
+                _R195_ST["prof"].disable()
+                _R195_ST["prof"].dump_stats("/tmp/r195_cprof.pstats")
+            except Exception:
+                pass
+            _R195_ST["prof"] = None
+except Exception:
+    pass
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -249,6 +343,8 @@ from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
+from vllm_ascend.device.device_config import get_ascend_device_type  # isort: skip
+from vllm_ascend.device.hardware import AscendDeviceType  # isort: skip
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
@@ -375,6 +471,19 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _r167_dbg(tag, **kw):
+    try:
+        import json as _j167d
+        _n167 = globals().setdefault('_R167_DBG_N', [0])
+        if _n167[0] < 60:
+            _n167[0] += 1
+            with open("/tmp/r167_evdbg.log", "a") as _f167d:
+                _f167d.write(_j167d.dumps({"n": _n167[0], "tag": tag,
+                                            **{k: str(v)[:80] for k, v in kw.items()}}) + "\n")
+    except Exception:
+        pass
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -1000,6 +1109,55 @@ class NPUModelRunner(GPUModelRunner):
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         self._update_replay_requests(scheduler_output)
+        # R144 P0.1: stash the EXPLICIT vLLM scheduler lifecycle events for the
+        # attention layer (which only sees InputBatch.req_ids post-update, NOT
+        # the SchedulerOutput). The resolver consumes these instead of inferring
+        # finish from batch absence (forbidden: a request can be temporarily
+        # absent without being finished). finished_req_ids/preempted_req_ids are
+        # sets of req_id strings; scheduled_new_reqs is a list of NewRequestData
+        # (.req_id). Stashed BEFORE super()._update_states mutates InputBatch.
+        self._r144_finished = set(getattr(scheduler_output, "finished_req_ids", set()) or set())
+        self._r144_preempted = set(getattr(scheduler_output, "preempted_req_ids", None) or set())
+        self._r144_new = set(
+            getattr(nr, "req_id", nr) for nr in (getattr(scheduler_output, "scheduled_new_reqs", None) or [])
+        )
+        # R167 FREEFIX: process the lifecycle events HERE, at the runner level.
+        # The slot allocator's release previously ran only inside the attention
+        # layer's bind_slots (eager forwards) — but the step that CARRIES
+        # finished_req_ids is the request's final DECODE step (a graph replay:
+        # the attention layer's Python never runs). By the next eager forward
+        # the scheduler_output no longer lists the finish => the frees were
+        # LOST and capacity exhausted monotonically (probe: cv128 exhausted
+        # mseq=12 at gen 7 with ZERO frees across 6 finished generations).
+        if (os.environ.get("R166_SLOTALGO", "0") == "1"
+                or os.environ.get("R170_ROWSLOT", "0") == "1") and (
+                self._r144_finished or self._r144_preempted):
+            try:
+                from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _A167ff
+                # R172 FIX: bind_slots sets _r166_alloc/_r164_slotmap on the
+                # INT2 SUBCLASS (type(self) at bind); reading them off the
+                # BASE class returned None -> releases were a silent no-op
+                # (B32 churn exhausted cap with zero frees, rid-122 was
+                # deterministic). Resolve base-then-subclass like the migrator does.
+                _sub167 = getattr(
+                    __import__("vllm_ascend.attention.attention_int2",
+                               fromlist=["AscendINT2AttentionBackendImpl"]),
+                    "AscendINT2AttentionBackendImpl", None)
+                _A167 = (getattr(_A167ff, "_r166_alloc", None)
+                         or (getattr(_sub167, "_r166_alloc", None)
+                             if _sub167 is not None else None))
+                if _A167 is not None:
+                    _gone167 = set(self._r144_finished) | set(self._r144_preempted)
+                    for _r167ff in _gone167:
+                        _A167.release(_r167ff)
+                    _sm167 = (getattr(_A167ff, "_r164_slotmap", None)
+                              or (getattr(_sub167, "_r164_slotmap", None)
+                                  if _sub167 is not None else None))
+                    if _sm167 is not None:
+                        for _r167ff in _gone167:
+                            _sm167.pop(_r167ff, None)
+            except Exception:
+                pass
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -1709,6 +1867,31 @@ class NPUModelRunner(GPUModelRunner):
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
+        # R118 runner-side input snap (default OFF; R118_RUNNER_SNAP adds a
+        # per-step device sync via .item() — it can MASK H2D/replay races, so
+        # no-sync control legs must run with it off): per-step content of the
+        # persistent graph-input buffers AFTER the H2D writes and BEFORE the
+        # forward/replay — the runner leg of the first-wrong-tensor ladder.
+        if (os.environ.get("R118_RUNNER_SNAP", "0") == "1"
+                and total_num_scheduled_tokens <= 16):
+            try:
+                import importlib as _il118r
+                import json as _js
+                import time as _tm
+
+                _rt = _il118r.import_module("r118_trace")
+                _row = {"mode": "runner", "tag": "prep",
+                        "tot": int(total_num_scheduled_tokens),
+                        "ids_cpu0": int(self.input_ids.cpu[0]),
+                        "ids_gpu0": int(self.input_ids.gpu[0].item()),
+                        "pos_gpu0": int(self.positions[0].item()),
+                        "nct_gpu0": int(self.num_computed_tokens[0].item()),
+                        "sl_gpu0": int(self.seq_lens[0].item()),
+                        "t": _tm.time_ns()}
+                with open(_rt.OUT, "a") as _f:
+                    _f.write(_js.dumps(_row) + "\n")
+            except Exception as _e:
+                print(f"[R118-RUNNER-SNAP] {_e}", flush=True)
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
@@ -2357,7 +2540,67 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+        # R166_PFSYNC (default OFF, CAUSAL DIAGNOSTIC): a controlled device sync
+        # at the first step AFTER any prefill-containing step. Adjudicates the
+        # freshest-prefill-row race (E33/E34: the request whose prefill is
+        # freshest at its first group replay is the wrong row — if this sync
+        # cures it, the racer is an async write from the prefill step not
+        # visible to the next replay despite current_stream sync).
+        try:
+            import os as _os166p
+            if _os166p.environ.get("R166_PFSYNC", "0") == "1":
+                _pf = getattr(self, "_r166_last_step_prefill", False)
+                _st166 = None
+                _fc166 = get_forward_context()
+                for _k in (getattr(_fc166, "attn_metadata", None) or {} if _fc166 is not None else {}):
+                    _st166 = (_fc166.attn_metadata[_k] or None)
+                    break
+                _is_pf = bool(_st166 is not None and str(getattr(
+                    _st166, "attn_state", "")).endswith(("PrefillNoCache", "ChunkedPrefill", "Mixed")))
+                if _pf and not _is_pf:
+                    import torch as _t166p
+                    _t166p.npu.synchronize()
+                self._r166_last_step_prefill = _is_pf
+        except Exception:
+            pass
+        # R169_FLATDUMP (default OFF): prefill-state HOST block-table
+        # timeline (scheduler truth per prefill/mixed step). Host-only:
+        # no sync, no device work. Pairs with the updater-side flat dump.
+        try:
+            import os as _os169r
+            if _os169r.environ.get("R169_FLATDUMP", "0") == "1":
+                _st169r = None
+                _fc169r = get_forward_context()
+                for _k169r in (getattr(_fc169r, "attn_metadata",
+                                       None) or {} if _fc169r is not None else {}):
+                    _st169r = _fc169r.attn_metadata[_k169r]
+                    break
+                _st169s = str(getattr(_st169r, "attn_state", ""))
+                _g169r = globals().setdefault('_R169_PF_N', [0])
+                if (_g169r[0] < 600
+                        and ("Prefill" in _st169s or _st169s == "Mixed")):
+                    _g169r[0] += 1
+                    import json as _js169r
+                    _bt169r = self.input_batch.block_table
+                    _cpu169r = (_bt169r.get_cpu_tensor()
+                                if hasattr(_bt169r, "get_cpu_tensor")
+                                else _bt169r[0].get_cpu_tensor())
+                    _rec169r = {"n": _g169r[0], "state": _st169s,
+                                "rids": [str(r) for r in (getattr(
+                                    _st169r, "request_ids", None)
+                                    or [])][:16],
+                                "sls": [int(x) for x in (getattr(
+                                    _st169r, "seq_lens_list", None)
+                                    or [])][:16],
+                                "bt0": [int(v) for v in
+                                        _cpu169r[0].tolist()[:256]],
+                                "bt_shape": list(_cpu169r.shape)}
+                    with open("/tmp/r169_pfbt.jsonl", "a") as _f169r:
+                        _f169r.write(_js169r.dumps(_rec169r) + "\n")
+        except Exception:
+            pass
 
+       
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -3077,10 +3320,34 @@ class NPUModelRunner(GPUModelRunner):
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
-            return self.sampler(
+            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+                self.sampler.prepare_sampling(max_topk)
+            _so = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            # R118 teacher forcing (default OFF): overwrite the sampled token
+            # with a fixed sequence so eager and graph decode consume IDENTICAL
+            # inputs every step — exact K/V/attention comparison regardless of
+            # logits noise. Flows through the native async feedback path.
+            _ft = os.environ.get("R118_FORCE_TOKENS", "")
+            if _ft:
+                try:
+                    _seq = [int(x) for x in _ft.split(",") if x != ""]
+                    _c = getattr(type(self), "_r118_force_n", None)
+                    if _c is None:
+                        type(self)._r118_force_n = _c = [0]
+                    if _seq:
+                        _tok = _seq[_c[0] % len(_seq)]
+                        if (_so.sampled_token_ids is not None
+                                and _so.sampled_token_ids.dim() >= 1
+                                and _so.sampled_token_ids.shape[0] > 0):
+                            _so.sampled_token_ids[0] = _tok
+                        _c[0] += 1
+                except Exception as _e:
+                    print(f"[R118-FORCE] {_e}", flush=True)
+            return _so
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
@@ -3104,6 +3371,75 @@ class NPUModelRunner(GPUModelRunner):
             return num_nans_in_logits
         except IndexError:
             return {}
+
+    def _prepare_input_ids(self, scheduler_output, num_reqs,
+                           total_num_scheduled_tokens, cu_num_tokens):
+        """R118 wrapper around the core input-id prep (all features default OFF).
+
+        - R118_INJECT_AT=<k> (+R118_INJECT_VAL, default -1): FAULT INJECTION.
+          At decode step k (counter of _prepare_input_ids calls with
+          total<=16), writes the placeholder value into input_ids.gpu[0] on
+          device — simulating the placeholder-upload defect class (async
+          feedback row excluded from prev_req_id_to_index -> W1 uploads the
+          -1 row), which produces novel K/V with correct in-graph compute.
+        - R118_GRAPH_INPUT_FIX=1: device-side repair — after the core prep,
+          any decode row of input_ids.gpu holding the -1 placeholder is
+          restored from prev_sampled_token_ids[:, 0] (D2D where; no host
+          sync, no D2H, capture-safe: runs outside the graph on the same
+          persistent buffer).
+        - R118_FEEDBACK_DIAG=1: per-step path log (has a host sync; diagnostic
+          legs only).
+        """
+        _inj = os.environ.get("R118_INJECT_AT", "")
+        _fix = os.environ.get("R118_GRAPH_INPUT_FIX", "0") == "1"
+        _diag = os.environ.get("R118_FEEDBACK_DIAG", "0") == "1"
+        if not (_inj or _fix or _diag):
+            return super()._prepare_input_ids(
+                scheduler_output, num_reqs, total_num_scheduled_tokens,
+                cu_num_tokens)
+        _cnt = getattr(type(self), "_r118_prep_n", None)
+        if _cnt is None:
+            type(self)._r118_prep_n = _cnt = [0]
+        _n = _cnt[0]
+        _cnt[0] += 1
+        if _diag:
+            try:
+                import json as _j
+                import time as _t
+                _pv = self.prev_positions.np[:num_reqs].tolist() if getattr(
+                    self, "prev_positions", None) is not None else None
+                _row = {"mode": "fb", "n": _n, "tot": int(total_num_scheduled_tokens),
+                        "prev_positions": _pv,
+                        "ids_cpu0": int(self.input_ids.cpu[0]),
+                        "ids_gpu0": int(self.input_ids.gpu[0].item()),
+                        "t": _t.time_ns()}
+                import importlib as _il118r
+
+                _rt = _il118r.import_module("r118_trace")
+                with open(_rt.OUT, "a") as _f:
+                    _f.write(_j.dumps(_row) + "\n")
+            except Exception as _e:
+                print(f"[R118-FB-DIAG] {_e}", flush=True)
+        _r = super()._prepare_input_ids(
+            scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
+        if _inj and _n == int(_inj) and total_num_scheduled_tokens <= 16:
+            _val = int(os.environ.get("R118_INJECT_VAL", "-1"))
+            self.input_ids.gpu[0].fill_(_val)
+            print(f"[R118-INJECT] step {_n}: placeholder-token fault injected "
+                  f"(val={_val})", flush=True)
+        if _fix and total_num_scheduled_tokens <= 16:
+            _ps = getattr(self.input_batch, "prev_sampled_token_ids", None)
+            if _ps is not None and _ps.numel() > 0:
+                _rows = min(num_reqs, _ps.shape[0],
+                            self.input_ids.gpu.shape[0])
+                _bad = self.input_ids.gpu[:_rows] < 0
+                self.input_ids.gpu[:_rows] = torch.where(
+                    _bad, _ps[:_rows, 0].to(self.input_ids.gpu.dtype),
+                    self.input_ids.gpu[:_rows])
+                if bool(_bad.any().item()):
+                    print(f"[R118-FIX] step {_n}: repaired placeholder "
+                          f"input-id rows", flush=True)
+        return _r
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
@@ -3257,6 +3593,41 @@ class NPUModelRunner(GPUModelRunner):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
+            # (a vestigial `assert positions is not None` from the m-port base
+            # was removed: positions is not a parameter of this method on main
+            # and nothing below reads it -- the assert would NameError on every
+            # full-graph replay)
+            # R166_BT_HOST: expose the HOST block table (scheduler truth) to
+            # the R164 update driver — the device md.block_tables is stale in
+            # this composition (MIDPROBE-proven; see _r164_update_meta).
+            try:
+                import os as _os166b
+                try:
+                    import os as _os166w
+                    _ev166 = getattr(self, "_r166_pf_event", None)
+                    _us166 = self.update_stream
+                    if (_ev166 is not None and _us166 is not None
+                            and _os166w.environ.get("R166_PFEV", "0") == "1"):
+                        _us166.wait_event(_ev166)
+                except Exception:
+                    pass
+                if _os166b.environ.get("R166_BT_HOST", "0") == "1":
+                    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _A166
+                    _bt166 = self.input_batch.block_table
+                    if hasattr(_bt166, "get_cpu_tensor"):
+                        _A166._r166_host_bt = _bt166.get_cpu_tensor()
+                    else:
+                        # MultiGroupBlockTable: single kv group -> [0]
+                        _A166._r166_host_bt = _bt166[0].get_cpu_tensor()
+                if _os166b.environ.get("R169_FLATDUMP", "0") == "1":
+                    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _A169
+                    _bt169 = self.input_batch.block_table
+                    _A169._r169_host_bt = (
+                        _bt169.get_cpu_tensor()
+                        if hasattr(_bt169, "get_cpu_tensor")
+                        else _bt169[0].get_cpu_tensor())
+            except Exception:
+                pass
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,
@@ -4010,6 +4381,15 @@ class NPUModelRunner(GPUModelRunner):
             offload_dummy=offload_dummy,
             copy_sfa_restore_tails=self._copy_sfa_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,
+            # R144 P0: stable request identity (req_id strings, batch_idx->req_id)
+            # from InputBatch. Explicit add/remove lifecycle via SchedulerOutput
+            # (scheduled_new_reqs/finished_req_ids). Sliced to num_reqs (live);
+            # padding rows [num_reqs:num_reqs_padded] have no req_id (inert dummy).
+            request_ids=self.input_batch.req_ids[:num_reqs],
+            # R144 P0.1: explicit lifecycle events (stashed in _update_states).
+            finished_req_ids=getattr(self, "_r144_finished", None),
+            preempted_req_ids=getattr(self, "_r144_preempted", None),
+            new_req_ids=getattr(self, "_r144_new", None),
         )
 
         if self.use_dcp:
@@ -5099,6 +5479,24 @@ class NPUModelRunner(GPUModelRunner):
         allocation_context = kv_cache_allocation_context or nullcontext()
         with allocation_context:
             kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        # R156-H4 (default OFF): consolidate EQUAL-SIZE int8 raw cache tensors
+        # into ONE backing buffer so the middle-carrier staging can gather
+        # every layer's pages in a single index op (~15 launches/step instead
+        # of ~430; the update-stream per-launch wall is ~80us device-side).
+        # Byte-for-byte identical semantics: same shapes, zeros, per-layer
+        # views into one allocation.
+        import os as _os156h4
+        if _os156h4.environ.get("R156_H4", "0") == "1":
+            _groups: dict = {}
+            for _ln, _t in kv_cache_raw_tensors.items():
+                if (isinstance(_t, torch.Tensor) and _t.dtype == torch.int8
+                        and _t.dim() == 1):
+                    _groups.setdefault((_t.dtype, _t.numel()), []).append(_ln)
+            for (_dt, _sz), _lns in _groups.items():
+                if len(_lns) > 1:
+                    _buf = torch.zeros(len(_lns) * _sz, dtype=_dt, device=self.device)
+                    for _i, _ln in enumerate(sorted(_lns)):
+                        kv_cache_raw_tensors[_ln] = _buf[_i * _sz:(_i + 1) * _sz]
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(
             kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
@@ -5875,10 +6273,19 @@ class NPUModelRunner(GPUModelRunner):
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
+                    _oscar_cdt = getattr(
+                        self.vllm_config.cache_config, "cache_dtype", "auto")
+                    _shape_kwargs = {}
+                    # OSCAR INT2: only the Ascend backend accepts the dtype
+                    # hint (packed INT2 derives head_size // 4); pass it solely
+                    # when INT2 is requested, matching the kernel-block path.
+                    if _oscar_cdt == "int2_per_token_head":
+                        _shape_kwargs["cache_dtype_str"] = _oscar_cdt
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks, get_storage_block_size(current_kv_cache_spec),
                         current_kv_cache_spec.num_kv_heads,
-                        current_kv_cache_spec.head_size)
+                        current_kv_cache_spec.head_size,
+                        **_shape_kwargs)
                     kv_cache_shape_list = [kv_cache_shape]
                     kv_cache_dtype_list = [current_kv_cache_spec.dtype]
                     overlap_full_kv_cache = False
@@ -5909,7 +6316,8 @@ class NPUModelRunner(GPUModelRunner):
                         indexer_scale_shape = attn_backend.get_kv_cache_shape(
                                                 num_blocks, get_storage_block_size(current_kv_cache_spec),
                                                 current_kv_cache_spec.num_kv_heads,
-                                                current_kv_cache_spec.scale_dim
+                                                current_kv_cache_spec.scale_dim,
+                                                **_shape_kwargs
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = attn_backend.get_kv_cache_shape(
@@ -5917,7 +6325,8 @@ class NPUModelRunner(GPUModelRunner):
                                 current_kv_cache_spec.num_kv_heads,
                                 current_kv_cache_spec.head_size
                                 + current_kv_cache_spec.scale_dim
-                                * get_dtype_size(current_kv_cache_spec.scale_dtype))
+                                * get_dtype_size(current_kv_cache_spec.scale_dtype),
+                                **_shape_kwargs)
                             kv_cache_shape_list = [
                                 indexer_k_shape, indexer_scale_shape, indexer_full_shape
                             ]
@@ -6188,11 +6597,19 @@ class NPUModelRunner(GPUModelRunner):
                     block_size_chunk = (
                         current_kv_cache_spec.block_size // kernel_block_size
                     )
+                    _oscar_cdt = self.vllm_config.cache_config.cache_dtype
+                    _shape_kwargs = {}
+                    # OSCAR INT2: the packed-INT2 cache derives its shape with
+                    # head_size // 4; only the Ascend backend accepts the
+                    # dtype hint, so pass it solely when INT2 is requested.
+                    if _oscar_cdt == "int2_per_token_head":
+                        _shape_kwargs["cache_dtype_str"] = _oscar_cdt
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks * block_size_chunk,
                         kernel_block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
+                        **_shape_kwargs,
                     )
                     if (
                         raw_kv_is_combined
@@ -6328,6 +6745,22 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
+
+                    # INT2 KV cache: override dtype to uint8 and adjust shape
+                    _int2_mode = (self.vllm_config.cache_config.cache_dtype == "int2_per_token_head")
+                    if _int2_mode:
+                        k_cache_dtype = v_cache_dtype = torch.uint8
+                        # k_shape and v_shape should already have head_size//4 from get_kv_cache_shape
+                        # but let's ensure it's correct
+                        _expected_packed = current_kv_cache_spec.head_size // 4
+                        if k_shape[-1] != _expected_packed:
+                            k_shape = (*k_shape[:-1], _expected_packed)
+                        if v_shape[-1] != _expected_packed:
+                            v_shape = (*v_shape[:-1], _expected_packed)
+
+                    # A5 sparse C8: ckv uses float8_e4m3fn
+                    if self.use_sparse and current_sparse_sfa_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                        k_cache_dtype = self.c8_k_cache_dtype
 
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                     if current_packed_sfa_main_cache:
@@ -6987,7 +7420,7 @@ class NPUModelRunner(GPUModelRunner):
         self._kv_block_zeroer.init_meta(
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self.kernel_block_sizes,
-            cache_dtype=self.cache_config.cache_dtype,
+            cache_dtype=self.vllm_config.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
@@ -7097,3 +7530,126 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 def update_pass_config(model_runner):
     # vLLM #60517 removed PassConfig.enable_sp in both supported revisions.
     yield
+
+# R195_HPROF (DIAGNOSTIC_ONLY/NEVER_PROMOTE/default OFF): wall-clock marks
+# around NPUModelRunner.execute_model / sample_tokens. Wrapping AFTER class
+# definition catches every return path without touching the bodies; zero
+# overhead when R195_HPROF!=1. See the R195_HPROF block at module top for the
+# region decomposition of the B32 decode host gap.
+try:
+    if _R195_HP:
+        _r195_orig_exec = NPUModelRunner.execute_model
+        _r195_orig_sample = NPUModelRunner.sample_tokens
+
+        def _r195_execute_model(self, scheduler_output, *args, **kwargs):
+            _ntp195 = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0)
+            _R195_ST["n"] += 1
+            _r195_mark("mrx_in", _ntp195)
+            _r195_maybe_cprof(_ntp195)
+            try:
+                return _r195_orig_exec(self, scheduler_output, *args, **kwargs)
+            finally:
+                _r195_mark("mrx_out", _ntp195)
+                _r195_maybe_cprof_stop()
+
+        def _r195_sample_tokens(self, *args, **kwargs):
+            _r195_mark("st_in")
+            try:
+                return _r195_orig_sample(self, *args, **kwargs)
+            finally:
+                _r195_mark("st_out")
+
+        NPUModelRunner.execute_model = _r195_execute_model  # type: ignore[method-assign]
+        NPUModelRunner.sample_tokens = _r195_sample_tokens  # type: ignore[method-assign]
+except Exception:
+    pass
+
+# R201_KPROF (DIAGNOSTIC_ONLY/NEVER_PROMOTE/default OFF): torch_npu profiler
+# around WHOLE execute_model calls of the N-th occurrence of a "big" step
+# (total_num_scheduled_tokens in [R201_KPROF_LO, R201_KPROF_HI], default
+# [8000, 8192] = the ntp=8192 prefill class), running INSIDE the EngineCore
+# process (the parent-process profiler sees no child NPU activity — that is
+# why the harness-side R201_KPROF=1 attempt exported nothing). Occurrence
+# indices come from R201_KPROF_IDX (comma list, default "0"); one chrome
+# trace per index at $R201_KPROF_DIR/step_<idx>.json. Wrapping the whole
+# execute_model covers attention + FFN + sampling of exactly one step.
+try:
+    _R201_KP = os.environ.get("R201_KPROF", "0") == "2"
+    if _R201_KP:
+        _r201_lo = int(os.environ.get("R201_KPROF_LO", "8000"))
+        _r201_hi = int(os.environ.get("R201_KPROF_HI", "8192"))
+        _r201_idx = [int(x) for x in os.environ.get("R201_KPROF_IDX", "0").split(",") if x != ""]
+        _r201_od = os.environ.get("R201_KPROF_DIR", "/tmp/r201_kprof")
+        _r201_orig_exec = NPUModelRunner.execute_model
+        _R201_ST: dict = {"seen": 0, "active": None, "active_idx": -1}
+
+        def _r201_execute_model(self, scheduler_output, *args, **kwargs):
+            _ntp = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0)
+            _big = _r201_lo <= _ntp <= _r201_hi
+            _start = False
+            if _big:
+                _i = _R201_ST["seen"]
+                _R201_ST["seen"] = _i + 1
+                import time as _t201
+                _npf = _ndc = -1
+                _sls = []
+                try:
+                    from vllm import forward_context as _fc201
+                    _fwd201 = getattr(_fc201, "attn_metadata", None) or {}
+                    _md1 = None
+                    for _k201 in _fwd201:
+                        _md1 = _fwd201[_k201]
+                        break
+                    _npf = int(getattr(_md1, "num_prefills", -1) or 0)
+                    _ndc = int(getattr(_md1, "num_decodes", -1) or 0)
+                    _sls = [int(x) for x in (getattr(_md1, "seq_lens_list", None) or [])][:6]
+                except Exception:
+                    pass
+                try:  # noqa: SIM105 - narrow guard, keep plain try/except
+                    print(
+                        "[R201_BIG] occ={} ntp={} npf={} ndc={} sls6={} t={:.3f}".format(
+                            _i, _ntp, _npf, _ndc, _sls, _t201.time()
+                        ),
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                if _i in _r201_idx and _R201_ST["active"] is None:
+                    import os as _os201
+
+                    import torch_npu.profiler as _tnp201
+                    from torch_npu.profiler import ProfilerActivity as _PA201
+                    _os201.makedirs(_r201_od, exist_ok=True)
+                    _kw201 = {}
+                    try:
+                        from torch_npu.profiler.experimental_config import _ExperimentalConfig as _EC201
+                        _kw201["experimental_config"] = _EC201(
+                            profiler_level="Level1")
+                    except Exception:
+                        pass
+                    _act201 = _tnp201.profile(
+                        activities=[_PA201.CPU, _PA201.NPU],
+                        schedule=None, record_shapes=False, **_kw201)
+                    _R201_ST["active"] = _act201
+                    _act201.__enter__()
+                    _R201_ST["active_idx"] = _i
+                    _start = True
+            try:
+                return _r201_orig_exec(self, scheduler_output, *args, **kwargs)
+            finally:
+                if _start and _R201_ST["active"] is not None:
+                    _p = _R201_ST["active"]
+                    _R201_ST["active"] = None
+                    try:
+                        _p.__exit__(None, None, None)
+                        _p.export_chrome_trace(
+                            _r201_od + "/step_{}.json".format(_R201_ST["active_idx"]))
+                    except Exception as _e201:
+                        try:  # noqa: SIM105 - narrow guard, keep plain try/except
+                            print("[R201_KPROF] export failed {!r}".format(_e201), flush=True)
+                        except Exception:
+                            pass
+
+        NPUModelRunner.execute_model = _r201_execute_model  # type: ignore[method-assign]
+except Exception:
+    pass
