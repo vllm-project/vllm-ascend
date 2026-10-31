@@ -148,6 +148,7 @@ def qsa_fia_attention(
             # Lazy import keeps model discovery and CPU semantic tests NPU-free.
             from vllm_ascend.ops.triton.qwen4_exp.fia import build_qsa_fia_mask, copy_qsa_fia_output
 
+            assert mask_workspace is not None
             atten_mask, has_selection = build_qsa_fia_mask(
                 compact_indices[start:end], visible, kv_length, mask_kv_length, mask_workspace
             )
