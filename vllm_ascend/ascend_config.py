@@ -397,6 +397,50 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+@config(config=ConfigDict(frozen=True))
+class QuantizedAllReduceConfig:
+    """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
+
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2/A3,
+    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
+    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+
+    The wrapper is built for every parallel group, but only groups with at most
+    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
+    TP degree itself is validated here, so an unsupported TP fails at config
+    parsing time instead of when some parallel group is constructed.
+    """
+
+    enable: bool = False
+    min_numel: int = 16777216
+
+    @field_validator("min_numel")
+    @classmethod
+    def _check_min_numel(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
+        return value
+
+    def _validate_preconditions(self, vllm_config: Any) -> None:
+        if not self.enable:
+            return
+        # Imported lazily: the wrapper module imports torch_npu, which should not
+        # be pulled in from the config factory at module import time.
+        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+            _MAX_VALID_WORLD_SIZE,
+        )
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size > _MAX_VALID_WORLD_SIZE:
+            raise ValueError(
+                "additional_config.quantized_all_reduce_config supports "
+                f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
+                f"int8 bound leaves too few quantization levels beyond that), but "
+                f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
+            )
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -488,6 +532,10 @@ class AscendConfig:
                 "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
+            },
+            "quantized_all_reduce_config": {
+                "enable": false,
+                "min_numel": 16777216
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -630,6 +678,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -1893,6 +1942,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
