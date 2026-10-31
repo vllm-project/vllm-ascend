@@ -129,7 +129,8 @@ __aicore__ inline void MoeV2GatherOut<T>::Init(GM_ADDR inputX, GM_ADDR expandedR
                                                GM_ADDR workspace, const InnerMoeInitRoutingV2TilingData* tilingData,
                                                TPipe* tPipe) {
   this->pipe = tPipe;
-  this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
+  this->blockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+      AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
   this->gatherOutTilingData = &(tilingData->gatherOutComputeParamsOp);
 
   this->needCoreNum = this->gatherOutTilingData->needCoreNum;

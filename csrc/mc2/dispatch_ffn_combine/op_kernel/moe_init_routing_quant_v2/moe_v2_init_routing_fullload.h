@@ -244,7 +244,8 @@ __aicore__ inline void MoeV2FullLoad<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM_A
                                               GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace,
                                               const InnerMoeInitRoutingV2TilingData* tilingData, TPipe* tPipe) {
   this->gatherOutTilingData_ = &(tilingData->gatherOutComputeParamsOp);
-  this->blockIdx_ = get_block_idx() + get_subblockid() * get_block_num();
+  this->blockIdx_ = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+      AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
   this->k_ = tilingData->k;
   this->n_ = tilingData->n;
   this->cols_ = tilingData->cols;
