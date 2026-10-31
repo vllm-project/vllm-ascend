@@ -431,11 +431,15 @@ class KVPoolScheduler:
 
     def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
-        token_len = (
-            self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if self._discard_partial_chunks
-            else prompt_token_len
-        )
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
+            # Private compressor state is rebuilt from a whole token page.
+            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+        else:
+            token_len = (
+                self._floor_to_cache_transfer_granularity(prompt_token_len)
+                if self._discard_partial_chunks
+                else prompt_token_len
+            )
         if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
             return None
         if self.client is None or self.client.closed:

@@ -3830,16 +3830,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         python launch_online_dp.py --script ./start_d_engine_pool.sh --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "<DECODE_NODE0_IP>" --dp-rpc-port 12990 --vllm-start-port 8000
         ```
 
-    4. Confirm that the Decode worker logs report completion of the MemCache
-       DP initialization barrier before treating the group as ready:
+    4. Check the logs on every Decode rank for successful MemCache
+       initialization before treating the group as ready.
 
-        ```text
-        All DP MemCache initializations completed
-        ```
-
-        The Prefill instance has DP size 1 and does not enter this DP
-        barrier; check their logs for successful MemCache initialization and
-        verify that P1-P3 joined the Prefill PP instance. They do not expose
+        Check the Prefill worker logs for successful MemCache initialization
+        and verify that P1-P3 joined the Prefill PP instance. They do not expose
         HTTP APIs. On every node, confirm that the active `mmc-local.conf`
         uses `device_rdma` and `dram.size = 40GB`.
 

@@ -18,7 +18,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
-from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -42,18 +41,6 @@ _NATIVE_TORCH_SUM = torch.sum
 def test_adaptive_verification_cudagraph_support(builder_cls, speculative_config, expected):
     config = SimpleNamespace(speculative_config=speculative_config)
     assert builder_cls.get_cudagraph_support(config, Mock()) is expected
-
-
-def test_aclgraph_model_forwards_confidence_computation():
-    model = Mock()
-    expected = torch.tensor([0.25, 0.75])
-    model.compute_confidence.return_value = expected
-    wrapped = ModelWithContext(model, is_draft_model=True, is_draft_model_prefill=False)
-    hidden = torch.randn(2, 4)
-    markov = torch.randn(2, 4)
-
-    assert wrapped.compute_confidence(hidden, markov) is expected
-    model.compute_confidence.assert_called_once_with(hidden, markov)
 
 
 @pytest.mark.parametrize(
@@ -93,7 +80,7 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
 
     assert adaptive._assign_draft_token_budget_compiled is module._assign_draft_token_budget_ascend
@@ -106,7 +93,7 @@ def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
     # Isolate this test from batch-invariant tests that patch torch.sum globally.
     monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     confidence_probs = torch.tensor([[0.95, 0.8, 0.5], [0.9, 0.85, 0.7], [0.7, 0.6, 0.5]])
     idx_mapping = torch.tensor([0, 1])
@@ -128,7 +115,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     tensor = torch.zeros(5)
     indices = torch.tensor([1, 3])

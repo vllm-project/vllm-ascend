@@ -43,7 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -221,9 +221,6 @@ class AscendModelState(DefaultModelState):
             self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
 
         self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
-        if enable_dsa_cp():
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            self._decoder_replay_num_tokens = ((self._decoder_replay_num_tokens + tp_size - 1) // tp_size) * tp_size
         self._decoder_replay_counts = None
         self._decoder_replay_counts_device = None
         dp_size = self.vllm_config.parallel_config.data_parallel_size

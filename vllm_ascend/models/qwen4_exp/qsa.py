@@ -40,6 +40,11 @@ from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadat
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
@@ -588,6 +593,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
+        # Restore main KV and indexer groups before either cache is updated.
+        wait_for_kv_layer_from_connector(self.layer_name)
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -622,18 +629,20 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
-        self.impl.forward_qsa(
-            self,
-            query,
-            key,
-            value,
-            self.kv_cache,
-            main_metadata,
-            output,
-            token_to_req=side_metadata.token_to_req,
-            logical_positions=side_metadata.logical_positions,
-            seq_lens=side_metadata.seq_lens,
-        )
+        with attention_transfer_window():
+            self.impl.forward_qsa(
+                self,
+                query,
+                key,
+                value,
+                self.kv_cache,
+                main_metadata,
+                output,
+                token_to_req=side_metadata.token_to_req,
+                logical_positions=side_metadata.logical_positions,
+                seq_lens=side_metadata.seq_lens,
+            )
+        maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 
 
 __all__ = ["AscendQSAIndexer", "AscendQwen4ExpQSAAttention"]

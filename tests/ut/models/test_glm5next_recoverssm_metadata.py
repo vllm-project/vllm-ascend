@@ -8,9 +8,52 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KDARecoverSSMCommitMetadata, KimiK3KDAMetadataBuilder
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
+
+
+@pytest.mark.parametrize("graph_mode", [False, True])
+def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode):
+    builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    builder.use_full_cuda_graph = graph_mode
+    builder.kv_cache_spec = MambaSpec(
+        block_size=8,
+        shapes=((3, 4), (2, 2)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    table = torch.tensor([[9, 7, 5, 3], [2, 4, 6, 8], [11, 12, 13, 14], [0, 0, 0, 0]], dtype=torch.int32)
+    original = table.clone()
+    starts = torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32)
+    expected = None
+
+    def parent_build(self, prefix, common, accepted, draft_counts, fast_build):
+        assert not self.use_full_cuda_graph
+        torch.testing.assert_close(self.mamba_aligned_state_indices, expected, atol=0, rtol=0)
+        return SimpleNamespace(num_spec_decodes=0, num_prefills=0, num_decodes=0)
+
+    monkeypatch.setattr(KimiK3KDAMetadataBuilder, "build", parent_build)
+    for lengths, blocks in [
+        ([8, 9, 17, 0, 999], [[9, 7], [4, 6], [13, 14], [0, 0]]),
+        ([9, 17, 8, 0, 999], [[7, 5], [6, 8], [11, 12], [0, 0]]),
+    ]:
+        expected = torch.tensor(blocks, dtype=torch.int32)
+        common = SimpleNamespace(
+            num_reqs=4,
+            num_actual_tokens=24,
+            query_start_loc=starts,
+            query_start_loc_cpu=starts,
+            seq_lens=torch.tensor(lengths, dtype=torch.int32),
+            block_table_tensor=table,
+        )
+        common.replace = lambda common=common, **updates: SimpleNamespace(**(vars(common) | updates))
+        builder.build(0, common, num_actual_reqs=3 if graph_mode else None)
+        assert builder.use_full_cuda_graph is graph_mode
+        torch.testing.assert_close(table, original, atol=0, rtol=0)
 
 
 def test_upstream_context_creation_uses_ascend_patch_and_caches(monkeypatch):
@@ -59,6 +102,7 @@ def test_context_patch_is_limited_to_enabled_glm(monkeypatch, model_type, enable
 
 def test_graph_padding_is_excluded_from_sampler_commit_rows(monkeypatch):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
     builder.use_full_cuda_graph = True
     starts = torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32)
     drafts = torch.full((4,), 5, dtype=torch.int32)
@@ -161,6 +205,7 @@ def test_eager_fallback_keeps_metadata_when_graph_staging_does_not_fit(batch, co
 @pytest.mark.parametrize("actual_reqs", [0, 1, 2, 3])
 def test_padding_offsets_stay_on_device_without_host_copy(monkeypatch, actual_reqs):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
     builder.use_full_cuda_graph = True
     cpu_starts = torch.tensor([0, 1, 5, 11, 17], dtype=torch.int32)
     device_starts = cpu_starts.clone()

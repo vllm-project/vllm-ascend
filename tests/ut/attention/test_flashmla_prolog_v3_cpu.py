@@ -97,6 +97,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         "DeviceOperator": SimpleNamespace(reshape_and_cache=scatter),
         "record_attention_compute_start": Mock(),
         "maybe_save_kv_layer_to_connector": Mock(),
+        "wait_for_kv_layer_from_connector": Mock(),
         "DecodeMLAPreprocessResult": lambda q, pe, k, kr, **kw: SimpleNamespace(ql_nope=q, q_pe=pe, k=k, kr=kr, **kw),
     }
     impl = SimpleNamespace(
