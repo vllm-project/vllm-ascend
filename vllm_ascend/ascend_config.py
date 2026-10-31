@@ -29,7 +29,11 @@ _CANN_OPS_TRANSFORMER_AVAILABLE = importlib.util.find_spec("cann_ops_transformer
 
 def is_megamoe_supported_by_config(vllm_config) -> bool:
     hf_text_config = vllm_config.model_config.hf_text_config
-    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    # Latent-MoE models such as Kimi K3 project tokens before dispatch, so
+    # MegaMoe sees routed_expert_hidden_size rather than the model width.
+    hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+    if hidden_size is None:
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
     if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
         hidden_size = vllm_config.model_config.get_hidden_size()
     if hidden_size is None:
@@ -47,7 +51,9 @@ def is_megamoe_supported_by_config(vllm_config) -> bool:
     # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
     # range [1024, 3072] and a multiple of 512. This constraint may be removed
     # in CANN 9.2.0
-    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    moe_intermediate_size = getattr(hf_text_config, "routed_expert_intermediate_size", None)
+    if moe_intermediate_size is None:
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
     if moe_intermediate_size is None:
         return False
     return moe_intermediate_size >= 1024 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
@@ -332,8 +338,9 @@ class AscendConfig:
         # This is a reference value: if the actual per-rank received token
         # count exceeds it, tokens may be truncated, causing precision
         # degradation. Do not set it too large because workspace memory scales
-        # linearly with this value. Default 65536.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        # linearly with this value. Default 6144, an empirically validated
+        # capacity for Kimi K3 that avoids the much larger worst-case buffer.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 6144)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
