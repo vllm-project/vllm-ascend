@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -122,6 +123,17 @@ def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(16, _make_vllm_config()) is None
+
+
+def test_select_moe_comm_method_uses_catccos_when_enabled(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_CATCCOS_MOE", "1")
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    validate = MagicMock()
+    monkeypatch.setattr(afc, "validate_catccos_selection", validate)
+    vllm_config = _make_vllm_config()
+
+    assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.CATCCOS
+    validate.assert_called_once_with(vllm_config, False)
 
 
 @pytest.mark.parametrize(

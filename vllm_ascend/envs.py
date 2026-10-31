@@ -100,6 +100,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Whether to use the external CatCCOS dispatch-FFN-combine MoE backend.
+    # This integration is opt-in and fails closed when its runtime contract is
+    # not satisfied.
+    "VLLM_ASCEND_ENABLE_CATCCOS_MOE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CATCCOS_MOE", "0"))),
+    # Absolute path to the CatCCOS PyTorch extension shared library.
+    "VLLM_ASCEND_CATCCOS_LIBRARY_PATH": lambda: os.getenv("VLLM_ASCEND_CATCCOS_LIBRARY_PATH", ""),
+    # TCP rendezvous address used by the CatCCOS runtime.
+    "VLLM_ASCEND_CATCCOS_STORE_ADDR": lambda: os.getenv("VLLM_ASCEND_CATCCOS_STORE_ADDR", ""),
+    # Symmetric memory reserved by each CatCCOS rank. The A2 binding requires
+    # at least 1004 MiB; the default is 1 GiB.
+    "VLLM_ASCEND_CATCCOS_LOCAL_MEM_SIZE": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_LOCAL_MEM_SIZE", str(1 << 30))),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

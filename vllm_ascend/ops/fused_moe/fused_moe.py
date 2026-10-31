@@ -38,6 +38,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
+from vllm_ascend.ops.fused_moe.catccos import catccos_moe_enabled
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -125,7 +126,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        if catccos_moe_enabled():
+            if layer.w13_weight.dtype != torch.bfloat16 or layer.w2_weight.dtype != torch.bfloat16:
+                raise ValueError("CatCCOS requires BF16 expert weights")
+        elif enable_fused_mc2:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if enable_fused_mc2 == 1 and self.dynamic_eplb:
@@ -559,6 +563,7 @@ else:
                 MoECommType.ALLTOALL,
                 MoECommType.MC2,
                 MoECommType.FUSED_MC2,
+                MoECommType.CATCCOS,
             } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
         def _maybe_reduce_shared_expert_output(
@@ -576,7 +581,8 @@ else:
             states: torch.Tensor,
             trunc_size: int,
         ) -> torch.Tensor:
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+            if _EXTRA_CTX.moe_comm_type != MoECommType.CATCCOS:
+                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
             return states[..., :trunc_size]
 
         def set_lora_context(self, lora_context):
@@ -609,7 +615,13 @@ else:
                     # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                     moe_comm_type = _EXTRA_CTX.moe_comm_type
                     if (
-                        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+                        moe_comm_type
+                        in {
+                            MoECommType.ALLTOALL,
+                            MoECommType.MC2,
+                            MoECommType.FUSED_MC2,
+                            MoECommType.CATCCOS,
+                        }
                         and not shared_expert_dp_enabled()
                     ):
                         shared_out = tensor_model_parallel_all_reduce(shared_out)
@@ -825,7 +837,13 @@ else:
             # `maybe_all_reduce_tensor_model_parallel`
             moe_comm_type = _EXTRA_CTX.moe_comm_type
             if (
-                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+                moe_comm_type
+                in {
+                    MoECommType.ALLTOALL,
+                    MoECommType.MC2,
+                    MoECommType.FUSED_MC2,
+                    MoECommType.CATCCOS,
+                }
                 and not shared_expert_dp_enabled()
             ):
                 shared_out = tensor_model_parallel_all_reduce(shared_out)

@@ -23,6 +23,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.fused_moe.catccos import (
+    CatCCOSRuntime,
+    catccos_moe_enabled,
+    pad_catccos_inputs,
+    validate_catccos_fused_input,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -58,7 +64,17 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
         _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
         _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        if catccos_moe_enabled():
+            catccos_method = _MoECommMethods.get(MoECommType.CATCCOS)
+            if catccos_method is None:
+                _MoECommMethods[MoECommType.CATCCOS] = CatCCOSCommImpl(moe_config)
+            elif isinstance(catccos_method, CatCCOSCommImpl):
+                catccos_method.validate_compatible(moe_config)
+            else:
+                raise RuntimeError("Invalid CatCCOS MoE registry entry")
     else:
+        if catccos_moe_enabled():
+            raise ValueError("CatCCOS requires expert parallelism")
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
@@ -231,6 +247,56 @@ class MC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
+
+
+class CatCCOSCommImpl(MoECommMethod):
+    """CatCCOS dispatch-FFN-combine through the standard MoE lifecycle."""
+
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
+        self.runtime = CatCCOSRuntime(moe_config)
+
+    def validate_compatible(self, moe_config: FusedMoEConfig) -> None:
+        self.runtime.validate_compatible(moe_config)
+
+    def pad_and_split_input_ids(self, input_ids):
+        return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithMC2()
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def fused_experts(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ) -> FusedExpertsResult:
+        w1, w2 = validate_catccos_fused_input(
+            fused_experts_input,
+            self.moe_config,
+        )
+        hidden_states, topk_ids, topk_weights, original_tokens = pad_catccos_inputs(
+            fused_experts_input.hidden_states,
+            fused_experts_input.topk_ids,
+            fused_experts_input.topk_weights,
+        )
+        before_dispatch_evt = torch.npu.current_stream().record_event()
+        routed_out = self.runtime.dispatch(
+            hidden_states,
+            topk_ids,
+            topk_weights,
+            w1,
+            w2,
+        )
+        completed_evt = torch.npu.current_stream().record_event()
+        return FusedExpertsResult(
+            routed_out=routed_out[:original_tokens],
+            before_dispatch_evt=before_dispatch_evt,
+            before_gmm2_evt=completed_evt,
+            before_combine_evt=completed_evt,
+            swiglu_limit=fused_experts_input.swiglu_limit,
+        )
 
 
 class AlltoAllCommImpl(MoECommMethod):
