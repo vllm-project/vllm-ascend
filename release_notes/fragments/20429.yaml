@@ -1,0 +1,6 @@
+pr: 20429
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DSpark generation failures when draft KV cache groups use
+      physical block sizes different from the global cache configuration.
