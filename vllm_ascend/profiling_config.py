@@ -573,8 +573,8 @@ def generate_service_profiling_config() -> Path | None:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=config_dir, delete=False, suffix=".tmp", prefix=CONFIG_FILENAME + "."
         ) as tmp_file:
-            tmp_file.write(SERVICE_PROFILING_SYMBOLS_YAML)
             tmp_path = Path(tmp_file.name)
+            tmp_file.write(SERVICE_PROFILING_SYMBOLS_YAML)
 
         # Atomically replace the target file with the temporary file
         tmp_path.replace(config_file)

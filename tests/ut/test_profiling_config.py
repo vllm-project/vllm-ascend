@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import yaml
@@ -94,6 +95,38 @@ def test_generate_service_profiling_config_cleans_up_after_replace_failure(
 
     with (
         patch.object(profiling_config.Path, "replace", side_effect=OSError("replace failed")),
+        patch.object(profiling_config.logger, "exception") as mock_exception,
+    ):
+        result = profiling_config.generate_service_profiling_config()
+
+    assert result is None
+    assert not (config_dir / profiling_config.CONFIG_FILENAME).exists()
+    assert list(config_dir.glob("*.tmp")) == []
+    mock_exception.assert_called_once()
+
+
+def test_generate_service_profiling_config_cleans_up_after_write_failure(
+    monkeypatch,
+    tmp_path,
+):
+    config_dir = tmp_path / "config"
+    monkeypatch.setattr(profiling_config, "get_config_dir", lambda: config_dir)
+    original_factory = profiling_config.tempfile.NamedTemporaryFile
+
+    @contextmanager
+    def failing_temp_file(*args, **kwargs):
+        with (
+            original_factory(*args, **kwargs) as temp_file,
+            patch.object(temp_file, "write", side_effect=OSError("disk full")),
+        ):
+            yield temp_file
+
+    with (
+        patch.object(
+            profiling_config.tempfile,
+            "NamedTemporaryFile",
+            failing_temp_file,
+        ),
         patch.object(profiling_config.logger, "exception") as mock_exception,
     ):
         result = profiling_config.generate_service_profiling_config()
