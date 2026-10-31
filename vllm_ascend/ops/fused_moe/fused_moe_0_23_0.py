@@ -80,6 +80,7 @@ class AscendMoERunner(MoERunner):
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
+            MoECommType.CATCCOS,
         } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
     def _maybe_reduce_shared_expert_output(
@@ -97,7 +98,8 @@ class AscendMoERunner(MoERunner):
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
-        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        if _EXTRA_CTX.moe_comm_type != MoECommType.CATCCOS:
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
     # TODO: Remove this after drop v0.19.1 support
@@ -447,7 +449,13 @@ class AscendFusedMoE(FusedMoE):
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = _EXTRA_CTX.moe_comm_type
                 if (
-                    moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+                    moe_comm_type
+                    in {
+                        MoECommType.ALLTOALL,
+                        MoECommType.MC2,
+                        MoECommType.FUSED_MC2,
+                        MoECommType.CATCCOS,
+                    }
                     and not shared_expert_dp_enabled()
                 ):
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
@@ -663,7 +671,13 @@ class AscendFusedMoE(FusedMoE):
         # `maybe_all_reduce_tensor_model_parallel`
         moe_comm_type = _EXTRA_CTX.moe_comm_type
         if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+            moe_comm_type
+            in {
+                MoECommType.ALLTOALL,
+                MoECommType.MC2,
+                MoECommType.FUSED_MC2,
+                MoECommType.CATCCOS,
+            }
             and not shared_expert_dp_enabled()
         ):
             shared_out = tensor_model_parallel_all_reduce(shared_out)

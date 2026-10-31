@@ -439,6 +439,32 @@ class TestAscendUnquantizedFusedMoEMethod:
         assert format_cast.call_count == 2
         empty_cache.assert_called_once()
 
+    def test_process_weights_after_loading_keeps_catccos_weights_nd(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = False
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        layer = self._build_layer()
+        layer.w13_weight = nn.Parameter(layer.w13_weight.to(torch.bfloat16))
+        layer.w2_weight = nn.Parameter(layer.w2_weight.to(torch.bfloat16))
+        original_w13 = layer.w13_weight.detach().clone()
+        original_w2 = layer.w2_weight.detach().clone()
+        format_cast = MagicMock(side_effect=lambda weight, _: weight)
+        maybe_trans_nz = MagicMock(side_effect=lambda weight: weight)
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_fused_mc2 = False
+        monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: mock_ascend_config)
+        monkeypatch.setattr(fused_moe_module, "catccos_moe_enabled", lambda: True)
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+        monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
+
+        method.process_weights_after_loading(layer)
+
+        torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2).contiguous())
+        torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2).contiguous())
+        format_cast.assert_not_called()
+        maybe_trans_nz.assert_not_called()
+
     @pytest.mark.parametrize("moe_comm_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
     def test_apply_builds_fused_experts_input(self, monkeypatch, moe_comm_type):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
@@ -636,11 +662,41 @@ class TestAscendUnquantizedFusedMoEMethod:
 
 class TestAscendMoERunner:
     @pytest.mark.parametrize(
+        ("moe_comm_type", "expected_reduce_calls"),
+        [
+            (MoECommType.MC2, 1),
+            (MoECommType.ALLTOALL, 1),
+            (MoECommType.CATCCOS, 0),
+        ],
+    )
+    def test_final_reduce_only_skips_catccos(self, monkeypatch, moe_comm_type, expected_reduce_calls):
+        runner = AscendMoERunner.__new__(AscendMoERunner)
+        maybe_all_reduce = MagicMock(side_effect=lambda states: states + 1)
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=moe_comm_type),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch.ops,
+            "vllm",
+            SimpleNamespace(maybe_all_reduce_tensor_model_parallel=maybe_all_reduce),
+            raising=False,
+        )
+
+        result = runner._maybe_reduce_final_output(torch.ones(2, 3), 2)
+
+        assert maybe_all_reduce.call_count == expected_reduce_calls
+        expected = torch.ones(2, 2) + int(bool(expected_reduce_calls))
+        torch.testing.assert_close(result, expected)
+
+    @pytest.mark.parametrize(
         "moe_comm_type, flash_comm_v1_enabled, expected",
         [
             (MoECommType.ALLTOALL, False, True),
             (MoECommType.MC2, False, True),
             (MoECommType.FUSED_MC2, False, True),
+            (MoECommType.CATCCOS, False, True),
             (MoECommType.ALLGATHER, False, False),
             (MoECommType.ALLGATHER, True, True),
         ],

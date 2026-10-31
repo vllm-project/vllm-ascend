@@ -11,7 +11,9 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe.catccos import validate_catccos_selection
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -29,6 +31,7 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    CATCCOS = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -327,6 +330,17 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
+    if envs_ascend.VLLM_ASCEND_ENABLE_CATCCOS_MOE:
+        if not is_moe_model(vllm_config):
+            raise ValueError("CatCCOS was enabled for a non-MoE model")
+        validate_catccos_selection(vllm_config, is_draft_model)
+        logger.info_once(
+            "MoE comm method selected: method=%s, num_tokens=%d",
+            MoECommType.CATCCOS,
+            num_tokens,
+        )
+        return MoECommType.CATCCOS
+
     if not is_moe_model(vllm_config):
         return None
 
