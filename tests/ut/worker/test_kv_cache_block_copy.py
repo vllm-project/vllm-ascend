@@ -1,3 +1,5 @@
+import weakref
+
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -45,6 +47,115 @@ def test_copy_kv_cache_blocks_deduplicates_shared_views():
     torch.testing.assert_close(cache[2], before[0])
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("reverse_views", [False, True])
+@pytest.mark.parametrize("layout", ["narrow", "strided", "offset"])
+@pytest.mark.parametrize(
+    "block_pairs",
+    [[], [(0, 2)], [(0, 2), (2, 0)], [(0, 2), (2, 3), (0, 1)], [(0, 0)]],
+    ids=["empty", "one_way", "cycle", "chain_and_fanout", "self_copy"],
+)
+def test_copy_kv_cache_blocks_with_overlapping_views(dtype, reverse_views, layout, block_pairs):
+    cache = torch.arange(32, dtype=dtype).view(4, 8)
+    if layout == "narrow":
+        views = [cache[:, :2], cache]
+        copied_columns = list(range(8))
+    elif layout == "strided":
+        # Equal pointers and shapes do not imply equal byte coverage.
+        views = [cache[:, :4], cache[:, ::2]]
+        copied_columns = [0, 1, 2, 3, 4, 6]
+    else:
+        # Overlapping views can also start at different storage offsets.
+        views = [cache[:, :4], cache[:, 2:6]]
+        copied_columns = list(range(6))
+    if reverse_views:
+        views.reverse()
+    before = cache.clone()
+    expected = before.clone()
+    for src, dst in block_pairs:
+        expected[dst, copied_columns] = before[src, copied_columns]
+
+    copy_kv_cache_blocks_inplace(
+        views,
+        cache.shape[0],
+        [KVCacheBlockCopy(src_block_id=src, dst_block_id=dst) for src, dst in block_pairs],
+    )
+
+    # Check untouched blocks and padding as well as each destination payload.
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("attention_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("reverse_views", [False, True])
+def test_copy_kv_cache_blocks_with_overlaid_byte_and_attention_views(attention_dtype, reverse_views):
+    num_blocks = 4
+    page_bytes = 32
+    storage_offset = 8
+    payload_bytes = 16
+    raw = torch.arange(storage_offset + num_blocks * page_bytes + 8, dtype=torch.uint8)
+    state = torch.as_strided(raw, (num_blocks, 4), (page_bytes, 1), storage_offset)
+    element_size = torch.empty((), dtype=attention_dtype).element_size()
+    attention = torch.as_strided(
+        raw.view(attention_dtype),
+        (num_blocks, payload_bytes // element_size),
+        (page_bytes // element_size, 1),
+        storage_offset // element_size,
+    )
+    assert state.data_ptr() == attention.data_ptr()
+    views = [state, attention]
+    if reverse_views:
+        views.reverse()
+    before = raw.clone()
+    expected = before.clone()
+    block_pairs = [(0, 2), (2, 0), (0, 3)]
+    for src, dst in block_pairs:
+        src_start = storage_offset + src * page_bytes
+        dst_start = storage_offset + dst * page_bytes
+        expected[dst_start : dst_start + payload_bytes] = before[src_start : src_start + payload_bytes]
+
+    copy_kv_cache_blocks_inplace(
+        views,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=src, dst_block_id=dst) for src, dst in block_pairs],
+    )
+
+    # Cache copies must preserve bits, including FP8 storage and page padding.
+    torch.testing.assert_close(raw, expected, rtol=0, atol=0)
+
+
+def test_copy_kv_cache_blocks_bounds_staging_for_disjoint_regions(monkeypatch):
+    num_regions, num_blocks, page_elements = 8, 4, 8
+    raw = torch.arange(num_regions * num_blocks * page_elements, dtype=torch.float32)
+    regions = raw.view(num_regions, num_blocks, page_elements)
+    views = [view for region in regions for view in (region[:, :2], region)]
+    before = regions.clone()
+    expected = before.clone()
+    expected[:, 0] = before[:, 2]
+    expected[:, 2] = before[:, 0]
+    # Regions share one backing allocation but do not overlap. Only source
+    # blocks for one region's two views should be live at a time.
+    copies_per_region = 2
+    staging_budget = copies_per_region * (2 + page_elements) * raw.element_size()
+    snapshots = []
+    stack = torch.stack
+
+    def check_staging_budget(*args, **kwargs):
+        result = stack(*args, **kwargs)
+        snapshots.append(weakref.ref(result))
+        live_bytes = sum(t.numel() * t.element_size() for ref in snapshots if (t := ref()) is not None)
+        assert live_bytes <= staging_budget
+        return result
+
+    monkeypatch.setattr(torch, "stack", check_staging_budget)
+    copy_kv_cache_blocks_inplace(
+        views,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2), KVCacheBlockCopy(src_block_id=2, dst_block_id=0)],
+    )
+
+    torch.testing.assert_close(regions, expected, rtol=0, atol=0)
+
+
 def test_copy_kv_cache_blocks_skips_none_entries():
     cache = torch.arange(12, dtype=torch.float32).view(4, 3)
     before = cache.clone()
@@ -56,6 +167,21 @@ def test_copy_kv_cache_blocks_skips_none_entries():
     )
 
     torch.testing.assert_close(cache[2], before[0])
+
+
+def test_copy_kv_cache_blocks_skips_empty_views():
+    cache = torch.arange(32, dtype=torch.float32).view(4, 8)
+    before = cache.clone()
+    expected = before.clone()
+    expected[2] = before[0]
+
+    copy_kv_cache_blocks_inplace(
+        [cache[:, :0], cache],
+        cache.shape[0],
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0)
 
 
 def test_copy_kv_cache_blocks_copies_complete_physical_pages():
