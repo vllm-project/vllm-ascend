@@ -955,8 +955,28 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 @pytest.mark.parametrize("return_with_event", [False, True])
 @pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
+@pytest.mark.parametrize(
+    "mega_moe,quant_type,a5_support,selected_comm_type,expected_comm_type,num_tokens",
+    [
+        (False, QuantType.NONE, True, MoECommType.MC2, MoECommType.MC2, 128),
+        (True, QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.MC2, 128),
+        (True, QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.ALLGATHER, 129),
+        (True, QuantType.NONE, False, MoECommType.MC2, MoECommType.MC2, 128),
+        (True, QuantType.W8A8MXFP, True, MoECommType.FUSED_MC2, MoECommType.FUSED_MC2, 128),
+    ],
+)
 def test_routed_experts_forward_impl_runs_current_flow(
-    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
+    monkeypatch,
+    return_with_event,
+    use_v2,
+    v2_eplb,
+    is_sequence_parallel,
+    mega_moe,
+    quant_type,
+    a5_support,
+    selected_comm_type,
+    expected_comm_type,
+    num_tokens,
 ):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
@@ -970,6 +990,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     finalized = torch.randn(2, 4)
     expert_load = torch.zeros(4, dtype=torch.int32)
     quant_method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+    quant_method.quant_method = SimpleNamespace(quant_type=quant_type)
     quant_method.apply = MagicMock(
         return_value=SimpleNamespace(
             routed_out=routed_out,
@@ -1034,14 +1055,30 @@ def test_routed_experts_forward_impl_runs_current_flow(
         "_EXTRA_CTX",
         SimpleNamespace(
             in_profile_run=False,
-            moe_comm_type=MoECommType.MC2,
+            moe_comm_type=selected_comm_type,
             moe_comm_method=moe_comm_method,
+            use_mega_moe=mega_moe,
+            max_tokens_across_dp=num_tokens,
             eplb_heat_collection_status=False,
         ),
     )
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
-    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *_: moe_comm_method)
-    monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
+    get_moe_comm_method = MagicMock(return_value=moe_comm_method)
+    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", get_moe_comm_method)
+    select_moe_comm_method = MagicMock(return_value=expected_comm_type)
+    monkeypatch.setattr(routed_experts_module, "select_moe_comm_method", select_moe_comm_method)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda capability: a5_support),
+    )
+    vllm_config = SimpleNamespace()
+    routed_experts._vllm_config = vllm_config
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_current_vllm_config",
+        lambda: pytest.fail("forward_impl must use the config saved at layer initialization"),
+    )
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     record_expert_tokens = MagicMock()
@@ -1067,11 +1104,19 @@ def test_routed_experts_forward_impl_runs_current_flow(
         assert not fused_moe_events.has_fine_grained_stage_events
     else:
         assert result is finalized
+    get_moe_comm_method.assert_called_once_with(expected_comm_type, routed_experts.moe_config)
+    assert routed_experts_module._EXTRA_CTX.moe_comm_type == expected_comm_type
+    if mega_moe and quant_type == QuantType.NONE and a5_support:
+        select_moe_comm_method.assert_called_once_with(
+            num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE
+        )
+    else:
+        select_moe_comm_method.assert_not_called()
     moe_comm_method.prepare.assert_called_once_with(
         hidden_states=hidden_states,
         router_logits=router_logits,
         replace_allreduce=is_sequence_parallel,
-        quant_type=QuantType.NONE,
+        quant_type=quant_type,
     )
     quant_method.apply.assert_called_once()
     assert quant_method.apply.call_args.kwargs["layer"] is routed_experts

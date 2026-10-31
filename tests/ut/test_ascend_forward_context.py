@@ -159,6 +159,21 @@ def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
     assert afc.get_mc2_tokens_capacity() == 600
 
 
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+def test_set_mc2_tokens_capacity_without_megamoe_uses_ordinary_limit(monkeypatch, enable_fused_mc2):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=enable_fused_mc2),
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    vllm_config = _make_vllm_config(tensor_parallel_size=2)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=2000, uniform_decode_query_len=3)
+
+    assert afc.get_mc2_tokens_capacity() == 512 * 2
+
+
 def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(monkeypatch):
     monkeypatch.setattr(
         afc,
@@ -496,6 +511,50 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
         expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=draft_quant)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [(2048, MoECommType.MC2), (2049, MoECommType.ALLGATHER), (4096, MoECommType.ALLGATHER)],
+)
+def test_select_moe_comm_method_a5_unquantized_draft_four_cards_topk_ten(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=4096,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=4, tensor_parallel_size=4, top_k_experts=10)
+
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
+        == expected
+    )
+
+
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [(1024, MoECommType.MC2), (1025, MoECommType.ALLGATHER)],
+)
+def test_select_moe_comm_method_a5_draft_without_megamoe_keeps_ordinary_capacity(
+    monkeypatch, enable_fused_mc2, num_tokens, expected
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=1024,
+        ep_world_size=4,
+        enable_fused_mc2=enable_fused_mc2,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
+    vllm_config = _make_vllm_config(world_size=4, tensor_parallel_size=2, top_k_experts=10)
+
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE)
         == expected
     )
 
