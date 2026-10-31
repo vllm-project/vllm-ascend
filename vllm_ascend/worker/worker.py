@@ -1459,7 +1459,10 @@ class NPUWorker(WorkerBase):
                 self.parallel_config.prefill_context_parallel_size,
                 self.parallel_config.decode_context_parallel_size,
             )
-        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
+        # PCP builds the final Engram group here; expose the original Engram
+        # settings rather than the copy that deferred the upstream group.
+        with set_current_vllm_config(self.vllm_config):
+            init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

@@ -152,6 +152,21 @@
 #       platform-side default creation. Keep Ascend's
 #       model, topology and loader restrictions in the normal platform hook.
 #
+#   2. `vllm.distributed.parallel_state._engram_dp_shard_size`
+#    Why:
+#       Upstream selects node-local Engram groups without considering Ascend's
+#       uniform TP x EDP hash-head layout, so otherwise valid models can fail
+#       before weight loading when the selected EDP does not divide the heads.
+#    How:
+#       Refine the upstream candidate with gcd(candidate, hash_heads / TP) for
+#       non-shared DeepSeek V4.1 tables, before either DP or DP x PCP group
+#       creation. Preserve upstream node checks and shared-memory groups.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; tracks vllm-ascend issue #19044.
+#    Future Plan:
+#       Remove this wrapper once the supported upstream helper accepts the
+#       backend's head-sharding constraints when selecting Engram groups.
+#
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
