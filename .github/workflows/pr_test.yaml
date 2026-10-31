@@ -302,24 +302,48 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Download test case map and coverage package
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
-            -o test_case_map.json
-          echo "Downloaded test_case_map.json"
-          du -h test_case_map.json
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
-            -o coverage.tar
-          echo "Downloaded coverage.tar"
-          du -h coverage.tar
+          OBS="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test"
+          # coverage_release_branch.txt names the one release branch that has
+          # its own package, for example releases/v0.30.0. Only a PR into that
+          # branch uses coverage-v0.30.0.tar. Every other target uses main.
+          suffix=""
+          pointer_code=$(curl -sSL --retry 3 --retry-delay 5 \
+            -o coverage_release_branch.txt -w "%{http_code}" \
+            "${OBS}/coverage_release_branch.txt" || echo "000")
+          if [ "${pointer_code}" = "200" ] && [ -s coverage_release_branch.txt ]; then
+            release_branch=$(tr -d '[:space:]' < coverage_release_branch.txt)
+            echo "Supported release coverage branch: ${release_branch}"
+            if [ "${BASE_REF}" = "${release_branch}" ] \
+              && [[ "${release_branch}" =~ ^releases/(v[0-9][0-9A-Za-z._-]*)$ ]]; then
+              suffix="${BASH_REMATCH[1]}"
+            fi
+          else
+            echo "No coverage_release_branch.txt on OBS (HTTP ${pointer_code}); using main"
+            rm -f coverage_release_branch.txt
+          fi
+
+          if [ -n "${suffix}" ]; then
+            echo "Using coverage-${suffix}.tar for ${BASE_REF}"
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/test_case_map-${suffix}.json" -o test_case_map.json
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/coverage-${suffix}.tar" -o coverage.tar
+            echo "COVERAGE_EXTRA_OBJECT=extra_recommended_tests-${suffix}.yaml" >> "${GITHUB_ENV}"
+          else
+            echo "Using main coverage package for ${BASE_REF}"
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/test_case_map.json" -o test_case_map.json
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+              "${OBS}/coverage.tar" -o coverage.tar
+            if [ "${BASE_REF}" = "main" ]; then
+              echo "COVERAGE_EXTRA_OBJECT=extra_recommended_tests.yaml" >> "${GITHUB_ENV}"
+            fi
+          fi
+          du -h test_case_map.json coverage.tar
           tar xf coverage.tar vllm-ascend/covstub
           test -d vllm-ascend/covstub
           echo "Extracted vllm-ascend/covstub"
@@ -342,28 +366,34 @@ jobs:
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
 
-      # Extra OBS tests are for uncovered code changes. Skip the merge when
-      # the PR has no src paths (docs-only and other non-src diffs). Do not
-      # skip this job: ready-precise requires recommend-tests to succeed.
+      # Extra OBS tests are merged only for main and for the release branch
+      # named in coverage_release_branch.txt. Other targets skip the list.
+      # Also skip when the PR has no src paths. Do not skip this job:
+      # ready-precise requires recommend-tests to succeed.
       - name: Merge extra tests from YAML
         if: ${{ needs.pre-commit.outputs.src == 'true' }}
         run: |
           set -euo pipefail
+          EXTRA_OBJECT="${COVERAGE_EXTRA_OBJECT:-}"
+          if [ -z "${EXTRA_OBJECT}" ]; then
+            echo "PR target is not main or the supported release coverage branch; skip extra tests"
+            exit 0
+          fi
           if ! python3 -c "import yaml" >/dev/null 2>&1; then
             echo "yaml not found for $(python3 -V); bootstrapping pip and installing pyyaml"
             curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
             python3 get-pip.py --break-system-packages
             python3 -m pip install --break-system-packages pyyaml
           fi
-          OBS_EXTRA_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          OBS_EXTRA_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/${EXTRA_OBJECT}"
           http_code=$(curl -sSL --retry 3 --retry-delay 5 -o extra_recommended_tests.obs.yaml -w "%{http_code}" "${OBS_EXTRA_URL}" || echo "000")
           if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.obs.yaml ]; then
-            echo "Downloaded extra_recommended_tests.yaml from OBS"
+            echo "Downloaded ${EXTRA_OBJECT} from OBS"
             python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
               --list-file recommended_pytest_paths.txt \
               --extra-yaml extra_recommended_tests.obs.yaml
           else
-            echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skipped"
+            echo "No ${EXTRA_OBJECT} on OBS (HTTP ${http_code}); skipped"
             rm -f extra_recommended_tests.obs.yaml
           fi
 
