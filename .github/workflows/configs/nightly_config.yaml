@@ -327,6 +327,12 @@ a5:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp
 #         os: linux-aarch64-a5-8
 #         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
+  multi_node:
+    test_config:
+      - name: DeepSeek_V4_Flash_A5_PD_Performance_Test_01
+        config_file_path: DeepSeek_V4_Flash_A5_PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 2
   single_node:
     test_config:
       - name: singlecard-ops-a5
