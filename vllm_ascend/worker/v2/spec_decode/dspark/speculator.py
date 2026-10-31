@@ -22,11 +22,12 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -438,7 +439,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
-            return super().propose(
+            draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -457,3 +458,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
+            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
+            # Older vLLM lacks that runner hook; keep its token/logit contract
+            # here until both supported lanes provide PCPManager.sync_drafts.
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(draft_tokens, src=0)
+            if self.draft_logits is not None:
+                logits = self.draft_logits[input_batch.idx_mapping]
+                pcp_group.broadcast(logits, src=0)
+                self.draft_logits[input_batch.idx_mapping] = logits
+        return draft_tokens
