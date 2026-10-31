@@ -1,0 +1,6 @@
+pr: 20234
+entries:
+  - category: bugfix
+    text: Fixed conflicting MegaMoE communication contexts between the target and DSpark draft models when running DeepSeek V4.1 on Ascend A5.
+    model: deepseek-v4.1
+    hardware: [A5]

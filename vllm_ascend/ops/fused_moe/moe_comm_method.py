@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -32,6 +33,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.mega_moe_context import get_main_owned_buffer, is_draft_moe_config
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp, maybe_record_event
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
@@ -301,6 +303,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+            self._mega_moe_is_draft = is_draft_moe_config(moe_config, get_current_vllm_config())
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # Resolve the Python ABI once, before the first collective/capture.
@@ -454,11 +457,14 @@ class FusedMC2CommImpl(MoECommMethod):
             self.token_dispatcher.global_bs,
         )
 
-        return self.get_symm_buffer_for_mega_moe(
-            group,
-            num_experts,
-            num_max_tokens_per_rank,
-            num_topk,
+        return get_main_owned_buffer(
+            get_mc2_group(),
+            self.get_symm_buffer_for_mega_moe,
+            is_draft=self._mega_moe_is_draft,
+            group=group,
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=num_topk,
             hidden=self.moe_config.hidden_dim,
             intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
