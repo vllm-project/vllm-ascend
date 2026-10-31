@@ -410,11 +410,12 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
+        torch.Tensor | None,
     ]:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
-            return None, None, None
+            return None, None, None, None
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
 
@@ -426,6 +427,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
         decode_select_num_idx: torch.Tensor | None = None
+        prefill_select_num_idx: torch.Tensor | None = None
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
@@ -463,7 +465,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             p = index_md.prefill
             assert p is not None
             if _USE_ASCENDC_INDEX_SCORE_PREFILL:
-                prefill_topk = minimax_m3_index_prefill_ascendc(
+                prefill_topk, prefill_select_num_idx = minimax_m3_index_prefill_ascendc(
                     iq[num_decode_tokens:],
                     kv,
                     p.block_table,
@@ -491,7 +493,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     self.num_kv_heads,
                     self.scale,
                 )
-                prefill_topk = minimax_m3_index_topk(
+                prefill_topk, prefill_select_num_idx = minimax_m3_index_topk(
                     score,
                     p.cu_seqlens_q,
                     p.context_lens,
@@ -500,7 +502,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     self.init_blocks,
                     self.local_blocks,
                 )
-        return decode_topk, prefill_topk, decode_select_num_idx
+        return decode_topk, prefill_topk, decode_select_num_idx, prefill_select_num_idx
 
     @staticmethod
     def update_graph_params(
@@ -626,6 +628,7 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
 class AscendMiniMaxM3SparsePrefillMetadata:
     cu_seqlens_q: torch.Tensor
     cu_seqlens_k: torch.Tensor
+    query_lens: torch.Tensor
     seq_lens: torch.Tensor
     context_lens: torch.Tensor
     block_table: torch.Tensor
@@ -677,6 +680,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             device=device,
         )
         self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        self.prefill_query_lens_buffer = torch.empty_like(self.context_len_buffer)
 
     def build(
         self,
@@ -714,6 +718,15 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_query_lens_cpu = qsl_cpu[num_decodes + 1 : prefill_end + 1] - qsl_cpu[num_decodes:prefill_end]
+            prefill_query_lens = self.prefill_query_lens_buffer[:active_prefills]
+            prefill_query_lens.copy_(
+                prefill_query_lens_cpu.to(
+                    device=self.prefill_query_lens_buffer.device,
+                    dtype=torch.int32,
+                    non_blocking=True,
+                ),
+                non_blocking=True,
+            )
             prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
             prefill_context_lens.copy_(
                 (prefill_kv_lens_cpu - prefill_query_lens_cpu).to(
@@ -732,6 +745,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             prefill_metadata = AscendMiniMaxM3SparsePrefillMetadata(
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,
+                query_lens=prefill_query_lens,
                 seq_lens=prefill_kv_lens,
                 context_lens=prefill_context_lens,
                 block_table=block_table[num_decodes:prefill_end],
@@ -799,6 +813,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
             torch.Tensor | None,
             torch.Tensor | None,
             torch.Tensor | None,
+            torch.Tensor | None,
         ],
         output: torch.Tensor,
     ) -> torch.Tensor:
@@ -808,7 +823,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
             return output
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
-        decode_topk, prefill_topk, decode_select_num_idx = topk_idx
+        decode_topk, prefill_topk, decode_select_num_idx, prefill_select_num_idx = topk_idx
 
         num_decode_tokens = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
@@ -858,6 +873,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 block_size=self.block_size,
                 total_kv_blocks=p.total_kv_blocks,
                 max_kv_blocks=p.max_kv_blocks,
+                select_num_idx=prefill_select_num_idx,
+                query_lens=p.query_lens,
             )
         return output
 

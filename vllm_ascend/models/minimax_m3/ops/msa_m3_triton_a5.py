@@ -467,15 +467,23 @@ def _prefill_index_score_prepare_for_topk_kernel(
 
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
 @triton.jit(do_not_specialize_on_alignment=["prefix_lens"])
-def _topk_index_mask_invalid_prefill_kernel(
-    ti_ptr,  # [num_idx_heads, total_q, topk] int32 in/out
+def _prefill_topk_postprocess_kernel(
+    ti_in_ptr,  # [num_idx_heads, total_q, selected_count] int64 input
+    ti_out_ptr,  # [num_idx_heads, total_q, topk] int32 output
+    select_num_idx_ptr,  # [num_idx_heads, total_q] int32 output
     cu_seqlens,  # [batch+1]
     prefix_lens,  # [batch]
     block_size: tl.constexpr,  # sparse block size (128)
     topk: tl.constexpr,
-    stride_ti_h,
-    stride_ti_n,
-    stride_ti_t,
+    selected_count,
+    stride_in_h,
+    stride_in_n,
+    stride_in_t,
+    stride_out_h,
+    stride_out_n,
+    stride_out_t,
+    stride_select_h,
+    stride_select_n,
     BLOCK_SIZE_T: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
@@ -490,13 +498,18 @@ def _topk_index_mask_invalid_prefill_kernel(
     valid_blocks = (prefix_len + pid_q + block_size) // block_size
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
-    ti_ptrs = ti_ptr + pid_h * stride_ti_h + token_idx * stride_ti_n + off_t * stride_ti_t
+    ti_in_ptrs = ti_in_ptr + pid_h * stride_in_h + token_idx * stride_in_n + off_t * stride_in_t
+    load_mask = off_t < selected_count
+    idx = tl.load(ti_in_ptrs, mask=load_mask, other=-1)
     store_mask = off_t < topk
-    idx = tl.load(ti_ptrs, mask=store_mask, other=0)
-    valid_slot = off_t < tl.minimum(topk, valid_blocks)
+    valid_slot = off_t < tl.minimum(selected_count, valid_blocks)
     valid_idx = (idx >= 0) & (idx < valid_blocks)
-    masked_idx = tl.where(valid_slot & valid_idx, idx, -1)
-    tl.store(ti_ptrs, masked_idx.to(ti_ptr.dtype.element_ty), mask=store_mask)
+    valid_selection = valid_slot & valid_idx
+    masked_idx = tl.where(valid_selection, idx, -1)
+    ti_out_ptrs = ti_out_ptr + pid_h * stride_out_h + token_idx * stride_out_n + off_t * stride_out_t
+    tl.store(ti_out_ptrs, masked_idx.to(tl.int32), mask=store_mask)
+    valid_count = tl.sum(valid_selection.to(tl.int32))
+    tl.store(select_num_idx_ptr + pid_h * stride_select_h + token_idx * stride_select_n, valid_count)
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +683,7 @@ def minimax_m3_index_topk(
     init_blocks: int,
     local_blocks: int,
     out: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Select index top-k from a precomputed score tensor (torch.topk).
 
     When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
@@ -699,33 +712,42 @@ def minimax_m3_index_topk(
         BLOCK_SIZE_K=2048,
     )
     score_rows = score[:, :total_q, :max_block]
-    _, topk_idx_raw = torch.topk(score_rows, k=min(topk, max_block), dim=-1)
+    selected_count = min(topk, max_block)
+    _, topk_idx_raw = torch.topk(score_rows, k=selected_count, dim=-1)
     if out is not None:
-        topk_idx = out[:, :total_q, :]
-        topk_idx.copy_(topk_idx_raw)
+        topk_idx = out[:, :total_q, :topk]
     else:
-        if max_block < topk:
-            topk_idx = torch.empty(
-                num_idx_heads,
-                total_q,
-                topk,
-                dtype=torch.int32,
-                device=score.device,
-            )
-            topk_idx[..., :max_block].copy_(topk_idx_raw.to(torch.int32))
-        else:
-            topk_idx = topk_idx_raw.to(torch.int32)
-    _topk_index_mask_invalid_prefill_kernel[(max_query_len, batch, num_idx_heads)](
+        topk_idx = torch.empty(
+            num_idx_heads,
+            total_q,
+            topk,
+            dtype=torch.int32,
+            device=score.device,
+        )
+    select_num_idx = torch.empty(
+        (num_idx_heads, total_q),
+        dtype=torch.int32,
+        device=score.device,
+    )
+    _prefill_topk_postprocess_kernel[(max_query_len, batch, num_idx_heads)](
+        topk_idx_raw,
         topk_idx,
+        select_num_idx,
         cu_seqlens_q,
         prefix_lens,
         SPARSE_BLOCK_SIZE,
         topk,
+        selected_count,
+        topk_idx_raw.stride(0),
+        topk_idx_raw.stride(1),
+        topk_idx_raw.stride(2),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
+        select_num_idx.stride(0),
+        select_num_idx.stride(1),
     )
-    return topk_idx
+    return topk_idx, select_num_idx
 
 
 @torch.no_grad()

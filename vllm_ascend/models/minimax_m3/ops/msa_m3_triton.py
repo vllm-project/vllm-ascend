@@ -629,20 +629,28 @@ def _prepare_prefill_topk_scores_kernel(
 @triton.jit(
     do_not_specialize_on_alignment=["prefix_lengths_ptr"],
 )
-def _mask_prefill_topk_indices_kernel(
+def _prefill_topk_postprocess_kernel(
+    raw_indices_ptr,
     topk_indices_ptr,
+    select_num_idx_ptr,
     query_start_offsets_ptr,
     prefix_lengths_ptr,
     index_head_count: tl.constexpr,
     sparse_block_size: tl.constexpr,
     topk: tl.constexpr,
-    index_head_stride,
-    index_token_stride,
-    index_topk_stride,
+    selected_count,
+    raw_head_stride,
+    raw_token_stride,
+    raw_topk_stride,
+    output_head_stride,
+    output_token_stride,
+    output_topk_stride,
+    select_head_stride,
+    select_token_stride,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
 ):
-    """Replaces invalid prefill top-k block IDs with ``-1``."""
+    """Cast, pad and mask prefill indices, and count valid selections."""
     query_tile_id = tl.program_id(0)
     batch_head_id = tl.program_id(1)
     batch_id = batch_head_id // index_head_count
@@ -663,29 +671,38 @@ def _mask_prefill_topk_indices_kernel(
     prefix_length = tl.load(prefix_lengths_ptr + batch_id)
     valid_block_counts = (prefix_length + query_offsets + sparse_block_size) // sparse_block_size
 
-    index_ptrs = (
-        topk_indices_ptr
-        + head_id * index_head_stride
-        + token_indices[:, None] * index_token_stride
-        + topk_lane_offsets[None, :] * index_topk_stride
+    raw_index_ptrs = (
+        raw_indices_ptr
+        + head_id * raw_head_stride
+        + token_indices[:, None] * raw_token_stride
+        + topk_lane_offsets[None, :] * raw_topk_stride
     )
-    access_mask = query_mask[:, None] & (topk_lane_offsets[None, :] < topk)
-    block_ids = tl.load(index_ptrs, mask=access_mask, other=0)
+    load_mask = query_mask[:, None] & (topk_lane_offsets[None, :] < selected_count)
+    block_ids = tl.load(raw_index_ptrs, mask=load_mask, other=-1)
 
     valid_rank_mask = topk_lane_offsets[None, :] < tl.minimum(
-        topk,
+        selected_count,
         valid_block_counts[:, None],
     )
     valid_block_mask = (block_ids >= 0) & (block_ids < valid_block_counts[:, None])
-    output_block_ids = tl.where(
-        valid_rank_mask & valid_block_mask,
-        block_ids,
-        -1,
+    valid_selection_mask = valid_rank_mask & valid_block_mask
+    output_block_ids = tl.where(valid_selection_mask, block_ids, -1)
+    output_index_ptrs = (
+        topk_indices_ptr
+        + head_id * output_head_stride
+        + token_indices[:, None] * output_token_stride
+        + topk_lane_offsets[None, :] * output_topk_stride
     )
     tl.store(
-        index_ptrs,
+        output_index_ptrs,
         output_block_ids.to(topk_indices_ptr.dtype.element_ty),
-        mask=access_mask,
+        mask=query_mask[:, None] & (topk_lane_offsets[None, :] < topk),
+    )
+    valid_counts = tl.minimum(selected_count, valid_block_counts)
+    tl.store(
+        select_num_idx_ptr + head_id * select_head_stride + token_indices * select_token_stride,
+        valid_counts,
+        mask=query_mask,
     )
 
 
@@ -1243,8 +1260,8 @@ def minimax_m3_index_topk(
     init_blocks: int,
     local_blocks: int,
     out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Finalizes prefill scores and returns zero-based block IDs."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Finalize prefill scores and return block IDs plus valid counts."""
     assert topk > 0
     index_head_count, total_query_tokens, score_block_count = score.shape
     batch_size = cu_seqlens_q.shape[0] - 1
@@ -1286,7 +1303,19 @@ def minimax_m3_index_topk(
         k=selected_count,
         dim=-1,
     ).indices
-    topk_indices = _copy_topk_indices(raw_indices, topk, out)
+    if out is None:
+        topk_indices = torch.empty(
+            (index_head_count, total_query_tokens, topk),
+            dtype=torch.int32,
+            device=raw_indices.device,
+        )
+    else:
+        topk_indices = out[:, :total_query_tokens, :topk]
+    select_num_idx = torch.empty(
+        (index_head_count, total_query_tokens),
+        dtype=torch.int32,
+        device=raw_indices.device,
+    )
 
     topk_tile_size = triton.next_power_of_2(max(1, topk))
     mask_tile_limit = max(1, 2048 // topk_tile_size)
@@ -1298,19 +1327,27 @@ def minimax_m3_index_topk(
         triton.cdiv(max_query_len, mask_query_tile_size),
         batch_size * index_head_count,
     )
-    _mask_prefill_topk_indices_kernel[mask_grid](
+    _prefill_topk_postprocess_kernel[mask_grid](
+        raw_indices,
         topk_indices,
+        select_num_idx,
         cu_seqlens_q,
         prefix_lens,
         index_head_count,
         SPARSE_BLOCK_SIZE,
         topk,
+        selected_count,
+        raw_indices.stride(0),
+        raw_indices.stride(1),
+        raw_indices.stride(2),
         topk_indices.stride(0),
         topk_indices.stride(1),
         topk_indices.stride(2),
+        select_num_idx.stride(0),
+        select_num_idx.stride(1),
         BLOCK_SIZE_Q=mask_query_tile_size,
     )
-    return topk_indices
+    return topk_indices, select_num_idx
 
 
 @torch.no_grad()
