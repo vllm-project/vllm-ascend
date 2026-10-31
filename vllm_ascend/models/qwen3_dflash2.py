@@ -175,6 +175,8 @@ def _score_edges(
     return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
 
 
+# The V2 speculator supplies a request-shaped ForwardContext for this module.
+# Its compiled operations remain inside DFlash2's outer FULL ACL graph.
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -247,9 +249,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
-        # Draft load uses set_model_tag("eagle_head"); without a distinct tag the
-        # selector's @support_torch_compile backend shares that npugraph cache and
-        # unpacks the draft graph (67 values) with the selector's 9 inputs.
+        # The selector has different inputs from the draft backbone, so it
+        # must use a separate compilation cache namespace.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(
                 hidden_size=self.config.hidden_size,

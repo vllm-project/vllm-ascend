@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -309,25 +310,50 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
-def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
-    calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
+@pytest.mark.parametrize(
+    "enforce_eager,expected_mode",
+    [(False, CUDAGraphMode.FULL_DECODE_ONLY), (None, CUDAGraphMode.FULL_DECODE_ONLY), (True, CUDAGraphMode.NONE)],
+)
+def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, enforce_eager, expected_mode):
+    calls = []
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.update_stream = object()
 
-    # Eager drafting forces the draft aclgraph manager to NONE.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
+    def initialize_parent(self, mode):
+        calls.append(mode)
+        self.query_cudagraph_manager = SimpleNamespace()
+
+    monkeypatch.setattr(DFlashSpeculator, "init_cudagraph_manager", initialize_parent)
     speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
 
-    # Graph mode is rejected until the Ascend walk kernel is capturable, and
-    # must fail before delegating to the parent manager.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    assert calls == [expected_mode]
+    assert speculator.query_cudagraph_manager.speculator is speculator
+    assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
+
+
+def test_selector_scores_in_request_scoped_context(monkeypatch):
+    config = SimpleNamespace()
+    selector = MagicMock()
+    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.vllm_config = config
+    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
+    speculator.num_query_per_req = 3
+    speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(6))
+    candidates = torch.zeros(2, 2, 2, dtype=torch.int64)
+    unary = torch.zeros(2, 2, 2)
+    hidden = torch.zeros(2, 2, 4)
+    context = object()
+    create = MagicMock(return_value=context)
+    override = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.create_forward_context", create)
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.override_forward_context", override)
+
+    speculator._score_candidates(candidates, unary, hidden)
+
+    create.assert_called_once_with(None, config, batch_descriptor=BatchDescriptor(num_tokens=2))
+    override.assert_called_once_with(context)
+    selector.assert_called_once()
 
 
 def test_greedy_walk_contract_reference():
