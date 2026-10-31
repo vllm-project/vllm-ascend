@@ -118,7 +118,9 @@ def quantize_indexer_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Ten
 
     # Each core writes whole 32-byte groups of FP16 scales. Contiguous blocks
     # keep neighboring cores from racing on a partial output cache line.
-    block_rows = 16
+    # Use more rows per iteration once every core has a complete tile.
+    # Keep small inputs at 16 rows to preserve their core parallelism.
+    block_rows = 32 if num_rows >= 32 * get_vectorcore_num() else 16
     num_blocks = triton.cdiv(num_rows, block_rows)
     grid = min(num_blocks, get_vectorcore_num())
     _QUANTIZE_INDEXER_QUERY_KERNEL(

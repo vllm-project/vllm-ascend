@@ -34,7 +34,7 @@ def assert_quantized_equal(query, expected):
 
 
 @pytest.mark.parametrize("heads", [32, 64])
-@pytest.mark.parametrize("tokens", [0, 1, 3, 32, 129, 4096])
+@pytest.mark.parametrize("tokens", [0, 1, 3, 23, 24, 25, 32, 47, 48, 49, 129, 4096])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @torch.inference_mode()
 def test_quantize_indexer_query(heads, tokens, dtype):
@@ -79,6 +79,25 @@ def test_quantize_indexer_query_noncontiguous(heads):
     query = torch.randn(3, heads, 256, dtype=torch.bfloat16, device="npu")[..., ::2]
     assert not query.is_contiguous()
     assert_quantized_equal(query, reference(query))
+
+
+@pytest.mark.parametrize("repeat", [1, 4])
+@torch.inference_mode()
+def test_quantize_indexer_query_adjacent_halfway_values(repeat):
+    halfway = torch.arange(-126, 127, dtype=torch.float32) + 0.5
+    values = torch.stack(
+        (
+            torch.nextafter(halfway, torch.full_like(halfway, -torch.inf)),
+            halfway,
+            torch.nextafter(halfway, torch.full_like(halfway, torch.inf)),
+        )
+    )
+    query = values.unsqueeze(-1).expand(-1, -1, 128).clone().repeat(repeat, 1, 1)
+    # A maximum of exactly 127 fixes every scale at 1, exposing each tie
+    # and its adjacent FP32 values without extra normalization rounding.
+    query[..., 0] = 127
+    expected = reference(query)
+    assert_quantized_equal(query.npu(), expected)
 
 
 @pytest.mark.parametrize("heads", [32, 64])
