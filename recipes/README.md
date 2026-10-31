@@ -119,20 +119,32 @@ The independent `Recipes Preview Comment` workflow posts one preview-link
 comment on open PRs targeting `main` that have the `recipe` label and change
 `recipes/**`, including fork PRs. It reuses the fixed preview URL above and the
 existing GitHub Actions bot, updates the same comment with the current PR
-commit after a push, and skips unchanged comments on reruns. While the label
-remains, closing or merging a PR, removing all recipe changes, or changing its
+commit after a push, and skips unchanged comments on reruns. Removing the label,
+closing or merging a PR, removing all recipe changes, or changing its
 base away from `main` updates an existing comment to an inactive status;
 reopening or restoring eligible changes restores the link. The comment does
 not confirm deployment success, cleanup, or publication.
 
-The workflow also scans open PRs targeting `main` with the `recipe` label once
+The workflow also scans open PRs with the `recipe` label once
 per hour, at minute 23 (`23 * * * *`), to backfill or refresh comments. GitHub
 may delay scheduled runs, so this is not a guaranteed one-hour delivery time.
-Adding the `recipe` label manually triggers a comment check immediately. Labels
-added by another workflow using `GITHUB_TOKEN` do not trigger another workflow;
-the hourly scan covers that case. PR events without the label skip processing
-and can still appear as skipped runs in Actions. Manual backfills also require
-the label. Removing it stops updates and leaves any existing comment unchanged.
+Manually adding or removing the `recipe` label triggers a comment check.
+Labels changed by another workflow using `GITHUB_TOKEN` do not trigger
+`labeled` or `unlabeled` runs. A `workflow_run` trigger therefore refreshes the
+affected PR after `PR Create` completes, including when its labeler removes the
+label after all recipe changes are reverted. It reads current state regardless
+of the upstream run's conclusion, since a later step can fail after labeling.
+For fork runs without PR associations, it matches the source repository and
+branch through the PR API; it never checks out PR code or reads run artifacts.
+
+Only eligible, labeled PRs get a new preview comment. An unlabeled PR with an
+existing bot comment can only have that comment deactivated. Targeted events
+still enter the per-PR queue without the label, so cleanup waits for any
+in-flight comment creation before checking the latest state. The hourly scan
+does not search historical comments on unlabeled or closed PRs; use a manual
+backfill to repair a missed cleanup event, or a run whose source metadata is
+no longer available. Manual backfills can deactivate existing comments without
+the label, but cannot create new ones without it.
 All entry points share per-PR concurrency and recheck the live label before
 processing comments. This schedule only maintains comments; preview builds
 remain the responsibility of the recipes repository.
@@ -140,6 +152,8 @@ remain the responsibility of the recipes repository.
 Comments use only the repository's `GITHUB_TOKEN` with `pull-requests: write`;
 they do not need App credentials or `RECIPES_PREVIEW_ENABLED`. The workflow
 reads PR metadata and file names without checking out or executing PR code.
+Maintainers can stop comment updates through **Actions → Recipes Preview
+Comment → Disable workflow**, independently of preview dispatch.
 The recipes scheduled scanner still requires the `recipe` label to discover
 PRs when dispatch is disabled. Maintainers should add it to older recipe PRs
 that predate the labeler rule.
