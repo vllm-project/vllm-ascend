@@ -19,6 +19,8 @@ TARGET_MODEL = "Qwen/Qwen3.8-27B"
 DRAFT_MODEL = "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0"
 NUM_SPECULATIVE_TOKENS = 7
 MAX_TOKENS = 64
+GREEDY_NEAR_TIE_LOGPROB_GAP = 0.25
+GREEDY_TOP_LOGPROBS = 5
 
 
 class _RunnerKwargs(TypedDict):
@@ -63,9 +65,17 @@ def draft_model_path() -> str:
 def greedy_reference(mrv2_environment):
     with VllmRunner(TARGET_MODEL, **RUNNER_KWARGS) as runner:
         outputs = runner.model.generate(
-            PROMPTS_SHORT, SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS, ignore_eos=True), use_tqdm=False
+            PROMPTS_SHORT,
+            SamplingParams(
+                temperature=0.0,
+                seed=0,
+                max_tokens=MAX_TOKENS,
+                ignore_eos=True,
+                logprobs=GREEDY_TOP_LOGPROBS,
+            ),
+            use_tqdm=False,
         )
-    return [list(output.outputs[0].token_ids) for output in outputs]
+    return [output.outputs[0] for output in outputs]
 
 
 @pytest.mark.e2e_model("Qwen/Qwen3.8-27B")
@@ -99,7 +109,13 @@ def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference,
         assert "LiLiCorrDraftModel" in config.draft_model_config.architectures
         outputs = runner.model.generate(
             PROMPTS_SHORT,
-            SamplingParams(temperature=temperature, seed=0, max_tokens=MAX_TOKENS, ignore_eos=True),
+            SamplingParams(
+                temperature=temperature,
+                seed=0,
+                max_tokens=MAX_TOKENS,
+                ignore_eos=True,
+                logprobs=GREEDY_TOP_LOGPROBS if temperature == 0.0 else None,
+            ),
             use_tqdm=False,
         )
         metrics = runner.model.get_metrics()
@@ -108,7 +124,37 @@ def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference,
     assert len(tokens) == len(PROMPTS_SHORT)
     assert all(len(ids) == MAX_TOKENS for ids in tokens)
     if temperature == 0.0:
-        assert tokens == greedy_reference
+        for request_idx, (actual_ids, baseline) in enumerate(zip(tokens, greedy_reference, strict=True)):
+            baseline_ids = list(baseline.token_ids)
+            assert len(baseline_ids) == MAX_TOKENS
+            first_diff = next(
+                (i for i, (actual, expected) in enumerate(zip(actual_ids, baseline_ids)) if actual != expected), None
+            )
+            if first_diff is None:
+                assert actual_ids == baseline_ids
+                continue
+
+            # Different verify batch shapes can change a BF16 argmax near a
+            # tie. Check the first divergence while both histories still
+            # agree; later tokens have different autoregressive contexts.
+            actual = outputs[request_idx].outputs[0]
+            for side, completion, selected, alternative in (
+                ("baseline", baseline, baseline_ids[first_diff], actual_ids[first_diff]),
+                ("speculative", actual, actual_ids[first_diff], baseline_ids[first_diff]),
+            ):
+                assert completion.logprobs is not None
+                assert len(completion.logprobs) == MAX_TOKENS
+                scores = completion.logprobs[first_diff]
+                assert selected in scores
+                assert alternative in scores, (
+                    f"request {request_idx}, token {first_diff}, {side}: "
+                    f"alternative token {alternative} is outside top {GREEDY_TOP_LOGPROBS}"
+                )
+                gap = scores[selected].logprob - scores[alternative].logprob
+                assert -1e-5 <= gap <= GREEDY_NEAR_TIE_LOGPROB_GAP, (
+                    f"request {request_idx}, token {first_diff}, {side}: logprob gap {gap:.4f} "
+                    f"exceeds near-tie bound {GREEDY_NEAR_TIE_LOGPROB_GAP}"
+                )
 
     num_drafts = num_accepted = 0
     accepted_per_pos = [0] * NUM_SPECULATIVE_TOKENS
