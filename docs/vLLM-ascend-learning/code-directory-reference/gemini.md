@@ -1,0 +1,16 @@
+# .gemini：目录与文件功能
+
+[返回总索引](../code-directory-guide.md) · [学习文档入口](../README.md)
+
+本分册覆盖 **2 个条目**。说明对应当前本地源码；右栏中的定义、注释或配置项用于追溯依据。
+
+用途说明不等于运行验证；按文件角色归类的条目不保证已逐行确认全部算法。
+
+## `.gemini/`
+
+开发助手相关配置或说明，不属于推理运行代码。
+
+| 文件 | 功能 | 源码依据 / 阅读入口 |
+| --- | --- | --- |
+| [config.yaml](../../../.gemini/config.yaml) | 开发辅助的 配置 指引、模板或参考资源。 | 顶层项：`have_fun`, `memory_config`, `code_review` |
+| [styleguide.md](../../../.gemini/styleguide.md) | 开发辅助的 styleguide 指引、模板或参考资源。 | 标题：Pull Request Summary Style Guide |

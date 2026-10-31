@@ -1,0 +1,899 @@
+[
+  {
+    "pr": 80,
+    "merge": "18d2ff1a2e2afddbd5f4afd34999bc303350880f",
+    "title": "!80 merge mooncakestore-3 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/ascend_store_connector.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/coordinator.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/metadata.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py",
+      "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_coordinator.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "c7e816599 dsv41 support mooncake store"
+    ]
+  },
+  {
+    "pr": 82,
+    "merge": "7e118d7733c1b6f1679f7aba920ccd84bf427ca0",
+    "title": "!82 merge private_pool_perf_opt into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "db7052268 fix decode infer 1st token in eager"
+    ]
+  },
+  {
+    "pr": 70,
+    "merge": "763c89bc6fd06476dfd56deae20f1d668b1c5990",
+    "title": "!70 merge forward_engram into releases/v0.27.1rc",
+    "files": [
+      "docs/source/user_guide/configuration/additional_config.md",
+      "tests/e2e/nightly/single_node/ops/test_engram_fp8_offload.py",
+      "tests/e2e/nightly/single_node/ops/test_engram_multistream_executor.py",
+      "tests/ut/compilation/test_breakable_aclgraph.py",
+      "tests/ut/distributed/test_mc2_draft_group.py",
+      "tests/ut/models/test_deepseek_v41_engram.py",
+      "tests/ut/models/test_deepseek_v41_engram_executor.py",
+      "tests/ut/ops/test_fused_moe.py",
+      "tests/ut/test_ascend_config.py",
+      "tests/ut/worker/test_model_runner_v1.py",
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/compilation/breakable_aclgraph.py",
+      "vllm_ascend/distributed/parallel_state.py",
+      "vllm_ascend/models/deepseek_v41/engram.py",
+      "vllm_ascend/models/deepseek_v41/engram_diagnostics.py",
+      "vllm_ascend/models/deepseek_v41/engram_executor.py",
+      "vllm_ascend/models/deepseek_v41/engram_hash.py",
+      "vllm_ascend/models/deepseek_v41/engram_offload.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [
+      "tests/ut/ops/test_fused_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py"
+    ],
+    "commits": [
+      "8ae7c367b 1. engram hash 放到 engram 辅流 2. engram gate 入主流 3. engram 辅流 engram fetch 前小算子优化 4. 主流 event_wait 消除"
+    ]
+  },
+  {
+    "pr": 72,
+    "merge": "206d3bb7770b50fe718c6e24f0410978f82b8364",
+    "title": "!72 merge perf/moe-opt into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/linear.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py"
+    ],
+    "commits": [
+      "c2eb37ee8 fix: pass real routed_scaling_factor to the vision gating fusion op",
+      "4c9ee836d refactor: cache image token mask on the raw forward context",
+      "77298451d perf: drop contiguous copy of the A5 gate weight_t",
+      "5be11606c chore: trim verbose comments to single-line notes",
+      "28f88cb42 perf: replace MoE gate cast GEMM with npu_fused_matmul 16cast32 on A5",
+      "de7968749 perf: remove redundant layer-level fp32 cast for V4.1 MoE routing input",
+      "ace159c90 revert: eliminate per-forward fp32 cast in MoE gate GEMM via npu_fused_matmul",
+      "12eb35be5 perf: compute DeepSeek V4 image token mask once per forward step",
+      "4f7e41c01 perf: eliminate per-forward fp32 cast in MoE gate GEMM via npu_fused_matmul"
+    ]
+  },
+  {
+    "pr": 76,
+    "merge": "779f109fc88570393baef75bc0bcf78025d39282",
+    "title": "!76 merge pr_74 into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/attention/test_dsa_v41_private_circle.py",
+      "tests/ut/core/test_private_circle_pool.py",
+      "tests/ut/worker/test_private_circle_block_table.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/ops/triton/private_circle_ring_table.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py",
+      "vllm_ascend/spec_decode/llm_base_proposer.py",
+      "vllm_ascend/worker/block_table.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "4ddaca94d try to fix private pool",
+      "5179b785f fix wincahe with dispark",
+      "a1a7c73cf dsaprk topk id优化",
+      "c4140289e dsaprk topk id优化",
+      "6363ffd9f dsaprk topk id优化"
+    ]
+  },
+  {
+    "pr": 73,
+    "merge": "a5690af526a6d1fcd2705ecc1783f75e1d7cbdfe",
+    "title": "!73 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/envs.py",
+      "vllm_ascend/utils.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "14ba64a65 fix skip dp allreduce bug"
+    ]
+  },
+  {
+    "pr": 71,
+    "merge": "6746201ec1e55743ca8974194630eab190cb21c2",
+    "title": "!71 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ops/triton/private_circle_ring_table.py",
+      "vllm_ascend/spec_decode/llm_base_proposer.py",
+      "vllm_ascend/utils.py",
+      "vllm_ascend/worker/block_table.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "7f8cab566 async scheduler optimizer"
+    ]
+  },
+  {
+    "pr": 69,
+    "merge": "b7029879eedbe4b63bfd4454dcae520f7bf78843",
+    "title": "!69 merge pr_63 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/distributed/parallel_state.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/token_dispatcher.py",
+      "vllm_ascend/patch/worker/patch_distributed.py",
+      "vllm_ascend/utils.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/token_dispatcher.py"
+    ],
+    "commits": [
+      "baebb4dda dspark change to mc2 with new hccl group"
+    ]
+  },
+  {
+    "pr": 39,
+    "merge": "bd93f022f9067425fbb006a2aadc95f66e65198e",
+    "title": "!39 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/test_utils.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/utils.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "2b8acb36c refactor: scope vector-like weight ND guard to bf16/fp16 branch",
+      "5b924a986 fix: keep vector-like weights in ND during NZ conversion",
+      "07d6c03ac chore: remove NZ-VERIFY debug logging",
+      "571c907f7 fix: skip NZ for ratio=2 compressor weights, add model-level process_weights hook",
+      "d56931f29 chore: remove verify_nz.py standalone script",
+      "715d88b7b feat: add NZ format verification logging to all matmul weight loading paths",
+      "30c0c0a6d feat(model): convert V4.1 compressor and indexer matmul weights to NZ format"
+    ]
+  },
+  {
+    "pr": 66,
+    "merge": "25a8437c930d464ea1bc1e464e9bfd5b2fadc29c",
+    "title": "!66 merge pr_63 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "e4e6b0e97 fix private pool + dspark+ async sch精度问题"
+    ]
+  },
+  {
+    "pr": 64,
+    "merge": "3189f37bb8016e3e1764d34d0e3d49b7e2df2e44",
+    "title": "!64 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/compilation/acl_graph.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/spec_decode/dspark_proposer.py",
+      "vllm_ascend/spec_decode/llm_base_proposer.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "acd9bca0a fix(dspark): skip the draft-graph pre-replay sync",
+      "c60545866 fix(dspark): use unscaled base RoPE for pure-SWA draft layers",
+      "b7ad27847 fix(dspark): skip the pre-replay sync for models without update-stream params",
+      "f13966829 fix(dspark): bind the captured draft graph to the persistent query_start_loc buffer",
+      "650f8578b fix(dspark): reset draft is_prefilling to all-decode at the padded request width",
+      "51d65bc82 fix(dspark): zero-pad draft per-group block table to the graph bucket request count",
+      "bcb85e4a7 feat(dspark): enable ACL graphs for the DSpark draft model"
+    ]
+  },
+  {
+    "pr": 60,
+    "merge": "8115b5102a5f7649fad84c9ef456bbf2d0cae3f2",
+    "title": "!60 merge support_dspark into releases/v0.27.1rc",
+    "files": [
+      "docs/source/user_guide/configuration/additional_config.md",
+      "tests/e2e/nightly/single_node/ops/test_engram_fp8_offload.py",
+      "tests/ut/core/test_deepseek_v41_grouping.py",
+      "tests/ut/core/test_private_circle_pool.py",
+      "tests/ut/models/test_deepseek_v41_engram.py",
+      "tests/ut/models/test_deepseek_v41_engram_executor.py",
+      "tests/ut/models/test_deepseek_v41_engram_fp8.py",
+      "tests/ut/patch/platform/test_prefix_cache_cp_patches.py",
+      "tests/ut/test_ascend_config.py",
+      "tests/ut/test_ascend_forward_context.py",
+      "tests/ut/test_speculative_mode.py",
+      "tests/ut/worker/test_model_runner_v1.py",
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v41/README.md",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/engram.py",
+      "vllm_ascend/models/deepseek_v41/engram_diagnostics.py",
+      "vllm_ascend/models/deepseek_v41/engram_executor.py",
+      "vllm_ascend/models/deepseek_v41/engram_fetch_legacy.cpp",
+      "vllm_ascend/models/deepseek_v41/engram_offload.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/models/deepseek_v41/vl_model.py",
+      "vllm_ascend/ops/triton/compressor/compressor_triton.py",
+      "vllm_ascend/spec_decode/__init__.py",
+      "vllm_ascend/spec_decode/dspark_proposer.py",
+      "vllm_ascend/speculative_mode.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "60e081c24 engram and dspark: 1. fetch support fp8 2. fetch support multistream 3. engram support dspark"
+    ]
+  },
+  {
+    "pr": 63,
+    "merge": "706f8ed23339c1b5b091dc3e819c5ec25d264a44",
+    "title": "!63 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "4002335af async scheduler adaptor"
+    ]
+  },
+  {
+    "pr": 59,
+    "merge": "29a9dba843433493819e73e6c0c96286ac287c50",
+    "title": "!59 merge pr_54 into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/core/test_deepseek_v41_grouping.py",
+      "tests/ut/core/test_private_circle_pool.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_utils.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py",
+      "vllm_ascend/spec_decode/dspark_proposer.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "21ad48cd4 dspark cache add to private pool"
+    ]
+  },
+  {
+    "pr": 62,
+    "merge": "c782ce2eaa1f7c8852d391f7f8f77c2dad6fcfa9",
+    "title": "!62 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/models/deepseek_v41/indexer.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "72521a79c fix index topk bug in dspark"
+    ]
+  },
+  {
+    "pr": 47,
+    "merge": "6edb79a18d76f055d38a464a51a00ffbbac65583",
+    "title": "!47 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "665d5c0a5 opt indexer and compressor"
+    ]
+  },
+  {
+    "pr": 51,
+    "merge": "8f97a6b708874028146b611872c42c5d78c80644",
+    "title": "!51 merge feat/megamoe-shared-experts-clean into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/ops/fused_moe/dataclass/fused_experts.py",
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/mega_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/ops/fused_moe/dataclass/fused_experts.py",
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/mega_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py"
+    ],
+    "commits": [
+      "8d0686064 feat(moe): fuse shared expert into A5 MegaMoE"
+    ]
+  },
+  {
+    "pr": 50,
+    "merge": "c9abd7ba3fdc9047bccb4134b85baf0f9f9498ba",
+    "title": "!50 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "c5c86eb9f swa metadata调用优化",
+      "55147c33d swa metadata调用优化",
+      "aa623340f swa metadata调用优化"
+    ]
+  },
+  {
+    "pr": 58,
+    "merge": "7a4ae74bd314f43d5cc2f900eb8470b4a8b56e13",
+    "title": "!58 merge dsv41-init into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/deepseek_v41_config.py",
+      "vllm_ascend/models/__init__.py",
+      "vllm_ascend/models/deepseek_v41/engram_hash.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_config.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v4_vision.py",
+      "vllm_ascend/patch/platform/patch_speculative_config.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "83cbb446c 适配新配置文件"
+    ]
+  },
+  {
+    "pr": 56,
+    "merge": "66e71f60b24cbe72051dcca721173db0230124f8",
+    "title": "!56 merge pr_54 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "f36d719c9 fix dspark issue"
+    ]
+  },
+  {
+    "pr": 54,
+    "merge": "d292b4654fc806c7f65ec77d2a605ed80177f151",
+    "title": "!54 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/attention/dsa_v1.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v4/dspark.py",
+      "vllm_ascend/models/deepseek_v4/mtp.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/spec_decode/dspark_proposer.py",
+      "vllm_ascend/spec_decode/llm_base_proposer.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/ops/fused_moe/fused_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py"
+    ],
+    "commits": [
+      "d4aaca69d fix(dspark): DSpark V4.1 draft integration fixes"
+    ]
+  },
+  {
+    "pr": 52,
+    "merge": "72659cb16275e0c7953b7c917a3225135afa5c39",
+    "title": "!52 merge private_pool_perf_opt into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/core/test_deepseek_v41_grouping.py",
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/core/deepseek_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "3c6b20df8 opt select_moe_comm_method",
+      "826fa0148 private pool perf opt"
+    ]
+  },
+  {
+    "pr": 53,
+    "merge": "c0814b17914b24f2d2434d9949c27d6eb84747b3",
+    "title": "!53 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/worker/worker.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "1ec2df1d0 fix first request return none"
+    ]
+  },
+  {
+    "pr": 41,
+    "merge": "8cdd00463bfb00113e9a8825ca93aa6b18ab7e82",
+    "title": "!41 merge V27-dsv4.1 into releases/v0.27.1rc",
+    "files": [
+      ".gitignore",
+      "tests/ut/core/test_private_circle_pool.py",
+      "tests/ut/patch/platform/test_scheduler_level_bounded_replay.py",
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+      "vllm_ascend/envs.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "62c3d776d fix prefix cache bounded relay error"
+    ]
+  },
+  {
+    "pr": 38,
+    "merge": "55ce64f8347b1580f5e34218b265e91b641c025f",
+    "title": "!38 merge dsv41 into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/attention/test_dsa_v41_private_circle.py",
+      "vllm_ascend/attention/dsa_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "f64b97b65 fix(dsa-v41): handle synthetic graph padding rows",
+      "f4c335319 fix(dsa-v41): allow prefix cache metadata",
+      "010ffc8b0 fix(dsa-v41): stabilize decode graph attention metadata"
+    ]
+  },
+  {
+    "pr": 43,
+    "merge": "9f8cf60f77fd3a16a496a50ce5dd9e71d2ce7668",
+    "title": "!43 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "setup.py",
+      "tests/ut/trace/__init__.py",
+      "tools/trace/parse_logs.py",
+      "tools/trace/process_trace_model.py",
+      "vllm_ascend/envs.py",
+      "vllm_ascend/patch/platform/__init__.py",
+      "vllm_ascend/patch/platform/patch_trace.py",
+      "vllm_ascend/patch/worker/patch_trace.py",
+      "vllm_ascend/trace/README.md",
+      "vllm_ascend/trace/__init__.py",
+      "vllm_ascend/trace/patcher.py",
+      "vllm_ascend/trace/prof_wrapper.py",
+      "vllm_ascend/trace/tracelogger_namelist.yml",
+      "vllm_ascend/trace/utils.py",
+      "vllm_ascend/utils.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "c27e8d495 add trace"
+    ]
+  },
+  {
+    "pr": 37,
+    "merge": "b28a4587777d21aa4c2a95761b86457321365dea",
+    "title": "!37 merge V27-dsv4.1 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+      "vllm_ascend/models/deepseek_v41/engram.py",
+      "vllm_ascend/models/deepseek_v41/engram_hash.py",
+      "vllm_ascend/models/deepseek_v41/engram_offload.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "922433912 修改图模式问题"
+    ]
+  },
+  {
+    "pr": 34,
+    "merge": "a6789af60fa016de01375c30bd45cb69b6f22b4c",
+    "title": "!34 merge V27-dsv4.1 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py",
+      "vllm_ascend/worker/block_table.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "b0676c87b 适配图"
+    ]
+  },
+  {
+    "pr": 22,
+    "merge": "89cea7d6caecb8e066ec67ec715523bcccc05566",
+    "title": "!22 merge V27-dsv4.1 into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/attention/test_attention_utils.py",
+      "tests/ut/attention/test_dsa_v41_private_circle.py",
+      "tests/ut/core/test_private_circle_pool.py",
+      "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+      "tests/ut/patch/platform/test_prefix_cache_cp_patches.py",
+      "tests/ut/worker/test_private_circle_block_table.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/attention/utils.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/core/private_circle_pool.py",
+      "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+      "vllm_ascend/envs.py",
+      "vllm_ascend/patch/platform/__init__.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_coordinator.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_utils.py",
+      "vllm_ascend/patch/platform/patch_private_circle_pool.py",
+      "vllm_ascend/worker/block_table.py",
+      "vllm_ascend/worker/model_runner_v1.py",
+      "vllm_ascend/worker/v2/attn_utils.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "2090dacda add private pool and rollback 128"
+    ]
+  },
+  {
+    "pr": 33,
+    "merge": "c5f09dce2bbf9f3db920b0fc4d698afe95b93c28",
+    "title": "!33 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "356fb68d4 去除FA的RoPE、NoPE规避"
+    ]
+  },
+  {
+    "pr": 31,
+    "merge": "f83c003ce37955de1da3af1fdf88e3e9696141b2",
+    "title": "!31 merge feat/mega-moe-pd-info-logs into releases/v0.27.1rc",
+    "files": [
+      "tests/ut/test_ascend_forward_context.py",
+      "vllm_ascend/ascend_forward_context.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "bca6b8ff8 [BugFix][MoE] Fix A5 MegaMoE buffer sizing for PD-mixed mode"
+    ]
+  },
+  {
+    "pr": 24,
+    "merge": "3935bf5f559272569182b6d31f87b72c7c9aa088",
+    "title": "!24 merge engram_with_log into releases/v0.27.1rc",
+    "files": [
+      "setup.py",
+      "tests/ut/models/test_deepseek_v41_engram.py",
+      "tests/ut/test_ascend_config.py",
+      "tests/ut/worker/test_model_runner_v1.py",
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/models/deepseek_v41/engram.py",
+      "vllm_ascend/models/deepseek_v41/engram_fetch_legacy.cpp",
+      "vllm_ascend/models/deepseek_v41/engram_gate.py",
+      "vllm_ascend/models/deepseek_v41/engram_hash.py",
+      "vllm_ascend/models/deepseek_v41/engram_hbm.py",
+      "vllm_ascend/models/deepseek_v41/engram_offload.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/models/deepseek_v41/vl_model.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "b1f2991bd add engram module"
+    ]
+  },
+  {
+    "pr": 18,
+    "merge": "0d8036d7275aebfc6cdd224fcd45087f58ea48b3",
+    "title": "!18 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "docs/source/user_guide/configuration/additional_config.md",
+      "vllm_ascend/_310p/model_runner_310p.py",
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/ascend_forward_context.py",
+      "vllm_ascend/device/device_op.py",
+      "vllm_ascend/distributed/parallel_state.py",
+      "vllm_ascend/models/deepseek_v4/model.py",
+      "vllm_ascend/ops/fused_moe/mega_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/prepare_finalize.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "vllm_ascend/patch/worker/patch_distributed.py",
+      "vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py",
+      "vllm_ascend/utils.py",
+      "vllm_ascend/worker/model_runner_v1.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/models/deepseek_v4/model.py",
+      "vllm_ascend/ops/fused_moe/mega_moe.py",
+      "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "vllm_ascend/ops/fused_moe/prepare_finalize.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "vllm_ascend/quantization/methods/w4a8/w4a8_mxfp4.py"
+    ],
+    "commits": [
+      "df1286cca [Feat][Model] Merge MegaMoE support into DeepSeek V4.1"
+    ]
+  },
+  {
+    "pr": 30,
+    "merge": "68927199d75422d0297465bb9fc2772064291c9e",
+    "title": "!30 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "d173e3670 补全swa fa实现"
+    ]
+  },
+  {
+    "pr": 21,
+    "merge": "e93c0622228c61697a07948caaebb1b692b0db55",
+    "title": "!21 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/models/deepseek_v41/model.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "c711e85c3 AscendC hc_pre/hc_post ops for DeepSeek V4.1"
+    ]
+  },
+  {
+    "pr": 19,
+    "merge": "24c2a344dcbf41ad8827d3ab6d466915cef4f293",
+    "title": "!19 merge indexer into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/model.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "d7dddb09f indexer"
+    ]
+  },
+  {
+    "pr": 29,
+    "merge": "07a303dbf025b66f79fb60533054958e9a76d0fe",
+    "title": "!29 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "f2029c08d 修改compressor问题：cache 2d->4d"
+    ]
+  },
+  {
+    "pr": 23,
+    "merge": "34417bffb7ad990dee2d5b49e93f9d98e136f6dc",
+    "title": "!23 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "7c68c5501 补全swa fa实现",
+      "20fdf8f97 补全swa fa实现",
+      "806d961a4 补全swa fa实现",
+      "7be7d6ebe 补全swa fa实现",
+      "945a37826 补全swa fa实现",
+      "6193ea11e 补全swa fa实现",
+      "dc797d8ad 补全swa fa实现",
+      "54db883a5 补全swa fa实现",
+      "053d81058 补全swa fa实现",
+      "ef918c9d1 补全swa fa实现",
+      "f1727279a 补全swa fa实现",
+      "f8b718d88 补全swa fa实现"
+    ]
+  },
+  {
+    "pr": 26,
+    "merge": "a4c88ddc0f77b5b7329115ab69a2c3f87a903f8d",
+    "title": "!26 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/model.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "37d693a78 compress新算子接入"
+    ]
+  },
+  {
+    "pr": 27,
+    "merge": "088189b418b50ef12937baf608a4b8b7ea90fd0e",
+    "title": "!27 merge 0.27-pool1-pool2 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/models/deepseek_v41/model.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "9ecec0d32 fix dsv4 A5 expand cache"
+    ]
+  },
+  {
+    "pr": 25,
+    "merge": "91de6973413049a39e05299c6d1de50c1b05c60e",
+    "title": "!25 merge 0.27-pool1-pool2 into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/model.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "b598d92cf A5 cache quant"
+    ]
+  },
+  {
+    "pr": 20,
+    "merge": "fc776e235a7e3d272f49fd5ebe1bc491541a108b",
+    "title": "!20 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/models/deepseek_v41/engram_hbm.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "952ac368f 新增deepseek-v4.1支持"
+    ]
+  },
+  {
+    "pr": 17,
+    "merge": "da075d4a67824dd18cb5d91448e9f8c1161b3422",
+    "title": "!17 merge releases/v0.27.1rc into releases/v0.27.1rc",
+    "files": [
+      "vllm_ascend/ascend_config.py",
+      "vllm_ascend/attention/dsa_v1.py",
+      "vllm_ascend/attention/dsa_v41.py",
+      "vllm_ascend/attention/utils.py",
+      "vllm_ascend/core/circular_buffer.py",
+      "vllm_ascend/core/deepseek_v41.py",
+      "vllm_ascend/core/kv_cache_interface.py",
+      "vllm_ascend/deepseek_v41_config.py",
+      "vllm_ascend/models/__init__.py",
+      "vllm_ascend/models/deepseek_v4/mm_preprocess.py",
+      "vllm_ascend/models/deepseek_v4/model.py",
+      "vllm_ascend/models/deepseek_v4/vision.py",
+      "vllm_ascend/models/deepseek_v4/vl_model.py",
+      "vllm_ascend/models/deepseek_v41/README.md",
+      "vllm_ascend/models/deepseek_v41/__init__.py",
+      "vllm_ascend/models/deepseek_v41/compressor.py",
+      "vllm_ascend/models/deepseek_v41/dspark.py",
+      "vllm_ascend/models/deepseek_v41/engram_gate.py",
+      "vllm_ascend/models/deepseek_v41/engram_hash.py",
+      "vllm_ascend/models/deepseek_v41/engram_hbm.py",
+      "vllm_ascend/models/deepseek_v41/indexer.py",
+      "vllm_ascend/models/deepseek_v41/mm_preprocess.py",
+      "vllm_ascend/models/deepseek_v41/model.py",
+      "vllm_ascend/models/deepseek_v41/vl_model.py",
+      "vllm_ascend/ops/fused_moe/force_eplb.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/router/router_factory.py",
+      "vllm_ascend/ops/rope_dsv4.py",
+      "vllm_ascend/ops/triton/compressor/__init__.py",
+      "vllm_ascend/ops/triton/compressor/compressor_triton.py",
+      "vllm_ascend/ops/triton/engram_int8.py",
+      "vllm_ascend/ops/triton/prepare_indexer_indices.py",
+      "vllm_ascend/ops/triton/quantize_indexer_query.py",
+      "vllm_ascend/patch/platform/__init__.py",
+      "vllm_ascend/patch/platform/patch_circular_buffer.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_config.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/LICENSE",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/README.md",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/__init__.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/encoding.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/parser.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/renderer.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/structural_tag.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_frontend/tokenizer.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v4_vision.py",
+      "vllm_ascend/patch/platform/patch_fused_moe.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_coordinator.py",
+      "vllm_ascend/patch/platform/patch_kv_cache_utils.py",
+      "vllm_ascend/patch/platform/patch_speculative_config.py",
+      "vllm_ascend/quantization/methods/w8a8/w8a8_mxfp8.py",
+      "vllm_ascend/worker/model_runner_v1.py",
+      "vllm_ascend/worker/utils.py"
+    ],
+    "moe_files": [
+      "vllm_ascend/models/deepseek_v4/model.py",
+      "vllm_ascend/ops/fused_moe/force_eplb.py",
+      "vllm_ascend/ops/fused_moe/routed_experts.py",
+      "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+      "vllm_ascend/ops/fused_moe/router/router_factory.py",
+      "vllm_ascend/patch/platform/patch_fused_moe.py",
+      "vllm_ascend/quantization/methods/w8a8/w8a8_mxfp8.py"
+    ],
+    "commits": [
+      "09220f435 新增deepseek-v4.1支持"
+    ]
+  },
+  {
+    "pr": 8,
+    "merge": "fb53d417a51f4277598120edf6ef6101cb2bb5c9",
+    "title": "!8 merge ds-next into ds-next",
+    "files": [
+      "vllm_ascend/models/__init__.py",
+      "vllm_ascend/models/deepseek_v4.py",
+      "vllm_ascend/models/deepseek_v41.py",
+      "vllm_ascend/models/deepseek_v41_config.py",
+      "vllm_ascend/models/deepseek_v41_vision.py",
+      "vllm_ascend/models/deepseek_v41_vl.py",
+      "vllm_ascend/patch/platform/__init__.py",
+      "vllm_ascend/patch/platform/patch_deepseek_v41_config.py",
+      "vllm_ascend/quantization/methods/fp8.py"
+    ],
+    "moe_files": [],
+    "commits": [
+      "c34d8388a 增加新模型初始化和权重加载"
+    ]
+  }
+]

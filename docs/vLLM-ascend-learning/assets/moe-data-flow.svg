@@ -1,0 +1,63 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='1420'><defs><marker id='a' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><path d='M0 0L8 4L0 8Z' fill='#526175'/></marker></defs><rect width='1200' height='1420' fill='white'/><g font-family='Microsoft YaHei, sans-serif' font-size='18' fill='#233247'>
+<text x='30' y='36'>MoE 数据流：输入不是文字，而是前面网络算出的 hidden states</text>
+<rect x='30' y='60' width='1140' height='80' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='93'>教学例子：T=3 个 token，H=4，E=4 个路由专家，每个 token 选 K=2 个专家。</text>
+<text x='46' y='121'>输入 X=[x0, x1, x2]，shape=[3,4]；本例只展示一个逻辑批次，省略 TP、padding、量化。</text>
+<path d='M410 140 L410 185' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='185' width='760' height='85' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='46' y='218'>① Router：为每个 token 计算专家分数，再选择 Top-K</text>
+<text x='46' y='246'>logits [3,4] → topk_ids [3,2] + topk_weights [3,2]</text>
+<rect x='850' y='185' width='320' height='145' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='866' y='218'>共享专家分支（可选）</text>
+<text x='866' y='246'>接收同一份 X [3,4]</text>
+<text x='866' y='274'>每个 token 都参与计算</text>
+<text x='866' y='302'>输出 S [3,4]</text>
+<path d='M1010 140 L1010 185' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M410 270 L410 310' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='310' width='760' height='125' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='46' y='343'>路由结果示例（权重仅为教学数字）</text>
+<text x='46' y='371'>x0 → E0:0.7，E2:0.3</text>
+<text x='46' y='399'>x1 → E1:0.6，E2:0.4</text>
+<text x='46' y='427'>x2 → E0:0.2，E3:0.8</text>
+<path d='M410 435 L410 475' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='475' width='760' height='90' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='46' y='508'>② Dispatch：按专家重新组织 token；专家在远端时进行跨卡传输</text>
+<text x='46' y='536'>原始 X 不会消失；3 个 token 形成 6 个 token-专家计算任务</text>
+<text x='46' y='564'>同时保留 token 来源和路由权重，供后续恢复与加权</text>
+<path d='M250 565 L250 610' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M650 565 L650 610' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='610' width='360' height='155' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='46' y='643'>NPU 0：拥有 E0、E1</text>
+<text x='46' y='671'>E0 输入 [x0,x2] → [2,4]</text>
+<text x='46' y='699'>E1 输入 [x1] → [1,4]</text>
+<text x='46' y='727'>③ 各专家 MLP 计算</text>
+<text x='46' y='755'>输出保持 token 向量宽度 H</text>
+<rect x='430' y='610' width='360' height='155' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='446' y='643'>NPU 1：拥有 E2、E3</text>
+<text x='446' y='671'>E2 输入 [x0,x1] → [2,4]</text>
+<text x='446' y='699'>E3 输入 [x2] → [1,4]</text>
+<text x='446' y='727'>③ 各专家 MLP 计算</text>
+<text x='446' y='755'>专家中间维度可为 I</text>
+<path d='M250 765 L410 810' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M650 765 L410 810' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='810' width='760' height='145' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='46' y='843'>④ Combine：返回来源，按原 token 恢复顺序并加权汇总</text>
+<text x='46' y='871'>r0 = 0.7 × E0(x0) + 0.3 × E2(x0)</text>
+<text x='46' y='899'>r1 = 0.6 × E1(x1) + 0.4 × E2(x1)</text>
+<text x='46' y='927'>r2 = 0.2 × E0(x2) + 0.8 × E3(x2)</text>
+<text x='46' y='955'>得到路由专家输出 R=[r0,r1,r2]，shape=[3,4]</text>
+<path d='M410 955 L600 1035' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M1010 330 L1010 1000' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M1010 1000 L830 1035' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='280' y='1035' width='640' height='100' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='296' y='1068'>⑤ 合并路由专家与共享专家输出</text>
+<text x='296' y='1096'>简化教学形式：Y = R + S，shape=[3,4]</text>
+<text x='296' y='1124'>实际还需遵守模型的 gate、缩放和并行归约语义</text>
+<path d='M600 1135 L600 1170' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='280' y='1170' width='640' height='65' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='296' y='1203'>MoE 输出 Y → 模型后续残差 / 后续层</text>
+<rect x='30' y='1280' width='1140' height='105' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='1313'>注意：图中只展示 EP=2 的专家分布示意；它不同于之前框架图的 TP=2。</text>
+<text x='46' y='1341'>向量、分数、专家计算和加权通常在 NPU 上完成；CPU 负责组织与提交任务。</text>
+<text x='46' y='1369'>权重参与加权的位置、通信方式及是否实际复制 token，由具体后端决定。</text>
+</g></svg>

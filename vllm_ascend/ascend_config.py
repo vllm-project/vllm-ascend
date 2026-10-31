@@ -37,6 +37,29 @@ if TYPE_CHECKING:
 _MEGA_MOE_SUPPORTED = None
 
 
+def compute_mega_moe_buffer_tokens_per_rank(
+    mega_moe_max_tokens: int,
+    execution_tokens_per_rank: int,
+    expert_parallel_size: int,
+) -> int:
+    """Compute the per-rank token capacity for the A5 MegaMoE buffer."""
+    if execution_tokens_per_rank <= 0:
+        raise ValueError(f"execution_tokens_per_rank must be positive, got {execution_tokens_per_rank}")
+    if expert_parallel_size <= 0:
+        raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
+
+    configured_tokens_per_rank = mega_moe_max_tokens // expert_parallel_size
+    buffer_tokens_per_rank = min(configured_tokens_per_rank, execution_tokens_per_rank)
+    if buffer_tokens_per_rank <= 0:
+        raise ValueError(
+            "MegaMoE per-rank token capacity must be positive: "
+            f"mega_moe_max_tokens={mega_moe_max_tokens}, "
+            f"execution_tokens_per_rank={execution_tokens_per_rank}, "
+            f"expert_parallel_size={expert_parallel_size}."
+        )
+    return buffer_tokens_per_rank
+
+
 def is_mega_moe_supported() -> bool:
     """Whether the megamoe op is available at runtime.
 
@@ -358,7 +381,8 @@ class EplbConfig:
 
         logger.info(
             "Dynamic EPLB is %s and convert moe's weights to list is %s",
-            self.dynamic_eplb, self.convert_weight_to_list,
+            self.dynamic_eplb,
+            self.convert_weight_to_list,
         )
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
@@ -618,9 +642,9 @@ class AscendConfig:
     # model's quant_type, 0 means disabled (use the model's own quant).
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
+    # Receive-token ceiling for dispatch_ffn_combine and CANN MegaMoE.
+    # A5 also bounds its per-rank input capacity by this ceiling divided
+    # by EP size and the execution capacity for the current PD role.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
@@ -1116,6 +1140,9 @@ class AscendConfig:
 
     @staticmethod
     def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
+        # utils imports ascend_config; defer this import to avoid a cycle.
+        from vllm_ascend.utils import is_deepseek_v41
+
         model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         is_kimi_k3 = any(
@@ -1151,6 +1178,8 @@ class AscendConfig:
         # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
         # validated SiTU shape without widening support for unrelated models.
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
+        if is_deepseek_v41(getattr(vllm_config.model_config, "hf_config", hf_text_config)):
+            supported_intermediate_sizes.add(4608)
         if is_minimax_m3 or is_kimi_k3:
             supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.

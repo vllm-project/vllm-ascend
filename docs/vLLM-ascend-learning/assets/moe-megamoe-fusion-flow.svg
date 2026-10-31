@@ -1,0 +1,36 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720'><defs><marker id='a' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><path d='M0 0L8 4L0 8Z' fill='#526175'/></marker></defs><rect width='1200' height='720' fill='white'/><g font-family='Microsoft YaHei, sans-serif' font-size='18' fill='#233247'>
+<text x='30' y='38'>同一条 MoE 数据流，在 PR18 / PR51 中怎样融合</text>
+<rect x='30' y='70' width='1140' height='90' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='103'>逻辑数据流不变：X → 路由 → 分发 → 专家计算 → 汇总 → Y</text>
+<text x='46' y='131'>融合改变的是底层执行边界，不是让 token 跳过专家计算。图中省略 gate / 缩放等模型细节。</text>
+<rect x='30' y='210' width='230' height='85' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='243'>输入 X</text>
+<text x='46' y='271'>路由 ID / 权重</text>
+<rect x='320' y='210' width='530' height='85' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='336' y='243'>PR18：MegaMoE 融合路由专家路径</text>
+<text x='336' y='271'>Dispatch + Expert MLP + Combine → R</text>
+<rect x='910' y='210' width='260' height='85' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='926' y='243'>与独立共享输出 S</text>
+<text x='926' y='271'>按模型语义合并</text>
+<path d='M260 252 L320 252' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M850 252 L910 252' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='360' width='230' height='120' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='393'>输入 X</text>
+<text x='46' y='421'>路由 ID / 权重</text>
+<text x='46' y='449'>共享专家权重 / scale</text>
+<rect x='320' y='360' width='530' height='120' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='336' y='393'>PR51：满足支持条件时</text>
+<text x='336' y='421'>MegaMoE 同时执行路由专家和共享专家</text>
+<text x='336' y='449'>返回已经包含两部分贡献的输出</text>
+<rect x='910' y='360' width='260' height='120' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='926' y='393'>MoE 输出 Y</text>
+<text x='926' y='421'>不再额外计算并叠加</text>
+<text x='926' y='449'>同一份共享专家贡献</text>
+<path d='M260 420 L320 420' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<path d='M850 420 L910 420' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#a)'/>
+<rect x='30' y='540' width='1140' height='135' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='46' y='573'>PR31 不增加数据流阶段，而是修正该融合路径所需的工作缓冲区容量判断。</text>
+<text x='46' y='601'>PD 合设且没有 KV 传输配置时，按 Prefill 执行容量准备，避免低估。</text>
+<text x='46' y='629'>PR51 不满足外部算子接口、量化、布局等条件时，仍使用独立共享专家路径。</text>
+<text x='46' y='657'>以上解释逻辑关系，不表示每种后端都按图中边界单独启动算子。</text>
+</g></svg>
