@@ -2094,7 +2094,7 @@ def _attach_parallel_o_proj(impl, pcp_group, *, tp_group=None, decode_sharded=Fa
     )
 
 
-@pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
+@pytest.mark.parametrize("local_num_actual_tokens", [4, 2, 0], ids=["full_bucket", "local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
 @pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
 def test_pcp_forward_updates_global_caches_before_local_attention(

@@ -2607,7 +2607,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             common_attn_metadata = layer_metadata.swa
         actual_tokens = common_attn_metadata.num_actual_tokens
 
-        o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
+        if actual_tokens > 0 and actual_tokens == o_proj_input_shape[0]:
+            o_proj_input = hidden_states.new_empty(o_proj_input_shape)
+        else:
+            o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
         cache_is_prepared = self._prepare_caches_before_attention(
