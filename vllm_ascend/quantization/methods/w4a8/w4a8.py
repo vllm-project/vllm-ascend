@@ -40,6 +40,12 @@ from vllm_ascend.utils import (
 from ..base import AscendLinearScheme, AscendMoEScheme, PreparedLinearInput, QuantType
 from ..registry import register_scheme
 
+_MODELSLIM_SCALE_BIAS_PARTITIONS = 16
+_INT4_VALUES_PER_BYTE = 2
+_INT4_VALUES_PER_INT32 = 8
+_INT4_NZ_OUTPUT_ALIGNMENT = 64
+_INT4_NZ_INPUT_ALIGNMENT = 16
+
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
