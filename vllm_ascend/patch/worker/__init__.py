@@ -36,6 +36,7 @@ import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
 
 import vllm_ascend.patch.worker.patch_distributed  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_moe_pruning  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
