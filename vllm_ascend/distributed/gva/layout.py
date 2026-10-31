@@ -27,9 +27,9 @@ class GvaRowRange:
     end: int
 
     def __post_init__(self) -> None:
-        _require_int(self.owner_rank, "owner_rank", minimum=0)
-        _require_int(self.start, "start", minimum=0)
-        _require_int(self.end, "end", minimum=1)
+        object.__setattr__(self, "owner_rank", _require_int(self.owner_rank, "owner_rank", minimum=0))
+        object.__setattr__(self, "start", _require_int(self.start, "start", minimum=0))
+        object.__setattr__(self, "end", _require_int(self.end, "end", minimum=1))
         if self.end <= self.start:
             raise ValueError(f"row range must be non-empty, got [{self.start}, {self.end})")
 

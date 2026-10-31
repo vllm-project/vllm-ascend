@@ -1,13 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from enum import IntEnum
+
 import pytest
 
 from vllm_ascend.distributed.gva import (
     GvaCapabilities,
+    GvaObjectRef,
     GvaObjectSpec,
     GvaPoolMember,
+    GvaPoolRef,
     GvaPoolSpec,
 )
+
+
+class _IntegralValue(IntEnum):
+    ZERO = 0
+    ONE = 1
+    SIXTY_FOUR = 64
+    CAPACITY = 4096
 
 
 def test_gva_capabilities_require_an_access_mode():
@@ -15,6 +26,37 @@ def test_gva_capabilities_require_an_access_mode():
         GvaCapabilities()
 
     assert GvaCapabilities(entry_gather=True, graph_safe=True, max_entry_bytes=64).entry_gather
+
+
+def test_gva_descriptors_normalize_integral_fields():
+    capabilities = GvaCapabilities(entry_gather=True, max_entry_bytes=_IntegralValue.SIXTY_FOUR)
+    pool = GvaPoolSpec(
+        pool_id="qwen-ple",
+        generation="generation-1",
+        api_family="offload",
+        members=(_IntegralValue.ZERO, _IntegralValue.ONE),
+        capacity_bytes=_IntegralValue.CAPACITY,
+        store_url="tcp://127.0.0.1:8500",
+        schema="qwen-ple-bf16-v1",
+    )
+    member = GvaPoolMember(rank=_IntegralValue.ONE, device_id=_IntegralValue.ZERO)
+    object_spec = GvaObjectSpec("ple-layer-2", "generation-1", _IntegralValue.CAPACITY, "schema", "ckpt", "layout")
+    object_ref = GvaObjectRef(
+        GvaPoolRef("qwen-ple", "generation-1", "offload", "schema"),
+        "ple-layer-2",
+        _IntegralValue.CAPACITY,
+        "schema",
+        "ckpt",
+        "layout",
+    )
+
+    assert type(capabilities.max_entry_bytes) is int
+    assert all(type(rank) is int for rank in pool.members)
+    assert type(pool.capacity_bytes) is int
+    assert type(member.rank) is int
+    assert type(member.device_id) is int
+    assert type(object_spec.size_bytes) is int
+    assert type(object_ref.size_bytes) is int
 
 
 def test_gva_pool_spec_requires_static_membership_and_valid_rank():

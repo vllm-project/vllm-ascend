@@ -33,7 +33,7 @@ class GvaCapabilities:
         if not (self.direct_map or self.entry_gather):
             raise ValueError("a GVA backend must provide direct_map or entry_gather")
         if self.max_entry_bytes is not None:
-            _positive(self.max_entry_bytes, "max_entry_bytes")
+            object.__setattr__(self, "max_entry_bytes", _positive(self.max_entry_bytes, "max_entry_bytes"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class GvaPoolSpec:
         if any(rank < 0 for rank in members):
             raise ValueError("members must contain non-negative rank IDs")
         object.__setattr__(self, "members", tuple(int(rank) for rank in members))
-        _positive(self.capacity_bytes, "capacity_bytes")
+        object.__setattr__(self, "capacity_bytes", _positive(self.capacity_bytes, "capacity_bytes"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,8 +77,8 @@ class GvaPoolMember:
     device_id: int
 
     def __post_init__(self) -> None:
-        _non_negative(self.rank, "rank")
-        _non_negative(self.device_id, "device_id")
+        object.__setattr__(self, "rank", _non_negative(self.rank, "rank"))
+        object.__setattr__(self, "device_id", _non_negative(self.device_id, "device_id"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +102,7 @@ class GvaObjectSpec:
         ):
             if not value:
                 raise ValueError(f"{name} must not be empty")
-        _positive(self.size_bytes, "size_bytes")
+        object.__setattr__(self, "size_bytes", _positive(self.size_bytes, "size_bytes"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,4 +145,4 @@ class GvaObjectRef:
         ):
             if not value:
                 raise ValueError(f"{name} must not be empty")
-        _positive(self.size_bytes, "size_bytes")
+        object.__setattr__(self, "size_bytes", _positive(self.size_bytes, "size_bytes"))
