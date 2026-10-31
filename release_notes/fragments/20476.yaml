@@ -1,0 +1,4 @@
+pr: 20476
+entries:
+  - category: performance
+    text: Qwen4Exp input preparation uses Ascend Triton kernels for PLE history gathering and QSA metadata generation.
