@@ -68,6 +68,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
+| `sparse_li_c8_all_layers`            | bool | `False` | Override per-layer quant-config filtering to select Sparse LI C8 for all relevant indexer layers. Requires Sparse LI C8 to be enabled. See [Sparse LI C8 layer selection](#sparse-li-c8-layer-selection). |
 | `kv_pool_range_debug`               | bool | `false` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
@@ -344,6 +345,41 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+### Sparse LI C8 layer selection
+
+`sparse_li_c8_all_layers` defaults to `false`, preserving the existing
+quant-config-based layer selection:
+
+- Without an active per-layer filter, all relevant indexer layers use C8
+  when Sparse LI C8 is enabled.
+- With the per-layer filter enabled, only layers marked for C8 use C8.
+  Unmarked layers use the non-C8 path, usually BF16.
+
+Set `sparse_li_c8_all_layers` to `true` to override this filter for
+all-layer C8 performance testing. Sparse LI C8 must already be enabled on
+a supported SFA model. On the current implementation, this is derived
+from `attention_config.indexer_kv_dtype`; setting the legacy
+`enable_sparse_li_c8` additional-config field alone is not sufficient.
+
+For example, on A3 with a compatible checkpoint:
+
+```bash
+vllm serve /path/to/model \
+    --attention-config '{"indexer_kv_dtype":"int8"}' \
+    --additional-config '{"sparse_li_c8_all_layers":true}'
+```
+
+Merge the flag into any existing `--additional-config` JSON. In PD deployments
+that transfer indexer caches, configure both P and D to use matching per-layer
+indexer cache formats. Setting the flag on only one side can cause a cache
+layout mismatch.
+
+This flag changes path selection only. It does not generate missing
+quantization parameters or establish that unmarked layers support C8.
+Before enabling it, confirm whether missing markers are incomplete metadata
+or an intentional choice to retain non-C8 layers, and validate model accuracy.
+The flag does not enable Sparse Flash Attention C8 or sparse KV offload.
 
 ### Example
 

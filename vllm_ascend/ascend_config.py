@@ -450,6 +450,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "sparse_li_c8_all_layers": false,
             "enable_sparse_li_c4": false,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
@@ -577,6 +578,9 @@ class AscendConfig:
         )
     )
     enable_prefill_mc2: bool = False
+    # When True, apply Sparse LI C8 to every layer (ignore the per-layer
+    # quant-config filter); requires enable_sparse_li_c8 to be derived True.
+    sparse_li_c8_all_layers: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     kv_pool_range_debug: bool = False
@@ -881,6 +885,8 @@ class AscendConfig:
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
+        if self.sparse_li_c8_all_layers and not self.enable_sparse_li_c8:
+            raise ValueError("sparse_li_c8_all_layers requires enable_sparse_li_c8 on an SFA model.")
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -1208,6 +1214,8 @@ class AscendConfig:
         return any(layer_id in layer_ids for layer_id in ids)
 
     def is_sparse_li_c8_layer(self, layer_name: str | None) -> bool:
+        if self.sparse_li_c8_all_layers:
+            return True
         return self._is_sparse_li_layer(
             layer_name,
             self.enable_sparse_li_c8,

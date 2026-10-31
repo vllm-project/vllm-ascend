@@ -1,0 +1,7 @@
+pr: 19711
+entries:
+  - category: config
+    text: >-
+      Added the optional sparse_li_c8_all_layers flag to override per-layer
+      quant-config filtering when Sparse LI C8 is enabled. The flag defaults
+      to false and does not generate missing quantization parameters.
