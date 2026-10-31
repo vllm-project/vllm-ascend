@@ -47,6 +47,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
+| `dsv41_metadata_async_config` | dict | `{}` | Opt-in A3 Model Runner V2 graph-external DeepSeek V4.1 target metadata. Disabled by default; see the experimental configuration below. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
@@ -342,3 +343,57 @@ non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
 prefill KV before cache writes; layer broadcasts restore prior-forward cache
 contents before attention. The broadcast decision uses the global scheduled
 batch, not PCP-local segment offsets.
+
+### A3 V2 asynchronous target metadata (experimental)
+
+`dsv41_metadata_async_config` overlaps DeepSeek V4.1 target SAS and QLI
+metadata with independent model computation on A3. It reuses the existing
+worker-owned `DeviceMetadataExecutor`; it does not change the metadata
+operators, launch CPU threads, or cache metadata across steps.
+
+Merge this key into the decode instance's existing `--additional-config`:
+
+```json
+{
+    "dsv41_metadata_async_config": {
+        "enabled": true,
+        "mode": "M1"
+    }
+}
+```
+
+Only `enabled` and `mode` are accepted. `enabled` must be a JSON boolean and
+defaults to `false`; `mode` defaults to `M2`:
+
+- `M1`: submit SAS (`ATTENTION`) and QLI (`INDEXER`) on the metadata stream.
+- `M2`: build SAS synchronously and submit only QLI on the metadata stream.
+
+Compressor tasks retain their synchronous preparation. The option requires
+`VLLM_USE_V2_MODEL_RUNNER=1`, A3, `DeepseekV41ForCausalLM`, a `kv_consumer`
+instance, and PP/PCP/DCP size one. LoRA and A5 packed-cache configurations are
+rejected when enabled. Omit the option or set `enabled` to `false` to retain
+the original path, including A5's existing graph-captured producers.
+
+A3 producers read dynamic Python scalar arguments and therefore stay outside
+the FULL graph. Each step rebuilds and submits its tasks; captured consumers
+wait/reset the corresponding group's event at first use. After replay is
+submitted, a main-stream fence protects the persistent buffers from the next
+step's producer. Events are keyed by actual capture-descriptor token counts,
+which may differ from the raw requested capture sizes with DSpark. Warmup,
+capture, and replay must use the same bucket and group-buffer frontier set.
+Changing either option requires rebuilding workers and recapturing graphs.
+
+The initial NPU experiments used ND1M caches, decode DP8/TP2, and DSpark with
+actual graph buckets 6 through 48. This does not validate other cache layouts,
+all graph sizes, or a universal performance improvement. Capture/producer/
+replay failures invalidate the A3 metadata state; recreate the worker instead
+of retrying the same state. The default remains disabled.
+
+Before enabling in production, validate numerical results and per-step scalar
+consistency across changing batch lengths, request arrival/completion, dummy
+inputs, and compression remainders. In particular,
+[#20193](https://github.com/vllm-project/vllm-ascend/pull/20193) discusses
+`max_seqlen_q` consistency with device `query_start_loc` in deferred metadata
+tasks. That proposal is separate from this scheduling option. Also verify
+FULL capture/replay, sustained load, and the existing A5 path on real NPUs;
+CPU event-order tests do not establish those properties.

@@ -50,6 +50,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.worker.metadata_async import finish_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -180,7 +181,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
+        succeeded = False
         try:
+            if hasattr(metadata, "validate_replay"):
+                metadata.validate_replay(desc.num_tokens)
             prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
             if prepare_engram is not None:
                 # Match FULL replay's DP padding before lookup consumes it.
@@ -198,13 +202,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 ):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                output = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                output = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            succeeded = True
+            return output
         finally:
-            if metadata is not None:
-                metadata.finish_replay()
+            finish_metadata(metadata, failed=not succeeded, replay=True)
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -271,6 +276,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
+        if hasattr(metadata, "configure_capture_sizes"):
+            if has_lora:
+                raise ValueError("A3 asynchronous metadata does not support LoRA graph capture")
+            metadata.configure_capture_sizes(self.capture_sizes)
         model = ModelWithContext(model, device_metadata=metadata)
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
@@ -278,9 +287,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
+        succeeded = False
         try:
             with communicator_switch():
-                return super().capture(
+                output = super().capture(
                     model,
                     model_state,
                     input_buffers,
@@ -294,10 +304,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
                 )
+            succeeded = True
+            return output
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
-            if metadata is not None:
-                metadata.finish()
+            finish_metadata(metadata, failed=not succeeded)
 
 
 class ModelWithContext(nn.Module):
@@ -325,16 +336,15 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
+        succeeded = False
         try:
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
-            return self.original_model(*args, **kwargs)
+            output = self.original_model(*args, **kwargs)
+            succeeded = True
+            return output
         finally:
-            # Warmup and actual capture receive separate prepare_attn calls.
-            # Retire each submission, including unused producers, after its
-            # consumers; do not wait for metadata at graph entry.
-            if self.device_metadata is not None:
-                self.device_metadata.finish()
+            finish_metadata(self.device_metadata, failed=not succeeded)
 
     def get_original_model(self):
         return self.original_model
