@@ -21,7 +21,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
+    AclGraphSleepPolicy,
     AclGraphSleepWakeupManager,
+    HcclSleepPolicy,
     HcclSleepWakeupManager,
     SleepWakeupManager,
 )
@@ -378,3 +380,55 @@ def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
 
     manager.wakeup(tags=["kv_cache"])
     manager.hccl.release_lifecycle_anchor.assert_called_once_with()
+
+
+def test_acl_graph_inplace_skips_recapture_on_main_path():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager.acl_policy = AclGraphSleepPolicy.INPLACE
+    wrapper = MagicMock()
+    wrapper.concrete_aclgraph_entries = {"keep": object()}
+    with patch(
+        "vllm_ascend.device_allocator.sleep_mem_optimized.acl_graph._acl_graph_wrappers",
+        [wrapper],
+    ):
+        manager.sleep()
+        manager.wakeup(tags=None)
+    model_runner.capture_model.assert_not_called()
+
+
+def test_hccl_lightweight_suspend_path_on_main():
+    worker = MagicMock()
+    worker._pp_send_work = []
+    manager = HcclSleepWakeupManager(MagicMock(), worker)
+    manager.hccl_policy = HcclSleepPolicy.LIGHTWEIGHT
+    manager.allow_fallback = False
+    with (
+        patch.object(manager, "_has_multi_rank_group", return_value=False),
+        patch.object(manager, "_suspend_all_comms", return_value=1),
+        patch.object(manager, "_resume_all_comms", return_value=1),
+        patch.object(manager, "refresh_moe_hccl_groups"),
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.npu.synchronize"),
+    ):
+        manager.sleep()
+        manager.wakeup()
+
+
+def test_acl_graph_inplace_fallback_when_entries_missing():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager.acl_policy = AclGraphSleepPolicy.INPLACE
+    manager.allow_fallback = True
+    manager._used_inplace = True
+    wrapper = MagicMock()
+    wrapper.concrete_aclgraph_entries = {}
+    with (
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.acl_graph._acl_graph_wrappers", [wrapper]),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
+    ):
+        manager.wakeup(tags=None)
+    model_runner.capture_model.assert_called_once_with()
