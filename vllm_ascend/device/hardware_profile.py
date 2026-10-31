@@ -131,6 +131,8 @@ class HardwareCapability(Enum):
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
     MC2_HIERARCHY_COMM = auto()
+    # Use the specialized small INT64 MoE counts prefix-sum kernel.
+    MOE_COUNTS_CUMSUM = auto()
     # Pass TP group/rank metadata required by the newer MoE dispatch/combine ABI.
     MOE_DISPATCH_EXTRA_ARGS = auto()
     # Pass shared-expert, expert-scale, quant-mode, and output-dtype metadata to MoE dispatch.
@@ -294,7 +296,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.MOE_COUNTS_CUMSUM, HardwareCapability.RMS_NORM_CAST},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
