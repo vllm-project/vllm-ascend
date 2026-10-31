@@ -88,6 +88,8 @@ class HardwareCapability(Enum):
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
+    # CompressorV2 arch22 supports long TH inputs with a 32-row FP32 ring.
+    DSV41_RING_COMPRESSOR = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -278,6 +280,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.DSV41_RING_COMPRESSOR,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -294,7 +297,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.DSV41_RING_COMPRESSOR},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
