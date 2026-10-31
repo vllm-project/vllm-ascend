@@ -598,9 +598,7 @@ def build_dspark_swa_indices(
         and build_dspark_swa_indices_triton is not None
         and query_start_loc.device.type == "npu"
         and num_decode_tokens is not None
-        and indices_output is None
-        and buffer is None
-        and lengths_output is None
+        and not (indices_output is not None and buffer is not None)
     ):
         return build_dspark_swa_indices_triton(
             query_start_loc,
@@ -608,6 +606,8 @@ def build_dspark_swa_indices(
             num_decode_tokens,
             index_width,
             window_size,
+            indices_output=(buffer[:num_decode_tokens] if buffer is not None else indices_output),
+            lengths_output=lengths_output,
         )
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
