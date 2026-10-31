@@ -188,6 +188,10 @@ class MiniMaxM3SparseForConditionalGeneration(
             "language_model.model.": "model.language_model.model.",
             "language_model.lm_head.": "model.language_model.lm_head.",
             "model.vision_tower.": "model.vision_tower.",
+            # Match legacy vision names before the generic vision_tower prefix.
+            "vision_tower.embeddings.proj.": "model.vision_tower.vision_model.embeddings.patch_embedding.",
+            "vision_tower.pre_layrnorm.": "model.vision_tower.vision_model.pre_layrnorm.",
+            "vision_tower.layers.": "model.vision_tower.vision_model.encoder.layers.",
             "vision_tower.": "model.vision_tower.",
             "multi_modal_projector.": ("model.vision_tower.multi_modal_projector."),
             "patch_merge_mlp.": "model.vision_tower.patch_merge_mlp.",
