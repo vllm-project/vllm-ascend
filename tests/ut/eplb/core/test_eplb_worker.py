@@ -23,6 +23,7 @@ baseline policy.
 """
 
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 import numpy as np
@@ -31,8 +32,24 @@ import torch
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess, EplbWorker
 
 
+@contextmanager
+def _ep_group(rank_in_group: int = 0):
+    """Stand in for vLLM's expert-parallel group during construction.
+
+    ``EplbWorker.__init__`` calls ``get_ep_group().rank_in_group``. The real
+    EP group only exists after vLLM's process-group setup, so the lookup is
+    patched with a rank-``rank_in_group`` group for the construction call.
+    """
+    with mock.patch(
+        "vllm_ascend.eplb.core.eplb_worker.get_ep_group",
+        return_value=mock.Mock(rank_in_group=rank_in_group),
+    ):
+        yield
+
+
 def make_worker(shared_dict, policy_type=0, tp_size=None) -> EplbWorker:
-    return EplbWorker(shared_dict, policy_type, True, tp_size)
+    with _ep_group():
+        return EplbWorker(shared_dict, policy_type, True, tp_size)
 
 
 class TestEplbWorkerDataAccess(unittest.TestCase):
@@ -309,7 +326,10 @@ class TestCalculateRebalanceAndProcess(unittest.TestCase):
     def test_eplb_process_constructs_worker(self):
         # Queue() would create OS pipes, which the unit test environment does
         # not need: stub it out.
-        with mock.patch("vllm_ascend.eplb.core.eplb_worker.Queue"):
+        with (
+            mock.patch("vllm_ascend.eplb.core.eplb_worker.Queue"),
+            _ep_group(),
+        ):
             process = EplbProcess({}, policy_type=0)
         self.assertIsInstance(process.worker, EplbWorker)
         self.assertEqual(process.worker.policy_type, 0)
