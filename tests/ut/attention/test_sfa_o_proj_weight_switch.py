@@ -357,6 +357,9 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.o_proj.tp_size = 2
         output = torch.empty_like(expected)
         with (
+            # Force the legacy o-proj path: oproj_tp_enable() reads the global
+            # AscendConfig, which is not initialized on fresh xdist workers.
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False),
             patch("torch.distributed.all_to_all_single") as exchange,
             patch("torch.distributed.reduce_scatter_tensor") as reduce,
         ):

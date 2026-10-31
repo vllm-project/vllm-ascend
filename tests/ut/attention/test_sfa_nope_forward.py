@@ -410,6 +410,9 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     output = torch.full((padded_tokens, output_dim), 123.0)
 
     with (
+        # Force the legacy o-proj path: oproj_tp_enable() reads the global
+        # AscendConfig, which is not initialized on fresh xdist workers.
+        patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False),
         patch.object(
             sparse_mla,
             "get_forward_context",
