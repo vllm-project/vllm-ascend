@@ -319,7 +319,7 @@ class EplbConfig:
             value = getattr(self, key)
             if not isinstance(value, int):
                 raise TypeError(f"{key} must be an integer")
-            if value < 0:
+            if value < (0 if key == "num_redundant_experts" else 1):
                 raise ValueError(f"{key} must greater than 0; got {value} instead")
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
