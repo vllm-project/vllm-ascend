@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import vllm_ascend.ops.fused_moe.prepare_finalize as prepare_module
+import vllm_ascend.ops.fused_moe.routed_experts as routed_module
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 
 
@@ -74,3 +75,49 @@ def test_pcp_route_gather_preserves_rows_and_waits_before_consumption(monkeypatc
             assert events[1] == ("select", 288)
     else:
         assert events == [("gather", 4), ("select", 288), ("gather", 16)]
+
+
+@pytest.mark.parametrize(
+    "max_rows,profiling,scoring",
+    [(1024, False, "sigmoid"), (1023, False, "sigmoid"), (1024, True, "sigmoid"), (1024, False, "softmax")],
+)
+def test_local_topk_selected_automatically_for_supported_batches(monkeypatch, max_rows, profiling, scoring):
+    hidden = torch.zeros(1, 4)
+    logits = torch.zeros(1, 288)
+    prepared = SimpleNamespace(
+        hidden_states=hidden, router_logits=logits, mc2_mask=None, padded_hidden_states_shape=None, pertoken_scale=None
+    )
+    weights, ids = torch.ones(1, 8), torch.zeros(1, 8, dtype=torch.int32)
+    comm = routed_module.AllGatherCommImpl.__new__(routed_module.AllGatherCommImpl)
+    comm.prepare = Mock(return_value=prepared)
+    comm.prepare_finalize = SimpleNamespace(prepare_local_topk=Mock(return_value=(prepared, weights, ids)))
+    comm.finalize = Mock(return_value=hidden)
+    router = type("AscendFusedTopKRouter", (), {"top_k": 8, "scoring_func": scoring})()
+    layer = SimpleNamespace(
+        enable_npugraph_ex_static_kernel=False,
+        moe_config=SimpleNamespace(pcp_size=8, dp_size=1, is_sequence_parallel=False),
+        dynamic_eplb=False,
+        log2phy=None,
+        mix_placement=False,
+        router=router,
+        quant_type=None,
+        _select_experts=Mock(return_value=(weights, ids)),
+        quant_method=SimpleNamespace(apply=Mock(return_value=SimpleNamespace(routed_out=hidden))),
+        _use_v2_model_runner=False,
+        return_with_event=False,
+    )
+    monkeypatch.setattr(routed_module, "get_forward_context", lambda: SimpleNamespace())
+    monkeypatch.setattr(routed_module, "get_moe_comm_method", lambda *_: comm)
+    monkeypatch.setattr(routed_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(routed_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
+    monkeypatch.setattr(
+        routed_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(in_profile_run=profiling, max_tokens_across_pcp=max_rows, moe_comm_type=None),
+    )
+    result = routed_module.AscendRoutedExperts.forward_impl(layer, hidden_states=hidden, router_logits=logits)
+    assert result is hidden
+    optimized = max_rows >= 1024 and not profiling and scoring == "sigmoid"
+    assert comm.prepare_finalize.prepare_local_topk.call_count == int(optimized)
+    assert comm.prepare.call_count == int(not optimized)
+    assert layer._select_experts.call_count == int(not optimized)

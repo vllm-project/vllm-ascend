@@ -15,7 +15,6 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.envs as envs
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -83,7 +82,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.enable_main_kv_async = envs.VLLM_ASCEND_PCP_MAIN_KV_ASYNC
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
         self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
         if not self.enable_pcp_o_proj_weight_sharding:
@@ -365,8 +363,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         # Decode, packed/quantized caches, graph and other layouts stay on the
         # established path. All ranks gate on the global prefill flag.
         if (
-            not self.enable_main_kv_async
-            or not self.vllm_config.model_config.enforce_eager
+            not self.vllm_config.model_config.enforce_eager
             or self.qk_rope_head_dim != 0
             or self.enable_sparse_sfa_c8
             or kv_no_split.dtype != torch.bfloat16

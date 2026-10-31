@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
-import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -442,9 +441,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
-        self._pcp_hidden_early_enabled = (
-            envs.VLLM_ASCEND_PCP_MOE_HIDDEN_EARLY
-            and vllm_config.model_config.enforce_eager
+        self._pcp_hidden_early_supported = (
+            vllm_config.model_config.enforce_eager
             and vllm_config.lora_config is None
             and vllm_config.speculative_config is None
             and not ascend_config.enable_force_eplb
@@ -715,7 +713,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # The first prototype deliberately excludes decode and small batches.
         cfg = self.moe_config
         if (
-            not self._pcp_hidden_early_enabled
+            not self._pcp_hidden_early_supported
             or cfg.tp_size != 1
             or cfg.dp_size != 1
             or cfg.pcp_size != 8
@@ -768,8 +766,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # Small batches retain the original path: the 8-rank microbenchmark
         # found packing overhead dominates at decode sizes.
         use_local_topk = (
-            envs.VLLM_ASCEND_PCP_LOCAL_TOPK
-            and isinstance(moe_comm_method, AllGatherCommImpl)
+            isinstance(moe_comm_method, AllGatherCommImpl)
             and self.moe_config.pcp_size == 8
             and self.moe_config.dp_size == 1
             and get_tensor_model_parallel_world_size() == 1

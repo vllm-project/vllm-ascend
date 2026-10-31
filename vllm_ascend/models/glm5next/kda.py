@@ -26,7 +26,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-import vllm_ascend.envs as envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -467,11 +466,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             layer_name=self.prefix,
         )
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        use_pcp_reduce_scatter = (
-            has_pcp_prefill
-            and isinstance(self.o_proj, PCPRowParallelLinear)
-            and envs.VLLM_ASCEND_KDA_PCP_REDUCE_SCATTER
-        )
+        use_pcp_reduce_scatter = has_pcp_prefill and isinstance(self.o_proj, PCPRowParallelLinear)
         if has_pcp_prefill:
             assert pcp_context is not None
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:

@@ -15,7 +15,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 @pytest.mark.parametrize("actual_rows", [2, 4])
 def test_main_kv_completion_preserves_padding_slots_and_replicated_prefix(monkeypatch, replicated, actual_rows):
     impl = pcp_module.AscendSFAPCPImpl.__new__(pcp_module.AscendSFAPCPImpl)
-    impl.enable_main_kv_async = True
     impl.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enforce_eager=True))
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = False
@@ -69,10 +68,9 @@ def test_main_kv_completion_preserves_padding_slots_and_replicated_prefix(monkey
     assert torch.equal(cache[0], expected)
 
 
-@pytest.mark.parametrize("gate", ["disabled", "graph", "rope", "c8", "fp32"])
+@pytest.mark.parametrize("gate", ["graph", "rope", "c8", "fp32"])
 def test_main_kv_unsupported_modes_do_not_submit_collectives(monkeypatch, gate):
     impl = pcp_module.AscendSFAPCPImpl.__new__(pcp_module.AscendSFAPCPImpl)
-    impl.enable_main_kv_async = gate != "disabled"
     impl.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enforce_eager=gate != "graph"))
     impl.qk_rope_head_dim = 8 if gate == "rope" else 0
     impl.enable_sparse_sfa_c8 = gate == "c8"

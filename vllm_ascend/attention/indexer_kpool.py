@@ -24,7 +24,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-import vllm_ascend.envs as envs
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -672,7 +671,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self, k_hidden_states: torch.Tensor, indexer_metadata: AscendIndexerKPoolMetadata
     ) -> torch.Tensor | KPoolHiddenGather:
         """Launch ordinary PCP keys before the independent MLA/indexer queries."""
-        if not envs.VLLM_ASCEND_PCP_KPOOL_ASYNC or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE:
+        if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE:
             return k_hidden_states
         restore_indices = indexer_metadata.pcp_hidden_restore_indices
         # DSA-CP has a separate TP gather and query collective ordering.

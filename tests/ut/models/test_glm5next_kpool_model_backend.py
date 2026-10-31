@@ -607,12 +607,10 @@ def test_cann_indexer_writes_caches_before_optional_selection(
 @pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("compute_topk", [False, True])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-@pytest.mark.parametrize("enabled", [False, True])
 def test_backend_restores_pcp_keys_before_kpool_cache_write(
-    monkeypatch, pcp_local_token_count, actual_tokens, prefetch, compute_topk, graph_mode, enabled
+    monkeypatch, pcp_local_token_count, actual_tokens, prefetch, compute_topk, graph_mode
 ) -> None:
-    monkeypatch.setattr(backend_module.envs, "VLLM_ASCEND_PCP_KPOOL_ASYNC", enabled)
-    uses_async = prefetch and enabled and graph_mode == CUDAGraphMode.NONE
+    uses_async = prefetch and graph_mode == CUDAGraphMode.NONE
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -731,7 +729,6 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
 
 @pytest.mark.parametrize("dsa_cp", [False, True])
 def test_pcp_hidden_prefetch_leaves_other_layouts_unchanged(monkeypatch, dsa_cp):
-    monkeypatch.setattr(backend_module.envs, "VLLM_ASCEND_PCP_KPOOL_ASYNC", True)
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
     )
