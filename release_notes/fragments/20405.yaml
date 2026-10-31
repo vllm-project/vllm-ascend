@@ -1,0 +1,4 @@
+pr: 20405
+entries:
+  - category: performance
+    text: Precompile MLA prefill attention-update Triton kernels during JIT warmup, covering both full and residual merges to avoid first-use compilation stalls.
