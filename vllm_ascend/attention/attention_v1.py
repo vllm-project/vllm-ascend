@@ -213,6 +213,10 @@ class AscendMetadata:
     # (batch_size, max_blocks_per_seq)
     block_tables: torch.Tensor = None
 
+    # Per-step FIA read addresses for block-interleaved K/V. Never modify the
+    # original table: cache writers, Mamba and other backends still use it.
+    interleaved_fia_block_tables: torch.Tensor | None = None
+
     # The indices of the token slots that input tokens will be stored into.
     # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the
     # three tokens are stored in the 3rd slot in block 2, 2nd slot in block 0,
@@ -515,12 +519,36 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return attn_metadata
 
 
+def _get_interleaved_fia_block_tables(metadata: AscendMetadata) -> torch.Tensor:
+    if metadata.interleaved_fia_block_tables is None:
+        table = metadata.block_tables
+        metadata.interleaved_fia_block_tables = torch.where(table < 0, table, table * 2)
+    return metadata.interleaved_fia_block_tables
+
+
+def _is_block_interleaved_kv_cache(key: torch.Tensor, value: torch.Tensor) -> bool:
+    if key.ndim != 4 or key.shape != value.shape or key.dtype != value.dtype or key.device != value.device:
+        return False
+    if key.dtype not in (torch.float16, torch.bfloat16) or key.shape[0] == 0:
+        return False
+    _, block_size, heads, head_size = key.shape
+    page = block_size * heads * head_size
+    stride = (2 * page, heads * head_size, head_size, 1)
+    return (
+        key.stride() == stride
+        and value.stride() == stride
+        and key.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+        and value.storage_offset() == key.storage_offset() + page
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FIAParamProvider:
     layer_name: str | None
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    is_interleaved_kv: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -529,7 +557,13 @@ class FIAParamProvider:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
+                "block_table": (
+                    None
+                    if self.is_non_pa
+                    else _get_interleaved_fia_block_tables(metadata)
+                    if self.is_interleaved_kv
+                    else metadata.block_tables
+                ),
             }
         else:
             return {
@@ -749,6 +783,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                is_interleaved_kv=self._use_interleaved_fia_cache(),
             ),
         )
         return output, num_tokens
@@ -867,6 +902,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             _, _, block_size, _ = key.shape
         return key, value, block_size
 
+    def _use_interleaved_fia_cache(self) -> bool:
+        # Limit this to ordinary ND FIA. C8/NZ, sinks, SWA and CP backends keep
+        # their existing addressing and graph parameter providers.
+        return (
+            type(self) is AscendAttentionBackendImpl
+            and not self.use_bnsd_kv_cache
+            and not self.enable_c8_quant
+            and self.sinks is None
+            and self.sliding_window is None
+            and self.key_cache is not None
+            and self.value_cache is not None
+            and _is_block_interleaved_kv_cache(self.key_cache, self.value_cache)
+        )
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -908,6 +957,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        if block_table is not None and self._use_interleaved_fia_cache():
+            assert self.key_cache is not None and self.value_cache is not None
+            # Storage is K0,V0,K1,V1,... . Expose two overlapping dense read
+            # aliases, starting at K0 and V0, and address logical block b at
+            # dense block 2*b. Both views have 2*N-1 blocks and stay in bounds.
+            # Writers retain the original strided views; no KV copy/allocation
+            # or change to hybrid page ownership is involved.
+            num_blocks, block_size, heads, head_size = self.key_cache.shape
+            hidden = heads * head_size
+            shape = (2 * num_blocks - 1, block_size, hidden)
+            stride = (block_size * hidden, hidden, 1)
+            key = self.key_cache.as_strided(shape, stride, self.key_cache.storage_offset())
+            value = self.value_cache.as_strided(shape, stride, self.value_cache.storage_offset())
+            block_table = _get_interleaved_fia_block_tables(attn_metadata)[: block_table.shape[0]]
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
