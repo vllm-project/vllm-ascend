@@ -704,6 +704,10 @@
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen_prefix",
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen",
       "vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8",
-      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8"
+      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8",
+       "vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num16",
+       "vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num16",
+       "vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num1",
+       "vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num1"
     ]
 }

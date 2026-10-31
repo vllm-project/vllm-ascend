@@ -142,6 +142,8 @@ class AisbenchRunner:
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.spec_decode_baseline = aisbench_config.get("baseline", [])
+        # 修改
+        self.prefix_num = aisbench_config.get("prefix_num")
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
@@ -234,6 +236,9 @@ class AisbenchRunner:
             subprocess.call(command)
         if self.task_type == "performance":
             conf_path = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}.py")
+            #修改
+            if self.prefix_num and self.prefix_num > 1:
+                self.dataset_path = self._regroup_prefix(self.dataset_path)
             if self.dataset_conf.startswith("textvqa"):
                 self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
             with open(conf_path, encoding="utf-8") as f:
@@ -519,3 +524,24 @@ def maybe_download_from_modelscope(
         else:
             model_path = model
     return model_path
+
+
+#修改
+def _regroup_prefix(self, dataset_path):
+    """将数据集重组为 prefix_num 个前缀组"""
+    import json
+
+    with open(dataset_path, encoding="utf-8") as f:
+        lines = [json.loads(line) for line in f]
+
+    prefixes = [lines[i]["question"] for i in range(self.prefix_num)]
+    for i, line in enumerate(lines):
+        prefix = prefixes[i % self.prefix_num]
+        suffix = line["question"][len(prefix):]
+        line["question"] = prefix + suffix
+
+    new_path = dataset_path + f".prefix_num{self.prefix_num}.jsonl"
+    with open(new_path, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    return new_path
