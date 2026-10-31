@@ -6,7 +6,7 @@ import torch
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
@@ -190,13 +190,15 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_format_cast")
     @patch("torch.Tensor.npu", new=lambda self: self, create=True)
-    def test_process_weights_after_loading(self, mock_maybe_trans_nz, mock_get_ascend_config):
-        mock_maybe_trans_nz.side_effect = identity
+    def test_process_weights_after_loading(self, mock_format_cast, mock_get_ascend_config):
+        mock_format_cast.side_effect = identity
         mock_get_ascend_config.return_value.enable_fused_mc2 = 0
         layer = self.build_layer()
         self.quant_method.process_weights_after_loading(layer)
+        self.assertEqual(mock_format_cast.call_count, 2)
+        self.assertTrue(all(call.args[1] == ACL_FORMAT_FRACTAL_NZ for call in mock_format_cast.call_args_list))
         self.assertEqual(layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
         self.assertEqual(layer.w2_scale_bias.data.shape, (self.experts, self.output_size))
@@ -215,14 +217,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_format_cast")
     @patch("torch.Tensor.npu", new=lambda self: self, create=True)
-    def test_process_weights_after_loading_compressed_tensors(self, mock_maybe_trans_nz, mock_get_ascend_config):
-        mock_maybe_trans_nz.side_effect = identity
+    def test_process_weights_after_loading_compressed_tensors(self, mock_format_cast, mock_get_ascend_config):
+        mock_format_cast.side_effect = identity
         mock_get_ascend_config.return_value.enable_fused_mc2 = 0
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         layer = self.build_layer_compressed_tensors()
         self.quant_method.process_weights_after_loading(layer)
+        self.assertEqual(mock_format_cast.call_count, 2)
+        self.assertTrue(all(call.args[1] == ACL_FORMAT_FRACTAL_NZ for call in mock_format_cast.call_args_list))
         self.assertTrue(hasattr(layer, "w13_scale_bias"))
         self.assertEqual(layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
