@@ -16,7 +16,9 @@
 #
 
 import copy
+import tempfile
 import unittest
+from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -32,6 +34,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from zmq.constants import REP
+from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -191,6 +195,7 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
     config.kv_transfer_config.get_from_extra_config.return_value = True
     config.parallel_config.data_parallel_rank = 0
+    config.parallel_config.data_parallel_index = 0
     config.parallel_config.prefill_context_parallel_size = 1
     config.parallel_config.decode_context_parallel_size = 1
     config.parallel_config.tensor_parallel_size = 1
@@ -242,10 +247,29 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
             with self.subTest(extra_config=extra_config, rank=rank):
                 config = MagicMock()
                 config.parallel_config.data_parallel_rank = rank
+                config.parallel_config.data_parallel_index = rank
                 config.kv_transfer_config.kv_connector_extra_config = extra_config
                 result = get_zmq_rpc_path_lookup(config)
                 self.assertIn(f"lookup_rpc_port_{port}", result)
                 self.assertIn(f"dp_rank{rank}", result)
+
+    def test_independent_dp_lookup_servers_bind_distinct_paths(self):
+        """Two dense engines with compute DP rank zero need separate RPC servers."""
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
+        with tempfile.TemporaryDirectory(prefix="kv-dp-") as rpc_dir, ExitStack() as stack:
+            stack.enter_context(patch(f"{module}.envs.VLLM_RPC_BASE_PATH", rpc_dir))
+            context = stack.enter_context(Context())
+            paths = []
+            for dp_index in range(2):
+                config = SimpleNamespace(
+                    parallel_config=SimpleNamespace(data_parallel_rank=0, data_parallel_index=dp_index),
+                    kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"lookup_rpc_port": "0"}),
+                )
+                paths.append(get_zmq_rpc_path_lookup(config))
+            self.assertNotEqual(paths[0], paths[1])
+            for path in paths:
+                server = stack.enter_context(context.socket(REP))
+                server.bind(path)
 
 
 class TestKVPoolScheduler(unittest.TestCase):
@@ -641,6 +665,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
@@ -919,6 +944,7 @@ class TestLookupKeyClient(unittest.TestCase):
     def test_lookup(self, mock_encoder_cls, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -946,6 +972,7 @@ class TestLookupKeyClient(unittest.TestCase):
     def test_close(self, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
         mock_socket = MagicMock()
@@ -1208,6 +1235,7 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.data_parallel_index = 0
         config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1

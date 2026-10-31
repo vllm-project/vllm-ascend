@@ -1201,7 +1201,12 @@ class LookupKeyClient:
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    # NOTE: This isolates lookup IPC paths only. MooncakeConnector (V1) worker
+    # handshake ports and MooncakeConnectorV2 scheduler control ports may still
+    # overlap ports reserved by other workers or components. DP indices do not
+    # guarantee disjoint TCP port ranges.
+    # Dense engines reset their compute DP rank, but retain their serving index.
+    dp_index = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
@@ -1215,4 +1220,4 @@ def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_index}"
