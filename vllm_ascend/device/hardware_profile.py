@@ -68,6 +68,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
+    # Public graph-pool VA remapping validated for sleepable MRV2 graphs.
+    SLEEP_GRAPH_REUSE = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
@@ -354,6 +356,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
+                    HardwareCapability.SLEEP_GRAPH_REUSE,
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
