@@ -4,7 +4,6 @@ from typing import Any
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -14,17 +13,13 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.compilation.acl_graph import (
-    set_draft_graph_params,
-    update_full_graph_params,
-)
+
 from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -53,12 +48,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # speculative decoding), so derive them from the capture descriptors
         # instead of the raw config sizes.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # DFlash's parallel drafting forward has its own dedicated draft graph
-        # path, independent of Eagle's prefill/decode split, so it always uses
-        # the default draft params bucket (is_draft_model_prefill stays False in
-        # both capture and replay to keep them consistent).
-        if super().needs_capture():
-            set_draft_graph_params(self.capture_sizes)
 
     def capture(
         self,
@@ -95,8 +84,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
-        num_tokens = desc.num_tokens
-        attn_backend = list(self.speculator.attn_backends.values())[0]
         if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.
@@ -105,44 +92,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, draft_attn_metadatas)
-        else:
-            # This will be removed once the refactoring is fully complete.
-            return self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
-
-    def _graph_replay(self, desc, attn_backend, num_tokens, draft_attn_metadatas):
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
-        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
-        # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
-
-        with set_forward_context(
-            self.speculator.model_state.attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=desc.cg_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            batch_descriptor=None,  # Full graph model don't need batch_descriptor
-            slot_mapping=None,
-        ):
-            _EXTRA_CTX.is_draft_model = True
-            _EXTRA_CTX.is_draft_model_prefill = False
-            forward_context = get_forward_context()
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
-                self.vllm_config,
-                self.speculator.speculative_config,
-                draft_attn_metadatas=draft_attn_metadatas,
-            )
-        return ret
-
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         resolved_tasks = graph.resolve_tasks(ContextSource(draft_attn_metadatas[0]))
