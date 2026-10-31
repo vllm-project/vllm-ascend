@@ -30,6 +30,56 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.addCleanup(format_cast.stop)
         format_cast.start()
 
+    def test_dsa_grouped_layout_and_reload(self):
+        layer = nn.Module()
+        layer.dsa_o_lora_rank = 8
+        layer.skip_weight_nz_conversion = True
+        for iteration in range(3):
+            weight = ((torch.arange(24 * 128).reshape(24, 128) + iteration) % 120).to(torch.uint8)
+            scales = ((torch.arange(24 * 4).reshape(24, 4) + iteration) % 250).to(torch.uint8)
+            if iteration == 0:
+                layer.weight = nn.Parameter(weight.view(torch.float8_e4m3fn), requires_grad=False)
+                layer.weight_scale = nn.Parameter(scales, requires_grad=False)
+            else:
+                self.scheme.restore_weights_for_rl_loading(layer)
+                self.assertEqual(layer.weight.shape, (24, 128))
+                self.assertEqual(layer.weight_scale.shape, (24, 4))
+                layer.weight.data.copy_(weight.view(torch.float8_e4m3fn))
+                layer.weight_scale.data.copy_(scales)
+            with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz") as nz:
+                self.scheme.process_weights_after_loading(layer)
+                nz.assert_not_called()
+            self.assertEqual(layer.weight.shape, (3, 128, 8))
+            self.assertEqual(layer.weight_scale.shape, (3, 2, 8, 2))
+            self.assertTrue(torch.equal(layer.weight.transpose(1, 2).reshape(24, 128).view(torch.uint8), weight))
+            self.assertTrue(torch.equal(layer.weight_scale.transpose(1, 2).reshape(24, 4), scales))
+            addresses = (layer.weight.data_ptr(), layer.weight_scale.data_ptr())
+            if iteration == 0:
+                original_addresses = addresses
+            self.assertEqual(addresses, original_addresses)
+            self.scheme.process_weights_after_loading(layer)
+            self.assertEqual((layer.weight.data_ptr(), layer.weight_scale.data_ptr()), addresses)
+
+    def test_dsa_invalid_output_groups(self):
+        for rank in (0, -1, 5):
+            layer = nn.Module()
+            layer.dsa_o_lora_rank = rank
+            layer.weight = nn.Parameter(torch.zeros(24, 128).to(torch.float8_e4m3fn), requires_grad=False)
+            layer.weight_scale = nn.Parameter(torch.ones(24, 4, dtype=torch.uint8), requires_grad=False)
+            with self.assertRaises(ValueError):
+                self.scheme.process_weights_after_loading(layer)
+
+    def test_dsa_nd_flag_without_grouping(self):
+        layer = nn.Module()
+        layer.skip_weight_nz_conversion = True
+        layer.weight = nn.Parameter(torch.zeros(24, 128).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.ones(24, 4, dtype=torch.uint8), requires_grad=False)
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz") as nz:
+            self.scheme.process_weights_after_loading(layer)
+            nz.assert_not_called()
+        self.assertEqual(layer.weight.shape, (128, 24))
+        self.assertEqual(layer.weight_scale.shape, (2, 24, 2))
+
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
         vllm_config.quant_config = SimpleNamespace()
