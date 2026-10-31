@@ -33,10 +33,10 @@ from vllm.logger import logger
 __all__ = ["check_dp_rpc_port_available", "find_tcp_listener"]
 
 
-def _resolve_ipv4(host: str) -> set[str]:
-    """Return the IPv4 addresses that ``host`` resolves to."""
+def _resolve_ip(host: str) -> set[str]:
+    """Return the IP addresses that ``host`` resolves to."""
     try:
-        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError):
         return set()
     return {str(info[4][0]) for info in infos}
@@ -44,10 +44,12 @@ def _resolve_ipv4(host: str) -> set[str]:
 
 def _address_matches(listen_ip: str, host: str) -> bool:
     """Whether a socket bound to ``listen_ip`` also owns ``host``."""
-    if listen_ip in ("0.0.0.0", ""):
-        # A wildcard listener owns every local address of the port.
+    wildcards = ("0.0.0.0", "::", "")
+    if listen_ip in wildcards or host in wildcards:
+        # A wildcard listener owns every local address of the port, and
+        # binding a wildcard address conflicts with any existing listener.
         return True
-    return listen_ip in _resolve_ipv4(host)
+    return listen_ip in _resolve_ip(host)
 
 
 def find_tcp_listener(host: str, port: int) -> tuple[int, str] | None:
