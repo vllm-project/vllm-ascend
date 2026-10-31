@@ -1044,14 +1044,76 @@ class SparseKVOffloadConfig:
     Configuration for the Sparse KV cache offloading.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
-        self.enabled = bool(user_config.get("enabled", False))
-        if not self.enabled:
-            return
+    _ALLOWED_KEYS = {
+        "enabled",
+        "topk_buffer_size",
+        "dram_size_per_dp_GB",
+        "keep_device_kv_cache",
+        "use_fused_overlap",
+        "host_backend",
+        "lru_max_threads",
+    }
 
+    @staticmethod
+    def _parse_bool(value: Any, field_name: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
+        raise ValueError(f"sparse_kv_offload_config.{field_name} must be a boolean")
+
+    @classmethod
+    def from_additional_config(cls, vllm_config: "VllmConfig", user_config: Any) -> "SparseKVOffloadConfig":
+        return cls(vllm_config, user_config)
+
+    def __init__(self, vllm_config: "VllmConfig", user_config: Any):
+        if not isinstance(user_config, dict):
+            raise ValueError(
+                f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
+            )
+        unknown_keys = set(user_config) - self._ALLOWED_KEYS
+        if unknown_keys:
+            raise ValueError("Unknown sparse_kv_offload_config option(s): " + ", ".join(sorted(unknown_keys)))
+
+        self.enabled = self._parse_bool(user_config.get("enabled", False), "enabled")
         self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
         self.dram_size_per_dp_GB = int(user_config.get("dram_size_per_dp_GB", 128))
-        self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
+        self.keep_device_kv_cache = self._parse_bool(
+            user_config.get("keep_device_kv_cache", False),
+            "keep_device_kv_cache",
+        )
+        self.use_fused_overlap = self._parse_bool(
+            user_config.get("use_fused_overlap", False),
+            "use_fused_overlap",
+        )
+        self.lru_max_threads = user_config.get("lru_max_threads", 8)
+        if type(self.lru_max_threads) is not int or self.lru_max_threads <= 0:
+            raise ValueError("sparse_kv_offload_config.lru_max_threads must be a positive integer")
+        self.host_backend = str(user_config.get("host_backend", "memfabric"))
+        if self.host_backend not in {"memfabric", "mooncake"}:
+            raise ValueError("sparse_kv_offload_config.host_backend must be 'memfabric' or 'mooncake'")
+        if self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.dram_size_per_dp_GB <= 0:
+            raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if self.enabled and self.host_backend == "mooncake":
+            if not self.use_fused_overlap:
+                raise ValueError("sparse_kv_offload_config.host_backend='mooncake' requires use_fused_overlap=true")
+            if self.keep_device_kv_cache:
+                raise ValueError(
+                    "sparse_kv_offload_config.host_backend='mooncake' is "
+                    "only supported for PD-disaggregated decode; "
+                    "keep_device_kv_cache must be false"
+                )
+
+        if not self.enabled:
+            return
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")

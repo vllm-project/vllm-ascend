@@ -166,6 +166,11 @@ docker run --rm \
 ## Install Mooncake
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
+
+The `v0.3.9` checkout below is the existing standard-transfer example.
+For Decode sparse offload, use the newer qualified NPU build described in
+[Using MooncakeConnectorV1 with Decode sparse offload](#using-mooncakeconnectorv1-with-decode-sparse-offload).
+
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -228,6 +233,85 @@ On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which
 !!! warning
 
     If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
+
+### Using MooncakeConnectorV1 with Decode sparse offload
+
+This mode transfers Prefill Main KV directly into Decode Mooncake host memory
+(RD2H), while transferring Indexer KV into Decode NPU memory (D2D). This host
+memory is allocated for Decode sparse offload and is separate from the host
+pool used for Prefill layerwise KV cache offload. Both sides use
+`MooncakeConnectorV1`.
+
+Prepare both nodes with CANN `9.2.0`, matching A3 ops/HIXL libraries, and
+HDK `25.5.1` with matching firmware. Use the qualified Mooncake NPU `0.3.13`
+PR3952 build, including the CANN `9.2.0` shared-segment device-ID fix,
+specified in [Mooncake dependencies](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md#mooncake-dependencies).
+
+Use the existing non-layerwise model launch options and add the Connector
+configuration below. The example uses DP=1 and TP=2 on both sides; replace
+the `prefill` and `decode` topology values with the actual launch settings on
+both nodes. These are Connector configuration fragments, not complete model
+launch commands.
+
+#### Prefill Connector configuration
+
+Keep `sparse_kv_offload_config` disabled on Prefill. Set `dsa_pd_offload` to
+JSON boolean `true` inside `kv_connector_extra_config`:
+
+```bash
+--kv-transfer-config '{
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_buffer_device": "npu",
+    "kv_role": "kv_producer",
+    "kv_port": 56000,
+    "kv_connector_extra_config": {
+        "use_ascend_direct": true,
+        "dsa_pd_offload": true,
+        "prefill": {"dp_size": 1, "tp_size": 2, "pp_size": 1},
+        "decode": {"dp_size": 1, "tp_size": 2, "pp_size": 1}
+    }
+}'
+```
+
+#### Decode Connector configuration
+
+Enable the [Mooncake Decode backend](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md#mooncake-backend)
+with `use_fused_overlap=true` and `keep_device_kv_cache=false`. Add:
+
+```bash
+--kv-transfer-config '{
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_buffer_device": "npu",
+    "kv_role": "kv_consumer",
+    "kv_port": 57000,
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+        "use_ascend_direct": true,
+        "dsa_pd_offload": true,
+        "prefill": {"dp_size": 1, "tp_size": 2, "pp_size": 1},
+        "decode": {"dp_size": 1, "tp_size": 2, "pp_size": 1}
+    }
+}'
+```
+
+Requirements for this combination:
+
+- Enable `dsa_pd_offload` on both the producer and consumer; it does not replace
+  the Decode `sparse_kv_offload_config`.
+- Decode must set `kv_load_failure_policy="fail"`. The Connector rejects
+  other failure policies for DSA Host offload.
+- Keep the declared DP/TP topology consistent across both Connector
+  configurations and the actual model launch parameters. Decode PP must be 1.
+- Reserve the normal Mooncake handshake and transport ports described above.
+- Prefill layerwise KV cache offload is not supported with this sparse-offload
+  path. Use the existing non-layerwise deployment options.
+
+#### Proxy for Decode sparse offload
+
+Start the ordinary `load_balance_proxy_server_example.py`, not
+`load_balance_proxy_layerwise_server_example.py`, after both services are
+ready. See the [Mooncake sparse-offload proxy example](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md#mooncake-sparse-offload-proxy).
+When using external Decode DP, register all Decode API endpoints with the proxy.
 
 ### launch_online_dp.py
 
