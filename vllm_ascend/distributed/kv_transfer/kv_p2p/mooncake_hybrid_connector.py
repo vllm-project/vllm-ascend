@@ -107,6 +107,20 @@ class _SharedPage:
     block_stride: int
 
 
+def _min_data_ptr(layer_tensors: tuple[torch.Tensor, ...]) -> int:
+    """Return the lowest data pointer among a layer's non-empty tensors.
+
+    Empty placeholder views report ``data_ptr() == 0`` and must not be used to
+    resolve a page base, otherwise the base resolves to address 0.
+    """
+    ptrs = [tensor.data_ptr() for tensor in layer_tensors if tensor.numel() > 0 and tensor.data_ptr() != 0]
+    if not ptrs:
+        raise ValueError(
+            f"KV cache layer has no materialized tensor: shapes={[tuple(tensor.shape) for tensor in layer_tensors]}."
+        )
+    return min(ptrs)
+
+
 def _reconstruct_shared_pages(
     kv_cache_config: KVCacheConfig,
     kv_caches: dict[str, Any],
@@ -135,12 +149,12 @@ def _reconstruct_shared_pages(
             )
 
         if descriptor.layer_stride == 0:
-            page_base = min(tensor.data_ptr() for _, _, layer_tensors in descriptor_layers for tensor in layer_tensors)
+            page_base = min(_min_data_ptr(layer_tensors) for _, _, layer_tensors in descriptor_layers)
             page_key = ("shared_by", descriptor_idx, 0)
             pages_by_key[page_key] = [
                 (
                     layer_name,
-                    min(tensor.data_ptr() for tensor in layer_tensors) - page_base,
+                    _min_data_ptr(layer_tensors) - page_base,
                 )
                 for layer_name, _, layer_tensors in descriptor_layers
             ]
@@ -148,8 +162,7 @@ def _reconstruct_shared_pages(
             continue
 
         descriptor_base = min(
-            min(tensor.data_ptr() for tensor in layer_tensors) - placement_start
-            for _, placement_start, layer_tensors in descriptor_layers
+            _min_data_ptr(layer_tensors) - placement_start for _, placement_start, layer_tensors in descriptor_layers
         )
         for layer_name, placement_start, layer_tensors in descriptor_layers:
             layer_start = descriptor_base + placement_start
@@ -157,7 +170,7 @@ def _reconstruct_shared_pages(
             pages_by_key.setdefault(page_key, []).append(
                 (
                     layer_name,
-                    min(tensor.data_ptr() for tensor in layer_tensors) - layer_start,
+                    _min_data_ptr(layer_tensors) - layer_start,
                 )
             )
             page_strides[page_key] = descriptor.block_stride
@@ -1805,7 +1818,7 @@ class MooncakeConnectorWorker:
                     self.kv_caches_base_addr.append(single_kv_cache.data_ptr())
                     ptrs.append(single_kv_cache.data_ptr())
                     lengths.append(single_kv_cache.element_size() * math.prod(single_kv_cache.shape))
-        elif self.use_mamba:
+        elif self.use_mamba and not self.use_sparse:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                     kv_cache_tuple = kv_caches[layer_name]
@@ -1822,7 +1835,7 @@ class MooncakeConnectorWorker:
                         )
                         self.kv_caches_base_addr.append(single_kv_cache.data_ptr())
             self.block_stride_per_addr.extend(self.block_len_per_addr)
-        elif self.use_compress:
+        elif self.use_compress or self.use_sparse:
             layer_group_idx = dict[str, int]()
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 for layer_name in group.layer_names:
@@ -1830,7 +1843,9 @@ class MooncakeConnectorWorker:
             # Rebuild physical pages from the descriptor sharing relation and
             # runtime views. One entry is one complete padded page, so inner
             # views such as indexer K and scale must not become independent
-            # full-page transfers.
+            # full-page transfers. Sparse-indexer hybrid models (e.g.
+            # GLM-5.3-Flash) also use aligned shared pages even with mamba
+            # state, so they must take this path rather than the mamba one.
             for shared_page in _reconstruct_shared_pages(self.kv_cache_config, kv_caches):
                 page_base_addr: int | None = None
                 page_groups: set[int] = set()
@@ -1839,12 +1854,12 @@ class MooncakeConnectorWorker:
                     page_groups.add(layer_group_idx[layer_name])
                     layer_tensors = as_kv_cache_tensors(kv_caches[layer_name])
                     if not layer_tensors:
-                        raise ValueError(f"DeepSeek-V4 shared KV cache layer has no materialized tensor: {layer_name}.")
+                        raise ValueError(f"Shared KV cache layer has no materialized tensor: {layer_name}.")
 
-                    layer_page_base = min(tensor.data_ptr() for tensor in layer_tensors) - placement_offset
+                    layer_page_base = _min_data_ptr(layer_tensors) - placement_offset
                     if page_base_addr is not None and layer_page_base != page_base_addr:
                         raise ValueError(
-                            "DeepSeek-V4 layers with the same placement and block stride "
+                            "Layers with the same placement and block stride "
                             "do not resolve to the same page base: "
                             f"layers={shared_by}, layer={layer_name}, "
                             f"placement_offset={placement_offset}."
