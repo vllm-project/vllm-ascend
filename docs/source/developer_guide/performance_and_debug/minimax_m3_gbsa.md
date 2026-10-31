@@ -24,6 +24,15 @@ Metadata remains forward-local, with persistent buffers refreshed before the
 captured layer consumers. Both metadata and attention use `softmax_precision=1`
 for E4M3 FP8 KV and `0` for BF16 KV.
 
+The supported uniform query lengths follow the decode threshold derived from
+the speculative configuration, including intermediate drafting widths. For
+example, seven speculative tokens enable lengths 1 through 8. Each width has
+separate buffers allocated before graph capture; prefix capacity follows the
+token budget divided by that width. Preparation runs once per forward and
+matching layer configuration, without reading device values on the host or
+adding per-layer preparation kernels. Nonuniform inputs and unsupported KV
+dtypes or block sizes retain the fallback path.
+
 ## Validation
 
 CPU wiring, output-buffer contracts, and metadata regression checks:

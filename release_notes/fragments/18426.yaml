@@ -7,3 +7,8 @@ entries:
     text: Fuse GBSA block ordering into MiniMax-M3 AscendC and A5 Triton decode TopK postprocessing to avoid per-layer normalization kernels while preserving preallocated output buffers.
     model: MiniMax-M3
     hardware: [A2, A3, A5]
+
+  - category: bugfix
+    text: Derive MiniMax-M3 GBSA metadata reuse lengths from the speculative configuration so uniform decode widths beyond 1 and 4 also share prepared schedules across layers.
+    model: MiniMax-M3
+    hardware: [A3, A5]

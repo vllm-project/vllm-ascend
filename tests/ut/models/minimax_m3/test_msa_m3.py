@@ -571,7 +571,7 @@ def test_sparse_decode_prefix_keeps_captured_buffers_alive() -> None:
     captured = builder._get_decode_cu_seqlens_q(10, 4)
     expected = captured.clone()
     # Other graph sizes and query lengths must not overwrite captured storage.
-    for batch_size in (1, 128, builder.context_len_buffer.numel()):
+    for batch_size in (1, 128, builder.context_len_buffer.numel() // 4):
         assert builder._get_decode_cu_seqlens_q(batch_size, 4).data_ptr() == captured.data_ptr()
         assert builder._get_decode_cu_seqlens_q(batch_size, 1).data_ptr() != captured.data_ptr()
     torch.testing.assert_close(captured, expected, rtol=0, atol=0)
@@ -1739,7 +1739,7 @@ def test_sparse_attn_decode_rejects_invalid_reused_prefix(shape: tuple[int, ...]
         )
 
 
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 def test_sparse_decode_reuses_schedule_but_keeps_layer_inputs(
     mock_gbsa_ops: tuple[MagicMock, MagicMock], query_len: int
 ) -> None:
@@ -1876,7 +1876,7 @@ def test_sparse_decode_cache_separates_scheduling_configurations(
 
 @pytest.mark.parametrize(
     "query_len,block_size,dtype",
-    [(2, 128, torch.bfloat16), (4, 64, torch.bfloat16), (4, 128, torch.float16), (4, 128, torch.float8_e4m3fn)],
+    [(4, 64, torch.bfloat16), (4, 128, torch.float16), (4, 128, torch.float8_e4m3fn)],
 )
 def test_sparse_decode_unverified_paths_do_not_reuse_metadata(
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
@@ -1931,7 +1931,7 @@ def test_sparse_builder_metadata_cache_is_forward_local(
         assert first.gbsa_metadata_cache is None and second.gbsa_metadata_cache is None
 
 
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize("topk,logical_blocks", [(1, 8), (4, 8), (16, 8), (16, 0)])
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
 def test_prepared_gbsa_counts_match_decode_topk_mask(query_len, topk, logical_blocks, init_blocks, local_blocks):
@@ -1955,7 +1955,7 @@ def test_prepared_gbsa_counts_match_decode_topk_mask(query_len, topk, logical_bl
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize(
     "device_type,kv_cache_dtype",
     [
@@ -1972,7 +1972,7 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(
     monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     builder = _make_sparse_builder(torch.device("cpu"), kv_cache_dtype)
     buffers = builder.decode_gbsa_metadata_buffers
-    assert set(buffers) == {(4, 2, 128, 16, 1), (4, 2, 128, 16, 4)}
+    assert set(buffers) == {(4, 2, 128, 16, width) for width in builder.decode_gbsa_query_lengths}
     assert all(buffer.shape == (1024,) and buffer.dtype == torch.int32 for buffer in buffers.values())
     preallocated = buffers[(4, 2, 128, 16, query_len)]
     mock_gbsa_ops[0].assert_not_called()
@@ -2036,11 +2036,11 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(
     with patch.object(torch, "empty_like", side_effect=AssertionError("Persistent buffers must already exist")):
         changed_size = builder.build(0, smaller).decode
     assert next(iter(changed_size.gbsa_metadata_cache.values())) is preallocated
-    assert len(buffers) == 2 and torch.all(preallocated == 3)
+    assert len(buffers) == len(builder.decode_gbsa_query_lengths) and torch.all(preallocated == 3)
 
 
 @pytest.mark.parametrize("set_graph_pad_size", [True, False])
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize("actual_reqs,padded_reqs", [(1, 2), (3, 4), (15, 16)])
 @pytest.mark.parametrize(
     "device_type,kv_cache_dtype",
@@ -2096,9 +2096,7 @@ def test_sparse_builder_refreshes_captured_gbsa_buffer_for_padded_decode(
     assert metadata_op.call_args.kwargs["cu_seqlens_q"].shape == (padded_reqs + 1,)
 
 
-@pytest.mark.parametrize(
-    "dtype,block_size,query_len", [(torch.float16, 128, 1), (torch.bfloat16, 64, 1), (torch.bfloat16, 128, 2)]
-)
+@pytest.mark.parametrize("dtype,block_size,query_len", [(torch.float16, 128, 1), (torch.bfloat16, 64, 1)])
 def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size, query_len, mock_gbsa_ops):
     config = _make_vllm_config()
     config.model_config.dtype = dtype
@@ -2454,7 +2452,7 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
 
 
 @pytest.mark.parametrize("tp_size", [1, 4, 8])
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize("num_prefills", [0, 1])
 @pytest.mark.parametrize("idle_dp", [False, True])
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
@@ -2531,7 +2529,7 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     group.all_gather.assert_not_called()
 
 
-@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize("mode", ["mixed", "piecewise", "eager"])
 @pytest.mark.parametrize(
     "device_type,kv_cache_dtype",
@@ -2593,3 +2591,86 @@ def test_sparse_decode_presorted_indices_bypass_normalization(mock_gbsa_ops, mon
     )
     normalize.assert_not_called()
     assert attention_op.call_args.args[3] is indices
+
+
+@pytest.mark.parametrize("spec_tokens", [0, 2, 7, 8, 15])
+def test_gbsa_schedule_lengths_follow_speculative_config(spec_tokens, mock_gbsa_ops, monkeypatch):
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    monkeypatch.setattr(
+        msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    config = _make_vllm_config(max_num_batched_tokens=1024)
+    config.speculative_config = (
+        SimpleNamespace(num_speculative_tokens=spec_tokens, parallel_drafting=False) if spec_tokens else None
+    )
+    spec = FullAttentionSpec(block_size=128, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
+    builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))
+    widths = range(1, spec_tokens + 2)
+    assert list(builder.decode_gbsa_query_lengths) == list(widths)
+    assert set(builder.decode_cu_seqlens_q_buffers) == set(widths)
+    assert len(builder.decode_gbsa_metadata_buffers) == len(widths)
+    # Query prefixes cover at most the configured token budget, rounded by
+    # fewer than q_len tokens. They do not allocate max_tokens for every q_len.
+    for width, prefix in builder.decode_cu_seqlens_q_buffers.items():
+        assert prefix.numel() == (1024 + width - 1) // width + 1
+        assert prefix.is_contiguous() and prefix.dtype == torch.int64
+        torch.testing.assert_close(prefix[:3], torch.arange(3, dtype=torch.int64) * width, rtol=0, atol=0)
+    schedule_addresses = {key: value.data_ptr() for key, value in builder.decode_gbsa_metadata_buffers.items()}
+    prefix_addresses = {key: value.data_ptr() for key, value in builder.decode_cu_seqlens_q_buffers.items()}
+    metadata_op, attention_op = mock_gbsa_ops
+    for width in [spec_tokens + 1, 1, spec_tokens + 1]:
+        common = _create_common_attn_metadata(BatchSpec([257, 513], [width, width]), 128, torch.device("cpu"))
+        monkeypatch.setattr(
+            msa_m3_module, "split_decodes_and_prefills", lambda *a, width=width, **k: (2, 0, 2 * width, 0)
+        )
+        md = builder.build(0, common)
+        assert md.decode is not None and md.decode.gbsa_metadata_prepared
+        assert md.decode.gbsa_metadata_cache is not None
+        query = torch.zeros((2 * width, 4, 128), dtype=torch.bfloat16)
+        attention_op.return_value = (query, torch.empty(0))
+        for _ in range(3):
+            minimax_m3_sparse_attn_decode_npu(
+                query,
+                torch.zeros((2, 6, 128, 2, 128), dtype=torch.bfloat16),
+                torch.zeros((2, 2 * width, 16), dtype=torch.int32),
+                common.block_table_tensor,
+                common.seq_lens,
+                2,
+                0.5,
+                torch.empty_like(query),
+                width,
+                select_num_idx=torch.ones((2, 2 * width), dtype=torch.int32),
+                cu_seqlens_q=md.decode.cu_seqlens_q,
+                gbsa_metadata_cache=md.decode.gbsa_metadata_cache,
+                indices_are_sorted=True,
+            )
+    assert metadata_op.call_count == 3
+    assert attention_op.call_count == 9
+    assert schedule_addresses == {key: value.data_ptr() for key, value in builder.decode_gbsa_metadata_buffers.items()}
+    assert prefix_addresses == {key: value.data_ptr() for key, value in builder.decode_cu_seqlens_q_buffers.items()}
+
+
+def test_gbsa_reuse_rejects_nonuniform_shape_contract(mock_gbsa_ops):
+    metadata_op, attention_op = mock_gbsa_ops
+    q = torch.zeros((7, 2, 128), dtype=torch.bfloat16)
+    attention_op.return_value = (q, torch.empty(0))
+    cache: dict = {}
+    for _ in range(2):
+        msa_m3_npu_module._run_generic_block_sparse_attention(
+            q,
+            torch.zeros((4, 128, 1, 128), dtype=torch.bfloat16),
+            torch.zeros((4, 128, 1, 128), dtype=torch.bfloat16),
+            torch.zeros((1, 7, 2), dtype=torch.int32),
+            torch.zeros((2, 4), dtype=torch.int32),
+            torch.ones((1, 7), dtype=torch.int32),
+            torch.tensor([0, 3, 7], dtype=torch.int64),
+            torch.tensor([257, 513], dtype=torch.int32),
+            num_kv_heads=1,
+            sm_scale=0.5,
+            block_size=128,
+            max_query_len=4,
+            gbsa_metadata_cache=cache,
+        )
+    assert not cache and metadata_op.call_count == 2
