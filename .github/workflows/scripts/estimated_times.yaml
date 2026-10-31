@@ -139,7 +139,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
-  tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 160
+  tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 360
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
