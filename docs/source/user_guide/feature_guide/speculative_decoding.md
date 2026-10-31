@@ -973,8 +973,19 @@ checkpoints. To disable prefix caching, use `--no-enable-prefix-caching`;
 vLLM then selects Mamba cache mode `none`.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector` with matching model weights, base state dtypes,
+speculative window, Mamba cache mode and effective state block size on both sides.
+Enable RecoverSSM on the decode consumer with `--use-replayssm`. The prefill
+producer must use native KDA and leave `--use-replayssm` disabled; enabling
+RecoverSSM on the producer is not supported for this deployment. Only
+convolution and recurrent state are copied; the consumer generates its own
+verification records. Use SD convolution layout `[state_len, conv_dim]` on both
+peers. Different TP sizes reuse Mooncake's row-wise Q/K/V transfers when the
+head shard counts have an integer ratio. A producer may instead shard over PCP
+with TP=1; combined TP>1/PCP>1 remains unsupported. The RecoverSSM consumer
+retains PP=PCP=DCP=1. Attention KV geometry must also match; a compatible KDA
+state layout alone does not establish full-model PD correctness. This transfer
+adaptation does not change PCP execution or PD/MTP bootstrap behavior.
 
 !!! warning
 

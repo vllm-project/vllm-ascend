@@ -44,6 +44,7 @@ from .helpers import (
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    thread.recover_kda = False
     thread.tp_rank = 0
     thread.tp_size = 1
     thread.pcp_rank = 0
