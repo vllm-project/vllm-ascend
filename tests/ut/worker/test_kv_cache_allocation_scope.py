@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.ascend_config import RlConfig
 from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
@@ -126,7 +127,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     ):
         mock_get_config.return_value = SimpleNamespace(
             weight_nz_mode=0,
-            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
+            rl_config=RlConfig(),
         )
         mock_allocator_class.get_instance.return_value = MagicMock()
         NPUWorker.wake_up(worker, tags=["kv_cache"])
@@ -154,9 +155,7 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
 def test_level1_sleep_does_not_cpu_backup_hadamard(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
-    mock_get_config.return_value = SimpleNamespace(
-        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
-    )
+    mock_get_config.return_value = SimpleNamespace(rl_config=RlConfig())
     mock_allocator_class.get_instance.return_value = MagicMock()
 
     hadamard = torch.tensor([[1.0, -1.0], [-1.0, 1.0]])
@@ -179,9 +178,7 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 def test_level2_sleep_still_cpu_backups_named_buffers(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
-    mock_get_config.return_value = SimpleNamespace(
-        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
-    )
+    mock_get_config.return_value = SimpleNamespace(rl_config=RlConfig())
     mock_allocator_class.get_instance.return_value = MagicMock()
 
     hadamard = torch.tensor([[1.0, -1.0], [-1.0, 1.0]])
