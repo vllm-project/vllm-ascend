@@ -1,0 +1,4 @@
+pr: 19812
+entries:
+  - category: bugfix
+    text: Fixed W4A8 unfused grouped matmul failures when an expert-parallel rank receives no tokens.

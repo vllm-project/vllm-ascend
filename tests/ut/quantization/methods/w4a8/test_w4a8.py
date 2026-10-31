@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import regex as re
 import torch
 
@@ -7,6 +8,34 @@ from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+
+
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.int8])
+@pytest.mark.parametrize("projection", [1, 2])
+@pytest.mark.parametrize("expert_list", [False, True])
+def test_empty_expert_rank(input_dtype, projection, expert_list):
+    method = object.__new__(AscendW4A8DynamicFusedMoEMethod)
+    method.use_expert_weight_list = expert_list
+    layer = Mock(
+        w13_weight=torch.empty(2, 256, 64, dtype=torch.int32),
+        w2_weight=torch.empty(2, 256, 32, dtype=torch.int32),
+        w13_weight_scale=torch.empty(2, 512),
+        w2_weight_scale=torch.empty(2, 1, 256),
+        w13_weight_list=[torch.empty(256, 256, dtype=torch.int8)] * 2,
+        w2_weight_list=[torch.empty(256, 128, dtype=torch.int8)] * 2,
+        w13_weight_scale_list=[torch.empty(512)] * 2,
+        w2_weight_scale_list=[torch.empty(1, 256)] * 2,
+    )
+    hidden = torch.empty(0, 256, dtype=input_dtype)
+    inputs = Mock(hidden_states=hidden, layer=layer)
+    with patch("torch_npu.npu_grouped_matmul", side_effect=AssertionError("Native GMM rejects empty scale")):
+        if projection == 1:
+            output = method.apply_gmm1(inputs)
+        else:
+            output = method.apply_gmm2(inputs, hidden, torch.empty(0))
+    assert output.shape == (0, 512 if projection == 1 else 256)
+    assert output.dtype == torch.bfloat16
+    assert output.device == hidden.device
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):

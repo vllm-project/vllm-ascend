@@ -508,9 +508,15 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
+        if hidden_states.shape[0] == 0:
+            # An EP rank may receive no routed tokens. Native weight-quantized
+            # GMM rejects the corresponding empty per-token scale as null.
+            output = hidden_states.new_empty((0, w1_scale[0].shape[-1]), dtype=torch.bfloat16)
+            dispose_tensor(hidden_states)
+            return output
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
         scale = [w1_scale[0].to(w2_scale[0].dtype)]
@@ -534,6 +540,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
+        if hidden_states.shape[0] == 0:
+            return hidden_states.new_empty((0, w2_scale[0].shape[-1]), dtype=torch.bfloat16)
         _, bias2 = self._get_mlp_scale_bias(mlp_compute_input.layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
         return torch_npu.npu_grouped_matmul(
