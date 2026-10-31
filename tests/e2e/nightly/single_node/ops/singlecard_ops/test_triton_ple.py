@@ -10,7 +10,7 @@ from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
-from vllm_ascend.ops.torch_ple import ple_conv_torch
+from vllm_ascend.ops.triton_ple import ple_conv as ple_conv_npu
 
 
 def test_model_dispatch_uses_upstream_decode_and_spec():
@@ -77,10 +77,10 @@ def test_modes_and_token_mapping():
                     f"exact={exact:.6f} max_abs={max_abs:.6f} state_exact={state_exact}",
                     flush=True,
                 )
-                assert exact >= 0.999 and state_exact
+                assert exact == 1.0 and state_exact
 
 
-def test_prefill_one_request_on_generic_path():
+def test_prefill_one_request():
     torch.manual_seed(37)
     for dtype in (torch.bfloat16, torch.float16):
         for tokens in (256, 8192):
@@ -113,7 +113,7 @@ def test_prefill_one_request_on_generic_path():
                             has_initial_states=torch.tensor([initialized], device="npu"),
                         )
                         upstream_ple_conv(**kwargs, residual=expected_output, conv_state=expected_state)
-                        ple_conv_torch(**kwargs, residual=actual_output, conv_state=actual_state)
+                        ple_conv_npu(**kwargs, residual=actual_output, conv_state=actual_state)
                         torch.npu.synchronize()
                         exact = (expected_output == actual_output).float().mean().item()
                         max_abs = (expected_output.float() - actual_output.float()).abs().max().item()
@@ -124,7 +124,7 @@ def test_prefill_one_request_on_generic_path():
                             f"state_exact={state_exact}",
                             flush=True,
                         )
-                        assert exact >= 0.999 and state_exact
+                        assert exact == 1.0 and state_exact
 
 
 def test_prefill_multiple_requests_across_token_chunks():
@@ -152,7 +152,7 @@ def test_prefill_multiple_requests_across_token_chunks():
         expected, actual = residual.clone(), residual.clone()
         expected_state, actual_state = state.clone(), state.clone()
         upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
-        ple_conv_torch(**kwargs, residual=actual, conv_state=actual_state)
+        ple_conv_npu(**kwargs, residual=actual, conv_state=actual_state)
         torch.npu.synchronize()
-        assert (expected == actual).float().mean().item() >= 0.999
+        assert torch.equal(expected, actual)
         assert torch.equal(expected_state, actual_state)

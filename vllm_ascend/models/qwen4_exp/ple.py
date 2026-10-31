@@ -24,19 +24,14 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
-from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
-from vllm_ascend.ops.torch_ple import ple_conv_torch
+from vllm_ascend.ops.triton_ple import ple_conv as ple_conv_npu
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
-    # Only long prefill benefits from the PyTorch path on Ascend.
-    if mode != "prefill":
-        upstream_ple_conv(*args, mode=mode, **kwargs)
-    else:
-        ple_conv_torch(*args, mode=mode, **kwargs)
+    ple_conv_npu(*args, mode=mode, **kwargs)
 
 
 def _get_allow_internal_format() -> bool:
