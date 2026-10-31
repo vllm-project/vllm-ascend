@@ -689,9 +689,10 @@ def test_sampler_logprobs_returns_sampled_and_topk() -> None:
     assert out.logprobs_tensors.logprobs.shape == (1, 3)
 
 
-def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
+@pytest.mark.parametrize("temperature", [0, 0.8])
+def test_rejection_sampler_uses_processed_logits_and_raw_logprobs(temperature) -> None:
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
-    _add_request(sampler, 0, 1, SamplingParams(temperature=0, allowed_token_ids=[2], logprobs=1))
+    _add_request(sampler, 0, 1, SamplingParams(temperature=temperature, allowed_token_ids=[2], logprobs=1))
     sampler.apply_staged_writes()
     rejection = RejectionSampler310V2.__new__(RejectionSampler310V2)
     rejection.sampler = sampler
@@ -707,7 +708,9 @@ def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
         idx_mapping_np=np.array([0], dtype=np.int32),
         expanded_idx_mapping=torch.tensor([0, 0]),
         input_ids=torch.tensor([0, 2], dtype=torch.int32),
+        input_ids_cpu=torch.tensor([0, 2], dtype=torch.int32),
         logits_indices=torch.tensor([0, 1]),
+        logits_indices_np=np.array([0, 1]),
         cu_num_logits_np=np.array([0, 2], dtype=np.int32),
         cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
         seq_lens_np=np.array([2], dtype=np.int32),
@@ -722,11 +725,12 @@ def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     assert out.num_sampled.tolist() == [2]
     assert out.num_rejected.tolist() == [0]
     assert out.logprobs_tensors is not None
+    assert out.logprobs_tensors.cu_num_generated_tokens == [0, 2]
     assert out.logprobs_tensors.logprob_token_ids[:, 0].tolist() == [2, 2]
     torch.testing.assert_close(out.logprobs_tensors.logprobs[:, 0], logits.log_softmax(-1)[:, 2])
 
 
-@pytest.mark.parametrize("num_sampled", [[2, 1], [0, 0]])
+@pytest.mark.parametrize("num_sampled", [[2, 1], [0, 1], [2, 0], [0, 0]])
 def test_rejection_logprobs_follow_request_offsets(num_sampled: list[int]) -> None:
     sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=3)
     for req_idx in range(2):
@@ -744,8 +748,15 @@ def test_rejection_logprobs_follow_request_offsets(num_sampled: list[int]) -> No
     if num_sampled == [0, 0]:
         assert result is None
     else:
-        assert result.logprob_token_ids[:, 0].tolist() == [0, 1, 2]
-        torch.testing.assert_close(result.logprobs[:, 0], logits.log_softmax(-1)[[0, 1, 2], [0, 1, 2]])
+        rows = list(range(num_sampled[0])) + ([2] if num_sampled[1] else [])
+        tokens = [0, 1][: num_sampled[0]] + ([2] if num_sampled[1] else [])
+        assert result.logprob_token_ids[:, 0].tolist() == tokens
+        torch.testing.assert_close(result.logprobs[:, 0], logits.log_softmax(-1)[rows, tokens])
+        assert result.cu_num_generated_tokens == [0, num_sampled[0], sum(num_sampled)]
+        lists = result.tolists()
+        for req_idx, count in enumerate(num_sampled):
+            expected = [0, 1][:count] if req_idx == 0 else [2][:count]
+            assert lists.slice_request(req_idx, count).logprob_token_ids[:, 0].tolist() == expected
 
 
 def _make_penalty_req_states(
@@ -808,13 +819,13 @@ def test_sampler_repetition_penalty_penalizes_prompt_token() -> None:
 
 def test_sampler_min_p_masks_low_probability_tokens() -> None:
     """Align with MRV1 MinPLogitsProcessor: keep tokens with p >= min_p * max_p."""
-    from vllm_ascend._310p.worker.v2.sampler import _apply_min_p_pytorch
+    from vllm_ascend._310p.worker.v2.sample.min_p import apply_min_p
 
     # Softmax([5, 1, 0]) ≈ [0.96, 0.018, 0.006]; min_p=0.1 keeps only idx0.
     logits = torch.tensor([[5.0, 1.0, 0.0]], dtype=torch.float32)
     expanded = torch.tensor([0], dtype=torch.int64)
     min_p = torch.tensor([0.1], dtype=torch.float32)
-    _apply_min_p_pytorch(logits, expanded, min_p)
+    apply_min_p(logits, expanded, min_p)
     assert torch.isfinite(logits[0, 0])
     assert not torch.isfinite(logits[0, 1])
     assert not torch.isfinite(logits[0, 2])
@@ -846,12 +857,12 @@ def test_sampler_min_p_restricts_softmax_mass() -> None:
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
     """Non-1 temperature must change relative logits before greedy/top paths."""
-    from vllm_ascend._310p.worker.v2.sampler import _apply_temperature_pytorch
+    from vllm_ascend._310p.worker.v2.sample.temperature import apply_temperature
 
     logits = torch.tensor([[2.0, 4.0, 0.0], [1.0, 1.0, 1.0]], dtype=torch.float32)
     expanded = torch.tensor([0, 1], dtype=torch.int64)
     temperature = torch.tensor([0.5, 1.0], dtype=torch.float32)
-    _apply_temperature_pytorch(logits, expanded, temperature)
+    apply_temperature(logits, expanded, temperature)
     torch.testing.assert_close(logits[0], torch.tensor([4.0, 8.0, 0.0]))
     torch.testing.assert_close(logits[1], torch.tensor([1.0, 1.0, 1.0]))
 
@@ -1289,3 +1300,92 @@ def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
         pytest.raises(NotImplementedError, match="divides every attention cache block size"),
     ):
         runner._adjust_kernel_block_sizes(config)
+
+
+@pytest.mark.parametrize("num_spec", [1, 2])
+@pytest.mark.parametrize("req_idx", [0, 2])
+@pytest.mark.parametrize("processor", ["frequency", "bad_words"])
+def test_mtp_postprocess_and_logprobs_use_compacted_input_rows(num_spec, req_idx, processor):
+    req_states = _make_penalty_req_states(prompt_tokens=[0], output_tokens=[], vocab_size=3)
+    req_states.all_token_ids.cpu = req_states.all_token_ids.cpu.repeat(3, 1)
+    req_states.prompt_len.np = req_states.prompt_len.np.repeat(3)
+    req_states.total_len.np = req_states.total_len.np.repeat(3)
+    sampler = Ascend310PSampler(max_num_reqs=3, device="cpu", vocab_size=3, req_states=req_states)
+    params = SamplingParams(temperature=0, logprobs=1, frequency_penalty=2.0 if processor == "frequency" else 0.0)
+    if processor == "bad_words":
+        params._bad_words_token_ids = [[1, 1]]
+    _add_request(sampler, req_idx, 1, params)
+    sampler.apply_staged_writes()
+    rejection = RejectionSampler310V2.__new__(RejectionSampler310V2)
+    rejection.sampler = sampler
+    rejection.device = torch.device("cpu")
+    rejection.num_speculative_steps = num_spec
+    rejection.sampled_tokens_cpu = torch.empty((3, num_spec + 1), dtype=torch.int32)
+    rejection.num_sampled_cpu = torch.empty(3, dtype=torch.int32)
+    rejection.num_rejected_cpu = torch.empty(3, dtype=torch.int32)
+    rejection._copy_stream = MagicMock()
+    rejection._copy_event = MagicMock()
+    # The prefix contributes input tokens but no logits. Helpers must see the
+    # compact [last_token, draft...] view rather than these unrelated tokens.
+    batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        expanded_idx_mapping=torch.full((num_spec + 1,), req_idx),
+        expanded_local_pos=torch.arange(num_spec + 1),
+        input_ids=torch.tensor([2, 2, 2, 0] + [1] * num_spec, dtype=torch.int32),
+        logits_indices=torch.arange(3, 4 + num_spec),
+        cu_num_logits_np=np.array([0, num_spec + 1], dtype=np.int32),
+        cu_num_logits=torch.tensor([0, num_spec + 1], dtype=torch.int32),
+        seq_lens_np=np.array([num_spec + 2], dtype=np.int32),
+        prefill_len_np=np.array([1], dtype=np.int32),
+    )
+    logits = torch.tensor([[0.0, 5.0, 2.0]]).repeat(num_spec + 1, 1)
+    with (
+        patch.object(model_runner_module.torch.npu, "current_stream"),
+        patch.object(model_runner_module.torch.npu, "stream"),
+    ):
+        output = rejection(logits, batch, draft_logits=None)
+    expected = ([1, 1] if num_spec == 1 else [1, 1, 2]) if processor == "frequency" else [1, 2]
+    count = len(expected)
+    assert output.sampled_token_ids[0, :count].tolist() == expected
+    assert output.num_sampled.tolist() == [count]
+    assert output.num_rejected.tolist() == [num_spec + 1 - count]
+    assert output.logprobs_tensors.cu_num_generated_tokens == [0, count]
+    per_req = output.logprobs_tensors.tolists().slice_request(0, count)
+    assert per_req.logprob_token_ids[:, 0].tolist() == expected
+    torch.testing.assert_close(output.logprobs_tensors.logprobs[:, 0], logits.log_softmax(-1)[range(count), expected])
+
+
+def test_rejection_sampler_rejects_probabilistic_drafts_before_initialization():
+    with pytest.raises(NotImplementedError, match="greedy drafts"):
+        RejectionSampler310V2(None, SimpleNamespace(draft_sample_method="probabilistic"), torch.device("cpu"))
+
+
+@pytest.mark.parametrize("params", [SamplingParams(min_p=0.1), SamplingParams(logit_bias={0: 1.0})])
+def test_rejection_sampler_rejects_unsupported_mtp_processors(params):
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
+    _add_request(sampler, 0, 1, params)
+    rejection = RejectionSampler310V2.__new__(RejectionSampler310V2)
+    rejection.sampler = sampler
+    with pytest.raises(NotImplementedError, match="min_p or logit_bias"):
+        rejection(torch.zeros(2, 3), SimpleNamespace(num_reqs=1, idx_mapping_np=np.array([0])), None)
+
+
+def test_postprocess_parameter_staging_resets_reused_slot():
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
+    _add_request(
+        sampler, 0, 1, SamplingParams(min_p=0.2, repetition_penalty=1.2, frequency_penalty=0.5, presence_penalty=0.5)
+    )
+    sampler.apply_staged_writes()
+    assert sampler.sampling_states.min_p.gpu[0].item() == pytest.approx(0.2)
+    _add_request(sampler, 0, 1, SamplingParams())
+    sampler.apply_staged_writes()
+    for name, expected in (
+        ("min_p", 0.0),
+        ("repetition_penalty", 1.0),
+        ("frequency_penalty", 0.0),
+        ("presence_penalty", 0.0),
+    ):
+        assert getattr(sampler, f"_{name}_np")[0] == pytest.approx(expected)
+        assert getattr(sampler.sampling_states, name).gpu[0].item() == pytest.approx(expected)
+    assert not sampler._use_penalty[0]

@@ -1,4 +1,0 @@
-pr: 20190
-entries:
-  - category: feature
-    text: Aligned Ascend 310P Model Runner V2 temperature sampling with MRV1, and added min_p, repetition/frequency/presence penalties, allowed token IDs, logit bias, bad words, and generated-token logprobs. min_p and logit_bias are not supported when MTP is enabled.
