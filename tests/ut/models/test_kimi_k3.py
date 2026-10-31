@@ -35,6 +35,11 @@ def test_kimi_k3_model_declares_checkpoint_packing_contract():
         "k_proj",
         "v_proj",
     ]
+    assert AscendKimiK3ForCausalLM.packed_modules_mapping["fused_bfg_proj"] == [
+        "b_proj",
+        "f_a_proj",
+        "g_proj",
+    ]
     assert AscendKimiK3ForCausalLM.packed_modules_mapping["experts"] == [
         "experts.0.w1",
         "experts.0.w3",
@@ -64,6 +69,45 @@ def test_kimi_k3_loads_qkv_checkpoint_shards_into_fused_linear():
 
     assert [call.args[2] for call in fused_weight.weight_loader.call_args_list] == ["q", "k", "v"]
     assert loaded == {"layers.0.self_attn.fused_qkv.weight"}
+
+
+def test_kimi_k3_loads_bfg_checkpoint_shards_into_fused_linear():
+    model = KimiK3TextModel.__new__(KimiK3TextModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_experts=0)
+    model.layers = nn.ModuleList([nn.Module()])
+    model.layers[0].self_attn = nn.Module()
+    model.layers[0].self_attn.fused_bfg_proj = nn.Module()
+
+    fused_weight = nn.Parameter(torch.empty(1))
+    fused_weight.weight_loader = MagicMock()
+    f_a_weight = nn.Parameter(torch.empty(1))
+    f_a_weight.weight_loader = MagicMock()
+    f_b_weight = nn.Parameter(torch.empty(1))
+    f_b_weight.weight_loader = MagicMock()
+    model.layers[0].self_attn.fused_bfg_proj.register_parameter("weight", fused_weight)
+    model.layers[0].self_attn.fused_bfg_proj.register_parameter("f_a_weight", f_a_weight)
+    model.layers[0].self_attn.fused_bfg_proj.register_parameter("f_b_weight", f_b_weight)
+    weights = [
+        (f"layers.0.self_attn.{name}.weight", torch.empty(1))
+        for name in ("b_proj", "f_a_proj", "f_b_proj", "g_proj")
+    ]
+
+    with (
+        patch("vllm_ascend.models.kimi_k3.get_spec_layer_idx_from_weight_name", return_value=None),
+        patch("vllm_ascend.models.kimi_k3.fused_moe_make_expert_params_mapping", return_value=[]),
+        patch("vllm_ascend.models.kimi_k3.is_pp_missing_parameter", return_value=False),
+    ):
+        loaded = model.load_weights(weights)
+
+    assert [call.args[2] for call in fused_weight.weight_loader.call_args_list] == [0, 2]
+    assert f_a_weight.weight_loader.call_args.args[2] is None
+    assert f_b_weight.weight_loader.call_args.args[2] is None
+    assert loaded == {
+        "layers.0.self_attn.fused_bfg_proj.weight",
+        "layers.0.self_attn.fused_bfg_proj.f_a_weight",
+        "layers.0.self_attn.fused_bfg_proj.f_b_weight",
+    }
 
 
 @pytest.mark.parametrize(
