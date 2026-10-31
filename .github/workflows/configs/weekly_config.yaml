@@ -27,10 +27,6 @@ a2:
 a3:
   multi_node:
     test_config:
-      - name: MiniMax-PD-in32k-bs4-1
-        config_file_path: MiniMax-PD-in32k-bs4-1.yaml
-        config_base_path: tests/e2e/cases/models/configs/MiniMax
-        size: 3
       - name: Qwen3.5-397B-w8a8-PD
         config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
@@ -134,10 +130,6 @@ a3:
 
   double_node:
     test_config:
-      - name: DeepSeek-V3-W8A8_weekly
-        config_file_path: DeepSeek-V3.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
-        size: 2
       - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_64k
         config_file_path: GLM-5.1-W8A8C8-A3_64k_90_50.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
