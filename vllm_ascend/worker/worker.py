@@ -1077,9 +1077,14 @@ class NPUWorker(WorkerBase):
         if get_ascend_config().enable_cpu_binding:
             engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
+                # Resolve the host physical NPU ID from the runtime-bound
+                # device. Ordinal arithmetic on local_rank cannot pierce
+                # per-process device renumbering (internal DP workers),
+                # where it made every DP group's TP0/TP1 ranks share the
+                # same CPU/NUMA/IRQ pool.
                 bind_cpus(
                     self.local_rank,
-                    npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                    npu_id=current_platform.visible_device_id_to_physical_device_id(torch.npu.current_device()),
                     migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
                 )
             except Exception as e:
