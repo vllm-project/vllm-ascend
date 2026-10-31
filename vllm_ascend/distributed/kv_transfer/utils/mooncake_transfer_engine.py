@@ -29,6 +29,7 @@ class GlobalTE:
         components that share this singleton (encoder cache transfer, the
         AscendStore Mooncake backend) keep calling it the way they always did.
         """
+        resolved_protocol = protocol or DEFAULT_TRANSFER_PROTOCOL
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
@@ -54,7 +55,6 @@ class GlobalTE:
                     self._initialization_attempted = True
                     engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
-                    resolved_protocol = protocol or DEFAULT_TRANSFER_PROTOCOL
                     ret_value = engine.initialize(hostname, "P2PHANDSHAKE", resolved_protocol, device_name)
                     if ret_value != 0:
                         raise RuntimeError(
@@ -70,10 +70,10 @@ class GlobalTE:
         # second caller asking for another transport would otherwise silently
         # run on the first one. This only catches an in-process mismatch;
         # prefill and decode are separate processes.
-        if protocol is not None and protocol != self.transfer_protocol:
+        if protocol is not None and resolved_protocol != self.transfer_protocol:
             raise RuntimeError(
                 f"TransferEngine already initialized with protocol {self.transfer_protocol!r}; "
-                f"cannot switch to {protocol!r} in the same process."
+                f"cannot switch to {resolved_protocol!r} in the same process."
             )
         return self.transfer_engine
 

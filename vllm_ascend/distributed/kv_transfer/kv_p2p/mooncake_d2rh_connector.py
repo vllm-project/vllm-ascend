@@ -2229,7 +2229,10 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         # Reject a backend selection this connector cannot honour before the
-        # inherited base worker builds the engine.
+        # inherited base worker builds the engine. This class overrides
+        # register_kv_caches and registers the host-cache regions through
+        # global_te.register_buffer, so a MemFabric engine here would mix two
+        # registries (and the Mooncake singleton was never initialized).
         ensure_mooncake_backend(vllm_config, type(self).__name__)
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._is_hma_required: bool = bool(getattr(self, "_is_hma_required", False))

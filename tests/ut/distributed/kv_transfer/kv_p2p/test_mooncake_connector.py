@@ -52,6 +52,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.utils import transfer_backend as tb_module
 from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 # vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
@@ -1901,7 +1902,7 @@ def wire_transfer_contract(monkeypatch, request):
     engine = MagicMock()
     engine.get_rpc_port.return_value = 9090
     engine.batch_transfer_sync_read.return_value = 0
-    monkeypatch.setattr(module.global_te, "get_transfer_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(tb_module.global_te, "get_transfer_engine", lambda *args, **kwargs: engine)
     monkeypatch.setattr(module, "get_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(module, "get_tp_group", lambda: types.SimpleNamespace(rank_in_group=0, world_size=1))
     monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -2018,7 +2019,7 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
         arguments["ready_event"].set()
         return startup
 
-    monkeypatch.setattr(module.global_te, "register_buffer", backend)
+    monkeypatch.setattr(tb_module.global_te, "register_buffer", backend)
     monkeypatch.setattr(module, "KVCacheRecvingThread", ready_receiver)
     if invalid_base:
         with pytest.raises(RuntimeError, match="Unable to recover an aligned KV cache allocation"):
@@ -3392,11 +3393,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             ),
             patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ip", mock_get_ip),
             patch(
-                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.get_transfer_engine",
+                "vllm_ascend.distributed.kv_transfer.utils.transfer_backend.global_te.get_transfer_engine",
                 return_value=self.mock_transfer_engine,
             ),
             patch(
-                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer",
+                "vllm_ascend.distributed.kv_transfer.utils.transfer_backend.global_te.register_buffer",
                 return_value=None,
             ),
             patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.KVCacheSendingThread", MagicMock()),
@@ -3485,7 +3486,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             self.assertEqual(view.is_contiguous(), not block_major)
 
     def test_missing_parallel_fields_reject_before_backend_creation(self):
-        module = sys.modules[MooncakeConnectorWorker.__module__]
         for role, field in (
             ("prefill", "tp_size"),
             ("prefill", "dp_size"),
@@ -3497,7 +3497,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 del parallel[role][field]
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
                 with (
-                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    patch.object(tb_module.global_te, "get_transfer_engine") as backend,
                     self.assertRaises(AssertionError),
                 ):
                     MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
@@ -3522,7 +3522,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
                 self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
                 with (
-                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    patch.object(tb_module.global_te, "get_transfer_engine") as backend,
                     patch.object(
                         module,
                         "get_pcp_group",
@@ -3545,7 +3545,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
                 with (
                     patch.object(
-                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                        tb_module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
                     ) as backend,
                     patch.object(
                         module,
@@ -3722,7 +3722,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
                 with (
                     patch.object(
-                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                        tb_module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
                     ) as get_te,
                     patch.object(module.torch.npu, "current_device", return_value=5) as current_device,
                 ):
