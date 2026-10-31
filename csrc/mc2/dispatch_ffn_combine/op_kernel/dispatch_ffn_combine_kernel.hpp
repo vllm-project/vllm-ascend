@@ -470,7 +470,8 @@ private:
             LayoutA layoutA = params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
             LayoutB layoutB1 = params.layoutB1;
             LayoutScale layoutScale = params.layoutScale1;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.problemShape.k());
+            // C rows hold N elements (the GMM1 output width); the workspace row stride is max(N, K).
+            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), max(inGroupProblemShape.n(), inGroupProblemShape.k()));
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             // Determine the starting loopIdx of the current core under the current groupIdx
@@ -519,7 +520,7 @@ private:
             if (params.listLen == 1) {
                 gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.k();
+            gmGroupOffsetC += inGroupProblemShape.m() * max(inGroupProblemShape.n(), inGroupProblemShape.k());
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
 
@@ -890,7 +891,8 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
         uint32_t n2 = params.problemShape.k();
-
+        // Row stride of the shared C workspace (GMM1 output, N cols per row).
+        uint32_t cRowStride = max(params.problemShape.n(), params.problemShape.k());
 
         typename BlockEpilogue2::Params epilogueParams2{
             static_cast<int32_t>(params.EP),
@@ -924,11 +926,11 @@ private:
             uint32_t rowStartThisCore = 0;
             MatrixCoord offsetC{0U, 0};
             MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
-            LayoutC layoutC{dequantSum1, params.problemShape.n()};
+            LayoutC layoutC{dequantSum1, params.problemShape.n(), cRowStride};
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit, params.problemShape.k());
+                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit, cRowStride);
         }
         AscendC::SyncAll<true>();
         // Synchronization signal: SwiGLU notifies GMM2 [1]
@@ -943,11 +945,11 @@ private:
                 MatrixCoord offsetC{rowStartThisCore, 0};
                 uint32_t dequantLen = dequantSum2;
                 MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-                LayoutC layoutC{dequantLen, params.problemShape.k()};
+                LayoutC layoutC{dequantLen, params.problemShape.n(), cRowStride};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit, params.problemShape.k());
+                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit, cRowStride);
             }
             AscendC::SyncAll<true>();
             // Synchronization signal: SwiGLU notifies GMM2 [2]
@@ -1126,11 +1128,13 @@ private:
 
             ptrC2 = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
+            // Shared C workspace: GMM1 writes N cols/row, GMM2 writes K cols/row -> row stride max(N, K).
+            workspaceOffset += params.maxOutputSize * max(params.problemShape.n(), n2) * sizeof(ElementC);
             ptrA = params.ptrWorkspace + workspaceOffset;
             ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
+            // Shared A workspace: x rows are K wide, the permuted intermediate rows are N/2 wide.
+            workspaceOffset += params.maxOutputSize * max(params.problemShape.k(), k2) * sizeof(ElementA);
 
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
 
