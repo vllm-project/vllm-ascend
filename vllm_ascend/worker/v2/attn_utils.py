@@ -52,7 +52,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    KVCacheTensor,
     KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
@@ -87,7 +86,6 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
-    requires_shared_backing_layout,
     supports_component_major_mla_pd,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -98,6 +96,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
+from vllm_ascend.models.deepseek_v4.cache_config import (
+    build_dsv4_kv_cache_layout,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
@@ -733,16 +734,6 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
-def _has_dsv4_cache_features(
-    layer_kv_cache_spec: Mapping[str, KVCacheSpec],
-    kv_cache_tensors: Iterable[KVCacheTensor],
-) -> bool:
-    """Whether shared tuple descriptors carry the DSV4 cache contract."""
-    if not requires_shared_backing_layout(kv_cache_tensors):
-        return False
-    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in layer_kv_cache_spec.values())
-
-
 def _get_attention_kv_cache_dims(
     layer_name: str,
     kv_cache_spec: AttentionSpec,
@@ -1131,74 +1122,6 @@ def allocate_shared_attention_kv_cache(
     }
 
 
-def _allocate_dsv4_kv_cache(
-    kv_cache_config: KVCacheConfig,
-    layer_kv_cache_spec: Mapping[str, KVCacheSpec],
-    shared_layers: Mapping[str, str],
-    vllm_config: VllmConfig,
-    alignment: int,
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    """Allocate DSV4 shared-tuple descriptor views."""
-    tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-    if len(tensor_sizes) != 1:
-        raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
-    backing_size = tensor_sizes.pop()
-    uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
-    regions: list[tuple[str, int, int]] = []
-    for descriptor in kv_cache_config.kv_cache_tensors:
-        for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
-            spec = layer_kv_cache_spec[layer_name]
-            if not uses_turboquant and descriptor.block_stride != spec.page_size_bytes:
-                raise ValueError(
-                    "DeepSeek-V4 requires contiguous per-layer pages, "
-                    f"but {layer_name} has block_stride="
-                    f"{descriptor.block_stride} and page_size="
-                    f"{spec.page_size_bytes}."
-                )
-            if descriptor.block_stride < spec.page_size_bytes:
-                raise ValueError(f"DSA physical stride is smaller than the page for {layer_name}")
-            layer_size = (kv_cache_config.num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-            start = descriptor.offset + layer_idx * descriptor.layer_stride
-            if start < 0 or start + layer_size > backing_size:
-                raise ValueError(f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation.")
-            regions.append((layer_name, start, layer_size))
-
-    if not regions:
-        raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
-
-    backing = _allocate_int8_cache_tensor(backing_size, alignment, device)
-    raw_tensors = {name: backing[start : start + size] for name, start, size in regions}
-
-    if get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None:
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            names = get_kv_cache_tensor_layers(descriptor)
-            if descriptor.layer_stride != 0 or len(names) < 2:
-                continue
-            if all(isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in names):
-                indexer_specs = {
-                    name: layer_kv_cache_spec[name]
-                    for name in names
-                }
-                raw_tensors.update(
-                    allocate_shared_indexer_cache(
-                        indexer_specs,
-                        kv_cache_config.num_blocks,
-                        lambda size: _allocate_int8_cache_tensor(size, alignment, device),
-                    )
-                )
-                continue
-            owner = names[0]
-            if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner] for name in names[1:]):
-                raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
-            for name in names[1:]:
-                raw_tensors[name] = raw_tensors[owner]
-
-    layer_names = {name for group in kv_cache_config.kv_cache_groups for name in group.layer_names}
-    assert layer_names == (raw_tensors.keys() | shared_layers.keys()), "Some layers are not correctly initialized"
-    return raw_tensors
-
-
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
@@ -1316,19 +1239,49 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
         return kv_cache_raw_tensors
 
-    has_dsv4_cache_features = _has_dsv4_cache_features(
-        layer_kv_cache_spec,
+    # DeepSeek-V4 descriptors describe views into one shared tuple backing.
+    # Build and validate that layout before generic hybrid allocation so the
+    # DSA pages are materialized by their own physical-stride contract.
+    uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
+    dsv4_cache_layout = build_dsv4_kv_cache_layout(
+        kv_cache_config.kv_cache_groups,
         kv_cache_config.kv_cache_tensors,
+        kv_cache_config.num_blocks,
+        uses_turboquant=uses_turboquant,
     )
-    if has_dsv4_cache_features:
-        return _allocate_dsv4_kv_cache(
-            kv_cache_config,
-            layer_kv_cache_spec,
-            shared_layers,
-            vllm_config,
-            alignment,
-            device,
-        )
+    if dsv4_cache_layout is not None:
+        backing = _allocate_int8_cache_tensor(dsv4_cache_layout.backing_size, alignment, device)
+        for name, start, size in dsv4_cache_layout.regions:
+            kv_cache_raw_tensors[name] = backing[start : start + size]
+
+        # Layerwise V2 may add zero-stride indexer descriptors that require a
+        # dedicated shared allocation instead of a view into the DSV4 backing.
+        if get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None:
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                names = get_kv_cache_tensor_layers(descriptor)
+                if descriptor.layer_stride != 0 or len(names) < 2:
+                    continue
+                if all(isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in names):
+                    indexer_specs = {name: layer_kv_cache_spec[name] for name in names}
+                    kv_cache_raw_tensors.update(
+                        allocate_shared_indexer_cache(
+                            indexer_specs,
+                            kv_cache_config.num_blocks,
+                            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+                        )
+                    )
+                    continue
+                owner = names[0]
+                if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner] for name in names[1:]):
+                    raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
+                for name in names[1:]:
+                    kv_cache_raw_tensors[name] = kv_cache_raw_tensors[owner]
+
+        layer_names = {name for group in kv_cache_config.kv_cache_groups for name in group.layer_names}
+        assert layer_names == (
+            kv_cache_raw_tensors.keys() | shared_layers.keys()
+        ), "Some layers are not correctly initialized"
+        return kv_cache_raw_tensors
 
     # vLLM #51718 changed every KVCacheTensor to describe a view into one
     # common backing allocation. Hybrid groups overlay that backing from byte
@@ -1719,7 +1672,6 @@ def _reshape_kv_cache_v2(
         raise ValueError("Reshape KV cache requires KVCacheConfig.")
 
     vllm_config = get_current_vllm_config()
-    is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
@@ -1729,6 +1681,15 @@ def _reshape_kv_cache_v2(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
+    # DSV4 attention views use the physical page strides emitted by the
+    # descriptor planner, including TurboQuant's padded pages.
+    uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
+    dsv4_cache_layout = build_dsv4_kv_cache_layout(
+        kv_cache_config.kv_cache_groups,
+        kv_cache_config.kv_cache_tensors,
+        kv_cache_config.num_blocks,
+        uses_turboquant=uses_turboquant,
+    )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {
@@ -1737,13 +1698,15 @@ def _reshape_kv_cache_v2(
             for name in get_kv_cache_tensor_layers(descriptor)
         }
 
+    # DSV4 attention views follow descriptor-provided physical page strides;
+    # keep this separate from the generic MLA reshape path.
     dsv4_page_strides = (
         {
             name: descriptor.block_stride
             for descriptor in kv_cache_config.kv_cache_tensors
             for name in get_kv_cache_tensor_layers(descriptor)
         }
-        if is_dsv4_model and uses_turboquant_groups(kv_cache_config.kv_cache_groups)
+        if dsv4_cache_layout is not None and uses_turboquant
         else {}
     )
 
@@ -2037,7 +2000,9 @@ def _reshape_kv_cache_v2(
                     kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
                 )
                 continue
-            if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
+            if dsv4_cache_layout is not None and isinstance(
+                kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)
+            ):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"DSA cache for {layer_name} must use one raw tensor.")
                 kv_caches[layer_name] = _view_dsv4_cache(

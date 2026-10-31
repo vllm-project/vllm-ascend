@@ -48,11 +48,11 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
-    requires_shared_backing_layout,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
+from vllm_ascend.models.deepseek_v4.cache_config import build_dsv4_kv_cache_layout
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
@@ -1056,24 +1056,32 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     )
 
 
-def test_dsv4_feature_detection_requires_shared_backing_descriptors():
+def test_dsv4_layout_builder_requires_shared_backing_descriptors():
     spec = _make_dsv4_mla_spec(block_size=8, compress_ratio=1)
-    specs = {"dsv4": spec}
+    layer_name = "dsv4"
     descriptor = KVCacheTensor(
-        size=1024,
-        layers=["dsv4"],
+        size=2 * spec.page_size_bytes,
+        layers=[layer_name],
         offset=0,
-        layer_stride=1024,
+        layer_stride=2 * spec.page_size_bytes,
         block_stride=spec.page_size_bytes,
     )
+    groups = [KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)]
 
-    assert requires_shared_backing_layout([descriptor])
-    assert attn_utils._has_dsv4_cache_features(specs, [descriptor])
-    assert not attn_utils._has_dsv4_cache_features(specs, [replace(descriptor, size=2048)])
-    assert not attn_utils._has_dsv4_cache_features(
-        {"regular": replace(spec, model_version=None)},
-        [replace(descriptor, layers=["regular"])],
-    )
+    layout = build_dsv4_kv_cache_layout(groups, [descriptor], num_blocks=2, uses_turboquant=False)
+    assert layout is not None
+    assert layout.backing_size == descriptor.size
+    assert layout.regions == ((layer_name, 0, 2 * spec.page_size_bytes),)
+
+    regular_group = [KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=replace(spec, model_version=None))]
+    assert build_dsv4_kv_cache_layout(regular_group, [descriptor], num_blocks=2, uses_turboquant=False) is None
+    with pytest.raises(ValueError, match="share one backing allocation"):
+        build_dsv4_kv_cache_layout(
+            groups,
+            [descriptor, replace(descriptor, size=2 * descriptor.size)],
+            num_blocks=2,
+            uses_turboquant=False,
+        )
 
 
 def test_dsv4_allocator_preserves_layerwise_sfa_indexer_branch(monkeypatch):
@@ -1126,15 +1134,10 @@ def test_dsv4_allocator_preserves_layerwise_sfa_indexer_branch(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _: {})
     monkeypatch.setattr(attn_utils, "allocate_shared_indexer_cache", allocate_shared)
 
-    specs = attn_utils._get_layer_kv_cache_specs(config)
-    raw = attn_utils._allocate_dsv4_kv_cache(
-        config,
-        specs,
-        shared_layers={},
-        vllm_config=vllm_config,
-        alignment=1,
-        device=torch.device("cpu"),
-    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _config: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
 
     assert captured["blocks"] == num_blocks
     assert set(captured["specs"]) == set(index_names)
@@ -1485,6 +1488,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     merged_spec = spec.merge([spec])
     assert merged_spec.tokens_per_state == cache_layer.compress_ratio
     assert get_storage_block_size(merged_spec) == cache_config.block_size
+    # DSV4 reshape dispatch is driven by the cache spec and descriptors, not
+    # by the model-level ``compress_ratios`` compatibility marker.
+    vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4")
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
