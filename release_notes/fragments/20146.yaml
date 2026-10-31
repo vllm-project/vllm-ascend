@@ -1,0 +1,4 @@
+pr: 20146
+entries:
+  - category: bugfix
+    text: The V1 Ascend runner now honors the configured logprobs mode instead of always using raw logprobs, including M3.1-Flash RL workloads.
