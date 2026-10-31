@@ -1,9 +1,0 @@
-enhancements:
-  - title: "Qwen3.8-Next PLE host offload + ETP sharding"
-    description: >
-      Add opt-in BF16 PLE/ngram embedding host offload for Qwen3.8-Next (Qwen4Exp)
-      on Ascend. PLE tables stay in CANN-registered host memory; the NPU gathers
-      selected rows directly via a masked Triton kernel. Also adds Engram Tensor
-      Parallel (ETP) group construction for sharding the PLE embedding table across
-      TP ranks, with EDP member-ordering tests that lock the Ascend permute invariant.
-    pr: 20326

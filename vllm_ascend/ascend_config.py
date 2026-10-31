@@ -690,7 +690,8 @@ class AscendConfig:
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory
-            # Qwen PLE owns private host tables and rejects shared memory.
+            # Qwen PLE owns private host tables; shared memory is opt-in via
+            # dp_shared_memory and off by default for Qwen4Exp.
             and getattr(vc.model_config, "architecture", None)
             not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP")
             and vc.use_v2_model_runner
