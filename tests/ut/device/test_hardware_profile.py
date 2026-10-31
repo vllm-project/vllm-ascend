@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import (
     DeviceAdaptorFamily,
     DeviceAddressingMode,
     HardwareCapability,
+    MiniMaxM3SparseAttentionBackend,
     MoECommPolicy,
     QuantizationBackendFamily,
     WeightLayoutPolicy,
@@ -243,3 +244,14 @@ def test_unknown_device_type_is_rejected() -> None:
 def test_every_device_type_has_a_profile() -> None:
     for device_type in AscendDeviceType:
         assert get_hardware_profile(device_type)._device_type is device_type
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_minimax_m3_gbsa_is_selected_only_on_a3(device_type):
+    profile = get_hardware_profile(device_type)
+    expected = (
+        MiniMaxM3SparseAttentionBackend.CANN_GBSA
+        if device_type == AscendDeviceType.A3
+        else MiniMaxM3SparseAttentionBackend.SAS
+    )
+    assert profile.minimax_m3_sparse_attention_backend == expected

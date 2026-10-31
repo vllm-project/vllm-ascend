@@ -1,5 +1,10 @@
 # MiniMax-M3
 
+A3 sparse attention uses CANN GenericBlockSparseAttention with fused decode
+block ordering and shared metadata preparation. A5 retains the in-tree
+SparseAttentionScore implementation. See the [A3 GBSA guide](../../developer_guide/performance_and_debug/minimax_m3_gbsa.md)
+for backend selection and validation details.
+
 ## 1 Introduction
 
 !!! note
