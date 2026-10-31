@@ -962,15 +962,16 @@ and devices:
 ```shell
 --use-replayssm \
 --speculative-config '{"method": "deepseek_mtp", "num_speculative_tokens": 5}' \
---no-enable-prefix-caching \
---mamba-cache-mode none \
+--enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 RecoverSSM requires speculative decoding and does not support pipeline
 parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Prefix caching and stochastic rounding must be disabled,
-and Mamba cache mode must be `none`.
+parallelism (DCP). Stochastic rounding must be disabled. With prefix caching,
+vLLM selects Mamba cache mode `align` to preserve block-aligned recurrent
+checkpoints. To disable prefix caching, use `--no-enable-prefix-caching`;
+vLLM then selects Mamba cache mode `none`.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,

@@ -306,6 +306,7 @@ def test_layout_includes_mtp_layers():
         ("mtp.layers.0.self_attn", 4),
         ("model.mtp.layers.1.self_attn", 5),
         ("model.layers.4.self_attn", 4),
+        ("notlayers.2.model.layers.3.attn", 2),
     ],
 )
 def test_physical_layer_index_supports_mtp_names(
