@@ -9,58 +9,93 @@ on:
       - 'main'
     paths:
       - 'docs/source/**/*.md'
+      - 'docs/requirements-linkcheck.txt'
+      - 'mkdocs.yml'
+      - '.github/workflows/schedule_doc_linkcheck.yaml'
+      - '.github/workflows/scripts/check_md_links.py'
+      - 'tests/ut/_tools/test_check_md_links.py'
   workflow_dispatch:
 
 defaults:
   run:
-    shell: bash -el {0}
+    shell: bash -e {0}
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: docs-linkcheck-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR checks; scheduled/manual full scans share one group.
+  group: docs-linkcheck-${{ github.event.pull_request.number || 'full' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   linkcheck:
     name: Markdown link check
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12
+      image: python:3.12-slim-bookworm
     timeout-minutes: 30
     steps:
+      - name: Install checkout runtime
+        run: |
+          # The slim image needs Git and the shared C++ runtime for JS actions.
+          apt-get update
+          apt-get install -y --no-install-recommends git libstdc++6
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
 
-      - name: Collect changed docs files
-        id: changed-docs
+      - name: Collect changed files
+        id: changed
         if: ${{ github.event_name == 'pull_request' }}
         uses: tj-actions/changed-files@v47
         with:
           use_rest_api: true
-          files: |
-            docs/source/**/*.md
+          json: true
+          escape_json: false
+          files_yaml: |
+            docs:
+              - 'docs/source/**/*.md'
+            checker:
+              - 'docs/requirements-linkcheck.txt'
+              - 'mkdocs.yml'
+              - '.github/workflows/schedule_doc_linkcheck.yaml'
+              - '.github/workflows/scripts/check_md_links.py'
+              - 'tests/ut/_tools/test_check_md_links.py'
 
-      - name: Install docs dependencies
-        if: ${{ github.event_name != 'pull_request' || steps.changed-docs.outputs.any_changed == 'true' }}
+      - name: Install checker dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r docs/requirements-docs.txt
+          python -m pip install -r docs/requirements-linkcheck.txt
 
       - name: Run full link check
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' || steps.changed.outputs.checker_any_changed == 'true' }}
         run: |
-          python .github/workflows/scripts/check_md_links.py docs/source --exclude 'docs/source/zh'
+          python .github/workflows/scripts/check_md_links.py docs/source
 
       - name: Run link check for changed docs
-        if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.any_changed == 'true' }}
+        if: ${{ github.event_name == 'pull_request' && steps.changed.outputs.checker_any_changed != 'true' && steps.changed.outputs.docs_any_changed == 'true' }}
         env:
-          CHANGED_DOCS: ${{ steps.changed-docs.outputs.all_changed_files }}
+          CHANGED_DOCS: ${{ steps.changed.outputs.docs_all_changed_files }}
         run: |
-          # shellcheck disable=SC2153
-          read -r -a changed_docs <<< "${CHANGED_DOCS}"
-          echo "Changed docs files:"
-          printf '  %s\n' "${changed_docs[@]}"
-          python .github/workflows/scripts/check_md_links.py "${changed_docs[@]}"
+          printf '%s' "${CHANGED_DOCS}" > /tmp/changed-docs.json
+          python .github/workflows/scripts/check_md_links.py \
+            --files-from /tmp/changed-docs.json --timeout 300
+
+      - name: Publish summary
+        if: ${{ always() }}
+        run: |
+          if [[ -f docs/_build/linkcheck/summary.md ]]; then
+            cat docs/_build/linkcheck/summary.md >> "${GITHUB_STEP_SUMMARY}"
+          else
+            printf '%s\n' 'Link check produced no report; inspect setup, unit-test, and input errors in the job log.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload linkcheck reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs-linkcheck-${{ github.run_id }}-${{ github.run_attempt }}
+          path: docs/_build/linkcheck/
+          if-no-files-found: warn
+          retention-days: 14
