@@ -62,7 +62,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     PREPARE_INPUTS_BLOCK_SIZE,
 )
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
+from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
@@ -654,34 +654,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_update_stream(update_stream)
 
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
-        if use_updatable_graph(att_backend):
-            update_params = []
-            for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
-                for layer_name, metadata in per_step_metadata.items():
-                    if self.dcp_size > 1:
-                        # Import lazily: attention backends also import spec-decode utilities.
-                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
+        update_params = []
+        for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
+            for layer_name, metadata in per_step_metadata.items():
+                if self.dcp_size > 1:
+                    # Import lazily: attention backends also import spec-decode utilities.
+                    from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 
-                        update_params.extend(
-                            build_dcp_fia_params(
-                                layer_name,
-                                metadata,
-                                get_dcp_group().rank_in_group,
-                                is_draft_model=True,
-                                is_draft_model_prefill=draft_step == 0,
-                            )
+                    update_params.extend(
+                        build_dcp_fia_params(
+                            layer_name,
+                            metadata,
+                            get_dcp_group().rank_in_group,
+                            is_draft_model=True,
+                            is_draft_model_prefill=draft_step == 0,
                         )
-                        continue
-                    update_params.append(
-                        {
-                            "layer_name": layer_name,
-                            "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                            "actual_seq_lengths_kv": metadata.seq_lens_list,
-                            "block_table": metadata.block_tables,
-                        }
                     )
-            self._runnable.update_draft_model_metadata(update_params)  # type: ignore
-            self._runnable.set_attn_backend(att_backend)  # type: ignore
+                    continue
+                update_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+        self._runnable.update_draft_model_metadata(update_params)  # type: ignore
+        self._runnable.set_attn_backend(att_backend)  # type: ignore
 
     def _prepare_dcp_draft_dummy_metadata(self, common_attn_metadata, draft_index: int) -> None:
         """Match later GQA autoregressive capture steps, including graph padding."""

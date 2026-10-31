@@ -1872,14 +1872,6 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
         raise e
 
 
-def use_updatable_graph(
-    attn_backend,
-) -> bool:
-    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
-
-
 def _is_glm_model(model_config) -> bool:
     """Return True if the target model belongs to the GLM series.
 

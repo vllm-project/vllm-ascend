@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from ..utils import super_kernel_scope, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -294,7 +294,7 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
+        if self.runtime_mode == CUDAGraphMode.FULL:
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
@@ -326,35 +326,6 @@ def weak_ref_workspaces(params):
         if params.workspaces[num_tokens] is None:
             continue
         params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
-
-
-def update_full_graph_params(
-    attn_backend,
-    update_stream,
-    forward_context,
-    num_tokens,
-    vllm_config,
-    speculative_config=None,
-    draft_attn_metadatas=None,
-):
-    if use_updatable_graph(attn_backend):
-        return
-
-    # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
-    # AssertionError outside set_current_vllm_config(); the SFA backend
-    # resolution in get_impl_cls() needs the config.
-    from vllm.config import set_current_vllm_config
-
-    with set_current_vllm_config(vllm_config):
-        impl_cls = attn_backend.get_impl_cls()
-        impl_cls.update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
 
 
 @dataclass
