@@ -730,6 +730,14 @@ class SparseKVOffloadManager:
             )
         return self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
 
+    def get_topk_cache_components(self) -> set[tuple[str, int]]:
+        """Identify scratch views that must not be zeroed by logical KV block ID."""
+        return {
+            (layer_name, component_id)
+            for layer_name in self.offload_layer_names
+            for component_id in (OFFLOAD_TOPK_BUFFER_K_INDEX, OFFLOAD_TOPK_BUFFER_V_INDEX)
+        }
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],

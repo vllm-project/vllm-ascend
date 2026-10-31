@@ -834,6 +834,7 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
         "static_forward_context": {},
         "num_blocks": 2,
         "cache_dtype": "auto",
+        "excluded_cache_components": set(),
     }
 
 
