@@ -1894,11 +1894,25 @@ class MooncakeConnectorScheduler:
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
         )
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
-        ):
+        if params is None:
+            return False, None
+
+        if params.get("do_remote_prefill"):
+            empty_block_ids = self._empty_local_block_ids_for_rejection(params)
+            self._reqs_need_recv[request.request_id] = (
+                request,
+                empty_block_ids,
+                tuple(),
+                0,
+            )
+            params["do_remote_prefill"] = False
+            logger.info(
+                "Decode rejection/abort for request %s: enqueue empty recv to notify Prefill release",
+                request.request_id,
+            )
+            return False, None
+
+        if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
@@ -1926,6 +1940,17 @@ class MooncakeConnectorScheduler:
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.block_size,
         )
+
+    @staticmethod
+    def _empty_local_block_ids_for_rejection(params: dict[str, Any]) -> BlockIds:
+        remote_block_ids = params.get("remote_block_ids")
+        if (
+            isinstance(remote_block_ids, (list, tuple))
+            and remote_block_ids
+            and isinstance(remote_block_ids[0], (list, tuple))
+        ):
+            return tuple([] for _ in remote_block_ids)
+        return ([],)
 
     def _port_offset_from_handshake_metadata(
         self,
