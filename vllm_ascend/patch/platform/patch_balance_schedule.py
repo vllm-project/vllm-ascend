@@ -411,9 +411,8 @@ class BalanceScheduler(Scheduler):
                     step_skipped_waiting.appendleft(skipped)
 
             while token_budget > 0:
-                # Port vllm-project/vllm#60572: PAUSED_NEW admission must match
-                # upstream Scheduler.get_num_unfinished_requests() counting KV holders.
-                # Ordinary waiting requests stay queued until resume.
+                # vllm-project/vllm#60572: upstream counts KV holders under PAUSED_NEW
+                # in get_num_unfinished_requests(); drain them, leaving ordinary waiting queued.
                 request_queue = self.kv_holding_waiting
                 if not request_queue and self._pause_state == PauseState.UNPAUSED:
                     request_queue = self.waiting
@@ -422,11 +421,8 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_active_reqs:
                     break
 
-                # Intentionally retain the global admission freeze under PAUSED_NEW,
-                # including for KV holders, to preserve the existing balancing policy.
-                # During a coordinated wait-mode pause, running requests continue and
-                # balance_gather() refreshes their counts; drain waits for capacity.
-                # This policy does not guarantee minimum drain latency.
+                # Intentionally retain the global capacity freeze for KV holders under PAUSED_NEW.
+                # Coordinated pauses drain as running requests finish and balance_gather() refreshes counts.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 

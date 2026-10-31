@@ -301,8 +301,7 @@ def test_dyntra_pause_all_does_not_apply_outgoing_plan(scheduler_cls):
 
 
 def test_balance_pause_still_obeys_rank_capacity():
-    # PAUSED_NEW intentionally preserves Balance's global capacity freeze for
-    # KV holders; draining waits for the per-rank snapshot to fall.
+    # PAUSED_NEW intentionally retains the global capacity freeze for KV holders.
     scheduler = make_scheduler(BalanceScheduler)
     loading = start_async_load(scheduler, load_done=True)
     scheduler.set_pause_state(PauseState.PAUSED_NEW)
@@ -311,8 +310,7 @@ def test_balance_pause_still_obeys_rank_capacity():
     assert not step(scheduler).num_scheduled_tokens
     assert loading in scheduler.kv_holding_waiting
 
-    # Model balance_gather() observing running requests finish during a
-    # coordinated wait-mode pause; the ready KV holder can then drain.
+    # Simulate balance_gather() observing freed capacity during a coordinated pause.
     scheduler.balance_queue = [torch.tensor([0], dtype=torch.int)]
     drain(scheduler)
     assert loading.request_id not in scheduler.requests

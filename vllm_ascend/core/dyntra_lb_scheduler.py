@@ -233,7 +233,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
     def _apply_load_balance_modifications(self) -> None:
         self._lb_admit_req_ids = None
         if self._pause_state != PauseState.UNPAUSED:
-            # A pause drains existing KV holders independently of the LB plan.
+            # Ignore LB plans while paused to avoid blocking drain or moving requests.
             self.modifications = None
             self.lb_freeze = False
             return
@@ -670,9 +670,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                # Port vllm-project/vllm#60572: PAUSED_NEW admission must match
-                # upstream Scheduler.get_num_unfinished_requests() counting KV holders.
-                # Ordinary waiting requests stay queued until resume.
+                # vllm-project/vllm#60572: upstream counts KV holders under PAUSED_NEW
+                # in get_num_unfinished_requests(); drain them, leaving ordinary waiting queued.
                 request_queue = self.kv_holding_waiting
                 if not request_queue and self._pause_state == PauseState.UNPAUSED:
                     request_queue = self.waiting
