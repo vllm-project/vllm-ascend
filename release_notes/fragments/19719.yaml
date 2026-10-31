@@ -1,0 +1,4 @@
+pr: 19719
+entries:
+  - category: feature
+    text: Added Direct MLAPO preprocessing for supported sparse KV offload Decode configurations, with automatic fused CPU KV writeback on TP0.

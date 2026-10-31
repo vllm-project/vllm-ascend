@@ -532,7 +532,7 @@ def test_mla_preprocess_nq_kernel(enable_rope: bool):
         device=hidden_states.device,
     )
 
-    torch.ops._C_ascend.mla_preprocess(
+    inputs = (
         hidden_states,
         wdqkv,
         None,
@@ -544,17 +544,14 @@ def test_mla_preprocess_nq_kernel(enable_rope: bool):
         cos if enable_rope else None,
         sin if enable_rope else None,
         wuk,
+    )
+    quant_args = (None,) * 8
+    torch.ops._C_ascend.mla_preprocess(
+        *inputs,
         kv_cache,
         kv_cache_rope,
         slotmapping,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        *quant_args,
         cache_mode="krope_ctkv",
         quant_mode="no_quant",
         enable_inner_out=False,
@@ -570,6 +567,20 @@ def test_mla_preprocess_nq_kernel(enable_rope: bool):
     assert _tensor_written_nq(q_rope_out), "q_rope was not written"
     assert _tensor_written_nq(kv_cache), "kv_cache was not written"
     assert _tensor_written_nq(kv_cache_rope), "kv_cache_rope was not written"
+
+    # One case exercises the Direct Host check with the same valid no-quant inputs.
+    if enable_rope:
+        with pytest.raises(RuntimeError):
+            torch.ops._C_ascend.mla_preprocess_with_kv_offload(
+                *inputs,
+                *quant_args,
+                quant_mode="no_quant",
+                q_out0=q_nope_out,
+                q_out1=q_rope_out,
+                inner_out=q_down,
+                current_k=kv_cache[0, :token_num],
+                current_rope=kv_cache_rope[0, :token_num],
+            )
 
     gc.collect()
     torch.npu.empty_cache()

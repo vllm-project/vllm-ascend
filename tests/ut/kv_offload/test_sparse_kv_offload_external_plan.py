@@ -154,6 +154,7 @@ def _make_plan_manager():
     manager.fused_plan_status_npu = manager.fused_plan_metadata_npu[:1]
     manager.fused_plan_current_linear_slots_npu = manager.fused_plan_metadata_npu[1:]
     manager.current_kv_by_layer = {}
+    manager.producer_writeback_layers = set()
     manager.fused_overlap_membership_map = None
     manager.fused_overlap_membership_map_rows = 0
     manager.fused_overlap_plan_owner_layer_id = None
@@ -455,13 +456,21 @@ def test_capture_without_fused_overlap_stays_on_current_stream():
     manager.fused_plan_stream.wait_event.assert_not_called()
 
 
-def test_current_kv_injection_uses_planner_linear_slots_and_sentinel():
+@pytest.mark.parametrize("producer_writeback", [False, True])
+def test_current_kv_injection_uses_planner_linear_slots_and_sentinel(producer_writeback):
     manager = _make_plan_manager()
     manager.topk_buffer_size = 4
-    manager.current_kv_by_layer[0] = (
+    k, rope = (
         torch.tensor([[10.0, 11.0], [20.0, 21.0]]),
         torch.tensor([[30.0], [40.0]]),
     )
+    manager.tp_size = 2
+    manager.fused_overlap_plan_owner_layer_id = 1
+    manager._offload_new_kv_on_current_stream = MagicMock()
+    manager.offload_new_kv(
+        "layer.0", torch.tensor([0, 1]), None, None, None, None, k, rope, writeback_in_producer=producer_writeback
+    )
+    assert manager._offload_new_kv_on_current_stream.call_count == int(not producer_writeback)
     manager.fused_plan_current_linear_slots_npu[:2].copy_(torch.tensor([6, 3]))
     selection_kv = torch.arange(16, dtype=torch.float32).reshape(8, 2)
     selection_rope = torch.arange(8, dtype=torch.float32).reshape(8, 1)
@@ -487,3 +496,7 @@ def test_current_kv_injection_uses_planner_linear_slots_and_sentinel():
     torch.testing.assert_close(selection_kv[0], torch.tensor([0.0, 1.0]))
     torch.testing.assert_close(selection_rope[0], torch.tensor([0.0]))
     assert scatter_op.call_count == 2
+    if producer_writeback:
+        manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_status_npu, src=0)
+    else:
+        manager.tp_group.broadcast.assert_not_called()
