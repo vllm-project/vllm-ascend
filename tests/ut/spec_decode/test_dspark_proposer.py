@@ -36,10 +36,10 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
+from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -205,12 +205,12 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         yield
 
     with (
-        patch("vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
         patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context",
+            "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context",
             forward_context_manager,
         ),
-        patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", return_value=forward_context),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_forward_context", return_value=forward_context),
     ):
         result = AscendSpecDecodeBaseProposer._propose(
             proposer,
@@ -297,7 +297,7 @@ class _DSparkProposerTestBase:
         with (
             patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
             patch(
-                "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+                "vllm_ascend.worker.v1.spec_decode.dspark_proposer.get_ascend_config",
                 return_value=SimpleNamespace(
                     dynamic_spec_config=dynamic_spec_config,
                 ),
@@ -405,7 +405,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
         from vllm_ascend.attention.utils import split_decodes_and_prefills
 
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         monkeypatch.setattr(
@@ -488,7 +488,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
         from vllm_ascend.attention.utils import split_decodes_and_prefills
 
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         monkeypatch.setattr(
@@ -562,7 +562,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     def test_positions_not_pre_sliced(self, monkeypatch, dp_padding):
         """``cad.positions`` must be the full buffer, not ``[:num_query_total]``."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -582,7 +582,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
         """After set_inputs_first_pass + _pad_draft_buffers, positions[:num_input]
         is full-length and zero-padded in the DP region."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -652,7 +652,9 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
             assert proposer._dflash_num_context == 8
             proposer._pad_draft_buffers(num_actual_tokens=5, num_input_tokens=8)
 
-        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context)
+        monkeypatch.setattr(
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context
+        )
         proposer.runner = SimpleNamespace(
             _sync_metadata_across_dp=lambda num_tokens, **kwargs: (8, None, None),
             dynamic_eplb=False,
@@ -686,7 +688,9 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
             for buf in proposer._per_group_context_slot_mapping_buffers.values():
                 assert torch.all(buf == -1)
 
-        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context)
+        monkeypatch.setattr(
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context
+        )
         proposer.runner = SimpleNamespace(
             _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
             dynamic_eplb=False,
@@ -749,7 +753,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     @pytest.fixture(autouse=True)
     def _mock_kernel(self, monkeypatch):
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
 
@@ -784,7 +788,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     def test_query_slot_kernel_uses_logical_block_size(self, monkeypatch):
         kernel = MagicMock()
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             kernel,
         )
         num_reqs, num_speculative_tokens, max_num_tokens = 1, 7, 32
@@ -810,7 +814,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     def test_dcp_passes_parallel_kernel_args_and_delegates_metadata(self, monkeypatch):
         kernel = MagicMock()
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             kernel,
         )
         proposer = self._make_proposer(max_num_tokens=64, num_reqs=1, block_size=5)
@@ -906,7 +910,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
     @pytest.mark.parametrize("async_metadata", [False, True])
     def test_seq_lens_subtracts_rejected(self, monkeypatch, dcp_size, async_metadata):
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -947,7 +951,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
     def test_kernel_called_with_has_num_rejected(self, monkeypatch):
         kernel = MagicMock()
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             kernel,
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -976,6 +980,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.dcp_size = 1
         proposer._per_group_block_tables = {}
         proposer._per_group_slot_mappings = {}
+        proposer.num_query_per_req = 4
         return proposer
 
     def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
@@ -987,7 +992,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         backend.full_cls_name.return_value = "AscendDSASWABackend"
         modules = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in draft_names}
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config", lambda *args, **kw: modules
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.get_layers_from_vllm_config", lambda *args, **kw: modules
         )
         proposer = self._make_proposer_for_init()
         proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: draft_names)
@@ -1026,6 +1031,10 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         class DraftBuilder:
             def __init__(self):
                 self.max_num_tokens = None
+                self.num_query_per_req = None
+
+            def set_dspark_num_query_per_req(self, num_query_per_req):
+                self.num_query_per_req = num_query_per_req
 
             def enable_dspark_device_metadata(self, max_num_tokens):
                 self.max_num_tokens = max_num_tokens
@@ -1035,7 +1044,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         layer = MagicMock()
         layer.get_attn_backend.return_value = backend
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.get_layers_from_vllm_config",
             lambda *args, **kwargs: {"L0": layer},
         )
         proposer = self._make_proposer_for_init()
@@ -1053,12 +1062,13 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         with (
             patch.object(AttentionGroup, "create_metadata_builders"),
             patch.object(AttentionGroup, "get_metadata_builder", return_value=builder),
-            patch("vllm_ascend.spec_decode.dspark_proposer.AscendDSAMetadataBuilder", DraftBuilder),
-            patch("vllm_ascend.spec_decode.dspark_proposer.enable_pcp", return_value=pcp_enabled),
+            patch("vllm_ascend.worker.v1.spec_decode.dspark_proposer.AscendDSAMetadataBuilder", DraftBuilder),
+            patch("vllm_ascend.worker.v1.spec_decode.dspark_proposer.is_pcp_enabled", return_value=pcp_enabled),
         ):
             proposer.initialize_attn_backend(kv_cache_config)
 
         assert builder.max_num_tokens == expected_tokens
+        assert builder.num_query_per_req == (proposer.num_query_per_req if expected_tokens is not None else None)
 
     def test_initialization_tracks_logical_block_size_per_gid(self, monkeypatch):
         manager_specs = [MagicMock(), MagicMock()]
@@ -1073,7 +1083,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
             layer.get_attn_backend.return_value = backend
             layers[f"L{gid}"] = layer
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.get_layers_from_vllm_config",
             lambda *a, **k: layers,
         )
 
@@ -1148,7 +1158,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
             layer.get_attn_backend.return_value = backend
             layers[layer_name] = layer
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            "vllm_ascend.worker.v1.spec_decode.dspark_proposer.get_layers_from_vllm_config",
             lambda *args, **kwargs: layers,
         )
 

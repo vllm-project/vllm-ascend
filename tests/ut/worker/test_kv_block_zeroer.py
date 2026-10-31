@@ -20,8 +20,8 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
-from vllm_ascend.worker import utils as worker_utils
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.v1 import kv_block_zeroer
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 
 class _FakeKernel:
@@ -118,8 +118,8 @@ def test_zero_block_ids_dispatches_per_segment_page_sizes(
     zeroer._ids_gpu = torch.empty(4, dtype=torch.int64)
 
     fake_kernel = _FakeKernel()
-    monkeypatch.setattr(worker_utils, "_zero_kv_blocks_kernel", fake_kernel)
-    monkeypatch.setattr(worker_utils, "get_vectorcore_num", lambda: 8)
+    monkeypatch.setattr(kv_block_zeroer, "_zero_kv_blocks_kernel", fake_kernel)
+    monkeypatch.setattr(kv_block_zeroer, "get_vectorcore_num", lambda: 8)
 
     zeroer.zero_block_ids([1, 3])
 

@@ -7,9 +7,12 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, SlidingWindowMLASpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    HiddenStateCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -23,7 +26,16 @@ from vllm_ascend.core.kv_cache_interface import (
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
+    supports_component_major_mla_pd,
 )
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
+    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+else:
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 
 def _mla_spec():
@@ -68,6 +80,15 @@ def test_get_storage_block_size_and_dcp_memory():
     assert spec.max_memory_usage_bytes(vllm_config) > 0
 
 
+def test_get_storage_block_size_for_plain_mla_subclass():
+    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` in both
+    # supported lanes. A plain MLA subclass (HiddenStateCacheSpec) must
+    # resolve to block_size.
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    expected = spec.block_size
+    assert get_storage_block_size(spec) == expected
+
+
 def test_sliding_window_mla_storage_and_page_size():
     spec = AscendSlidingWindowMLASpec(
         block_size=16,
@@ -109,6 +130,36 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert pool.get_num_free_blocks() == len(old_ids)
 
 
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
+
+
 # --- the fields a hand-rebuilt spec has to carry -----------------------------
 
 
@@ -123,11 +174,6 @@ def _swa_spec(**overrides):
     )
 
 
-@pytest.mark.skipif(
-    not hasattr(SlidingWindowMLASpec, "bounded_replay"),
-    reason="bounded_replay arrives with vLLM #56227. Until the Main2Main pin includes it "
-    "no spec can set the field, so there is nothing for merge to carry.",
-)
 def test_sliding_window_mla_merge_carries_bounded_replay():
     """The Ascend override rebuilds the merged spec instead of calling the
     parent's ``merge``, so upstream's field has to be carried across by hand:
@@ -138,8 +184,11 @@ def test_sliding_window_mla_merge_carries_bounded_replay():
     merged = AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=True)])
     assert merged.bounded_replay
     assert not merged.prefix_cacheable
+    assert merged.prefix_replay_tokens == merged.sliding_window == 64
 
-    assert not AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()]).bounded_replay
+    ordinary = AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()])
+    assert not ordinary.bounded_replay
+    assert ordinary.prefix_replay_tokens == 0
 
     with pytest.raises(AssertionError, match="replay policy"):
         AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=False)])
@@ -190,24 +239,25 @@ def test_the_swa_spec_accepts_whatever_the_probe_returns():
     replaying = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True))
     plain = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", False))
 
-    if hasattr(SlidingWindowMLASpec, "bounded_replay"):
-        assert replaying.bounded_replay
-        assert not plain.bounded_replay
+    assert replaying.bounded_replay
+    assert not plain.bounded_replay
 
 
 # --- which layers may declare a replay window --------------------------------
 
 
-def _vllm_config(*, v2_runner: bool = False, pcp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)):
+def _vllm_config(
+    *, v2_runner: bool = False, pcp_size: int = 1, dp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)
+):
     return SimpleNamespace(
         use_v2_model_runner=v2_runner,
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, data_parallel_size=dp_size),
         model_config=SimpleNamespace(architectures=list(architectures)),
     )
 
 
 def _cache_config(**overrides) -> SimpleNamespace:
-    return SimpleNamespace(**{"swa_bounded_replay": True, **overrides})
+    return SimpleNamespace(**{"swa_bounded_replay": True, "enable_prefix_caching": True, **overrides})
 
 
 def test_only_the_v4_1_target_may_replay():
@@ -239,7 +289,7 @@ def test_a_model_without_architectures_may_not_replay():
 
 
 def test_a_v4_layer_never_replays_however_the_switch_is_set():
-    with patch("vllm_ascend.core.kv_cache_interface.logger.warning_once") as warning:
+    with patch("vllm.logger.logger.warning_once") as warning:
         assert not resolve_bounded_replay(_vllm_config(architectures=["DeepseekV4ForCausalLM"]), _cache_config())
 
     # Silent, like upstream: the V4 tree does not read the switch at all, so
@@ -259,7 +309,7 @@ def test_the_upstream_switch_is_all_that_is_left():
     """A V4.1 layer on the V1 runner replays without being asked twice: the
     scheduler conditions above have already had their say, and there is no
     capability left for this side to withhold."""
-    with patch("vllm_ascend.core.kv_cache_interface.logger.warning_once") as warning:
+    with patch("vllm.logger.logger.warning_once") as warning:
         assert resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
@@ -272,30 +322,36 @@ def test_the_v2_runner_keeps_supported_replay_enabled():
 
 def test_the_v2_runner_does_not_warn():
     """V2 has its own slot-padding implementation for supported replay."""
-    with patch("vllm_ascend.core.kv_cache_interface.logger.warning_once") as warning:
+    with patch("vllm.logger.logger.warning_once") as warning:
         resolve_bounded_replay(_vllm_config(v2_runner=True), _cache_config())
 
     warning.assert_not_called()
 
 
-def test_prefill_context_parallelism_turns_the_switch_off():
-    assert not resolve_bounded_replay(_vllm_config(pcp_size=2), _cache_config())
+def test_prefill_context_parallelism_with_prefix_caching_keeps_replay_on():
+    assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=2), _cache_config())
 
 
-def test_the_pcp_message_is_upstreams():
-    with patch("vllm_ascend.core.kv_cache_interface.logger.warning_once") as warning:
-        resolve_bounded_replay(_vllm_config(pcp_size=4), _cache_config())
+def test_pcp_without_prefix_caching_keeps_replay_on():
+    with patch("vllm.logger.logger.warning_once") as warning:
+        assert resolve_bounded_replay(
+            _vllm_config(v2_runner=True, pcp_size=4), _cache_config(enable_prefix_caching=False)
+        )
+    warning.assert_not_called()
 
-    (message,), _ = warning.call_args
-    assert "prefill context parallelism" in message
-    assert "rank-local batch" in message
+
+def test_pcp_with_dp_keeps_replay_on():
+    with patch("vllm.logger.logger.warning_once") as warning:
+        assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=4, dp_size=2), _cache_config())
+
+    warning.assert_not_called()
 
 
 def test_a_layer_that_may_replay_warns_about_nothing():
     """A layer that is allowed to replay is the quiet case: whatever is said here
     is said about a run that will not replay. Only the conditions that turn the
     switch off speak."""
-    with patch("vllm_ascend.core.kv_cache_interface.logger.warning_once") as warning:
+    with patch("vllm.logger.logger.warning_once") as warning:
         resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()

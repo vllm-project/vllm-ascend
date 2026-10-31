@@ -29,7 +29,7 @@ The features below are the ones enabled by the verified deployment commands in [
 | Feature | Description | Configuration |
 | --- | --- | --- |
 | Tensor Parallel (TP) | Splits the model across all 16 NPUs within a node. | `--tensor-parallel-size 16` |
-| Expert Parallel (EP) | Distributes the MoE experts (256 routed + 1 shared per layer) across NPUs. | `--enable-expert-parallel` |
+| Expert Parallelism (EP) | Distributes the MoE experts (256 routed + 1 shared per layer) across NPUs. | `--enable-expert-parallel` |
 | Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 96k. | `--data-parallel-size 2` |
 | W8A8 Quantization | Loads the W8A8 quantized weights (Ascend quantization). | `--quantization ascend` |
 | Automatic Prefix Caching | Reuses the KV cache for shared prompt prefixes. | `--enable-prefix-caching` |

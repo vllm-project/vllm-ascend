@@ -1,4 +1,6 @@
+from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -10,11 +12,13 @@ from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 @pytest.fixture
@@ -25,7 +29,10 @@ def buffers():
 @pytest.fixture
 def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner._uses_flashmla = False
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.input_buffers = buffers
+    runner.debugger = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
     runner.decode_query_len = 2
     runner.pcp_manager = None
@@ -100,17 +107,41 @@ def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
     assert batch.num_scheduled_tokens.tolist() == [16]
 
 
+def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
+    with (
+        patch.object(buffers, "profile_cpp", True),
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+    ):
+        batch = AscendInputBatch.make_dummy(1, 16, buffers)
+
+    assert batch.is_dummy
+    assert batch.is_cpp_profile
+    assert batch.has_prefill
+    assert batch.attn_state == AscendAttentionState.PrefillNoCache
+    np.testing.assert_array_equal(batch.is_prefilling_np, [True])
+    np.testing.assert_array_equal(batch.prefill_len_np, [16])
+    np.testing.assert_array_equal(batch.num_computed_tokens_np, [0])
+    np.testing.assert_array_equal(batch.num_computed_prefill_tokens_np, [0])
+    assert not batch.is_padding.any()
+    torch.testing.assert_close(batch.positions, torch.arange(16, dtype=batch.positions.dtype))
+
+
+@pytest.mark.parametrize("is_hybrid", [False, True])
 @pytest.mark.parametrize("draft_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
 @pytest.mark.parametrize("capture_size,uniform", [(16, 1), (16, 2), (16, 4), (32, 2), (32, 4)])
-def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size):
+def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size, is_hybrid):
+    runner.model_config.is_hybrid = is_hybrid
     runner.decode_query_len = uniform
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"dummy": uniform}, total_num_scheduled_tokens=uniform)
     _, original_uniform = runner.gather_batch_req_state(scheduler_output, dummy_run=True)
     target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, uniform, capture_size)
     draft = _make_graph_manager(buffers, draft_mode, uniform, capture_size)
 
+    cpu_group = object()
+
     def other_rank_votes(votes, group):
-        assert group is cpu_group
+        # v0.32.0 passes ``group=cpu_group``; main's ``cpu_all_reduce_`` does not.
+        assert group is None or group is cpu_group
         # The other ranks decode real requests with the same query width.
         votes[0, 1:] = torch.tensor([2 * uniform, 3 * uniform, uniform])
         votes[1, 1:] = CUDAGraphMode.PIECEWISE.value
@@ -119,7 +150,6 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         votes[5, 1:] = torch.tensor([2, 3, 1])
 
     def execute_dummy(num_tokens, **kwargs):
-        assert buffers.dummy_num_tokens == uniform
         desc, sync = dispatch_cg_and_sync_dp(target, 1, uniform, original_uniform, 4, 0, max_query_len=uniform)
         assert sync is not None
         assert sync.uniform_token_count == uniform
@@ -128,24 +158,36 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert desc.num_tokens == capture_size
         batch = AscendInputBatch.make_dummy(1, desc.num_tokens, buffers, desc.max_query_len)
         actual_uniform = get_uniform_decode_token_count(
-            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.has_prefill
+            batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
+        )
+        dp_sync_kwarg = "dp_sync_state"
+        draft_desc, reused_sync = dispatch_cg_and_sync_dp(
+            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, **{dp_sync_kwarg: sync}
         )
         assert actual_uniform == uniform
-        draft_desc, reused_sync = dispatch_cg_and_sync_dp(
-            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, dp_sync=sync
-        )
         assert draft_desc.cg_mode == draft_mode.decode_mode()
         assert draft_desc.num_tokens == capture_size
         assert reused_sync is sync
         return None, None
 
-    cpu_group = object()
+    extra_collective_patch: AbstractContextManager[Any]
+    if vllm_version_is("0.32.0"):
+        # v0.32.0 collects through ``dist.all_reduce(votes, group=cpu_group)``.
+        dp_group = SimpleNamespace(cpu_group=cpu_group)
+        collective = Mock(side_effect=other_rank_votes)
+        extra_collective_patch = patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", collective)
+    else:
+        # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
+        collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
+        dp_group = SimpleNamespace(cpu_all_reduce_=collective)
+        extra_collective_patch = nullcontext()
+
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
-        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
-        patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", side_effect=other_rank_votes) as collective,
+        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
+        extra_collective_patch,
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
@@ -160,7 +202,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         ({"context_len": 1}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({}, CUDAGraphMode.PIECEWISE, object(), False, None),
-        ({}, CUDAGraphMode.PIECEWISE, None, True, None),
+        ({}, CUDAGraphMode.PIECEWISE, None, True, 1),
         ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, None),
         ({}, CUDAGraphMode.NONE, None, False, None),
     ],
@@ -181,6 +223,46 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     ):
         runner._dummy_run(1, **kwargs)
     assert buffers.dummy_num_tokens == 7
+
+
+def test_cpp_dummy_scopes_prefill_marker_and_skips_drafter(buffers, runner):
+    speculator = SimpleNamespace(num_query_per_req=8)
+    runner.speculator = speculator
+    original_max_num_reqs = runner.max_num_reqs
+
+    def execute_dummy(*args, **kwargs):
+        assert buffers.profile_cpp
+        assert runner.speculator is None
+        assert runner.max_num_reqs == 1
+        raise RuntimeError("test")
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
+        pytest.raises(RuntimeError, match="test"),
+    ):
+        runner._dummy_run(16, profile_cpp=True)
+
+    assert not buffers.profile_cpp
+    assert runner.speculator is speculator
+    assert runner.max_num_reqs == original_max_num_reqs
+
+
+def test_disabled_cpp_dummy_context_is_noop(runner):
+    class RejectCppStateAccess:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected input buffer access: {name}")
+
+    speculator = object()
+    original_max_num_reqs = runner.max_num_reqs
+    runner.input_buffers = RejectCppStateAccess()
+    runner.speculator = speculator
+
+    with runner._cpp_profile_dummy(False):
+        assert runner.speculator is speculator
+        assert runner.max_num_reqs == original_max_num_reqs
+
+    assert runner.speculator is speculator
+    assert runner.max_num_reqs == original_max_num_reqs
 
 
 @pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
@@ -253,6 +335,8 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
         assert batch.num_tokens == batch.num_tokens_after_padding == num_tokens
         blocks = SimpleNamespace(
             input_block_tables=[torch.zeros((num_reqs, 8), dtype=torch.int32)],
+            # Upstream reads block_sizes; Ascend also tracks kernel block sizes.
+            block_sizes=[16],
             kernel_block_sizes=[16],
             blocks_per_kv_block=[1],
         )
@@ -291,29 +375,31 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
     runner.block_tables.get_dummy_slot_mappings.assert_called_once_with(2)
 
 
+@pytest.mark.parametrize("state_type", [AscendModelState, AscendMambaHybridModelState])
 @pytest.mark.parametrize(
     "mode,is_dummy,expected_input_tokens",
     [(CUDAGraphMode.PIECEWISE, True, 16), (CUDAGraphMode.PIECEWISE, False, 2), (CUDAGraphMode.NONE, True, 2)],
 )
-def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, is_dummy, expected_input_tokens):
+def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
+    buffers, mode, is_dummy, expected_input_tokens, state_type
+):
     with patch.object(buffers, "dummy_num_tokens", 2), patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         batch = AscendInputBatch.make_dummy(1, 16, buffers)
     batch.is_dummy = is_dummy
-    state = AscendModelState.__new__(AscendModelState)
+    state = state_type.__new__(state_type)
+    state.decoder_replay = None
+    state.recoverssm = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )
-    # vLLM main (#58149) made max_model_len a read-only property backed by
-    # model_config; v0.30.0 keeps the plain instance attribute.
-    if vllm_version_is("0.30.0"):
-        state.max_model_len = 128
-    else:
-        state.model_config = SimpleNamespace(max_model_len=128)
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
+    # model_config.
+    state.model_config = SimpleNamespace(max_model_len=128)
     state.pcp_manager = None
     state.kvpp_runtime = None
     state.kvpp_is_dummy_run = False
     state.device_metadata = None
-    with patch("vllm_ascend.worker.v2.model_states.default.build_attn_metadata", return_value={}) as build:
+    with patch(f"{state_type.__module__}.build_attn_metadata", return_value={}) as build:
         assert state.prepare_attn(batch, mode, (), torch.full((1, 16), -1), [], None) == {}
     kwargs = build.call_args.kwargs
     assert kwargs["num_input_tokens"] == expected_input_tokens

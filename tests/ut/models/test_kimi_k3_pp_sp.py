@@ -5,6 +5,7 @@
 import __future__
 
 import ast
+import logging
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -16,8 +17,6 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.utils import vllm_version_is
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -25,9 +24,7 @@ def _keep_definition(item, allowed):
     if getattr(item, "name", None) in allowed:
         return True
     if isinstance(item, ast.If):
-        # Version gates wrap the production method in an if/else at class scope;
-        # keep the whole gate so exec selects the branch matching the installed
-        # vLLM (requires ``vllm_version_is`` in the target namespace).
+        # Keep requested definitions nested in class-scope conditionals.
         return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
     return False
 
@@ -227,7 +224,6 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
-        "vllm_version_is": vllm_version_is,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -472,12 +468,16 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
         {".gate_proj": (".gate_up_proj", 0)},
     )
     captured = []
+
+    def load_weights(weights, *, mapper):
+        captured.append(mapper)
+        return {name for name, _ in weights}
+
     namespace = {
         "BaseModel": nn.Module,
         "replace": replace,
-        "AutoWeightsLoader": lambda model: SimpleNamespace(
-            load_weights=lambda weights, mapper: captured.append(mapper)
-        ),
+        "logger": logging.getLogger(__name__),
+        "AutoWeightsLoader": lambda model: SimpleNamespace(load_weights=load_weights),
     }
     load_definitions(
         "vllm_ascend/models/kimi_k3_dspark.py",
@@ -489,7 +489,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     model = namespace["AscendK3DSparkForCausalLM"]()
     model.hf_to_vllm_mapper = mapper
     model._owns_embed_tokens = owns_embed
-    model.load_weights([])
+    assert model.load_weights([]) == set()
     selected = captured[0]
     expected = dict(mapper.orig_to_new_substr)
     if owns_embed:
@@ -544,7 +544,6 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
 
 
 @pytest.mark.parametrize("architecture", ["KimiK3ForCausalLM", "DeepseekV4ForCausalLM"])
-@pytest.mark.parametrize("legacy_transport", [False, True])
 @pytest.mark.parametrize(
     "use_pp,num_speculative_steps,owns_speculator,prefill_chunk",
     [
@@ -559,7 +558,7 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
     ],
 )
 def test_host_positions_after_rejection_or_chunk(
-    architecture, legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
+    architecture, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
 ):
     events = []
 
@@ -583,11 +582,18 @@ def test_host_positions_after_rejection_or_chunk(
         {"NPUModelRunner"},
         namespace,
         bases={"NPUModelRunner": "BaseStateRunner"},
-        methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
+        methods={
+            "NPUModelRunner": {
+                "_can_skip_spec_cpu_length_sync",
+                "postprocess_sampled",
+                "postprocess_num_computed_tokens",
+                "_update_seq_lens_cpu",
+            }
+        },
     )
     runner = namespace["NPUModelRunner"]()
+    runner.speculative_config = None
     runner.speculator = object() if owns_speculator else None
-    runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp
     runner.model_state = object()

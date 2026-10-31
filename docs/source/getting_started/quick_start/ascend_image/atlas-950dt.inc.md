@@ -37,7 +37,8 @@
             --shm-size=1g \
             --device /dev/davinci0 \
             --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
+            --device /dev/ummu \
+            --device /dev/uburma \
             --device /dev/hisi_hdc \
             -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
@@ -62,7 +63,8 @@
             --shm-size=1g \
             --device /dev/davinci0 \
             --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
+            --device /dev/ummu \
+            --device /dev/uburma \
             --device /dev/hisi_hdc \
             -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \

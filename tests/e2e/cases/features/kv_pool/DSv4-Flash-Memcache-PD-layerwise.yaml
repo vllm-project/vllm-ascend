@@ -18,7 +18,8 @@ config:
     dp_size: 4
     dp_size_local: 4
     dp_rank_start: 0
-    tp_size: 4
+    tp_size: 1
+    cp_size: 4
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -85,6 +86,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
@@ -118,9 +121,9 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2":1}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true}}]}}'
 
   - node_index: 1
     envs:
@@ -175,7 +178,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": false}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": false}}]}}'
       - --additional-config
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 

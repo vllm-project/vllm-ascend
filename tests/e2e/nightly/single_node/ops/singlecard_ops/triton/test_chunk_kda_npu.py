@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.kda.kda import chunk_kda
 
 DEVICE = "npu"
@@ -82,6 +84,9 @@ def assert_close(
     assert rel_err < ratio, f"{name}: max abs err {abs_err:.6f}, rmse ratio {rel_err:.6f} >= {ratio}"
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens", "dtype"),
     [

@@ -42,7 +42,11 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import (
+    get_potential_max_tokens,
+    npu_stream_switch,
+    oproj_tp_enable,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -180,6 +184,10 @@ class AscendDSAV41Metadata(AttentionMetadata):
     ori_mask_mode: int = 4
     ori_win_left: int = 0
     ori_win_right: int = 0
+    replay_seq_lens: torch.Tensor | None = None
+    replay_block_table: torch.Tensor | None = None
+    replay_cache_blocks: torch.Tensor | None = None
+    replay_cache_offsets: torch.Tensor | None = None
     smla_metadata: torch.Tensor | None = None
     qli_metadata: torch.Tensor | None = None
     cmp_residual: torch.Tensor | None = None
@@ -190,7 +198,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
-    cp_token_range: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -698,9 +705,17 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if metadata.swa.replay_block_table is not None:
+            # Rebase only SWA: A3 CSA cannot mask its missing prefix with
+            # sparse ori indices. Compressed KV retains its causal coordinates.
+            swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
+            ori_block_table = metadata.swa.replay_block_table
+            seq_lens = metadata.swa.replay_seq_lens
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
-            ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
+            ori_kv=swa_cache,
             cmp_kv=source_cache,
             ori_sparse_indices=metadata.swa.ori_sparse_indices,
             ori_topk_length=metadata.swa.ori_topk_length,
@@ -739,7 +754,22 @@ class AscendDSAV41Impl:
             output = torch.empty_like(hidden_states)
         forward_context = get_forward_context()
         if forward_context.attn_metadata is None:
+            projector = attn.dsa_attn.dsa_attn.impl
             output.zero_()
+            if oproj_tp_enable():
+                capacity = (
+                    projector._oproj_send_buf.shape[1]
+                    if hasattr(projector, "_oproj_send_buf")
+                    else get_potential_max_tokens()
+                )
+                profile_tokens = min(hidden_states.shape[0], capacity)
+                o_proj_input = hidden_states.new_zeros((profile_tokens, attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif getattr(projector, "enable_pcp_o_proj_weight_sharding", False):
+                # Match V4 profiling: exercise OTP communication buffers or
+                # PCP resident weight shards before graph capture.
+                o_proj_input = hidden_states.new_zeros((hidden_states.shape[0], attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         q, qr, prepared_indexer = self._prepare_inputs_and_caches(
@@ -755,7 +785,7 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
-            heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
+            heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output
@@ -1125,6 +1155,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
         ori_topk_length = None
+        replay_start = kwargs.get("replay_start")
+        replay_seq_lens = replay_block_table = replay_cache_blocks = replay_cache_offsets = None
+        max_ori_seq_len = int(getattr(common, "max_seq_len", 0))
+        if replay_start is not None:
+            replay_seq_lens = (seq_lens - replay_start).clamp_min(0)
+            max_ori_seq_len = kwargs["replay_max_seq_len"]
+            if cache_kind == "swa":
+                blocks_per_req = (max_ori_seq_len + storage_block_size - 1) // storage_block_size
+                capacity = blocks_per_req * storage_block_size
+                cache_positions = replay_start[:, None] + torch.arange(capacity, device=seq_lens.device)
+                cache_positions = torch.minimum(cache_positions, kwargs["replay_seq_lens"][:, None] - 1).clamp_min(0)
+                replay_cache_blocks = (
+                    common.block_table_tensor[:num_reqs]
+                    .gather(1, cache_positions.div(storage_block_size, rounding_mode="floor").long())
+                    .long()
+                )
+                replay_cache_offsets = cache_positions.remainder(storage_block_size).long()
+                replay_block_table = torch.arange(
+                    num_reqs * blocks_per_req, dtype=torch.int32, device=seq_lens.device
+                ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
             ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
@@ -1265,12 +1315,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     1,
                     head_dim,
                     cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
-                    seqused_ori_kv=seq_lens,
+                    seqused_ori_kv=replay_seq_lens if replay_seq_lens is not None else seq_lens,
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=num_reqs,
                     max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=int(getattr(common, "max_seq_len", 0)),
+                    max_seqlen_ori_kv=max_ori_seq_len,
                     max_seqlen_cmp_kv=(coordinates["max_cache_seq_len"] if has_compressed else 0),
                     ori_topk=ori_sparse_indices.shape[-1] if ori_sparse_indices is not None else 0,
                     ori_topk_length=ori_topk_length,
@@ -1498,6 +1548,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_mask_mode=ori_mask_mode,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
+            replay_seq_lens=replay_seq_lens,
+            replay_block_table=replay_block_table,
+            replay_cache_blocks=replay_cache_blocks,
+            replay_cache_offsets=replay_cache_offsets,
             smla_metadata=smla_metadata,
             qli_metadata=qli_metadata,
             cmp_residual=cmp_residual_buffer,
@@ -1517,6 +1571,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @staticmethod
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls():

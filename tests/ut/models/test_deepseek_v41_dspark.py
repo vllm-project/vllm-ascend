@@ -25,9 +25,10 @@ from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkDecoderLayer,
     DeepseekV41DSparkModel,
     DeepseekV41DSparkSWACache,
+    DSparkDeepseekV41ForCausalLM,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, DeepseekV41Model
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
@@ -91,6 +92,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
 
     model = SimpleNamespace(
         hc_mult=4,
+        decoder_replay_layers=None,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
@@ -114,8 +116,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
     torch.testing.assert_close(output, hidden + 6)
 
 
-@pytest.mark.parametrize("cp", [False, True])
-def test_v41_draft_routes_to_v41(cp):
+def test_v41_draft_routes_to_v41():
     from vllm_ascend.models.deepseek_v41.model import DeepseekV41SWAAttention
 
     draft_backend = SimpleNamespace()
@@ -126,13 +127,11 @@ def test_v41_draft_routes_to_v41(cp):
         instance.scale = 512**-0.5
         instance.dsa_attn = SimpleNamespace(dsa_attn=SimpleNamespace(impl=draft_backend))
 
-    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
-        patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,
             "get_dsv41_packed_cache_ops",
@@ -140,7 +139,7 @@ def test_v41_draft_routes_to_v41(cp):
         ),
     ):
         draft = DeepseekV41DSparkAttention(vllm_config=config, prefix="mtp.0.self_attn")
-    assert type(draft.v41_impl) is (AscendDSAV41CPImpl if cp else AscendDSAV41Impl)
+    assert type(draft.v41_impl) is AscendDSAV41Impl
     assert config.compilation_config.static_forward_context[draft.v41_layer_name] is draft
     assert draft.packed_cache_ops is draft_backend
     assert draft.softmax_scale == 512**-0.5
@@ -233,6 +232,7 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     config = SimpleNamespace(
         hc_mult=4,
         hidden_size=8,
+        head_dim=4,
         vocab_size=32,
         draft_vocab_size=draft_vocab_size,
         dspark_block_size=6,
@@ -250,19 +250,29 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
             )
         ),
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        model_config=SimpleNamespace(dtype=torch.float16),
         quant_config=quant_config,
     )
     module = deepseek_v41_dspark_module
+    draft_impls = []
 
     def layer(*args, **kwargs):
         result = torch.nn.Module()
         result.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        impl = MagicMock(spec=module.AscendDSAImpl)
+        draft_impls.append(impl)
+        result.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
         return result
 
     monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
     monkeypatch.setattr(module, "VocabParallelEmbedding", lambda *a, **kw: torch.nn.Identity())
     linear = MagicMock(return_value=torch.nn.Identity())
     monkeypatch.setattr(module, "ColumnParallelLinear", linear)
+    monkeypatch.setattr(
+        module,
+        "MergedColumnParallelLinear",
+        MagicMock(return_value=torch.nn.Identity()),
+    )
     monkeypatch.setattr(module, "RMSNorm", lambda *a, **kw: torch.nn.Identity())
     with (
         patch.object(
@@ -278,3 +288,116 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     confidence.assert_called_once_with(input_dim=12, prefix="model.confidence_head", bias=False, with_markov=True)
     assert linear.call_args.kwargs["quant_config"] is quant_config
     assert model.layers["42"].markov_head is model.markov_head
+    assert len(draft_impls) == 3
+    for impl in draft_impls:
+        assert impl._oproj_buffer_pool is model._oproj_buffer_pool
+        impl.reserve_oproj_buffers.assert_called_once_with(
+            torch.device(module.current_platform.device_type), torch.float16
+        )
+
+
+def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
+    load_calls = []
+
+    def weight_loader(param, loaded_weight, shard_id=None):
+        load_calls.append((param, loaded_weight, shard_id))
+
+    original_param = torch.nn.Parameter(torch.empty(4))
+    original_param.weight_loader = weight_loader
+    merged_param = torch.nn.Parameter(torch.empty(4))
+    merged_param.weight_loader = weight_loader
+    params = {
+        "model.layers.40.self_attn.wkv.weight": original_param,
+        "model.context_wkv_proj.weight": merged_param,
+    }
+    model = SimpleNamespace(
+        model=SimpleNamespace(num_dspark_layers=1, get_expert_mapping=lambda: []),
+        config=SimpleNamespace(num_attention_heads=1),
+        rotation_path=None,
+        named_parameters=lambda: params.items(),
+    )
+
+    def remap(name):
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
+        return "model.layers.40.self_attn.wkv.weight"
+
+    model._remap_dspark_name = remap
+    module = deepseek_v41_dspark_module
+    monkeypatch.setattr(module, "process_eagle_weight", lambda *_: None)
+    monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
+
+    loaded_weight = torch.arange(4)
+    loaded_params = DSparkDeepseekV41ForCausalLM.load_weights(
+        model,
+        [("mtp.0.attn.wkv.weight", loaded_weight)],
+    )
+
+    assert loaded_params == set(params)
+    assert [call[2] for call in load_calls] == [None, 0]
+    assert load_calls[0][0] is original_param
+    assert load_calls[1][0] is merged_param
+    assert load_calls[1][1].data_ptr() == loaded_weight.data_ptr()
+
+
+def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+    projection_calls = []
+    rope_calls = []
+    rope = object()
+    stacked_output = torch.arange(24, dtype=torch.float32).view(2, 12)
+
+    class StackedProjection:
+        def __call__(self, context_states):
+            projection_calls.append(context_states)
+            return stacked_output
+
+    attns = [SimpleNamespace(rotary_emb=SimpleNamespace(layername=f"layer-{layer_idx}")) for layer_idx in range(3)]
+    layers = {str(layer_idx + 40): SimpleNamespace(self_attn=attn) for layer_idx, attn in enumerate(attns)}
+
+    def get_rope(positions, layer_names):
+        rope_calls.append((positions, layer_names))
+        return rope
+
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", get_rope)
+
+    projected = []
+    stored = []
+    model = SimpleNamespace(
+        context_wkv_proj=StackedProjection(),
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+    )
+
+    def project_shared_kv(kv, positions, attn, rope=None):
+        projected.append((kv.clone(), positions, attn, rope))
+        return kv.unsqueeze(1)
+
+    def store_standard_swa_kv(shared_kv, slot_mapping, attn):
+        stored.append((shared_kv.clone(), slot_mapping, attn))
+
+    model._project_shared_kv = project_shared_kv
+    model._store_standard_swa_kv = store_standard_swa_kv
+    context_states = torch.zeros(2, 5)
+    positions = torch.tensor([7, 8])
+    slot_mappings = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
+
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(
+        model,
+        context_states,
+        positions,
+        slot_mappings,
+    )
+
+    assert len(projection_calls) == 1
+    assert projection_calls[0] is context_states
+    assert len(rope_calls) == 1
+    assert rope_calls[0][0] is positions
+    assert rope_calls[0][1] == ["layer-0", "layer-1", "layer-2"]
+    expected = stacked_output.view(2, 3, 4)
+    torch.testing.assert_close(projected[0][0], expected[:, 0])
+    torch.testing.assert_close(projected[1][0], expected[:, 2])
+    assert [call[3] for call in projected] == [rope, rope]
+    assert stored[0][1] is slot_mappings[0]
+    assert stored[1][1] is slot_mappings[2]

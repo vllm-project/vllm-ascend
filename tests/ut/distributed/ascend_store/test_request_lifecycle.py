@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -75,7 +76,7 @@ class MemoryBackend(Backend):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
-        return [0] * len(keys)
+        return [True] * len(keys)
 
     def get(self, keys, addrs, sizes):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
@@ -347,9 +348,16 @@ def test_raw_sequence_lifecycle(
                 kv_connector_worker_meta=worker.build_connector_worker_meta(),
             )
             computed_before_update = request.num_computed_tokens
+            output_tokens_before_update = request.num_output_tokens
             scheduler.update_from_output(output, result)
             if drafts:
-                assert request.num_computed_tokens == computed_before_update - len(drafts) + accepted
+                expected_computed = computed_before_update - len(drafts) + accepted
+                if not vllm_version_is("0.32.0"):
+                    # vLLM main trims ``num_computed_tokens`` to cover only the
+                    # tokens actually kept when a request stops mid token-list.
+                    appended = request.num_output_tokens - output_tokens_before_update
+                    expected_computed -= (accepted + 1) - appended
+                assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
                     DraftTokenIds([req_id], [[1000 + request.num_tokens + i for i in range(3)]])

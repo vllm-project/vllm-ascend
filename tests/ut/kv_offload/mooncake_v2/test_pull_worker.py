@@ -234,15 +234,43 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
     assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
 
 
-def test_mamba_tp_groups_follow_non_replicated_tp_ratio() -> None:
-    local_smaller = make_thread(tp_size=2, tp_rank=1)
-    assert local_smaller._get_mamba_remote_tp_rank_groups(1, 4) == [[2], [3]]
+@pytest.mark.parametrize("local_pcp", [False, True])
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_tp_groups_follow_non_replicated_tp_ratio(local_pcp: bool, remote_pcp: bool) -> None:
+    local_smaller = make_thread(
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
+    )
+    assert local_smaller._get_mamba_remote_tp_rank_groups(4 if remote_pcp else 1, 1 if remote_pcp else 4) == [[2], [3]]
 
-    local_larger = make_thread(tp_size=4, tp_rank=3)
-    assert local_larger._get_mamba_remote_tp_rank_groups(1, 2) == [[1]]
+    local_larger = make_thread(
+        tp_size=1 if local_pcp else 4,
+        tp_rank=0 if local_pcp else 3,
+        pcp_size=4 if local_pcp else 1,
+        pcp_rank=3 if local_pcp else 0,
+    )
+    assert local_larger._get_mamba_remote_tp_rank_groups(2 if remote_pcp else 1, 1 if remote_pcp else 2) == [[1]]
 
     with pytest.raises(ValueError, match="integer ratio"):
-        local_larger._get_mamba_remote_tp_rank_groups(1, 3)
+        local_larger._get_mamba_remote_tp_rank_groups(3 if remote_pcp else 1, 1 if remote_pcp else 3)
+
+
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+def test_mamba_head_groups_follow_worker_rank(local_tp, local_pcp, remote_tp, remote_pcp) -> None:
+    local_size, remote_size = local_tp * local_pcp, remote_tp * remote_pcp
+    for local_rank in range(local_size):
+        tp_rank, pcp_rank = divmod(local_rank, local_pcp)
+        thread = make_thread(tp_size=local_tp, tp_rank=tp_rank, pcp_size=local_pcp, pcp_rank=pcp_rank)
+        # Select every producer whose global head interval overlaps this consumer.
+        expected = [
+            [rank]
+            for rank in range(remote_size)
+            if rank * local_size < (local_rank + 1) * remote_size and local_rank * remote_size < (rank + 1) * local_size
+        ]
+        assert thread._get_mamba_remote_tp_rank_groups(remote_pcp, remote_tp) == expected
 
 
 def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
@@ -668,8 +696,14 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
         )
 
 
-def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
-    thread = make_thread(num_speculative_tokens=2)
+@pytest.mark.parametrize(
+    "num_speculative_tokens,num_speculative_blocks,local_blocks,checkpoint",
+    [(2, 2, [1, 2, 3, 4], 2), (5, 0, [7], 7)],
+)
+def test_compute_mamba_state_selects_pre_speculative_local_block(
+    num_speculative_tokens, num_speculative_blocks, local_blocks, checkpoint
+) -> None:
+    thread = make_thread(num_speculative_tokens=num_speculative_tokens)
 
     result = thread._compute_group_block_ids(
         "request",
@@ -678,19 +712,19 @@ def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
         0,
         16,
         16,
-        [1, 2, 3, 4],
-        [1, 2, 3, 4],
+        local_blocks,
+        local_blocks,
         [8, 9, 10],
         32,
         31,
         0,
         1,
         1,
-        make_mamba_spec(),
+        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
         0,
     )
 
-    assert result == [(0, [2], [10])]
+    assert result == [(0, [checkpoint], [10])]
 
 
 def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
@@ -897,38 +931,68 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
     assert lengths == [64]
 
 
-def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize("worker_rank", [1, 2, 3])
+@pytest.mark.parametrize("recoverssm", [False, True])
+def test_mamba_equal_tp_address_generation_transfers_each_cache(
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, recoverssm
+) -> None:
+    tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
+    remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
+    shapes = [(3, 16), (2, 4, 4)]
+    dtypes: tuple[torch.dtype, ...] = (torch.float16, torch.float32)
+    local_bases, remote_bases = [1000, 2000], [5000, 6000]
+    strides, block_lens = [128, 256], [96, 128]
+    expected_src, expected_dst = [1128, 2256], [5256, 6512]
+    if recoverssm:
+        shapes += [(2, 6, 4), (2, 6, 8)]
+        dtypes += (torch.float32, torch.float16)
+        local_bases += [3000, 4000]
+        remote_bases += [7000, 8000]
+        strides += [256, 256]
+        block_lens += [192, 192]
+        expected_src += [3256, 4256]
+        expected_dst += [7512, 8512]
     thread = make_thread(
-        kv_caches_base_addr=[[1000, 2000]],
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
+        tp_size=local_tp,
+        tp_rank=tp_rank,
+        pcp_size=local_pcp,
+        pcp_rank=pcp_rank,
+        kv_caches_base_addr=[local_bases],
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
     )
     remote = make_pp_metadata(
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
-        tp_base_addrs={0: [[5000, 6000]]},
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
+        pcp_tp_base_addrs={
+            pcp: {
+                tp: [remote_bases] if tp * remote_pcp + pcp == worker_rank else [[base + 2000 for base in remote_bases]]
+                for tp in range(remote_tp)
+            }
+            for pcp in range(remote_pcp)
+        },
     )
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
-
     thread._append_mamba_transfer_addresses(
-        make_mamba_spec(),
-        0,
-        0,
-        1,
+        replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes),
+        remote_pcp_rank,
+        remote_tp_rank,
+        remote_tp,
         {(0, 0): [("request", [1], [2])]},
         remote,
         src,
         dst,
         lengths,
     )
-
-    assert src == [1128, 2256]
-    assert dst == [5256, 6512]
-    assert lengths == [96, 128]
+    assert src == expected_src
+    assert dst == expected_dst
+    assert lengths == block_lens
 
 
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
@@ -1281,6 +1345,29 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
     assert lengths == [128]
 
 
+@pytest.mark.parametrize("local_shape,remote_shape", [((9, 256), (2, 9, 128)), ((2, 9, 128), (9, 256))])
+def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remote_shape) -> None:
+    thread = make_thread(
+        kv_cache_specs=[make_kpool_tail_spec()],
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[local_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[remote_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src, dst, lengths = list[int](), list[int](), list[int]()
+    with pytest.raises(ValueError, match="circular cache layout mismatch"):
+        thread._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 4, {(0, 0): [("request", [1], [3])]}, remote, src, dst, lengths
+        )
+    assert not src and not dst and not lengths
+
+
 def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     thread = make_thread(
@@ -1331,7 +1418,8 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     assert lengths == [256, 128, 128, 256, 128, 128]
 
 
-def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_unequal_tp_slices_conv_projections_and_state(remote_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
@@ -1348,7 +1436,11 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
         block_lens=[[48, 32]],
-        tp_base_addrs={0: [[5000, 6000]], 1: [[7000, 8000]]},
+        pcp_tp_base_addrs=(
+            {0: {0: [[5000, 6000]]}, 1: {0: [[7000, 8000]]}}
+            if remote_pcp
+            else {0: {0: [[5000, 6000]], 1: [[7000, 8000]]}}
+        ),
     )
     src: list[int] = []
     dst: list[int] = []
@@ -1356,9 +1448,9 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
 
     thread._append_mamba_transfer_addresses(
         spec,  # type: ignore[arg-type]
-        remote_pcp_rank=0,
-        remote_tp_rank=1,
-        remote_tp_size=2,
+        remote_pcp_rank=1 if remote_pcp else 0,
+        remote_tp_rank=0 if remote_pcp else 1,
+        remote_tp_size=1 if remote_pcp else 2,
         transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
         remote_metadata=remote,
         src_list=src,
@@ -1533,14 +1625,17 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         assert worker._recving_thread is None
 
 
-def test_mamba_unequal_tp_slices_into_wider_remote_cache() -> None:
+@pytest.mark.parametrize("local_pcp", [False, True])
+def test_mamba_unequal_tp_slices_into_wider_remote_cache(local_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
     )
     thread = make_thread(
-        tp_size=2,
-        tp_rank=1,
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
         kv_caches_base_addr=[[1000, 2000]],
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
@@ -1897,3 +1992,61 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     )
 
     assert result == expected
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("remote_pcp", [1, 2])
+def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, remote_tp: int, remote_pcp: int) -> None:
+    spec = replace(make_mamba_spec(), tp_replicated=True)
+    thread = make_thread(tp_size=local_tp, tp_rank=local_tp - 1)
+    groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
+    assert groups == [list(range(remote_pcp * remote_tp))]
+    transfers = thread._compute_group_block_ids(
+        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1
+    )
+    assert transfers == [(1, [2], [3])]
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("mismatch", [None, "shape", "length"])
+def test_replicated_short_conv_copies_complete_state_between_different_ranks(
+    local_tp: int, remote_tp: int, mismatch: str | None
+) -> None:
+    spec = replace(
+        make_mamba_spec(),
+        shapes=((3, 16),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    thread = make_thread(
+        tp_size=local_tp,
+        tp_rank=local_tp - 1,
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[(3, 16)]],
+        block_strides=[[128]],
+        block_lens=[[96]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(6, 8) if mismatch == "shape" else (3, 16)]],
+        block_strides=[[160]],
+        block_lens=[[94 if mismatch == "length" else 96]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    def append() -> None:
+        thread._append_mamba_transfer_addresses(
+            spec, 0, 0, remote_tp, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+        )
+
+    if mismatch is not None:
+        with pytest.raises(ValueError, match="replicated Mamba metadata mismatch"):
+            append()
+    else:
+        append()
+        assert src == [1128]
+        assert dst == [5320]
+        assert lengths == [96]

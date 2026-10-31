@@ -32,10 +32,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-# Install requirements-dev.txt for tests
+# Install requirements-nightly.txt for tests
 RUN export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" && \
     cd /vllm-workspace/vllm-ascend && \
-    python3 -m pip install -r requirements-dev.txt && \
+    python3 -m pip install -r requirements-nightly.txt && \
     python3 -m pip cache purge
 
 # Install benchmark tools

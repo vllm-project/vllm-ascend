@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+"""310P sampling primitives backed by the shared CPU generator cache.
+
+Lives under the MRv2 worker so that the MRv1-only ``vllm_ascend._310p.sample``
+package can be deleted without affecting the 310P MRv2 sampling path.
+"""
+
+import torch
+
+from vllm_ascend.utils import global_stream, npu_stream_switch
+
+_CPU_GENERATOR_CACHE_310P: dict[int, tuple[torch.Generator, torch.Generator]] = {}
+
+
+def _prepare_cpu_generators_310p(
+    generators: dict[int, torch.Generator],
+) -> dict[int, torch.Generator]:
+    """Return CPU RNGs while preserving requests across batch reordering."""
+    cached_by_source = {
+        id(source): (source, cpu_generator) for source, cpu_generator in _CPU_GENERATOR_CACHE_310P.values()
+    }
+    prepared: dict[int, torch.Generator] = {}
+    next_cache: dict[int, tuple[torch.Generator, torch.Generator]] = {}
+
+    for request_index, source in generators.items():
+        cache_entry = cached_by_source.get(id(source))
+        if cache_entry is None or cache_entry[0] is not source:
+            cpu_generator = torch.Generator(device="cpu")
+            cpu_generator.manual_seed(source.initial_seed())
+        else:
+            cpu_generator = cache_entry[1]
+
+        prepared[request_index] = cpu_generator
+        next_cache[request_index] = (source, cpu_generator)
+
+    _CPU_GENERATOR_CACHE_310P.clear()
+    _CPU_GENERATOR_CACHE_310P.update(next_cache)
+    return prepared
+
+
+def _generate_request_uniforms_310p(
+    batch_size: int,
+    generators: dict[int, torch.Generator],
+    device: torch.device,
+) -> torch.Tensor:
+    """Generate one uniform value per request on pinned CPU memory."""
+    uniforms = torch.rand(
+        (batch_size,),
+        dtype=torch.float32,
+        device="cpu",
+        pin_memory=True,
+    )
+    for request_index, cpu_generator in _prepare_cpu_generators_310p(generators).items():
+        uniforms[request_index] = torch.rand((), dtype=torch.float32, generator=cpu_generator)
+
+    # Exact zero would select a zero-probability prefix in inverse CDF.
+    uniforms.clamp_min_(torch.finfo(torch.float32).tiny)
+    return uniforms.to(device, non_blocking=True)
+
+
+def _sample_from_cdf_310p(
+    weights: torch.Tensor,
+    uniforms: torch.Tensor,
+) -> torch.Tensor:
+    """Sample rows of non-negative weights with 310P-supported NPU ops."""
+    cdf = weights.cumsum(dim=-1, dtype=torch.float32)
+    thresholds = uniforms.unsqueeze(-1) * cdf[..., -1:]
+    return torch.searchsorted(cdf, thresholds, right=True).squeeze(-1)
+
+
+def fill_exponential_310p(
+    reference: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    active_mask: list[bool] | None = None,
+) -> torch.Tensor:
+    """Generate exponential values on CPU and transfer them to NPU."""
+    batch_size = reference.shape[0]
+    cpu_generators = _prepare_cpu_generators_310p(generators)
+    needs_default_values = active_mask is not None or len(generators) != batch_size
+
+    if needs_default_values:
+        uniforms = torch.rand(
+            reference.shape,
+            dtype=torch.float32,
+            device="cpu",
+            pin_memory=True,
+        )
+    else:
+        uniforms = torch.empty(
+            reference.shape,
+            dtype=torch.float32,
+            device="cpu",
+            pin_memory=True,
+        )
+
+    for request_index, cpu_generator in cpu_generators.items():
+        if active_mask is not None and not active_mask[request_index]:
+            continue
+        uniforms[request_index] = torch.rand(
+            reference.shape[1:],
+            dtype=torch.float32,
+            generator=cpu_generator,
+        )
+
+    uniforms.clamp_min_(torch.finfo(torch.float32).tiny)
+    exponential = -torch.log(uniforms)
+    return exponential.to(
+        device=reference.device,
+        dtype=reference.dtype,
+        non_blocking=True,
+    )
+
+
+def _random_sample_310p(
+    probs: torch.Tensor,
+    generators: dict[int, torch.Generator],
+) -> torch.Tensor:
+    """
+    310P does not support the required NPU random-generation path.
+    The previous implementation generated [batch, vocab] random values
+    on the CPU and copied them to the NPU, causing performance degradation on
+    small models and RC devices. This implementation generates only one CPU
+    random value per request and performs inverse-CDF sampling on the NPU,
+    reducing CPU computation and H2D transfer overhead.
+    """
+    with npu_stream_switch(global_stream()):
+        uniforms = _generate_request_uniforms_310p(
+            probs.shape[0],
+            generators,
+            probs.device,
+        )
+
+    torch.npu.current_stream().wait_stream(global_stream())
+    sampled = _sample_from_cdf_310p(probs, uniforms)
+    return sampled.view(-1)

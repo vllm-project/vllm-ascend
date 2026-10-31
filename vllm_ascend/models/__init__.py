@@ -3,6 +3,18 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "Qwen4ExpForCausalLM",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Qwen4ExpForConditionalGeneration",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen4ExpMTP",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpMTP",
+    )
+    ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",
     )
@@ -72,6 +84,17 @@ def register_model():
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("DeepseekV32MTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")
+    # Ascend Qwen3.5-VL: NPU-side image preprocessing (resize/patchify +
+    # fused rescale/normalize); overwrites the upstream architecture mapping,
+    # same pattern as AscendDeepseekV4ForConditionalGeneration (see PR #15457).
+    ModelRegistry.register_model(
+        "Qwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5MoeForConditionalGeneration",
+    )
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )

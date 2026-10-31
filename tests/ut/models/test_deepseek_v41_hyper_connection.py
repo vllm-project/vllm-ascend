@@ -247,6 +247,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     torch.nn.Module.__init__(model)
     model.hc_mult = 2
     model.needs_moe_input_ids = False
+    model.decoder_replay_layers = None
     model.use_sequence_parallel_moe = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     seen = []
@@ -270,7 +271,13 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.decoder_replay_layers = None
     model.hc_mult = 2
+    model.start_layer = 0
+    model.end_layer = 3
+    model.decoder_replay_start = 3
+    model.decoder_replay_layers = None
+    model.use_sequence_parallel = False
     model.needs_moe_input_ids = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     model.norm = torch.nn.Identity()
@@ -321,6 +328,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     draft = SimpleNamespace(
         hc_mult=4,
         hidden_size=8,
+        head_dim=4,
         dspark_block_size=5,
         dspark_markov_rank=4,
         num_nextn_predict_layers=3,
@@ -342,6 +350,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     def make_layer(*args, **kwargs):
         layer = torch.nn.Module()
         layer.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        layer.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=object())))
         return layer
 
     factory = MagicMock(side_effect=make_layer)
@@ -349,6 +358,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         for name in (
             "VocabParallelEmbedding",
             "ColumnParallelLinear",
+            "MergedColumnParallelLinear",
             "RMSNorm",
             "DSparkMarkovHead",
             "DSparkConfidenceHead",

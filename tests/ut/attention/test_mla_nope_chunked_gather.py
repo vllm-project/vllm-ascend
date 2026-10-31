@@ -52,19 +52,18 @@ def _install_fakes(monkeypatch, captured):
         captured["value"] = value
 
     monkeypatch.setattr(DeviceOperator, "kv_cache_load", staticmethod(fake_kv_cache_load))
-    monkeypatch.setattr(
-        "vllm_ascend.attention.mla_v1.torch_npu",
-        SimpleNamespace(
-            npu_fused_infer_attention_score=lambda *args, **kwargs: (
-                torch.zeros(NUM_TOKENS, NUM_HEADS, V_HEAD_DIM),
-                torch.zeros(NUM_TOKENS * NUM_HEADS),
-            ),
-            npu_attention_update=lambda lse, out, dim: (
-                torch.zeros(NUM_TOKENS * NUM_HEADS, V_HEAD_DIM),
-                None,
-            ),
+    fake_torch_npu = SimpleNamespace(
+        npu_fused_infer_attention_score=lambda *args, **kwargs: (
+            torch.zeros(NUM_TOKENS, NUM_HEADS, V_HEAD_DIM),
+            torch.zeros(NUM_TOKENS * NUM_HEADS),
+        ),
+        npu_attention_update=lambda lse, out, dim: (
+            torch.zeros(NUM_TOKENS * NUM_HEADS, V_HEAD_DIM),
+            None,
         ),
     )
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.torch_npu", fake_torch_npu)
+    monkeypatch.setattr("vllm_ascend.attention.utils.torch_npu", fake_torch_npu)
 
 
 def _run(impl, rope_dim, cache_k_pe):

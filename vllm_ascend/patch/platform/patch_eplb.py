@@ -573,21 +573,14 @@ def _wrap_async_worker(original_worker):
     transfer_signature = signature(_async_worker.transfer_layer)
     transfer_stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
 
-    @wraps(original_worker)
-    def _transfer_run_periodically(*args, **kwargs):
-        bound = worker_signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        state = bound.arguments["state"]
-        stream = bound.arguments[worker_stream_parameter]
-        is_profile = bound.arguments["is_profile"]
-        if not isinstance(state, AscendEplbState) or is_profile:
-            return original_worker(*bound.args, **bound.kwargs)
-        while True:
-            state.rearrange_event.wait(stream=stream)
+    def _run(state, stream, is_profile):
+        rank = _async_worker.get_eplb_group().device_group.rank()
+        while state.wait_for_rearrangement(stream):
             eplb_group = _async_worker.get_eplb_group().device_group
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
                 model_state.communicator.set_stream(stream)
+                previous_consumed_event = None
                 with stream if stream is not None else nullcontext():
                     old_mapping = model_state.physical_to_logical_map.cpu()
                 new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
@@ -636,7 +629,14 @@ def _wrap_async_worker(original_worker):
                         "layer_idx": layer_idx,
                         transfer_stream_parameter: stream,
                     }
-                    metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    communicator = model_state.communicator
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        communicator.set_consumed_event(previous_consumed_event)
+                    try:
+                        metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    finally:
+                        if isinstance(communicator, AscendHixlEplbCommunicator):
+                            communicator.set_consumed_event(None)
                     with gpu_sync_allowed():
                         stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
@@ -651,6 +651,41 @@ def _wrap_async_worker(original_worker):
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        # record() replaces the underlying event. Capture it only
+                        # after wait() has observed the foreground acknowledgement.
+                        previous_consumed_event = consumed_event._event
+                    if index == len(changed_layers) - 1:
+                        # On both supported lanes, the last workspace move may
+                        # use upstream's helper instead of the wrapped commit
+                        # path, so report completion from this worker.
+                        if rank == 0:
+                            logger.info(
+                                "%s: model=%s",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                            )
+
+    @wraps(original_worker)
+    def _transfer_run_periodically(*args, **kwargs):
+        bound = worker_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        state = bound.arguments["state"]
+        stream = bound.arguments[worker_stream_parameter]
+        is_profile = bound.arguments["is_profile"]
+        if not isinstance(state, AscendEplbState) or is_profile:
+            return original_worker(*bound.args, **bound.kwargs)
+        try:
+            return _run(state, stream, is_profile)
+        except Exception as error:
+            if state._hixl_session is not None:
+                # Context restoration and the final stream synchronization also
+                # belong to the migration. Preserve ownership on any failure.
+                session = state._hixl_session
+                if session._error is None:
+                    session._error = error
+                session._usable = False
+            raise
 
     setattr(_transfer_run_periodically, _PATCH_MARKER, True)
     return _transfer_run_periodically
@@ -786,45 +821,6 @@ def _wrap_move_to_workspace(original_move):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
                 _clear_transfer_target(model_state.communicator)
-                if bound.arguments["ep_rank"] == 0:
-                    if full_target is None:
-                        logger.info(
-                            "%s: model=%s",
-                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                            model_state.model_name,
-                        )
-                    else:
-                        source_ranks = np.asarray(full_target.source_rank_ids)
-                        destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
-                        rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
-                        imbalance = getattr(full_target, "predicted_imbalance_summary", None)
-                        rank_node_ids = getattr(full_target, "rank_node_ids", None)
-                        if imbalance is None or rank_node_ids is None:
-                            logger.info(
-                                "%s: model=%s rank_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                rank_transfers,
-                            )
-                        else:
-                            rank_node_ids = np.asarray(rank_node_ids)
-                            cross_node_transfers = np.count_nonzero(
-                                rank_node_ids[source_ranks] != rank_node_ids[destination_ranks]
-                            )
-                            mean_before, p95_before, mean_after, p95_after = imbalance
-                            logger.info(
-                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d "
-                                "rank_transfers=%d cross_node_transfers=%d",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                                mean_before,
-                                mean_after,
-                                p95_before,
-                                p95_after,
-                                full_target.changed_layer_count,
-                                rank_transfers,
-                                cross_node_transfers,
-                            )
                 hixl_timings = getattr(model_state.communicator, "_eplb_hixl_phase_timings", [])
                 if hixl_timings and bound.arguments["ep_rank"] == 0:
                     logger.info(

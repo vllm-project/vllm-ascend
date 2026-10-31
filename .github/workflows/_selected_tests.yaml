@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      coverage-file-suffix:
+        type: string
+        required: false
+        default: ''
+        description: 'Filename suffix for release coverage, such as v0.30.0rc2. Empty keeps coverage.tar.'
       timeout-minutes:
         type: number
         required: false
@@ -97,16 +102,14 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
+      image: quay.io/ascend/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
-        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
@@ -118,9 +121,6 @@ jobs:
 
       - name: Install packages
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -212,12 +212,18 @@ jobs:
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
 
+      # Stage manifests where both the job container and runner can read them.
+      - name: Check layout and stage actions
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: bash .github/workflows/scripts/stage_ci_actions.sh
+
       - name: Restore incremental cache
         id: fallback-l1
         if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          cache-dir: csrc/build_cache
           architecture: ${{ steps.get_arch.outputs.arch }}
           soc-version: ${{ matrix.group.npu_type }}
           source-root: .
@@ -435,6 +441,8 @@ jobs:
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
         OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+        COVERAGE_FILE_SUFFIX: ${{ inputs.coverage-file-suffix }}
+        COVERAGE_BASE_REF: ${{ inputs.base_ref }}
       steps:
         - name: Checkout vllm-ascend source code
           uses: actions/checkout@v7
@@ -457,6 +465,39 @@ jobs:
               --test-groups-json "${SELECTED_TEST_GROUPS}" \
               --current-root all-coverage
 
+        - name: Prepare coverage object names
+          run: |
+            python3 - <<'PY'
+            import os
+            import re
+            import sys
+
+            prefix = "ci/precision-test"
+            suffix = os.environ.get("COVERAGE_FILE_SUFFIX", "")
+            if suffix and re.fullmatch(r"v[0-9][0-9A-Za-z._-]*", suffix) is None:
+                print(f"::error::refusing coverage file suffix {suffix}", file=sys.stderr)
+                sys.exit(1)
+
+            def object_name(filename: str) -> str:
+                if not suffix:
+                    return f"{prefix}/{filename}"
+                stem, extension = filename.rsplit(".", 1)
+                return f"{prefix}/{stem}-{suffix}.{extension}"
+
+            names = {
+                "COVERAGE_OBJECT_TAR": object_name("coverage.tar"),
+                "COVERAGE_OBJECT_VERSION": object_name("coverage_version.txt"),
+                "COVERAGE_OBJECT_MAP": object_name("test_case_map.json"),
+                "COVERAGE_OBJECT_EXTRA": object_name("extra_recommended_tests.yaml"),
+            }
+            with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+                for key, value in names.items():
+                    print(f"{key}={value}", file=handle)
+            print("Coverage OBS objects:")
+            for value in names.values():
+                print(f"  {value}")
+            PY
+
         - name: Download previous coverage data from OBS
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           run: |
@@ -466,8 +507,9 @@ jobs:
             # curl (no SDK or credentials needed). On the very first run there
             # is no history yet (HTTP 404); tolerate that so the downstream
             # backfill/assemble steps still proceed with the current data.
+            # Release-branch runs read their suffixed object, not main's package.
             if curl -fSL --retry 3 -o previous-coverage.tar \
-              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
+              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_TAR}"; then
               tar xf previous-coverage.tar -C previous-coverage
             else
               echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
@@ -554,6 +596,31 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
+        - name: Record current release coverage branch
+          run: |
+            python3 - <<'PY'
+            import os
+
+            def is_release_branch(name: str) -> bool:
+                prefix = "releases/v"
+                if not name.startswith(prefix):
+                    return False
+                version = name[len(prefix):]
+                if not version or not version[0].isdigit():
+                    return False
+                allowed = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-")
+                return all(char in allowed for char in version)
+
+            base_ref = os.environ.get("COVERAGE_BASE_REF", "")
+            pointer = "coverage_release_branch.txt"
+            if not is_release_branch(base_ref):
+                print(f"Skip release branch pointer for {base_ref or 'main'}")
+                raise SystemExit(0)
+            with open(pointer, "w", encoding="utf-8") as handle:
+                handle.write(base_ref + "\n")
+            print(f"Recorded current release coverage branch: {base_ref}")
+            PY
+
         - name: Upload coverage to OBS
           run: |
             pip install esdk-obs-python --quiet
@@ -562,7 +629,6 @@ jobs:
             from obs import ObsClient
 
             OBS_BUCKET = 'vllm-ascend'
-            OBS_PREFIX = 'ci/precision-test'
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
@@ -570,10 +636,15 @@ jobs:
             )
 
             uploads = [
-                ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
-                ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
-                ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
+                ('coverage.tar', os.environ['COVERAGE_OBJECT_TAR']),
+                ('coverage_version.txt', os.environ['COVERAGE_OBJECT_VERSION']),
+                ('test_case_map.json', os.environ['COVERAGE_OBJECT_MAP']),
             ]
+            if os.path.isfile('coverage_release_branch.txt'):
+                uploads.append((
+                    'coverage_release_branch.txt',
+                    'ci/precision-test/coverage_release_branch.txt',
+                ))
             for local_path, obs_path in uploads:
                 resp = client.putFile(OBS_BUCKET, obs_path, local_path)
                 if resp.status < 300:
@@ -588,14 +659,14 @@ jobs:
           run: |
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
-            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
             if ! pip install pyyaml --quiet; then
               echo "::warning::Failed to install pyyaml; skip prune"
               exit 0
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
-              echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
+              echo "Unable to download ${COVERAGE_OBJECT_EXTRA} from OBS (HTTP ${http_code}); skip prune"
               exit 0
             fi
             python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
@@ -635,7 +706,7 @@ jobs:
             import os
             from obs import ObsClient
 
-            obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+            obs_path = os.environ['COVERAGE_OBJECT_EXTRA']
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],

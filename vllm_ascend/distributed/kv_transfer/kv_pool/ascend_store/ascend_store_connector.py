@@ -1,9 +1,7 @@
-import threading
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
-import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
@@ -14,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -24,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -32,18 +30,21 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    get_layerwise_data_plane,
-    get_layerwise_protocol,
-    validate_layerwise_topology,
+    get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
+    LayerwiseKVPoolScheduler,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
+    LayerwiseKVPoolWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -51,12 +52,31 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
-    get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
+
+
+def create_kv_pool_scheduler(
+    vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
+) -> KVPoolScheduler:
+    scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
+    return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
+
+
+def create_kv_pool_worker(
+    vllm_config: VllmConfig,
+    use_layerwise: bool,
+    kv_cache_config: KVCacheConfig | None = None,
+) -> KVPoolWorker:
+    worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
+    return worker_class(
+        vllm_config,
+        use_layerwise,
+        kv_cache_config,
+    )
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
@@ -109,12 +129,26 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
-        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
-        self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
+        self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
+        self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
-        validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_decode_cache", False
+        )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        if (
+            self.kv_role == "kv_consumer"
+            and self.save_decode_cache
+            and not self.consumer_is_to_put
+            and self.use_layerwise
+        ):
+            raise ValueError(
+                "save_decode_cache on a kv_consumer does not support use_layerwise "
+                "unless consumer_is_to_put is enabled. "
+                "Decode-only saving is not implemented in the layerwise transfer path. "
+                "Set use_layerwise=False for Decode KV offload."
+            )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -130,7 +164,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
+        self._loaded_layer: int | None = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        # Opt in only for synchronous bulk loads, not background retrieval.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
@@ -138,13 +175,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
+            self.connector_scheduler = create_kv_pool_scheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
-            self.connector_worker = KVPoolWorker(
+            self.connector_worker = create_kv_pool_worker(
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
-                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
@@ -164,11 +200,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return False
         self.dspark_prefix_cache_enabled = True
         if self.connector_scheduler is not None:
-            self.connector_scheduler.dspark_prefix_keys = keys
+            cast(LayerwiseKVPoolScheduler, self.connector_scheduler).dspark_prefix_keys = keys
             # Retain a final prompt block for safe target/auxiliary recompute.
             self.connector_scheduler.use_eagle = True
         if self.connector_worker is not None:
-            self.connector_worker.configure_dspark_prefix_cache(keys)
+            cast(LayerwiseKVPoolWorker, self.connector_worker).configure_dspark_prefix_cache(keys)
         return True
 
     def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
@@ -185,6 +221,23 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is not None and request is not None:
             cache.save(request, through_tokens, block_ids)
+
+    def shutdown(self):
+        """Stop store users before closing the backend's native resources."""
+        try:
+            if self.connector_scheduler is not None:
+                client = self.connector_scheduler.client
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
+                    self.connector_scheduler.store_scheduler.close()
+        finally:
+            if hasattr(self, "lookup_server"):
+                self.lookup_server.close()
+            if self.connector_worker is not None:
+                self.connector_worker.shutdown()
+            super().shutdown()
 
     ############################################################
     # Scheduler Side Methods
@@ -307,7 +360,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # Target hooks have advanced current_layer by then, so preparing
             # the step there would reset the current layer before MTP.
             self._mamba_copy_bufs = None
-            self.connector_worker.prepare_layerwise_step(connector_metadata)
+            self._loaded_layer = None
+            cast(LayerwiseKVPoolWorker, self.connector_worker).prepare_layerwise_step(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -330,11 +384,23 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.connector_worker.start_load_kv(metadata)
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Let KVPP observe a layer's loads without advancing attention hooks."""
+        if not self.use_layerwise:
+            return
+        assert self.connector_worker is not None
+        cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
-        self.connector_worker.wait_for_layer_load()
+        # PLE and attention can share one physical layer. Load its groups once,
+        # then let each cache owner copy its own recurrent state before use.
+        layer = self.connector_worker._extract_physical_layer_index(layer_name)
+        if self._loaded_layer != layer:
+            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
+            self._loaded_layer = layer
         if self._mamba_copy_bufs is not None:
             mamba_utils.do_mamba_copy_block_for_layer(
                 self._mamba_copy_bufs,
@@ -380,15 +446,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not self.can_put:
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        self.connector_worker.save_kv_layer(self._get_connector_metadata())
+        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
-            # Don't do save if the role is kv_consumer
+        if not self.can_put:
+            # A load-only consumer has no store thread to wait for.
             return
 
         if self.use_layerwise:
@@ -403,11 +469,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         if self._current_step_has_real_forward:
             try:
-                self.connector_worker.ensure_store_initialized()
+                self.connector_worker.m_store.ensure_initialized()
             finally:
                 self._current_step_has_real_forward = False
         done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished(finished_req_ids)
+        assert self.connector_worker is not None
+        failed = self.connector_worker.get_failed_requests()
+        if self.connector_worker.load_async and not self.use_layerwise:
+            done_recving |= failed
+        return KVConnectorTransferResults(
+            finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return KV block IDs that failed to load on the worker."""
@@ -430,6 +506,27 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def reset_cache(self) -> bool | None:
+        """Drop external Mooncake KV after a prefix-cache reset.
+
+        Scheduler only. Drains the rank-0 send queue, then ``remove_all``
+        on the Mooncake master. Caller must pause generation first so no
+        new puts are enqueued during the drain. Worker role returns None.
+        Mooncake layerwise is unsupported and returns False. Other backends
+        keep the base-class "not implemented" result of None.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+        if self.backend_name != "mooncake":
+            return None
+        if self.use_layerwise:
+            logger.error("AscendStoreConnector reset_cache does not support Mooncake layerwise.")
+            return False
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.load_specs.clear()
+        self._kv_cache_events = None
+        return self.connector_scheduler.reset_store()
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
@@ -461,51 +558,5 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             per_engine_labelvalues,
         )
 
-
-class LookupKeyServer:
-    def __init__(
-        self,
-        pool_worker: KVPoolWorker,
-        vllm_config: "VllmConfig",
-    ):
-        self.decoder = MsgpackDecoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REP,  # type: ignore[attr-defined]
-            bind=True,
-        )
-
-        self.pool_worker = pool_worker
-        self.running = True
-
-        def process_request():
-            while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(all_frames[0], byteorder="big")
-                kv_group_ids = self.decoder.decode([all_frames[1]])
-                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                hashes_str = self.decoder.decode(all_frames[3:])
-                result = self.pool_worker.lookup_scheduler(
-                    token_len,
-                    hashes_str,
-                    kv_group_ids,
-                    use_layerwise=False,
-                    hbm_hit_tokens=hbm_hit_tokens,
-                )
-                logger.debug(
-                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                    token_len,
-                    kv_group_ids,
-                    result,
-                )
-                response = result.to_bytes(4, "big")
-                self.socket.send(response)
-
-        self.thread = threading.Thread(target=process_request, daemon=True)
-        self.thread.start()
-
-    def close(self):
-        self.socket.close(linger=0)
+    def has_pending_push_work(self) -> bool:
+        return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())

@@ -2,7 +2,7 @@
 
 ## v0.30.0rc1 - 2026.10.11
 
-This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/) to get started.
+This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc2/) to get started.
 
 ### Highlights
 
@@ -767,7 +767,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 
 - **FULL_AND_PIECEWISE on older HDK/CANN**: HDK < 25.5.1 / CANN < 8.5.0 stacks still have the old stream-budget limitation, which may cause graph capture failures or fallback to `PIECEWISE` mode. Upgrade to HDK 25.5.1+ / CANN 8.5.0+ is recommended for full `FULL_AND_PIECEWISE` support.
 - GLM5/GLM5.1 W4A8 deployments have known issues in some advanced configurations. CANN 9.0 with MC2 can return inaccurate output, FlashComm can fail during model startup, and MTP weight loading can fail in 1P1D A3 deployments. [#9395](https://github.com/vllm-project/vllm-ascend/issues/9395) [#9658](https://github.com/vllm-project/vllm-ascend/issues/9658) [#9655](https://github.com/vllm-project/vllm-ascend/issues/9655)
-- GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallel is used together with FULL graph mode. The reported workaround is to disable Expert Parallel for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
+- GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallelism is used together with FULL graph mode. The reported workaround is to disable Expert Parallelism for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
 - Qwen3.6-35B-A3B may shut down when MTP/speculative decoding is enabled, with `numAcceptedTokens[0]=4 exceeds varlen segment length=3` reported during shape/dtype processing. [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956)
 - GLM-5.1 can hang on the P node in 200k long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
 - GLM5 W4A8 deployments can see a significantly lower speculative decoding acceptance rate when MTP3 is used together with FlashComm. [#9803](https://github.com/vllm-project/vllm-ascend/issues/9803)
@@ -1739,7 +1739,7 @@ We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the of
 
 ### Known Issues
 
-- Qwen3-Next doesn't support expert parallel and MTP features in this release. And it'll be oom if the input is too long. We'll improve it in the next release
+- Qwen3-Next doesn't support expert parallelism and MTP features in this release. And it'll be oom if the input is too long. We'll improve it in the next release
 - Deepseek 3.2 only work with torchair graph mode in this release. We'll make it work with aclgraph mode in the next release.
 - Qwen2-audio doesn't work by default. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
 - CPU bind feature doesn't work if more than one vLLM instance is running on the same node.
@@ -1879,7 +1879,7 @@ v0.11.0 will be the next official release version of vLLM Ascend. We'll release 
 - The accuracy of qwen2.5 VL is not very good. This is a bug caused by CANN, we will fix it soon.
 - For long sequence input case, there is no response sometimes and the kv cache usage becomes higher. This is a bug for scheduler. We are working on it.
 - Qwen2-audio doesn't work by default, we're fixing it. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
-- When running Qwen3-Next with expert parallel enabled, please set `HCCL_BUFFSIZE` environment variable to a suitable value, such as 1024.
+- When running Qwen3-Next with expert parallelism enabled, please set `HCCL_BUFFSIZE` environment variable to a suitable value, such as 1024.
 - The accuracy of DeepSeek3.2 with aclgraph is not correct. Temporary solution is to set cudagraph_capture_sizes to a suitable value depending on the batch size for the input.
 
 ## v0.11.0rc0 - 2025.09.30
@@ -1912,7 +1912,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 
 ### Highlights
 
-- Added support for Qwen3-Next. Please note that the expert parallel and MTP features do not work with this release. We will be adding support for them soon. Follow the [official guide](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/docs/source/tutorials/multi_npu_qwen3_next.md) to get started. [#2917](https://github.com/vllm-project/vllm-ascend/pull/2917)
+- Added support for Qwen3-Next. Please note that the expert parallelism and MTP features do not work with this release. We will be adding support for them soon. Follow the [official guide](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/docs/source/tutorials/multi_npu_qwen3_next.md) to get started. [#2917](https://github.com/vllm-project/vllm-ascend/pull/2917)
 - Added quantization support for aclgraph [#2841](https://github.com/vllm-project/vllm-ascend/pull/2841)
 
 ### Core
@@ -2005,7 +2005,7 @@ This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the 
 
 We are excited to announce the newest official release of vLLM Ascend. This release includes many feature supports, performance improvements and bug fixes. We recommend users to upgrade from 0.7.3 to this version. Please always set `VLLM_USE_V1=1` to use V1 engine.
 
-In this release, we added many enhancements for large scale expert parallel case. It's recommended to follow the [official guide](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1/docs/source/tutorials/large_scale_ep.md).
+In this release, we added many enhancements for large scale expert parallelism case. It's recommended to follow the [official guide](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1/docs/source/tutorials/large_scale_ep.md).
 
 Please note that this release note will list all the important changes from last official release(v0.7.3)
 

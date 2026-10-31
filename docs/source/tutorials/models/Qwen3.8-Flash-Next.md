@@ -2,11 +2,9 @@
 
 ## 1 Introduction
 
-Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
+Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-The current version supports only Atlas A3 series hardware. Atlas A2 series hardware and Ascend 950DT and 950PR products are not yet supported and will be enabled progressively in future releases. This tutorial describes the W8A8 deployment on Atlas 800 A3. Text and multimodal input have been validated on Atlas 800 A3.
-
-This document is validated and written based on **vLLM-Ascend 0.26.0rc release**. The current model (Qwen3.8-Flash-Next) is first supported in this version.
+This document is validated and written based on `vllm-ascend:v0.26.0rc`. The current model (Qwen3.8-Flash-Next) is first supported in this version.
 
 !!! warning
 
@@ -24,9 +22,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-The following model weights are available:
+The following model weight is available:
 
-- `Qwen3.8-Flash-Next-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (64GB × 8) node. [https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp)
+- `Qwen3.8-Flash-Next-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (64GB × 8) node to serve. [https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as /root/.cache/.
 
@@ -41,7 +39,7 @@ A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https:
 - openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
 - Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
 
-The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in Section 5.1 uses the first eight devices.
+The following example uses the AArch64 image and exposes 16 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices.
 
 === "A3 series"
 
@@ -109,7 +107,7 @@ For single-node online deployment on Atlas 800 A3, the following DP1 × TP8 comm
 Before starting the service:
 
 - Replace `MODEL_PATH` with the directory recorded when downloading the model weight.
-- Revalidate memory capacity before changing the context length, concurrency, or memory utilization.
+- Revalidate memory capacity (e.g., with `npu-smi info`) before changing the context length, concurrency, or memory utilization.
 
 === "A3 series"
 
@@ -121,10 +119,6 @@ Before starting the service:
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
     export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
-    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
-    export VLLM_ASCEND_ENABLE_QSA_E3V=1
-    unset VLLM_ASCEND_FORCE_QSA_REFERENCE
-
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port 8088 \
@@ -136,7 +130,7 @@ Before starting the service:
         --data-parallel-size-local 1 \
         --data-parallel-start-rank 0 \
         --enable-expert-parallel \
-        --max-model-len 135168 \
+        --max-model-len 131072 \
         --max-num-seqs 8 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.93 \
@@ -152,10 +146,9 @@ Before starting the service:
 
     Key parameter descriptions:
 
-    - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
-    - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
+    - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
     - `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
     - The validated command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
@@ -164,6 +157,8 @@ Before starting the service:
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
+
+    Verify the service is ready: the log should show `Application startup complete`.
 
 ## 6 Functional Verification
 
@@ -221,7 +216,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are already included in Section 5:
+Function Calling requires the following startup options, which are already included in [Section 5](#5-online-service-deployment):
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -269,7 +264,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is already included in Section 5:
+Reasoning parsing requires the following startup option, which is already included in [Section 5](#5-online-service-deployment):
 
 ```text
 --reasoning-parser qwen3
@@ -297,7 +292,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
     }'
 ```
 
-The final answer is returned in `choices[0].message.content`, while the parsed reasoning is returned separately in the reasoning field of the response.
+The final answer is returned in `choices[0].message.content`, while the parsed reasoning is returned separately in the `reasoning_content` field of the response.
 
 To disable thinking and request a direct answer, use the validated non-thinking request:
 
@@ -329,7 +324,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 2. After execution, you can get the result. Here are the results of `Qwen3.8-Flash-Next` in `vllm-ascend:v0.26.0rc` for reference only.
 
-The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond with the following result.
+The A3 W8A8 deployment described in [Section 5.1](#51-single-node-online-deployment) was validated on GPQA Diamond with the following result.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
@@ -349,7 +344,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 

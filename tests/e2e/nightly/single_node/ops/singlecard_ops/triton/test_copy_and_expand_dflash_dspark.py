@@ -3,12 +3,14 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.spec_decode.utils import (
     copy_and_expand_dflash_and_dspark_inputs_kernel,
     prepare_inputs_padded_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.spec_decode.dflash_proposer import (
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import (
     _COPY_EXPAND_TILE_SIZE,
     _compute_num_programs,
 )
@@ -109,6 +111,10 @@ CONFIGS = [
 ]
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS)
 def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected):
     init_device_properties_triton()
@@ -213,6 +219,10 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("sample_from_anchor", [True, False])
 @pytest.mark.parametrize("empty_request", [0, 1, 2])

@@ -10,8 +10,10 @@ copy nor a host-side gather.
 """
 
 import ctypes
+import mmap
 from functools import cache
 from multiprocessing import shared_memory
+from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -25,6 +27,14 @@ SCALE_GROUP = 32
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
+
+
+def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
+    """Ask the kernel to back a shared Engram mapping with shmem THPs."""
+    try:
+        cast(mmap.mmap, shm.buf.obj).madvise(mmap.MADV_HUGEPAGE, 0, size)
+    except (AttributeError, OSError) as exc:
+        logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: %s", exc)
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -141,10 +151,17 @@ class HostUvaBuffer:
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
-        self.pointer = ctypes.c_void_p()
-        rc = self.lib.aclrtMallocHost(ctypes.byref(self.pointer), size, 0)
+        # Align the payload to avoid incorrect device reads observed on A3/CANN 9.2;
+        # retain the original allocation for free.
+        alignment = 64 * 1024
+        self._allocation_pointer = ctypes.c_void_p()
+        rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
         if rc:
             raise RuntimeError(f"aclrtMallocHost failed: rc={rc} size={size}")
+        allocation_address = self._allocation_pointer.value
+        if allocation_address is None:
+            raise RuntimeError("aclrtMallocHost returned a NULL pointer")
+        self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
@@ -164,7 +181,7 @@ class HostUvaBuffer:
             # A half-built buffer must not leave the host range registered: the
             # caller only sees the exception, so nothing else can release it.
             self.lib.aclrtHostUnregister(self.pointer)
-            self.lib.aclrtFreeHost(self.pointer)
+            self.lib.aclrtFreeHost(self._allocation_pointer)
             self.tensor = None
             self.buffer = None
             self.pointer = ctypes.c_void_p()
@@ -187,7 +204,7 @@ class HostUvaBuffer:
         self.tensor = None
         self.buffer = None
         self.ptrs = None
-        rc = self.lib.aclrtFreeHost(self.pointer)
+        rc = self.lib.aclrtFreeHost(self._allocation_pointer)
         if rc:
             raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.pointer = ctypes.c_void_p()
@@ -293,6 +310,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
+            _madvise_hugepage(self.shm, size)
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")

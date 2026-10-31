@@ -517,6 +517,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         return input_ids
 
+    def all_gather_eplb_mask(self, token_mask: torch.Tensor) -> torch.Tensor:
+        # Match input-id row alignment with a supported collective dtype.
+        return self.all_gather_input_ids(token_mask.to(torch.int32)).to(torch.bool)
+
     def finalize(
         self,
         hidden_states: torch.Tensor,

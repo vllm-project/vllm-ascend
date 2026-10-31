@@ -49,12 +49,57 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
 | `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
+| `/nightly <test_cases> --log-path <path>` | Upload a test file or directory as a downloadable artifact |
+| `/nightly <test_cases> --profile` | Capture profiling traces during selected YAML-driven AISBench performance benchmarks |
+| `/nightly <test_cases> --vllm-ref <ref>` | Install the given vllm commit / tag / branch instead of the image-baked vllm |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
+
+Use `--vllm-ref <ref>` to override the upstream vllm version. `<ref>` is a vllm commit SHA (full 40-char SHA recommended — GitHub cannot fetch abbreviated SHAs directly), a release tag (e.g. `v0.29.0`), or a branch name (e.g. `main`). The ref is fetched into the image's editable checkout at `/vllm-workspace/vllm` and reinstalled with `VLLM_TARGET_DEVICE=empty` (no kernel compilation), on single-node, multi-node, and accuracy test jobs alike; on multi-node it is installed in every pod. This applies to `/weekly` as well. Not specifying `--vllm-ref` keeps the vllm version baked into the nightly image, exactly as before.
+
+> **Note**: vllm derives its version from git tags at build time. A release tag installs the exact version (e.g. `0.29.0+empty`), but a bare SHA or branch name carries no tag information, so the installed version falls back to `0.1.dev1+g<sha>` — a warning is printed in the job log when this happens. Version-gated code paths in vllm-ascend may misbehave under such a fallback version, so prefer release tags for reliable results.
+>
+> **Note**: vllm-ascend only tracks a specific vllm version per branch (see the `vLLM version:` line auto-maintained in the PR description). Passing an incompatible vllm ref may fail at install time or at the runtime version check; for a dev commit, set the `VLLM_VERSION` env var as described in the [versioning policy](versioning_policy.md) if needed. Also note that with `--aop_enabled`, the bisect pipeline may re-switch vllm to the version expected by each bisected commit.
 
 Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
 automatically captures test results, classifies failures (env vs. code), and triggers
 binary bisect for genuine failures. By default, AOP hooks are disabled.
+
+Use `--profile` to collect Ascend PyTorch Profiler traces. Select benchmarks by
+their exact YAML keys and choose either a time offset or a successful-request
+completion threshold:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--profile-benchmark-names <names>` | All performance benchmarks | Comma-separated YAML benchmark keys to capture. |
+| `--profile-start-after <seconds>` | `60` | Delay from the first formal request, after AISBench internal warmup. |
+| `--profile-start-after-requests <count>` | Disabled | Start after this many successful formal requests complete. Mutually exclusive with `--profile-start-after`. |
+| `--profile-duration <seconds>` | `8` | Requested capture duration. |
+| `--profile-output <mode>` | `parsed` | Publish raw and parsed archives, or use `raw` for raw archives only. |
+| `--profile-with-stack` | Disabled | Collect stack/module attribution with additional overhead. |
+
+The 60-second default applies when neither start option is specified. Profiling
+can reduce throughput and increase latency enough to fail performance baselines.
+Download the `profile-artifact-<key>` GitHub Artifact for manifests and archive
+links. See [Profiling from PR Comments](../developer_guide/contribution/nightly_ci_test.md#profiling-from-pr-comments)
+for capture-window selection, downloads, and troubleshooting.
+
+Use `--log-path <path>` to collect a file or directory from `node0` after
+the test, including when the test fails. Absolute paths refer to the test
+container; relative paths start at `/vllm-workspace/vllm-ascend`. For
+multi-node tests, pass a compact JSON map to select paths on each node:
+`--log-path '{"node0":"logs/leader.txt","node1":"/tmp/test-logs"}'`.
+To collect multiple paths from one node, repeat that node in a single
+mapping, for example
+`--log-path '{"node1":"logs/worker.txt","node1":"/tmp/test-logs"}'`.
+The equivalent list of single-path entries is also supported:
+`--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
+Multiple paths from one node are placed under `path-1/`, `path-2/`, etc.
+inside that node's archive. The JSON must not contain spaces. Each selected
+node produces a `nodeN.tar.gz` file in the workflow run's **Artifacts** section.
+Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missing
+paths are reported in the workflow log. System and credential directories
+cannot be selected.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
@@ -92,6 +137,30 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 # Run specific test with AOP on a release branch
 /nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
+
+# Profile the perf benchmark for eight seconds, starting after 60 seconds
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 60 --profile-duration 8
+
+# Start profiling after 100 successful formal requests instead
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after-requests 100 --profile-duration 8
+
+# Download a directory from a single-node test
+/nightly test_custom_op --log-path /tmp/test-logs
+
+# Download a file relative to the test repository
+/nightly test_custom_op --log-path logs/output.txt
+
+# Download logs from the leader and a worker pod
+/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '{"node0":"/tmp/test-logs","node1":"/tmp/test-logs"}'
+
+# Download two files from the same worker pod
+/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '[{"node1":"logs/worker.txt"},{"node1":"logs/metrics.txt"}]'
+
+# Run against a specific vllm release tag
+/nightly qwen3-vl-32b-instruct-w8a8 --vllm-ref v0.29.0
+
+# Run against a specific vllm commit (full SHA) on a release branch
+/nightly test_custom_op --branch releases/v0.24.0 --vllm-ref 84030bbe3d74d99bad477a3d2e37a973ccd8865c
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.

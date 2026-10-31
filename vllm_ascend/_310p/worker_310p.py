@@ -23,12 +23,17 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.utils import is_rc_device
+from vllm_ascend.utils import is_rc_device, vllm_version_is
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+
+# vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
+# v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+else:
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
 
 class NPUWorker310(NPUWorker):
@@ -54,6 +59,8 @@ class NPUWorker310(NPUWorker):
             model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
             logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
             return model_runner
+
+        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 
         model_runner = NPUModelRunner310(self.vllm_config, self.device)
         logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
@@ -104,17 +111,9 @@ class NPUWorker310(NPUWorker):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
-            free_memory, total_memory = torch.npu.mem_get_info()
-            # The host memory or device memory for RC devices refers to the available portion of memory
-            # which cannot be obtained via torch.npu.mem_get_info()
-            if is_rc_device():
-                free_memory = psutil.virtual_memory().available
-            torch_memory = torch.npu.memory_reserved()
-            non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
-        non_torch_memory_cleared_by_empty_cache = non_torch_memory_before_empty_cache - self.non_torch_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -137,9 +136,7 @@ class NPUWorker310(NPUWorker):
             vm = psutil.virtual_memory()
             self.available_kv_cache_memory_bytes = (self.requested_memory - (vm.total - vm.available)) // 2
         else:
-            self.available_kv_cache_memory_bytes = (
-                self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
-            ) // 2
+            self.available_kv_cache_memory_bytes = (self.requested_memory - profile_result.non_kv_cache_memory) // 2
 
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,

@@ -49,7 +49,7 @@ def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
         mock.patch.object(torch.ops._C_ascend, "npu_rms_norm_cast", create=True, return_value=outputs) as op,
     ):
         result = BaseDeviceAdaptor.rms_norm_cast(x, weight, 1e-6)
-    if device == AscendDeviceType.A3 and custom_ops:
+    if device in (AscendDeviceType.A2, AscendDeviceType.A3) and custom_ops:
         assert result is outputs
         op.assert_called_once_with(x, weight, 1e-6)
     else:
@@ -228,7 +228,10 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
 
     assert not context_seq_len_npu.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather:
+    with (
+        mock.patch("vllm_ascend.device.device_op.try_load_strided_mla_cache", return_value=False),
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather,
+    ):
         BaseDeviceAdaptor.kv_cache_load(
             cache_kv_c,
             cache_k_pe,

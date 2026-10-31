@@ -68,17 +68,19 @@ defaults:
     shell: bash -el {0}
 
 env:
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
   # L1: persistent fine-grained build cache. L0 remains the exact final-artifact
   # cache consumed by test jobs.
-  INCREMENTAL_BUILD_CACHE_DIR: /tmp/vllm-ascend-incremental-build-cache
+  # runs-on/cache includes the literal path in its remote namespace. Every
+  # L1 caller must use this workspace-relative path, not runner.temp or /tmp.
+  # Restore exports its absolute equivalent for compilation. Save must use
+  # restore's original cache-dir output, not this subsequently updated env.
+  VLLM_ASCEND_BUILD_CACHE_DIR: csrc/build_cache
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -107,22 +109,16 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Config mirrors (ubuntu)
+      - name: Install packages (ubuntu)
         if: fromJSON(inputs.target).os == 'ubuntu'
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y git zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Config mirrors (openeuler)
+      - name: Install packages (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           yum install -y git zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -179,14 +175,19 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          yum install -y python3-pip net-tools jemalloc numactl patch clang
+          yum install -y python3-pip net-tools numactl patch clang
           pip install uv
+
+      # Stage manifests where both the job container and runner can read them.
+      - name: Check layout and stage actions
+        shell: bash
+        run: bash .github/workflows/scripts/stage_ci_actions.sh
 
       - name: Restore incremental build cache
         id: incremental-cache-restore
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
-          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          cache-dir: ${{ env.VLLM_ASCEND_BUILD_CACHE_DIR }}
           architecture: ${{ fromJSON(inputs.target).cache_arch }}
           soc-version: ${{ fromJSON(inputs.target).soc_version }}
           csrc-hash: ${{ inputs.csrc_hash }}
@@ -195,7 +196,6 @@ jobs:
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
-          VLLM_ASCEND_BUILD_CACHE_DIR: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
         run: |
           mkdir -p "$VLLM_ASCEND_BUILD_CACHE_DIR"
           rm -f "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
@@ -205,10 +205,6 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-
-          if [ "${{ runner.arch }}" = "X64" ]; then
-            export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL} https://download.pytorch.org/whl/cpu/"
-          fi
 
           pip install uc-manager
           # Indexes for triton-ascend and the CPU PyTorch wheel come from
@@ -227,9 +223,9 @@ jobs:
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
-        uses: $/.github/actions/csrc-l1-save
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-save
         with:
-          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          cache-dir: ${{ steps.incremental-cache-restore.outputs.cache-dir }}
           primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}
           access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
           secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}

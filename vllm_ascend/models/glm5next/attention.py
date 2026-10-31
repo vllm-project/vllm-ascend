@@ -3,6 +3,7 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -28,7 +29,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 
-from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
@@ -40,7 +40,7 @@ class Indexer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         hidden_size: int,
         q_lora_rank: int,
         quant_config: QuantizationConfig | None,
@@ -55,7 +55,7 @@ class Indexer(nn.Module):
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         # Indexer is only constructed for v32 configs, where these sparse-indexer
         # fields are guaranteed populated; narrow away the `int | None` declared
-        # on Glm5NextConfig for the optional-indexer case.
+        # on Glm5NextTextConfig for the optional-indexer case.
         assert config.index_topk is not None
         assert config.index_n_heads is not None
         assert config.index_head_dim is not None
@@ -141,7 +141,7 @@ class Glm5NextMLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -228,28 +228,25 @@ class Glm5NextMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # Transformers' NoPE config does not declare rope_parameters.
+        rope_parameters = getattr(config, "rope_parameters", None)
         if not skip_rope:
-            assert config.rope_parameters is not None
-            if config.rope_parameters["rope_type"] != "default":
-                config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+            assert rope_parameters is not None
+            if rope_parameters["rope_type"] != "default":
+                rope_parameters["rope_type"] = (
+                    "deepseek_yarn" if rope_parameters.get("apply_yarn_scaling", True) else "deepseek_llama_scaling"
                 )
 
             self.rotary_emb: RotaryEmbedding | None = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
+                rope_parameters=rope_parameters,
                 is_neox_style=False,
             )
 
-            if (
-                config.rope_parameters["rope_type"] != "default"
-                and config.rope_parameters["rope_type"] == "deepseek_yarn"
-            ):
-                mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
-                scaling_factor = config.rope_parameters["factor"]
+            if rope_parameters["rope_type"] != "default" and rope_parameters["rope_type"] == "deepseek_yarn":
+                mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
+                scaling_factor = rope_parameters["factor"]
                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                 self.scaling = self.scaling * mscale * mscale
         else:
@@ -261,7 +258,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
+                rope_parameters=rope_parameters,
                 is_neox_style=not config.indexer_rope_interleave,
             )
             # The sparse indexer projects from the MLA q-lora rank, which is

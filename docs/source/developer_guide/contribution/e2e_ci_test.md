@@ -53,7 +53,7 @@ to a logical partition, which selects an exact runner label from `runner_label.j
 | `_310p` in filename under one_card | Ascend 310P x1 | `linux-aarch64-310p-1` |
 | `_310p` in filename under two_card | Ascend 310P x2 | `linux-aarch64-310p-2` |
 | `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-4` |
-| All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |
+| All other paths | one_card A2 NPU (B1/B3 mixed pool) | `linux-aarch64-a2b1b3-1-hk-001` |
 
 When paths from multiple categories are listed in a single comment, each category's
 tests run on its respective hardware in parallel.

@@ -50,6 +50,11 @@ on:
         default: main
         type: string
         description: used for pr level tests
+      vllm_ref:
+        required: false
+        default: ''
+        type: string
+        description: vllm commit SHA / tag / branch to install in each pod instead of the image-baked vllm (empty = keep image version)
       should_run:
         required: true
         type: boolean
@@ -73,6 +78,14 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      download_path:
+        required: false
+        type: string
+        default: ''
+        description: test container file or directory to upload as a GitHub artifact
+      profile_options_json:
+        type: string
+        default: '{}'
       testcase_timeout:
         required: false
         default: 120
@@ -129,6 +142,10 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      HW_OBS_PROFILE_AK:
+        required: false
+      HW_OBS_PROFILE_SK:
+        required: false
       KUBECONFIG_B64:
         required: true
       OBS_ACCESS_KEY_ID:
@@ -171,6 +188,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      - name: Configure profiling
+        id: profiling
+        env:
+          PROFILE_OPTIONS_JSON: ${{ inputs.profile_options_json }}
+        run: |
+          python3 -m tools.profiling.capture configure \
+            --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT" \
+            --env-output "$GITHUB_ENV" --env-json "$RUNNER_TEMP/profile-env.json"
+
       - name: Set job variables
         id: vars
         run: |
@@ -210,7 +236,9 @@ jobs:
       - name: Prepare scripts
         run: |
           install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
+          install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
 
       - name: Clear resources
         run: |
@@ -254,10 +282,14 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
           OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+          DOWNLOAD_SPEC: ${{ inputs.download_path }}
         run: |
           set -euo pipefail
 
           size="${{ inputs.size }}"
+          if [ -n "$DOWNLOAD_SPEC" ]; then
+            python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_SPEC" --list --node-count "$size" > /dev/null
+          fi
           replicas="${{ inputs.replicas }}"
           image="${{ inputs.image }}"
           config_file_path="${{ inputs.config_file_path }}"
@@ -266,13 +298,14 @@ jobs:
           is_pr_test="${{ inputs.request_id != '' }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
+          vllm_ref="${{ inputs.vllm_ref }}"
           runner="${{ inputs.soc_version }}"
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
           if [ "${{ inputs.soc_version }}" = "a5" ]; then
               npu_per_node=8
               npu_resource_name=huawei.com/npu
-              shared_volume_path=/mnt/share
+              shared_volume_path=/mnt/weight
           elif [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
               pvc_name=gy005-az5-vllm-ascend
@@ -283,9 +316,10 @@ jobs:
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
-          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 \
+          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 "$RUNNER_TEMP/profile-env.json" \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
+            -D download_spec="$DOWNLOAD_SPEC" \
             -D size="$size" \
             -D replicas="$replicas" \
             -D image="$image" \
@@ -296,6 +330,7 @@ jobs:
             -D is_pr_test="$is_pr_test" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
+            -D vllm_ref="$vllm_ref" \
             -D pvc_name="${pvc_name:-}" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
@@ -319,6 +354,7 @@ jobs:
             -D bisect_config_base_path="$BISECT_CONFIG_BASE_PATH" \
             --outfile lws.yaml
 
+          python3 -m tools.profiling.capture initialize --root "$LOG_PREFIX/profile_artifact"
           kubectl apply -f ./lws.yaml
 
       - name: Wait for pods ready
@@ -569,10 +605,82 @@ jobs:
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \
             --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}"
 
+      - name: Publish profiling data
+        id: profile_bundle
+        if: ${{ always() && steps.profiling.outputs.enabled == 'true' }}
+        env:
+          PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_PROFILE_SK }}
+          PROFILE_KEY_PREFIX: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ steps.vars.outputs.benchmark_job_name }}
+        run: |
+          PROFILE_ROOT="$LOG_PREFIX/profile_artifact"
+          upload_status=0
+          echo "::group::Upload raw profiling traces"
+          python3 -c 'import boto3' 2>/dev/null || python3 -m pip install --quiet boto3 || upload_status=$?
+          if [ "$upload_status" -eq 0 ]; then
+            python3 -m tools.profiling.capture upload --root "$PROFILE_ROOT" --prefix "$PROFILE_KEY_PREFIX" || upload_status=$?
+          fi
+          echo "::endgroup::"
+          echo "::group::Prepare profiling index"
+          python3 -m tools.profiling.artifacts package \
+            --manifest "$LOG_PREFIX/profile_artifact/profile_manifest.json" \
+            --output "$RUNNER_TEMP/profile_artifact" \
+            --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit "$upload_status"
+
+      - name: Upload profiling index
+        id: profile_artifact
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.profiling.outputs.parse == 'true' && 'profile-capture' || 'profile-artifact' }}-${{ steps.profile_bundle.outputs.artifact_key }}
+          path: ${{ runner.temp }}/profile_artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Profiling summary
+        if: >-
+          always() && steps.profile_bundle.outputs.artifact_key != '' &&
+          (steps.profiling.outputs.parse != 'true' || steps.profile_bundle.outcome != 'success' ||
+           steps.profile_artifact.outcome != 'success')
+        run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
+
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          SRC="${LOG_PREFIX}/nightly_bisect_runs"
+          if [ -d "$SRC" ]; then
+            cp -a "$SRC" "$DEST/bisect_runs"
+          fi
+          for log in "${LOG_PREFIX}"/node_*_pytest.log; do
+            if [ -f "$log" ]; then
+              cp "$log" "$DEST/"
+            fi
+          done
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_multi_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-aop-bisect
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Fetch benchmark results from PVC
         if: always()
         run: |
           set -euo pipefail
+          if [ -d "$LOG_PREFIX/aisbench_outputs" ]; then
+            mv "$LOG_PREFIX/aisbench_outputs" /tmp/aisbench_outputs
+          fi
           mkdir -p /tmp/benchmark_results
           echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}..."
           # Copy from PVC mounted directory (persists after pod termination)
@@ -593,12 +701,35 @@ jobs:
 
       - name: Post process
         if: always()
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
         run: |
+          # Archive once after the test finishes, before deleting running pods.
+          # The exit trap covers pods that exit earlier.
+          if [ -n "$DOWNLOAD_PATH" ]; then
+            while IFS=$'\t' read -r node requested_path; do
+              index="${node#node}"
+              if [ "$index" -eq 0 ]; then
+                pod="${LWS_NAME}-0"
+                container=vllm-leader
+              else
+                pod="${LWS_NAME}-0-${index}"
+                container=vllm-worker
+              fi
+              echo "Archiving requested path from $pod: $requested_path"
+              if ! kubectl exec "$pod" -c "$container" -n "$NAMESPACE" -- \
+                  /bin/bash /root/.cache/tests/download_archive.sh --strict; then
+                echo "::warning::Could not archive $requested_path from $pod before deletion"
+              fi
+            done < <(python3 .github/workflows/scripts/collect_download.py \
+              "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }})
+          fi
+
           echo "Current pod status:"
           kubectl get pods -n "$NAMESPACE" --ignore-not-found=true
 
           echo "Deleting resources for [$LWS_NAME]..."
-          kubectl delete -f ./lws.yaml --ignore-not-found=true || true
+          kubectl delete -f ./lws.yaml --ignore-not-found=true --wait=false || true
 
           echo "Waiting for pods of [$LWS_NAME] to fully terminate..."
           TIMEOUT=300
@@ -620,6 +751,70 @@ jobs:
             echo "Waiting for pods to terminate: $PODS_EXIST"
             sleep $SLEEP_INTERVAL
           done
+
+      - name: Collect requested paths from test pods
+        if: ${{ always() && inputs.download_path != '' }}
+        id: collect_download
+        continue-on-error: true
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
+        run: |
+          python3 .github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" --list --node-count ${{ inputs.size }} > /tmp/download-paths.tsv
+          mkdir -p /tmp/download-artifact
+          for attempt in $(seq 1 12); do
+            pending=0
+            while IFS=$'\t' read -r NODE REQUESTED_PATH; do
+              [ -f "${LOG_PREFIX}/${NODE}_download.tar.gz" ] && continue
+              index="${NODE#node}"
+              if [ "$index" -eq 0 ]; then
+                pod="${LWS_NAME}-0"
+              else
+                pod="${LWS_NAME}-0-${index}"
+              fi
+              phase=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [ "$phase" = "Running" ] || [ "$phase" = "Pending" ]; then
+                pending=1
+              fi
+            done < /tmp/download-paths.tsv
+            [ "$pending" -eq 0 ] && break
+            echo "Waiting for requested archives (attempt $attempt/12)"
+            sleep 5
+          done
+          copied=0
+          while IFS=$'\t' read -r NODE REQUESTED_PATH; do
+            source_archive="${LOG_PREFIX}/${NODE}_download.tar.gz"
+            if [ -f "$source_archive" ]; then
+              cp "$source_archive" "/tmp/download-artifact/${NODE}.tar.gz"
+              echo "Collected ${NODE}: ${REQUESTED_PATH} -> ${NODE}.tar.gz ($(wc -c < "$source_archive") bytes)"
+              copied=$((copied + 1))
+            else
+              echo "::warning::No archive from ${NODE} for ${REQUESTED_PATH}"
+            fi
+          done < /tmp/download-paths.tsv
+          if [ "$copied" -eq 0 ]; then
+            echo "::warning::No requested paths were archived by test pods"
+            exit 1
+          fi
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
+          echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload requested paths
+        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        id: upload_download
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_download.outputs.name }}
+          path: /tmp/download-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Remove uploaded archives from shared storage
+        if: ${{ always() && steps.upload_download.outcome == 'success' }}
+        continue-on-error: true
+        run: rm -f "${LOG_PREFIX}"/node*_download.tar.gz
 
       - name: Collect Ascend logs
         if: always()
@@ -661,7 +856,7 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: ${{ inputs.config_file_path }}-ascend-logs
+          name: ${{ steps.vars.outputs.artifact_name }}
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
 
@@ -686,7 +881,7 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90
@@ -701,3 +896,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Upload AISBench outputs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: aisbench-outputs-multi-node-${{ steps.vars.outputs.benchmark_job_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/aisbench_outputs/
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true

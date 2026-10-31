@@ -11,7 +11,14 @@ permissions:
 jobs:
   upload-merged-new-tests:
     name: Supplement New Tests
-    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+    if: >-
+      ${{
+        github.event.pull_request.merged == true &&
+        (
+          github.event.pull_request.base.ref == 'main' ||
+          startsWith(github.event.pull_request.base.ref, 'releases/v')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     env:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -28,8 +35,48 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve supported target branch
+        id: target
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${BASE_REF}" = "main" ]; then
+            {
+              echo "supported=true"
+              echo "obs_object=ci/precision-test/extra_recommended_tests.yaml"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          POINTER_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage_release_branch.txt"
+          curl -sSL --retry 3 -o coverage_release_branch.txt "${POINTER_URL}" || true
+          python3 - <<'PY'
+          import os
+
+          base_ref = os.environ["BASE_REF"]
+          pointer_path = "coverage_release_branch.txt"
+          recorded = ""
+          if os.path.isfile(pointer_path):
+              recorded = open(pointer_path, encoding="utf-8").read().strip()
+          supported = recorded == base_ref
+          if supported:
+              print(f"PR targets the release branch recorded by coverage: {recorded}")
+          else:
+              print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt records {recorded or '<empty>'}")
+
+          obs_object = ""
+          if supported:
+              version = base_ref.split("/", 1)[1]
+              obs_object = f"ci/precision-test/extra_recommended_tests-{version}.yaml"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"supported={str(supported).lower()}", file=output)
+              print(f"obs_object={obs_object}", file=output)
+          PY
+
       - name: Collect new or moved tests
         id: collect
+        if: ${{ steps.target.outputs.supported == 'true' }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -63,18 +110,21 @@ jobs:
       - name: Merge into OBS extra_recommended_tests.yaml
         id: merge
         if: ${{ steps.collect.outputs.has_tests == 'true' }}
+        env:
+          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
         run: |
           set -euo pipefail
-          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${OBS_OBJECT}"
           python3 -m pip install pyyaml --quiet
           http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
           if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.yaml ]; then
-            echo "Downloaded existing extra_recommended_tests.yaml from OBS"
-          elif [ "${http_code}" = "404" ]; then
-            echo "No extra_recommended_tests.yaml on OBS yet; starting a new file"
+            echo "Downloaded existing ${OBS_OBJECT} from OBS"
+          elif [ "${http_code}" = "404" ] || [ "${http_code}" = "403" ]; then
+            # Anonymous reads return 403 when the object does not exist.
+            echo "No ${OBS_OBJECT} on OBS yet (HTTP ${http_code}); starting a new file"
             : > extra_recommended_tests.yaml
           else
-            echo "::error::Failed to download extra_recommended_tests.yaml from OBS (HTTP ${http_code})"
+            echo "::error::Failed to download ${OBS_OBJECT} from OBS (HTTP ${http_code})"
             exit 1
           fi
           python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
@@ -93,6 +143,8 @@ jobs:
 
       - name: Upload extra_recommended_tests.yaml to OBS
         if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
+        env:
+          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
         run: |
           set -euo pipefail
           if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
@@ -104,7 +156,7 @@ jobs:
           import os
           from obs import ObsClient
 
-          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          obs_path = os.environ['OBS_OBJECT']
           client = ObsClient(
               access_key_id=os.environ['OBS_ACCESS_KEY'],
               secret_access_key=os.environ['OBS_SECRET_KEY'],

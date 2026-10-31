@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.triton_utils import triton
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import (
     _apply_grammar_bitmask_kernel,
 )
@@ -39,6 +42,10 @@ def _build_reference(
     return expected
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_apply_grammar_bitmask_business_shape():
     generator = torch.Generator(device="cpu")
     generator.manual_seed(0)

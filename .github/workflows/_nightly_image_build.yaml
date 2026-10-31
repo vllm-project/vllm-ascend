@@ -15,6 +15,27 @@
 # This file is a part of the vllm-ascend project.
 #
 
+# Build the nightly test image on top of the runtime image produced from the
+# root Dockerfiles. All dependency versions come from those Dockerfiles; this
+# workflow does not select versions.
+#
+# The generated matrix pins each architecture to a fixed self-hosted runner so
+# the local build cache on those runners keeps being reused by later builds.
+#
+# Every nightly image is multi-arch (amd64+arm64). Ubuntu nightly images serve
+# the CI contract (test workflows pull from base_image/ascend-ci/vllm-ascend)
+# and are also pushed to atlas_inference/vllm-ascend; openEuler nightly images
+# are pushed to atlas_inference/vllm-ascend only. Everything under
+# atlas_inference/vllm-ascend on swr.cn-north-12 is mirrored to swr.cn-north-4
+# by the sync-tools workflow.
+#
+# Multi-arch ('full') builds follow the mainline nightly tag rule and publish
+# each image under two tags: the stable
+# nightly-ci-<branch>-<target>[-openeuler] tag, which is overwritten by every
+# nightly and is what the test workflows reference, and a unique
+# nightly-ci-...-cann<cann_version>-<date>-r<run_number> tag that preserves
+# each historical build. The CANN version is read from the root Dockerfile of
+# the branch that produced the runtime base image.
 name: 'Nightly image build'
 
 on:
@@ -23,7 +44,7 @@ on:
       target:
         required: true
         type: string
-        description: "Build target: 'a2' or 'a3'"
+        description: "Build target: 'a2', 'a3', '310p' or 'a5'"
       vllm_ascend_branch:
         required: false
         type: string
@@ -33,27 +54,17 @@ on:
         required: false
         type: string
         default: ''
-        description: "Branch used to resolve the base image tag (nightly-<branch>). Defaults to vllm_ascend_branch. For PR verification builds, set to the target branch instead of the head SHA."
+        description: "Branch used to resolve the base image (nightly-<branch>). Defaults to vllm_ascend_branch. For PR verification builds, set to the target branch instead of the head SHA."
       build_type:
         required: false
         type: string
         default: 'release'
-        description: "Build type: 'daily' or 'release'. Daily uses swr_registry base image."
+        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds ubuntu on arm64 only."
       swr_registry:
         required: false
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
         description: 'SWR registry domain'
-      cann_version:
-        required: false
-        type: string
-        default: '9.1.0_20260731131545'
-        description: "CANN version for base image tag"
-      base_image_date:
-        required: false
-        type: string
-        default: 'auto'
-        description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
       should_push:
         required: false
         type: boolean
@@ -68,12 +79,17 @@ on:
         required: false
         type: string
         default: '9.1.0'
-        description: "CANN version for the job container image tag"
+        description: "CANN version for the job container image tag only"
       soc:
         required: false
         type: string
         default: '910b'
         description: "Ascend SoC type for the job container image tag (e.g. 910b, a3, 310p, 950)"
+      os_filter:
+        required: false
+        type: string
+        default: 'all'
+        description: "Build a single OS variant: 'ubuntu', 'openeuler', or 'all'. Lets ubuntu and openeuler pipelines run independently."
     secrets:
       SWR_USERNAME:
         required: false
@@ -87,33 +103,94 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      tag_suffix_ubuntu: ${{ steps.set-tag.outputs.tag_suffix_ubuntu }}
+      tag_suffix_openeuler: ${{ steps.set-tag.outputs.tag_suffix_openeuler }}
     steps:
+      # The unique nightly tag follows the mainline format and needs the CANN
+      # version of the runtime base image, which is read from the root
+      # Dockerfile of the branch that produced it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+
       - id: set-matrix
         run: |
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            MATRIX='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
+          if [ "${{ inputs.build_type }}" = "full" ]; then
+            ALL='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
-            MATRIX='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
+            ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
           fi
-          echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+          OS="${{ inputs.os_filter }}"
+          if [ -z "$OS" ] || [ "$OS" = "all" ]; then
+            MATRIX="$ALL"
+          else
+            MATRIX=$(echo "$ALL" | jq -c --arg os "$OS" '{include:[.include[]|select(.os==$os)]}')
+          fi
+          # Guard against an empty matrix (e.g. os_filter='openeuler' with build_type
+          # 'release', where release only builds ubuntu, or an unsupported os_filter).
+          # An empty `include` yields a matrix with no jobs, so fail loudly instead.
+          COUNT=$(echo "$MATRIX" | jq '.include | length')
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::No build matrix for os_filter='${{ inputs.os_filter }}' with build_type='${{ inputs.build_type }}'"
+            exit 1
+          fi
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+      - id: set-tag
+        run: |
+          # Full builds are published under the stable tag plus a unique history
+          # tag whose suffix follows the mainline nightly rule:
+          #   -cann<cann_version>-<build_date>-r<run_number>
+          # The suffix is computed once here and reused by the build and merge
+          # jobs. Release builds only keep the stable tag.
+          if [ "${{ inputs.build_type }}" != "full" ]; then
+            echo "tag_suffix_ubuntu=" >> "$GITHUB_OUTPUT"
+            echo "tag_suffix_openeuler=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "${{ inputs.target }}" in
+            a2)   UBUNTU_DOCKERFILE=Dockerfile;      OPENEULER_DOCKERFILE=Dockerfile.openEuler ;;
+            a3)   UBUNTU_DOCKERFILE=Dockerfile.a3;   OPENEULER_DOCKERFILE=Dockerfile.a3.openEuler ;;
+            a5)   UBUNTU_DOCKERFILE=Dockerfile.a5;   OPENEULER_DOCKERFILE=Dockerfile.a5.openEuler ;;
+            310p) UBUNTU_DOCKERFILE=Dockerfile.310p; OPENEULER_DOCKERFILE=Dockerfile.310p.openEuler ;;
+            *)
+              echo "::error::Unsupported target '${{ inputs.target }}'"
+              exit 1
+              ;;
+          esac
+
+          read_cann_version() {
+            sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]'
+          }
+
+          DATE=$(date -u +%Y%m%d)
+          for OS_NAME in ubuntu openeuler; do
+            if [ "$OS_NAME" = "ubuntu" ]; then
+              DOCKERFILE="$UBUNTU_DOCKERFILE"
+            else
+              DOCKERFILE="$OPENEULER_DOCKERFILE"
+            fi
+            CANN_VERSION=$(read_cann_version "$DOCKERFILE")
+            if [ -z "$CANN_VERSION" ]; then
+              echo "::error::Could not read the CANN version from ${DOCKERFILE}"
+              exit 1
+            fi
+            echo "tag_suffix_${OS_NAME}=-cann${CANN_VERSION}-${DATE}-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          done
 
   build:
     needs: generate-matrix
     name: Build nightly-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}
     runs-on: ${{ matrix.arch_runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
     container:
       image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
         SOC: ${{ inputs.soc }}
-    strategy:
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
-    outputs:
-      swr_registry: ${{ steps.build.outputs.swr_registry }}
-      swr_temp_registry: ${{ steps.build.outputs.swr_temp_registry }}
-      tag_prefix: ${{ steps.build.outputs.tag_prefix }}
-      full_tag: ${{ steps.build.outputs.full_tag }}
-      build_type: ${{ steps.build.outputs.build_type }}
-      swr_logged_in: ${{ steps.build.outputs.swr_logged_in }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -141,134 +218,76 @@ jobs:
           fi
           BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
 
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
-            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
-            TAG_PREFIX="daily"
-            BASE_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-ascend"
-          else
-            SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend"
-            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-temp"
-            TAG_PREFIX="nightly-ci"
-            BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
-          fi
-
-          CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-          TAG_SUFFIX=""
+          # Runtime images are published by the runtime build workflow as
+          # nightly-<branch>[-<target>][-openeuler] from the root Dockerfiles.
+          BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
           OS_MARK=""
           if [ "${{ matrix.os }}" = "openeuler" ]; then
             OS_MARK="-openeuler"
           fi
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            # Resolve the base image date: 'auto' backtracks day-by-day from today to find
-            # the latest date for which the SWR base image exists; otherwise use the
-            # user-supplied date (YYYYMMDD).
-            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
-              DATE=""
-              for i in $(seq 0 30); do
-                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
-                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_ci/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
-                  DATE="$CANDIDATE_DATE"
-                  echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
-                  break
-                fi
-                echo "Tag $CANDIDATE_TAG not found, trying previous day..."
-              done
-              if [ -z "$DATE" ]; then
-                echo "ERROR: No base image found in the last 30 days"
-                exit 1
-              fi
-            else
-              DATE="${{ inputs.base_image_date }}"
-            fi
-            TAG_SUFFIX="-cann${CANN_VERSION_LOWER}-${DATE}"
-          fi
-
-          FULL_TAG="${TAG_PREFIX}-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}${TAG_SUFFIX}"
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            IMAGE="${SWR_TEMP_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
+          # Runtime image tags are stable now that dependency versions are pinned
+          # in the Dockerfiles, so no CANN/date suffix is appended.
+          TAG_SUFFIX=""
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+          # Same dual-tag rule as the mainline nightly builds: the stable tag is
+          # overwritten by each nightly, while a unique tag (CANN version +
+          # build date + run number) keeps the history of nightly images.
+          if [ "${{ matrix.os }}" = "openeuler" ]; then
+            UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}"
           else
-            IMAGE="${SWR_REGISTRY}:${FULL_TAG}"
+            UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}"
+          fi
+          UNIQUE_TAG="${FULL_TAG}${UNIQUE_SUFFIX}"
+
+          if [ "${{ inputs.build_type }}" = "full" ]; then
+            # Arch-specific images are pushed to the temp repo under the unique
+            # tag; the merge job creates the final multi-arch manifests. Ubuntu
+            # full builds are published to the CI repo and to atlas_inference
+            # (mirrored to swr.cn-north-4); openEuler only to atlas_inference.
+            if [ -n "$OS_MARK" ]; then
+              FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+            else
+              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+            fi
+            PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
+          else
+            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+            PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
           BUILD_ARGS=(
             --platform ${{ matrix.arch_platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
             --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
+            --build-arg BASE_IMAGE="${BASE_IMAGE}"
+            --build-arg OS_MARK="${OS_MARK}"
+            --build-arg TAG_SUFFIX="${TAG_SUFFIX}"
           )
 
-          if [ -n "$TAG_SUFFIX" ]; then
-            BUILD_ARGS+=(--build-arg TAG_SUFFIX="${TAG_SUFFIX}")
-          fi
-
-          if [ -n "$OS_MARK" ]; then
-            BUILD_ARGS+=(--build-arg OS_MARK="${OS_MARK}")
-          fi
-
-          if [ -n "$BASE_IMAGE" ]; then
-            BUILD_ARGS+=(--build-arg BASE_IMAGE="${BASE_IMAGE}")
-          fi
-
           if [ "${{ inputs.should_push }}" = "true" ]; then
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false,push=true" .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false,push=true" .
           else
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false" .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false" .
           fi
 
-          # Export outputs for merge job
-          exec >> $GITHUB_OUTPUT
-          echo "swr_registry=${SWR_REGISTRY}"
-          echo "swr_temp_registry=${SWR_TEMP_REGISTRY}"
-          echo "tag_prefix=${TAG_PREFIX}"
-          echo "full_tag=${FULL_TAG}"
-          echo "build_type=${{ inputs.build_type }}"
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            echo "push_registry=${SWR_TEMP_REGISTRY}"
-          else
-            echo "push_registry=${SWR_REGISTRY}"
-          fi
-
-          if [ "${{ github.repository_owner }}" = "vllm-project" ] && [ "${{ steps.login-swr.outcome == 'success' }}" = "true" ]; then
-            echo "swr_logged_in=true"
-          else
-            echo "swr_logged_in=false"
-          fi
+          {
+            echo "image=${FINAL_IMAGE}"
+            echo "full_tag=${FULL_TAG}"
+            echo "unique_tag=${UNIQUE_TAG}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log image push status
         if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
-          PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
-          FULL_TAG="${{ steps.build.outputs.full_tag }}"
-          if [ "${{ inputs.build_type }}" = "release" ]; then
-            # release mode: the stable (no-arch) tag was already pushed by the build step.
-            echo "release stable tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}"
-          else
-            # daily mode: arch-suffixed tags were already pushed by the build step.
-            echo "daily arch-suffixed tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
-          fi
-
-      - name: Push ubuntu arm64 image to release SWR (no arch tag)
-        if: ${{ inputs.should_push && inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64' && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
-        run: |
-          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
-          RELEASE_SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend"
-          RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
-          # Release copy uses a stable tag without arch info (single-arch arm64 image)
-          RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
-          SOURCE_IMAGE="${{ steps.build.outputs.swr_temp_registry }}:${{ steps.build.outputs.full_tag }}-${{ matrix.arch_name }}"
-          docker buildx imagetools create \
-            -t "${RELEASE_IMAGE}" \
-            "${SOURCE_IMAGE}"
+          echo "nightly test image pushed: ${{ steps.build.outputs.image }}"
 
   merge-image:
     name: Merge multi-arch nightly-${{ inputs.target }}
     runs-on: linux-amd64-cpu-4
-    needs: build
-    # Run even if some matrix instances failed. Each OS variant is merged independently,
-    # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
-    if: ${{ inputs.should_push && always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
+    needs: [generate-matrix, build]
+    # Run even if some matrix instances failed. Each OS variant is merged
+    # independently, only when BOTH arch images exist.
+    if: ${{ inputs.should_push && always() && inputs.build_type == 'full' }}
     steps:
       - name: Login to SWR
         uses: docker/login-action@v4
@@ -278,66 +297,73 @@ jobs:
           password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Create multi-arch manifest
+        id: merge
+        env:
+          SWR_REGISTRY: ${{ inputs.swr_registry }}
+          TARGET: ${{ inputs.target }}
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
+          OS_FILTER: ${{ inputs.os_filter }}
+          TAG_SUFFIX_UBUNTU: ${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}
+          TAG_SUFFIX_OPENEULER: ${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}
         run: |
-          # Registry and tag are recomputed here (not from matrix outputs) so merge still
-          # works even when the last-completed matrix instance failed to push.
-          MAIN_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
-          TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
+          set -euo pipefail
+          BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
 
-          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
-          CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-          # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>,
-          # where <date> is the schedule daily base image date. Ubuntu and openeuler
-          # base images may be built on different days, so resolve the date per OS
-          # variant using the same backtracking logic as the build step.
-          BASE_TAG="daily-${BRANCH_TAG}-${{ inputs.target }}"
+          # Restrict to the requested OS variant so ubuntu and openeuler
+          # pipelines merge independently of each other.
+          case "$OS_FILTER" in
+            ubuntu) OS_LIST="ubuntu" ;;
+            openeuler) OS_LIST="openeuler" ;;
+            *) OS_LIST="ubuntu openeuler" ;;
+          esac
 
           MISSING_VARIANT=0
           MERGED_VARIANT=0
-          for OS_MARK in "" "-openeuler"; do
-            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
-              DATE=""
-              for i in $(seq 0 30); do
-                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
-                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_ci/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
-                  DATE="$CANDIDATE_DATE"
-                  break
-                fi
-              done
+          for OS_NAME in $OS_LIST; do
+            if [ "$OS_NAME" = "openeuler" ]; then
+              OS_MARK="-openeuler"
+              TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
+              # openEuler nightly images only live in the release-shaped repo
+              # that the sync-tools workflow mirrors to swr.cn-north-4.
+              DESTS="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             else
-              DATE="${{ inputs.base_image_date }}"
+              OS_MARK=""
+              TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
+              # ubuntu nightly images serve the CI contract (test workflows
+              # pull from ascend-ci) and the north-4 consumers through the
+              # atlas_inference mirror, matching the retired daily pipeline.
+              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             fi
-            if [ -z "$DATE" ]; then
-              echo "::warning::Skipping ${OS_MARK:-ubuntu}: no base image date found"
+            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
+            # The build step pushed the per-arch images under the unique tag.
+            UNIQUE_TAG="${TAG}${TAG_SUFFIX}"
+            TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}"
+
+            # A variant merges only when BOTH arch images exist.
+            MISSING_ARCH=0
+            for ARCH in amd64 arm64; do
+              if ! docker buildx imagetools inspect "${TEMP}-${ARCH}" >/dev/null 2>&1; then
+                echo "::warning::Skipping ${UNIQUE_TAG}: missing ${TEMP}-${ARCH}"
+                MISSING_ARCH=1
+                break
+              fi
+            done
+            if [ "$MISSING_ARCH" = "1" ]; then
               MISSING_VARIANT=1
               continue
             fi
 
-            TAG="${BASE_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${DATE}"
-            MANIFEST_TAG="${MAIN_REGISTRY}:${TAG}"
-            AMD64_TAG="${TEMP_REGISTRY}:${TAG}-amd64"
-            ARM64_TAG="${TEMP_REGISTRY}:${TAG}-arm64"
-
-            # A variant merges only when BOTH arch images exist in the temp registry.
-            # ubuntu and openeuler are independent: a failure in one does not block the other.
-            if ! docker buildx imagetools inspect "${AMD64_TAG}" >/dev/null 2>&1; then
-              echo "::warning::Skipping ${TAG}: missing ${AMD64_TAG}"
-              MISSING_VARIANT=1
-              continue
-            fi
-            if ! docker buildx imagetools inspect "${ARM64_TAG}" >/dev/null 2>&1; then
-              echo "::warning::Skipping ${TAG}: missing ${ARM64_TAG}"
-              MISSING_VARIANT=1
-              continue
-            fi
-
-            echo "Creating multi-arch manifest: ${MANIFEST_TAG}"
-            docker buildx imagetools create \
-              -t "${MANIFEST_TAG}" \
-              "${AMD64_TAG}" \
-              "${ARM64_TAG}"
+            # Publish both tags on the same manifest in every destination: the
+            # stable tag keeps being overwritten by the newest nightly, the
+            # unique tag preserves this build in history.
+            for DEST in $DESTS; do
+              echo "Creating multi-arch manifests: ${DEST}:${TAG} and ${DEST}:${UNIQUE_TAG}"
+              docker buildx imagetools create \
+                -t "${DEST}:${TAG}" \
+                -t "${DEST}:${UNIQUE_TAG}" \
+                "${TEMP}-amd64" \
+                "${TEMP}-arm64"
+            done
             MERGED_VARIANT=1
           done
 
@@ -350,8 +376,10 @@ jobs:
           if [ "${MISSING_VARIANT}" = "1" ]; then
             echo "::warning::Some variants were skipped due to missing arch images."
           fi
+          echo "merged=${MERGED_VARIANT}" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch quay.io sync
+      - name: Dispatch cn-north-4 sync
+        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}

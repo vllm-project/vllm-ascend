@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     KVCacheSendingThread,
     KVCacheTaskTracker,
     MooncakeAgentMetadata,
+    MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
@@ -973,3 +974,8 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
+
+
+class TestMooncakeHybridConnectorLoadedGroups(unittest.TestCase):
+    def test_loaded_group_ids_hook_is_version_gated(self):
+        self.assertIn("get_loaded_kv_cache_group_ids", MooncakeConnector.__dict__)

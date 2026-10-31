@@ -32,6 +32,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
@@ -330,32 +331,6 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
-def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> None:
-    """Record the local expert counts supplied by the MoE operator."""
-    eplb_state = router.eplb_state
-    if eplb_state is None:
-        return
-    expert_tokens = result.expert_tokens
-    if expert_tokens is None:
-        raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
-    expert_load_view = eplb_state.expert_load_view
-    record_enabled = eplb_state.should_record_tensor
-    if expert_load_view is None or record_enabled is None:
-        raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
-    if expert_tokens.numel() != eplb_state.local_expert_count:
-        raise RuntimeError(
-            "MoE expert count does not match local EPLB experts: "
-            f"{expert_tokens.numel()} != {eplb_state.local_expert_count}"
-        )
-    torch.ops.vllm.ascend_eplb_record_expert_tokens(
-        expert_tokens,
-        expert_load_view,
-        record_enabled,
-        result.group_list_type,
-        eplb_state.local_expert_start,
-    )
-
-
 def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
     if tensor.device.type != "npu":
@@ -390,6 +365,17 @@ class EplbExpertTensorList(list[torch.Tensor]):
     @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
+
+    def element_size(self) -> int:
+        # Upstream registers expert weights via
+        # `w.view(torch.uint8) if w.element_size() == 1 else w`, so the
+        # container must expose the underlying per-expert item size.
+        return self[0].element_size()
+
+    def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
+        # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
+        # the per-expert container (and its aliasing semantics) intact.
+        return type(self)(tensor.view(dtype) for tensor in self)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -455,7 +441,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 draft_model_config.draft_moe_quant_type = self.quant_type
 
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+    def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
         except AttributeError as exc:
@@ -714,6 +700,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        num_source_tokens = hidden_states.shape[0]
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -750,7 +737,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_mc2_mask = None
 
         if self._use_v2_model_runner:
-            _record_v2_eplb_load(self.router, fused_experts_results)
+            eplb_state = self.router.eplb_state
+            if eplb_state is not None:
+                assert isinstance(eplb_state, AscendEplbLayerState)
+                eplb_state.record_load(
+                    fused_experts_results.expert_tokens,
+                    fused_experts_results.group_list_type,
+                    topk_ids=topk_ids,
+                    num_source_tokens=num_source_tokens,
+                    is_sequence_parallel=self.moe_config.is_sequence_parallel,
+                    prepare_finalize=moe_comm_method.prepare_finalize,
+                )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

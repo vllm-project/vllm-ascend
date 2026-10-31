@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
@@ -80,11 +81,24 @@ class EngramModelState(AscendModelState):
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
 
+    def _initialize_decoder_replay(self) -> None:
+        # Engram uses the model-specific replay state instead of preparing
+        # a second replay batch in AscendModelState.
+        self.decoder_replay = None
+
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self._replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        # PCP represents each prefill's front/back chunks as separate local
+        # requests. Only the gathered replay metadata uses that local layout.
+        max_num_local_reqs = self.max_num_reqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            max_num_local_reqs *= 2
+        self._replay_start = CpuGpuBuffer(max_num_local_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        self._global_replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self._replay_groups: tuple[int, torch.Tensor] | None = None
+        layers = getattr(model, "decoder_replay_layers", None)
+        self.decoder_replay_state = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
@@ -103,6 +117,9 @@ class EngramModelState(AscendModelState):
     def add_request(self, req_index: int, new_req_data) -> None:
         super().add_request(req_index, new_req_data)
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
+        if self.decoder_replay_state is not None:
+            params = new_req_data.sampling_params
+            self.decoder_replay_state.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement
@@ -143,15 +160,48 @@ class EngramModelState(AscendModelState):
             )
         replay_window, cacheable_groups = self._replay_groups
         num_reqs = input_batch.num_reqs
+        # Attention metadata uses the padded request shape for FULL graphs. Keep
+        # replay_start the same length as query_start_loc/seq_lens so padded rows
+        # are explicit zero boundaries instead of indexing past the actual batch.
+        metadata_num_reqs = input_batch.num_reqs_after_padding if cudagraph_mode == CUDAGraphMode.FULL else num_reqs
         replay_np = np.where(
             input_batch.is_prefilling_np[:num_reqs],
             self._replay_start_np[input_batch.idx_mapping_np[:num_reqs]],
             0,
         ).astype(np.int32)
+        self._replay_start.np[:metadata_num_reqs].fill(0)
         self._replay_start.np[:num_reqs] = replay_np
-        self._replay_start.copy_to_gpu(num_reqs)
-        replay_start = self._replay_start.gpu[:num_reqs]
-        if replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
+        self._replay_start.copy_to_gpu(metadata_num_reqs)
+        replay_start = self._replay_start.gpu[:metadata_num_reqs]
+        pcp_context = None
+        if self.pcp_manager is not None and not input_batch.is_dummy:
+            pcp_context = self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+        if pcp_context is not None:
+            assert self.pcp_manager is not None
+            global_batch = pcp_context.global_batch
+            global_reqs = global_batch.num_reqs
+            global_replay_np = np.where(
+                global_batch.is_prefilling_np[:global_reqs],
+                self._replay_start_np[global_batch.idx_mapping_np[:global_reqs]],
+                0,
+            ).astype(np.int32)
+            self._global_replay_start.np[:global_reqs] = global_replay_np
+            self._global_replay_start.copy_to_gpu(global_reqs)
+            if replay_window > 0 and global_replay_np.any() and cacheable_groups.numel() > 0:
+                _pad_v2_replayed_slots_kernel[(global_reqs,)](
+                    pcp_context.global_slot_mappings,
+                    pcp_context.global_slot_mappings.stride(0),
+                    cacheable_groups,
+                    global_batch.query_start_loc,
+                    global_batch.positions,
+                    self._global_replay_start.gpu,
+                    replay_window,
+                    PAD_SLOT_ID,
+                    NUM_GROUPS=cacheable_groups.numel(),
+                    BLOCK=1024,
+                )
+                self.pcp_manager.refresh_gathered_slot_mappings(slot_mappings)
+        elif replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
             _pad_v2_replayed_slots_kernel[(num_reqs,)](
                 slot_mappings,
                 slot_mappings.stride(0),
@@ -164,9 +214,14 @@ class EngramModelState(AscendModelState):
                 NUM_GROUPS=cacheable_groups.numel(),
                 BLOCK=1024,
             )
-        if model_specific_attn_metadata is None:
+        # No prefix-cache replay is active for the ordinary request path. Do
+        # not opt every FULL graph step into the bounded-replay band metadata:
+        # the optional ori_topk_length input changes the graph attention path
+        # even when every boundary is zero. Real replay steps still carry the
+        # padded, graph-shaped buffer above.
+        if model_specific_attn_metadata is None and replay_np.any():
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        return super().prepare_attn(
+        attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -177,6 +232,15 @@ class EngramModelState(AscendModelState):
             ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
+        if self.decoder_replay_state is not None:
+            self.decoder_replay_state.prepare(
+                DecoderReplayInputs(
+                    input_batch, block_tables, slot_mappings, attn_groups, replay_start, self.pcp_context
+                ),
+                cudagraph_mode,
+                for_capture=for_capture,
+            )
+        return attn_metadata
 
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
         model_inputs: dict[str, Any] = {}

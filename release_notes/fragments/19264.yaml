@@ -1,0 +1,4 @@
+pr: 19264
+entries:
+  - category: bugfix
+    text: Restored shared KV cache capacity for compatible Gemma 4 full and sliding-window attention configurations using Model Runner V2 and dense FP16 or BF16 KV caches.

@@ -28,7 +28,6 @@ from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -86,8 +85,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_dsa_cp.cache_clear()
-        utils.enable_dsa_cp_full_o_proj.cache_clear()
         utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -194,18 +191,6 @@ class TestUtils(TestBase):
             self.assertIs(utils.current_stream(), mock_stream)
             mock_current_stream.assert_called_once()
 
-    def test_enable_dsa_cp_full_o_proj_is_independent_of_pcp_switch(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-            mock.patch("vllm_ascend.utils.enable_pcp_o_proj_weight_sharding", return_value=False) as pcp_switch,
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-        pcp_switch.assert_not_called()
-
     def test_enable_sp_uses_upstream_parallel_config(self):
         # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
         mock.patch.stopall()
@@ -233,65 +218,22 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
-    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
-        ascend_config = SimpleNamespace(enable_dsa_cp=True)
+    def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
+        with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
+            padded = utils.pad_sequence_parallel_tokens(torch.zeros(6, 3))
+        self.assertEqual(padded.shape, (8, 3))
 
+        aligned = torch.zeros(8, 3)
         with (
-            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
-            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+            mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
+            mock.patch("torch.nn.functional.pad", wraps=torch.nn.functional.pad) as mock_pad,
         ):
-            self.assertTrue(utils.enable_dsa_cp())
+            padded = utils.pad_sequence_parallel_tokens(aligned)
 
-        mock_enable_sp.assert_not_called()
-
-    def test_enable_dsa_cp_reads_validated_ascend_config(self):
-        ascend_config = mock.MagicMock(enable_dsa_cp=False)
-
-        with (
-            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
-            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp())
-
-    def test_enable_dsa_cp_full_o_proj_accepts_kv_both(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_accepts_kv_producer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_rejects_kv_consumer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_rejects_when_dsa_cp_disabled(self):
-        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
+        # An aligned tracing input must still record the pad, otherwise the
+        # replayed graph drops padding for non-aligned token counts.
+        mock_pad.assert_called_once_with(aligned, (0, 0, 0, 0))
+        self.assertEqual(padded.shape, (8, 3))
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)
@@ -412,12 +354,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
@@ -963,3 +905,26 @@ def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, phys
 def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
     utils.setup_ascend_local_comm_res(0, config)
     physical_device_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert utils.oproj_tp_enable() is enabled
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+@pytest.mark.parametrize(
+    "knob,enable_fn",
+    [
+        ("lmhead_tensor_parallel_size", "lmhead_tp_enable"),
+        ("embedding_tensor_parallel_size", "embedding_tp_enable"),
+        ("mlp_tensor_parallel_size", "mlp_tp_enable"),
+    ],
+)
+def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, enabled):
+    """All four knobs share one convention: 0 and 1 both mean disabled."""
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{knob: size}))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert getattr(utils, enable_fn)() is enabled

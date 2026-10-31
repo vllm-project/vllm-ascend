@@ -41,11 +41,12 @@ def mock_distributed():
         yield
 
 
-def test_init_ascend_model_parallel(mock_distributed, parallel_config):
+@pytest.mark.parametrize("otp_size", [0, 1, 2])
+def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size):
     mock_ascend_config = MagicMock()
     mock_ascend_config.kvpp_config.size = 1
     mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
-    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = otp_size
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
@@ -65,10 +66,13 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
 
         mc2_group = get_mc2_group()
         lmheadtp_group = get_lmhead_tp_group()
-        otp_group = get_otp_group()
+        if otp_size > 1:
+            assert get_otp_group() is not None
+        else:
+            with pytest.raises(AssertionError, match="output tensor parallel group is not initialized"):
+                get_otp_group()
         p_tp_group = get_p_tp_group()
         assert mc2_group is not None
-        assert otp_group is not None
         assert lmheadtp_group is not None
         assert p_tp_group is not None
 

@@ -1,0 +1,62 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/zai-org/GLM-5.3.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+meta:
+  hardware:
+    ascend_950pr_8x: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+      - '--kv-cache-dtype'
+      - auto
+      - '--block-size'
+      - '512'
+      - '--max-model-len'
+      - '131072'
+      - '--max-num-seqs'
+      - '16'
+      - '--gpu-memory-utilization'
+      - '0.9'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+hardware_notes:
+  ascend_950pr_8x:
+    title: vLLM Ascend A5 image required
+    body: Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vllm-ascend#15346 for native FP8. EP is not available on this interconnect. Set HCCL_BUFFSIZE=1024 before launch.
+strategy_hardware:
+  single_node_tep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+features:
+  spec_decoding:
+    modes:
+      mtp:
+        hardware_overrides:
+          npu:
+            args:
+              - '--speculative-config'
+              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+      dflash:
+        hardware:
+          npu: unsupported
+variants:
+  default:
+    hardware_overrides:
+      ascend_950pr_8x:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
+        install:
+          pip: false

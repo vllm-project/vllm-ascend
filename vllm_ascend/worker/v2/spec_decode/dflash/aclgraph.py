@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -23,7 +24,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -59,64 +60,47 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         if super().needs_capture():
             set_draft_graph_params(self.capture_sizes)
 
-    if vllm_version_is("0.30.0"):
+    def capture(
+        self,
+        forward_fn: Callable,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        causal: bool | Mapping[int, bool] = False,
+        precompute_context_kv: Callable[[int], None] | None = None,
+        prepare_forward: Callable[[int, dict[str, Any] | None], None] | None = None,
+        progress_bar_desc: str = "Capturing CUDA graphs",
+    ) -> None:
+        """Capture ACL graphs for DFlash.
 
-        def capture(
-            self,
-            forward_fn: Callable,
-            input_buffers: InputBuffers,
-            block_tables: BlockTables,
-            attn_groups: list[list[AttentionGroup]],
-            kv_cache_config: KVCacheConfig,
-            max_model_len: int,
-            causal: bool | Mapping[int, bool] = False,
-            progress_bar_desc: str = "Capturing CUDA graphs",
-        ) -> None:
-            """Capture ACL graphs for DFlash."""
-            with communicator_switch(), model_capture_wrapper(self.speculator, False):
-                super().capture(
-                    forward_fn,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    max_model_len,
-                    causal=causal,
-                    progress_bar_desc=progress_bar_desc,
-                )
-
-    else:
-
-        def capture(  # type: ignore[misc]
-            self,
-            forward_fn: Callable,
-            input_buffers: InputBuffers,
-            block_tables: BlockTables,
-            attn_groups: list[list[AttentionGroup]],
-            kv_cache_config: KVCacheConfig,
-            max_model_len: int,
-            causal: bool | Mapping[int, bool] = False,
-            precompute_context_kv: Callable[[int], None] | None = None,
-            progress_bar_desc: str = "Capturing CUDA graphs",
-        ) -> None:
-            """Capture ACL graphs for DFlash."""
-            with communicator_switch(), model_capture_wrapper(self.speculator, False):
-                super().capture(
-                    forward_fn,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    max_model_len,
-                    causal=causal,
-                    precompute_context_kv=precompute_context_kv,
-                    progress_bar_desc=progress_bar_desc,
-                )
+        vLLM #60692 renamed ``precompute_context_kv(num_reqs)`` to
+        ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
+        one the installed vLLM expects.
+        """
+        prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
+        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+            super().capture(
+                forward_fn,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                max_model_len,
+                causal=causal,
+                progress_bar_desc=progress_bar_desc,
+                **prepare_kwargs,
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
+            # Length preparation and FlashAttn tiling run inside the graph,
+            # reading the draft's persistent device buffers on every replay.
+            return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,

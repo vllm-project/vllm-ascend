@@ -19,13 +19,14 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -157,6 +158,7 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(worker.cache_transfer_granularity, 512)
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
+                    scheduler.client.closed = False
                     scheduler.client.lookup.return_value = hit
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
@@ -177,7 +179,7 @@ class TestGLM53Store(unittest.TestCase):
                 def put(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
                         stored[key] = [ctypes.string_at(address, length) for address, length in zip(row, lengths)]
-                    return [0] * len(keys)
+                    return [True] * len(keys)
 
                 def get(keys, addresses, sizes, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
@@ -295,6 +297,7 @@ class TestGLM53Store(unittest.TestCase):
                 extra_config={"backend": "memcache"},
             )
             worker.m_store.batch_alloc.side_effect = alloc
+            worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
             worker.m_store.batch_get_key_info.side_effect = infos
             worker.m_store.batch_write_finish.side_effect = finish
             worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -322,7 +325,7 @@ class TestGLM53Store(unittest.TestCase):
         # make_worker pins to retention 0 (semantic checkpoints only); this
         # round-trip persists every block, so look it up densely.
         workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
-        scheduler = KVPoolScheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
+        scheduler = create_kv_pool_scheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
@@ -342,9 +345,19 @@ class TestGLM53Store(unittest.TestCase):
         hit_request.request_id = "missing"
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
 
-    def test_mooncake_layerwise_still_rejects_hybrid(self):
-        with self.assertRaisesRegex(ValueError, "AscendStore private KV state requires non-layerwise transfer"):
-            make_worker(self, kv_cache_config=make_glm53_plan(), use_layerwise=True, use_mla=True)
+    def test_mooncake_layerwise_excludes_private_tail(self):
+        plan = make_glm53_plan()
+        worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
+        start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
+        self.assertTrue(worker.use_block_key_layerwise)
+        self.assertTrue(scheduler.use_block_key_layerwise)
+        self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
+        self.assertEqual(scheduler.cacheable_group_ids, worker.cacheable_group_ids)
+        worker.register_kv_caches(make_glm53_caches(plan))
+        for layer in range(worker.num_layers):
+            for group_id, _ in worker._groups_for_layerwise_transfer(layer):
+                self.assertIn(group_id, worker.cacheable_group_ids)
 
     def test_empty_final_layer_waits_for_pending_save_before_reusing_events(self):
         pending: queue.Queue[str] = queue.Queue()
@@ -365,12 +378,12 @@ class TestGLM53Store(unittest.TestCase):
             prefetch_layer_map={},
             kv_send_thread=SimpleNamespace(request_queue=pending, raise_if_failed=MagicMock()),
         )
-        worker._wait_for_final_layer_save = MethodType(KVPoolWorker._wait_for_final_layer_save, worker)
+        worker._wait_for_final_layer_save = MethodType(LayerwiseKVPoolWorker._wait_for_final_layer_save, worker)
         worker.sync_save_events[1].record.side_effect = entered.set
 
         def save():
             try:
-                KVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))
+                LayerwiseKVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))
             except Exception as error:
                 errors.append(error)
             finally:
@@ -408,9 +421,9 @@ class TestGLM53Store(unittest.TestCase):
                 raise_if_failed=MagicMock(side_effect=[None, RuntimeError("save failed")]),
             ),
         )
-        worker._wait_for_final_layer_save = MethodType(KVPoolWorker._wait_for_final_layer_save, worker)
+        worker._wait_for_final_layer_save = MethodType(LayerwiseKVPoolWorker._wait_for_final_layer_save, worker)
         with self.assertRaisesRegex(RuntimeError, "save failed"):
-            KVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))
+            LayerwiseKVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))
 
     def test_layerwise_null_kda_slots_never_publish_readable_keys(self):
         plan = make_glm53_plan()
@@ -424,6 +437,7 @@ class TestGLM53Store(unittest.TestCase):
         )
         worker.register_kv_caches(make_glm53_caches(plan))
         worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]
         metadata = self.make_metadata(blocks, hashes, req_id="null-kda-slots")
@@ -434,7 +448,7 @@ class TestGLM53Store(unittest.TestCase):
             self.assertEqual(request.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in worker._allocated_gvas, valid)
+                self.assertEqual(key in request.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:

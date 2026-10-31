@@ -61,8 +61,8 @@ EPLB_EXPERT_WEIGHT_NAMES = {
     ),
     (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
+    (QuantType.W8A8MXFP, True): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
 }
 
 
@@ -82,7 +82,7 @@ class VllmEplbAdaptor:
         super().__init__(**args)
         if hasattr(model, "language_model"):
             self.model = model.language_model
-            self.config = model.config.text_config
+            self.config = model.config.get_text_config()
         else:
             self.model = model
             self.config = model.config
@@ -209,8 +209,11 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+        log2phy = self.log2phy_map_per_layer[layer_id]
+        if log2phy is not None:
+            if updated_log2phy_map.device.type == "cpu":
+                updated_log2phy_map = updated_log2phy_map.to(dtype=log2phy.dtype).pin_memory()
+            log2phy.copy_(updated_log2phy_map, non_blocking=True)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []

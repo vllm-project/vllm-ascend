@@ -89,6 +89,8 @@ hooks:
   # Sets per-page and per-section titles for the active language.
   # See docs/hooks/nav_titles.py for the title mapping.
   - docs/hooks/nav_titles.py
+  # Extend the TOC only on MiniMax-M3; other pages keep the site-wide depth.
+  - docs/hooks/minimax_m3_toc.py
 
 # ---- Markdown extensions ----
 markdown_extensions:
@@ -102,6 +104,8 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      # Site-wide TOC display depth: affects every model guide.
+      # Do not change this value to customize a single model's TOC.
       toc_depth: 3
   # Python Markdown Extensions
   - pymdownx.arithmatex:
@@ -213,6 +217,7 @@ nav:
         - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
         - tutorials/models/SigLIP2.md
+        - tutorials/models/Step-5-Preview.md
         - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
@@ -227,7 +232,6 @@ nav:
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
-        - tutorials/models/DeepSeek-V4-Flash-Vision.md
         - tutorials/models/DeepSeek-V4.1-Flash.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
@@ -235,8 +239,7 @@ nav:
         - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
-        - tutorials/models/GLM5.2.md
-        - tutorials/models/GLM5.3.md
+        - "GLM-5.2 & GLM-5.3": tutorials/models/GLM5.2.md
         - tutorials/models/GLM5.3-Flash.md
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
@@ -245,6 +248,7 @@ nav:
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
+        - tutorials/models/MiniMax-M3.1-Flash.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md
@@ -262,7 +266,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
     - faqs.md
@@ -281,6 +284,7 @@ nav:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
+        - user_guide/configuration/runtime_config.md
         - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
@@ -289,6 +293,7 @@ nav:
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/runtime_guard.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
@@ -301,6 +306,7 @@ nav:
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kvpp.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
+        - user_guide/feature_guide/encoder_cache_cpu_offload.md
         - user_guide/feature_guide/preempt_offload_connector.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md

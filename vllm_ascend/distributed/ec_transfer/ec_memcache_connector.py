@@ -29,9 +29,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    _get_encoder_cache_hidden_dim,
-)
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
@@ -109,7 +106,16 @@ class ECMemcacheConnector(ECConnectorBase):
         elif role == ECConnectorRole.WORKER:
             # Data-plane client for reading and writing embeddings.
             self._backend = MemcacheBackend(vllm_config.parallel_config)
-            self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
+            # vLLM #57904 measures the encoder output width at startup; size
+            # the receive buffer the same way, DeepStack-aware for Qwen3-VL
+            # (``out_hidden_size * (1 + N)``).
+            vision_config = getattr(getattr(model_config, "hf_config", None), "vision_config", None)
+            out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+            deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+            if out_hidden_size is not None and deepstack_indexes:
+                self._hidden_dim = out_hidden_size * (1 + len(deepstack_indexes))
+            else:
+                self._hidden_dim = model_config.get_inputs_embeds_size()
             self._dtype = model_config.dtype
             self._elem_size = torch.empty(0, dtype=self._dtype).element_size()
             self._recv_buffer_tokens = _get_recv_buffer_tokens(vllm_config)

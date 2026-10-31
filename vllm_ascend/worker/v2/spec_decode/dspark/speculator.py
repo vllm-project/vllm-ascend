@@ -253,8 +253,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-                self.vllm_config.cache_config.block_size
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
+                self.vllm_config.cache_config.block_size,
+                block_tables,
             )
 
     def _prepare_draft_dcp_metadata_inputs(
@@ -379,6 +380,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         """Match FULL-graph query lengths to the padded request count."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
+            if getattr(metadata, "external_flashmla", None) is not None:
+                continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
@@ -415,17 +418,21 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        dp_sync: Any = None,
+        dp_sync_state: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
         # Replicated drafts consume global requests, unlike sharded targets.
+        # Adaptive verification also negotiates the draft shape independently.
         # Every DP rank must synchronize the draft batch independently.
-        sync_state = None if self.replicated_pcp else dp_sync
+        sync_state = dp_sync_state
+        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+            sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
@@ -468,4 +475,5 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+                num_speculative_tokens=num_speculative_tokens,
             )

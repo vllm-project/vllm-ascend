@@ -78,16 +78,51 @@ class MooncakeBaseConnectorScheduler:
         # [kv_port, kv_port + dp_size * pp_size * pcp_size * tp_size).
         # Keep one scheduler control port per DP rank immediately after that
         # range so it cannot collide with a worker handshake socket.
+        # Dense engines reset their compute DP rank to zero; the serving
+        # index still identifies each independent replica.
         self.side_channel_port = (
-            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_rank
+            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_index
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
+        # Remove this restriction once the backend supports joint PCP/TP sharding.
+        if (
+            self.pcp_size > 1
+            and self.tp_size > 1
+            and any(isinstance(spec, MambaSpec) for specs in self.group_unique_specs for spec in specs)
+        ):
+            raise ValueError("Mooncake Mamba requires PCP=1 or TP=1 on both producer and consumer")
         self.need_truncate = self._needs_prefill_token_truncation()
+        self._logged_mamba_allocation = False
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
+
+    def _log_mamba_request_allocation(self, request_id: str, blocks: "KVCacheBlocks") -> None:
+        if self._logged_mamba_allocation:
+            return
+        for group_id, group_specs in enumerate(self.group_unique_specs):
+            for spec in group_specs:
+                if not isinstance(spec, MambaSpec):
+                    continue
+                block_ids = [block.block_id for block in blocks.blocks[group_id] if not block.is_null]
+                logger.info(
+                    "Mamba request allocation: engine=%s request=%s group=%s "
+                    "num_speculative_blocks=%s allocated_blocks=%s block_ids=%s "
+                    "page_bytes_per_layer=%s content_bytes_per_layer=%s allocated_bytes_per_layer=%s",
+                    self.engine_id,
+                    request_id,
+                    group_id,
+                    spec.num_speculative_blocks,
+                    len(block_ids),
+                    block_ids,
+                    spec.page_size_bytes,
+                    spec.state_content_size_bytes,
+                    len(block_ids) * spec.page_size_bytes,
+                )
+        # Observe one real request before transfer-block trimming, outside steady-state loads.
+        self._logged_mamba_allocation = True
 
     def _needs_prefill_token_truncation(self) -> bool:
         """Return whether Prefill must leave the last prompt token to Decode."""
@@ -134,10 +169,12 @@ class MooncakeBaseConnectorScheduler:
                 # state, not a prompt-aligned attention-block sequence.
                 transfer_block_ids.append(blocks)
             elif any(isinstance(spec, MambaSpec) for spec in group_specs):
-                if self.num_speculative_tokens > 0:
-                    transfer_block_ids.append(blocks[: -self.num_speculative_tokens])
-                else:
-                    transfer_block_ids.append(blocks)
+                # RecoverSSM stores its whole verify window in one state page,
+                # so draft tokens do not imply extra checkpoint blocks.
+                num_speculative_blocks = max(
+                    spec.num_speculative_blocks for spec in group_specs if isinstance(spec, MambaSpec)
+                )
+                transfer_block_ids.append(blocks[:-num_speculative_blocks] if num_speculative_blocks else blocks)
             else:
                 # SWA remains TP-sharded/replicated and keeps its original
                 # logical block size even when FullAttention uses DCP.
@@ -183,6 +220,10 @@ class MooncakeBaseConnectorScheduler:
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
+
+    def shutdown(self) -> None:
+        """Release scheduler-side resources when the engine shuts down."""
+        raise NotImplementedError
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError

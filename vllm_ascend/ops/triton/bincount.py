@@ -20,9 +20,20 @@
 # Migrated from model_executor/layers/utils.get_token_bin_counts_and_mask.
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -81,6 +92,72 @@ def token_bin_counts_and_mask_kernel(
         tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
+class TokenBinCountsAndMaskKernel(AscendTritonJitKernel["TokenBinCountsAndMaskKernel.CompileKey"]):
+    SEQ_BLOCK = 256
+    kernel = token_bin_counts_and_mask_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        seq_block: int
+        # Representative of vocab_size's Triton specialization class; the same
+        # class drives the specialized vocab_size scalar and the
+        # counts_batch_stride stride (= vocab_size for contiguous [n, vocab]).
+        vocab_size: int
+
+    def dispatch(self, *, seq_block: int, vocab_size: int) -> "TokenBinCountsAndMaskKernel.CompileKey":
+        return self.CompileKey(seq_block=seq_block, vocab_size=vocab_size)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list["TokenBinCountsAndMaskKernel.CompileKey"]:
+        vocab_size = max(
+            1,
+            vllm_config.model_config.get_vocab_size() // get_tensor_model_parallel_world_size(),
+        )
+        return self._trace_dispatch(self.dispatch)(
+            seq_block=self.SEQ_BLOCK,
+            vocab_size=triton_scalar_specialization_rep(vocab_size),
+        )
+
+    def warmup_inputs(self, compile_key: "TokenBinCountsAndMaskKernel.CompileKey") -> dict[str, Any]:
+        vocab_stride = compile_key.vocab_size
+        return dict(
+            tokens=TritonWarmupTensor(torch.int64, shape=(1, 1), strides=(1, 1)),
+            bin_counts=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(vocab_stride, 1)),
+            tokens_batch_stride=1,
+            tokens_seq_stride=1,
+            batch_size=1,
+            seq_len=1,
+            vocab_size=compile_key.vocab_size,
+            counts_batch_stride=vocab_stride,
+            counts_vocab_stride=1,
+            total_blocks=1,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        tokens: torch.Tensor,
+        bin_counts: torch.Tensor,
+        *,
+        tokens_batch_stride: int,
+        tokens_seq_stride: int,
+        batch_size: int,
+        seq_len: int,
+        vocab_size: int,
+        counts_batch_stride: int,
+        counts_vocab_stride: int,
+        total_blocks: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            SEQ_BLOCK=self.SEQ_BLOCK,
+            multibuffer=False,
+        )
+
+
+_TOKEN_BIN_COUNTS_AND_MASK_KERNEL = TokenBinCountsAndMaskKernel()
+
+
 def get_token_bin_counts_and_mask_triton(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -121,18 +198,17 @@ def get_token_bin_counts_and_mask_triton(
     total_blocks = n_rows * n_seq_blocks
     grid_size = min(core_num, total_blocks)
 
-    token_bin_counts_and_mask_kernel[(grid_size,)](
-        tokens,
-        tokens.stride(0),
-        tokens.stride(1),
-        n_rows,
-        n_cols,
-        vocab_size,
-        bin_counts,
-        bin_counts.stride(0),
-        bin_counts.stride(1),
-        total_blocks,
-        SEQ_BLOCK=SEQ_BLOCK,
-        multibuffer=False,
+    _TOKEN_BIN_COUNTS_AND_MASK_KERNEL(
+        tokens=tokens,
+        bin_counts=bin_counts,
+        tokens_batch_stride=tokens.stride(0),
+        tokens_seq_stride=tokens.stride(1),
+        batch_size=n_rows,
+        seq_len=n_cols,
+        vocab_size=vocab_size,
+        counts_batch_stride=bin_counts.stride(0),
+        counts_vocab_stride=bin_counts.stride(1),
+        total_blocks=total_blocks,
+        grid_size=grid_size,
     )
     return bin_counts, bin_counts > 0

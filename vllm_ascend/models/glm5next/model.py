@@ -7,6 +7,8 @@ from typing import Any, ClassVar, Literal
 import torch
 import torch_npu
 from torch import nn
+from transformers import Glm5NextTextConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -76,15 +78,40 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import pad_sequence_parallel_tokens
+
 from .attention import Glm5NextMLAAttention
-from .config import Glm5NextConfig
-from .kda import Glm5NextLinearAttention
+from .kda import Glm5NextLinearAttention, get_kda_parallel_size
 from .multimodal import (
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
+from .recoverssm_config import use_glm_recoverssm
+
+# Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
+_MHC_TAU = 0.05
+_MHC_POST_MULT_VALUE = 2.0
+_LOGIT_SCALE = 1.0
+
+
+def _is_moe(config: Glm5NextTextConfig) -> bool:
+    return config.n_routed_experts is not None
+
+
+def _is_kda_layer(config: Glm5NextTextConfig, layer_idx: int) -> bool:
+    layer_types = config.layer_types
+    return layer_types is not None and layer_idx < len(layer_types) and layer_types[layer_idx] == "linear_attention"
+
+
+def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
+    return config.layer_types is not None and "linear_attention" in config.layer_types
+
+
+def _validate_supported_config(config: Glm5NextTextConfig) -> None:
+    if config.index_topk is not None and not config.index_kpool_always_select_tail:
+        raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
 
 
 class Glm5NextMLP(nn.Module):
@@ -141,7 +168,7 @@ class Glm5NextMLP(nn.Module):
 class Glm5NextMoE(nn.Module):
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -209,10 +236,10 @@ class Glm5NextMoE(nn.Module):
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_token,
+            top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.moe_renormalize,
+            renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
@@ -268,7 +295,7 @@ class Glm5NextDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         layer_idx: int,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
@@ -283,16 +310,17 @@ class Glm5NextDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
-        self.is_moe = config.is_moe
+        self.is_moe = _is_moe(config)
         self.num_hidden_layers = config.num_hidden_layers
         self.rms_norm_eps = config.rms_norm_eps
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
-        self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
+        is_kda_layer = not is_mtp_layer and _is_kda_layer(config, layer_idx)
+        self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        if config.is_kda_layer(layer_idx):
+        if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
                 config=config,
                 vllm_config=vllm_config,
@@ -318,7 +346,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 quant_config=quant_config,  # keep MLA projections quantized when checkpoint weights are quantized
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
-                skip_rope=config.mla_nope,
+                skip_rope=config.mla_use_nope,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -361,13 +389,13 @@ class Glm5NextDecoderLayer(nn.Module):
 
         if self.mhc and not is_mtp_layer:
             # mhc config
-            self.mhc_num_residual_streams = config.mhc_num_residual_streams
-            self.mhc_tau = config.mhc_tau
+            self.mhc_num_residual_streams = config.hc_mult
+            self.mhc_tau = _MHC_TAU
             self.hc_eps = config.hc_eps
-            self.mhc_sinkhorn_iterations = config.mhc_sinkhorn_iterations
-            self.mhc_post_mult_value = config.mhc_post_mult_value
+            self.mhc_sinkhorn_iterations = config.hc_sinkhorn_iters
+            self.mhc_post_mult_value = _MHC_POST_MULT_VALUE
 
-            n = config.mhc_num_residual_streams
+            n = config.hc_mult
             d_model = n * self.hidden_size
             mix_hc = (2 + n) * n
 
@@ -456,7 +484,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         if self.is_sequence_parallel:
-            x = sp_reduce_scatter(x)
+            x = sp_reduce_scatter(pad_sequence_parallel_tokens(x))
 
         # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
         residual, post, comb, x = self.hc_post_pre(
@@ -548,11 +576,13 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
+@support_torch_compile
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
+        _validate_supported_config(config)
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -650,7 +680,7 @@ class Glm5NextModel(nn.Module):
                     "residual": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
                 }
             )
-        n = config.mhc_num_residual_streams
+        n = config.hc_mult
         return IntermediateTensors(
             {
                 "hidden_states": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
@@ -687,7 +717,7 @@ class Glm5NextModel(nn.Module):
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
-            hidden_states = sp_shard(hidden_states)
+            hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         for layer in self._active_layers:
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
@@ -728,7 +758,7 @@ class Glm5NextModel(nn.Module):
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
         ]
-        if self.config.is_moe:
+        if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             expert_params_mapping = fused_moe_make_expert_params_mapping(
@@ -819,7 +849,7 @@ class Glm5NextModel(nn.Module):
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict and not self.config.is_linear_attn:  # noqa: E501
+                    if name.endswith(".bias") and name not in params_dict and not _is_linear_attn(self.config):  # noqa: E501
                         continue
                     # Remapping the name of FP8 kv-scale.
                     remapped_name = maybe_remap_kv_scale_name(name, params_dict)
@@ -837,11 +867,13 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+    supports_replayssm: ClassVar[Literal[True]] = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        self.config = self.model_config.hf_config
+        self.config = self.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.model = Glm5NextModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
@@ -854,7 +886,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             )
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=self.config.logit_scale)
+        self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=_LOGIT_SCALE)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -876,25 +908,35 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
-        tp_size = parallel_config.tensor_parallel_size
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = get_kda_parallel_size(parallel_config)
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -920,6 +962,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerState, IsHybrid):
+    supports_replayssm: ClassVar[Literal[True]] = True
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
     # hybrid (auto-aligns mamba/attention block sizes, sizes the mamba state
@@ -1030,7 +1073,7 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         return config
 
 
-def get_spec_layer_idx_from_weight_name(config: Glm5NextConfig, weight_name: str) -> int | None:
+def get_spec_layer_idx_from_weight_name(config: Glm5NextTextConfig, weight_name: str) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (config.num_nextn_predict_layers > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
