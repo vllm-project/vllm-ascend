@@ -2025,13 +2025,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # inside the indexer's forward would leave their gate closed.
         with attention_transfer_window():
             if has_local_query:
-                query_plan = (
-                    getattr(indexer_attn_metadata, "query_plan", None)
-                    # Subclasses may prepare resident KV or CP views inside sparse dispatch.
-                    if type(self) is AscendSFAImpl
-                    and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
-                    else None
-                )
+                # Subclasses may prepare resident KV or CP views inside sparse dispatch.
+                query_plan = getattr(indexer_attn_metadata, "query_plan", None) if type(self) is AscendSFAImpl else None
+                if query_plan is not None and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE:
+                    query_plan = None
                 attn_output = None
                 if query_plan is not None and query_plan.dense is not None:
                     attn_output = execute_kpool_hybrid_attention(
