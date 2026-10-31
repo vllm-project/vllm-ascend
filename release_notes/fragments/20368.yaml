@@ -1,0 +1,9 @@
+pr: 20368
+entries:
+  - category: bugfix
+    text: >-
+      Fixed KV cache reformatting in PD disaggregation with decode TP smaller
+      than prefill TP: attention groups becoming ready in separate pull tasks
+      no longer overwrite each other's pending reformat state, which previously
+      left multi-KV-head (GQA) draft KV unreorganized and silently degraded
+      speculative decoding acceptance once KV blocks were reused.
