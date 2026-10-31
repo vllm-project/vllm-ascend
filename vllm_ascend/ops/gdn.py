@@ -44,7 +44,10 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNFusedAttentionBackend,
+    GDNSpecCausalConv1dMetadata,
+)
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -158,6 +161,7 @@ def _flatten_recurrent_state_indices(
     state_indices: torch.Tensor,
     total_tokens: int,
     query_start_loc: torch.Tensor | None = None,
+    flat_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reduce state indices to exactly one entry per recurrent token.
 
@@ -180,6 +184,8 @@ def _flatten_recurrent_state_indices(
         return state_indices.reshape(-1).contiguous()
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+    if flat_indices is not None:
+        return state_indices.reshape(-1)[flat_indices]
     # Variable-length speculative sequences: map each token to its
     # (sequence, slot) pair on device. The output length is host-known
     # (total_tokens), so this path stays sync-free, unlike masked_select or
@@ -191,7 +197,31 @@ def _flatten_recurrent_state_indices(
     token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
-    return state_indices[seq_ids, slot_ids].contiguous()
+    return state_indices.reshape(-1)[seq_ids * num_slots + slot_ids]
+
+
+def _get_recurrent_state_flat_indices(
+    metadata: GDNSpecCausalConv1dMetadata,
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor,
+) -> torch.Tensor | None:
+    """Build the layer-independent token-to-state mapping once per step."""
+    if state_indices.ndim != 2 or total_tokens == state_indices.numel():
+        return None
+    cached = getattr(metadata, "recurrent_state_flat_indices", None)
+    if cached is not None and cached.numel() == total_tokens:
+        return cached
+    num_seqs, num_slots = state_indices.shape
+    qsl = query_start_loc[: num_seqs + 1]
+    lens = (qsl[1:] - qsl[:-1]).clamp(min=0, max=num_slots)
+    bounds = lens.cumsum(0)
+    starts = bounds - lens
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp(max=num_seqs - 1)
+    flat_indices = seq_ids * num_slots + (token_ids - starts[seq_ids]).clamp(min=0, max=num_slots - 1)
+    metadata.recurrent_state_flat_indices = flat_indices
+    return flat_indices
 
 
 def _split_head_first_conv_output(
@@ -728,6 +758,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     spec_state_indices_tensor,
                     query_spec.shape[1],
                     spec_causal_conv1d_meta.query_start_loc,
+                    _get_recurrent_state_flat_indices(
+                        spec_causal_conv1d_meta,
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
                 ),
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
