@@ -1,5 +1,5 @@
-# Fork fragment (no upstream PR number yet). Rename to <PR>.yaml when opening upstream.
-pr: 0
+# Release note fragment for MRV2 draft_window_size.
+pr: 19724
 entries:
   - category: feature
     text: >
