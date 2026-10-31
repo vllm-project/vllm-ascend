@@ -49,7 +49,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 )
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
-from .gbsa import GBSA_PAGE_SIZE
+from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
@@ -426,6 +426,19 @@ class AscendQSAImpl:
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
+        request_plan = getattr(attn_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            return qsa_gbsa_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                logical_positions[:num_tokens],
+                seq_lens,
+                output[:num_tokens],
+            )
         return dispatch_qsa_attention(
             query[:num_tokens],
             key[:num_tokens],
@@ -438,7 +451,7 @@ class AscendQSAImpl:
             logical_positions[:num_tokens],
             seq_lens,
             output[:num_tokens],
-            getattr(attn_metadata, "qsa_request_plan", None),
+            request_plan,
         )
 
     @staticmethod
