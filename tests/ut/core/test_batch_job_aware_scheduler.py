@@ -658,6 +658,17 @@ class TestBatchJobAwareRequestQueue(TestBase):
         with self.assertRaises(IndexError):
             self.queue.pop_request()
 
+    def test_pop_request_does_not_return_removed_peeked_request(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.assertIs(self.queue.peek_request(), r1)
+        r2 = self._make_request("r2#job_name[job2]#")
+        self.queue.add_request(r2)
+        self.queue.remove_request(r1)  # e.g. r1 aborted after being peeked
+        popped = self.queue.pop_request()
+        self.assertIs(popped, r2)  # the removed r1 must not be returned
+        self.assertEqual(len(self.queue), 0)
+
     def test_get_cold_start_request_returns_prioritized(self):
         r1 = self._make_request("r1#job_name[job1]#")
         r2 = self._make_request("r2#job_name[job2]#")

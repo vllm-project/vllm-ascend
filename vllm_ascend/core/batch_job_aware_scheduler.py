@@ -448,6 +448,9 @@ class BatchJobAwareRequestQueue(RequestQueue):
 
         if bucket.remove(request):
             self._num_requests -= 1
+            # A removed request must not be returned by a later pop().
+            if self._peeked is request:
+                self._peeked = None
             if job_name in self._cold_start_reqs:
                 self._cold_start_reqs[job_name].discard(request.request_id)
                 if not self._cold_start_reqs[job_name]:
