@@ -7,7 +7,6 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -25,7 +24,6 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
-    get_cp_local_query_key_lens,
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
@@ -38,12 +36,11 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
 from vllm_ascend.utils import (
     _round_up,
-    enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
 )
@@ -67,9 +64,7 @@ class AscendSFAIndexerMetadata:
     num_actual_tokens: int
     # Write-ready slot mapping for the indexer's own cache layout, already
     # resolved for the active parallel mode: under PCP it is the full
-    # (gather-region) mapping, otherwise the input-token slice. Under DSA-CP
-    # the input-token count is padded to the TP-aligned size, so the slice
-    # equals the full padded mapping the gathered write needs.
+    # (gather-region) mapping, otherwise the input-token slice.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     cum_query_lens: torch.Tensor
@@ -78,7 +73,7 @@ class AscendSFAIndexerMetadata:
     cos: torch.Tensor
     block_size: int = 0
     # Parallel-layout sequence lengths consumed by the top-k kernel. Base/PCP
-    # modes use the unsharded values; DSA-CP uses rank-local lengths.
+    # modes use the unsharded values.
     actual_seq_lengths_query: torch.Tensor | None = None
     actual_seq_lengths_key: torch.Tensor | None = None
     # The PCP cache-write gather splits the local prefill region on this
@@ -218,12 +213,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
 
         # Cache-write gathers for parallel layouts: PCP all-gathers every
-        # non-replicated token across the CP group, DSA-CP all-gathers the
-        # indexer k across the TP group. Both are no-ops in the base layout.
+        # non-replicated token across the CP group. Base layout is a no-op.
         parallel_config = get_current_vllm_config().parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
-        self._dsa_cp_active = enable_dsa_cp()
+        self._use_fused_cache_store = (
+            type(self) is AscendSFAIndexerBackend
+            and not self.use_pcp  # Keep PCP cache gathering and slot remapping on the existing path.
+            and self.enable_sparse_li_c8
+            and self.c8_k_cache_dtype == torch.int8  # INT8 config uses FP16 scales; C8 may also be FP8.
+            and self.head_dim & (self.head_dim - 1) == 0  # Full-row tl.arange requires a power-of-two width.
+        )
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
         # mem-pool is active and are read by every forward, so they must survive
@@ -254,7 +254,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
         return 2 if self.enable_sparse_li_quant else 1
 
-    def _quantize_li_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _quantize_li_tensor(
+        self, x: torch.Tensor, *, defer_scale_cast: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply Hadamard transform and quantize for LI C8 or C4 path."""
         assert self.q_hadamard is not None
         x = x @ self.q_hadamard
@@ -265,7 +267,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             scale = scale.view(*shape_ori[:-1], *scale.shape[-2:])
             return x, scale.view(self.c4_k_scale_cache_dtype)
         x, scale = torch_npu.npu_dynamic_quant(x, dst_type=self.c8_k_cache_dtype)
-        return x, scale.to(self.c8_k_scale_cache_dtype)
+        return x, scale if defer_scale_cast else scale.to(self.c8_k_scale_cache_dtype)
 
     def write_cache(
         self,
@@ -312,6 +314,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        *,
+        defer_scale_cast: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
@@ -352,7 +356,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.enable_sparse_li_quant:
-            k_li, k_li_scale = self._quantize_li_tensor(k_li)
+            if defer_scale_cast:
+                k_li, k_li_scale = self._quantize_li_tensor(k_li, defer_scale_cast=True)
+            else:
+                k_li, k_li_scale = self._quantize_li_tensor(k_li)
             if self.enable_sparse_li_c8:
                 k_li_scale = k_li_scale.unsqueeze(-1)
         else:
@@ -369,9 +376,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         """Parallel-layout transforms applied to the k path output between
         ``forward_k`` and the cache write. Identity in the base layout; PCP
         all-gathers the prefill region across the CP group (reordering the
-        slot mapping to the gathered layout), DSA-CP all-gathers the indexer
-        k across the TP group (its padded slot mapping already covers the
-        gathered layout)."""
+        slot mapping to the gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
         if self.use_pcp:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
@@ -390,24 +395,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             )
             if k_li_scale is not None:
                 k_li_scale = gathered_tensors[1]
-        elif self._dsa_cp_active:
-            # Serialized with respect to the main KV all-gather on purpose:
-            # the indexer owns its cache-write pipeline, so it cannot join
-            # SFA's fused collective the way the pre-refactor inline flow
-            # did. The k and scale gathers are launched back-to-back and
-            # waited together so they at least overlap each other.
-            # TODO: re-fuse with the main KV all-gather (e.g. pass a
-            # collective plan through the indexer metadata) if DSA-CP
-            # throughput becomes a concern.
-            k_li, k_handle = all_gather_async(k_li, get_tp_group(), async_op=True)
-            scale_handle = None
-            if self.enable_sparse_li_quant:
-                assert k_li_scale is not None
-                k_li_scale, scale_handle = all_gather_async(k_li_scale, get_tp_group(), async_op=True)
-            if k_handle is not None:
-                k_handle.wait()
-            if scale_handle is not None:
-                scale_handle.wait()
         return k_li, k_li_scale, slot_mapping
 
     def forward(
@@ -417,7 +404,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
-        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -426,19 +412,32 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         sharing top-k indices) still runs the k path and the write so the
         cache stays up to date, and returns None.
 
-        The indexer metadata owns its RoPE tables and parallel-layout values;
-        DSA-CP metadata contains the local token shard that matches these
-        inputs."""
+        The indexer metadata owns its RoPE tables and parallel-layout values."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
-        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
-        if attn_q_gather_handle is not None:
-            # Keep the k projection overlapped with Q communication, but order
-            # the TP cache gathers after Q to avoid concurrent cross-group AIV
-            # collectives during graph replay. wait() adds a stream dependency.
-            attn_q_gather_handle.wait()
+        # Only the native backend may bypass its ordinary write_cache method.
+        # PCP and custom cache subclasses keep their established layout.
+        fuse_store = (
+            self._use_fused_cache_store
+            and indexer_metadata.num_actual_tokens > 0
+            and indexer_metadata.num_decode_tokens == indexer_metadata.num_actual_tokens
+        )
+        if fuse_store:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, defer_scale_cast=True)
+        else:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
-        self.write_cache(k_li, k_li_scale, slot_mapping)
+        if fuse_store:
+            assert k_li_scale is not None
+            store_indexer_key_scale(
+                k_li,
+                k_li_scale,
+                slot_mapping,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+            )
+        else:
+            self.write_cache(k_li, k_li_scale, slot_mapping)
         if not compute_topk:
             return None
 
@@ -554,15 +553,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.use_dsa_cp = enable_dsa_cp()
         self._group_metadata_buffers: dict[
             object,
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         ] = {}
         self._rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._dsa_cp_rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._dsa_cp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
-        self._dsa_cp_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
@@ -577,20 +572,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             _round_up(max_num_input_tokens, tp_size),
         )
 
-        if self.use_dsa_cp and not self.use_pcp:
-            self.dsa_cp_world_size = tp_size
-            self.dsa_cp_slot_capacity = _round_up(
-                max_num_input_tokens,
-                self.dsa_cp_world_size,
-            )
-            max_num_reqs = scheduler_config.max_num_seqs
-            self.dsa_cp_seq_capacity = max_num_reqs + 1
-            if speculative_config is not None:
-                spec_tokens = speculative_config.num_speculative_tokens
-                self.dsa_cp_seq_capacity = max(
-                    self.dsa_cp_seq_capacity,
-                    max_num_reqs * (spec_tokens + 1) + 1,
-                )
         self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config)
         if not self.use_dcp:
             return
@@ -805,111 +786,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             slot_mapping = pcp_slot_mapping
         return block_table, slot_mapping
 
-    def _build_dsa_cp_slot_mapping(
-        self,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-        buffer_key: object,
-    ) -> torch.Tensor:
-        num_tokens_pad = _round_up(num_input_tokens, self.dsa_cp_world_size)
-        slot_mapping_buffer = self._dsa_cp_slot_mapping_buffers.get(buffer_key)
-        if slot_mapping_buffer is None:
-            slot_mapping_buffer = torch.empty(
-                self.dsa_cp_slot_capacity,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self._dsa_cp_slot_mapping_buffers[buffer_key] = slot_mapping_buffer
-        if slot_mapping_buffer.shape[0] < num_tokens_pad:
-            raise RuntimeError(
-                "DSA-CP indexer slot buffer is too small: "
-                f"capacity={slot_mapping_buffer.shape[0]}, "
-                f"required={num_tokens_pad}."
-            )
-        padded_slot_mapping = slot_mapping_buffer[:num_tokens_pad]
-        padded_slot_mapping.fill_(-1)
-        padded_slot_mapping[: slot_mapping.shape[0]].copy_(slot_mapping)
-        return padded_slot_mapping
-
-    def _get_dsa_cp_seq_buffers(
-        self,
-        buffer_key: object,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        buffers = self._dsa_cp_seq_buffers.get(buffer_key)
-        if buffers is None:
-            query = torch.empty(
-                self.dsa_cp_seq_capacity,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            buffers = (query, torch.empty_like(query))
-            self._dsa_cp_seq_buffers[buffer_key] = buffers
-        return buffers
-
-    def _build_dsa_cp_parallel_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        buffer_key: object,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = common_attn_metadata.num_input_tokens
-        num_tokens_pad = _round_up(num_tokens, self.dsa_cp_world_size)
-        num_tokens_per_device = num_tokens_pad // self.dsa_cp_world_size
-        local_start = get_tp_group().rank_in_group * num_tokens_per_device
-        local_end = local_start + num_tokens_per_device
-
-        rope_buffers = self._dsa_cp_rope_buffers.get(buffer_key)
-        if rope_buffers is None:
-            local_capacity = self.dsa_cp_slot_capacity // self.dsa_cp_world_size
-            rope_shape = (local_capacity, *cos.shape[1:])
-            rope_buffers = (
-                torch.empty(rope_shape, dtype=cos.dtype, device=cos.device),
-                torch.empty(rope_shape, dtype=sin.dtype, device=sin.device),
-            )
-            self._dsa_cp_rope_buffers[buffer_key] = rope_buffers
-        local_cos_buf, local_sin_buf = rope_buffers
-        if local_cos_buf.shape[0] < num_tokens_per_device:
-            raise RuntimeError(
-                "DSA-CP indexer RoPE buffer is too small: "
-                f"capacity={local_cos_buf.shape[0]}, required={num_tokens_per_device}."
-            )
-        local_cos = local_cos_buf[:num_tokens_per_device]
-        local_sin = local_sin_buf[:num_tokens_per_device]
-        local_cos.zero_()
-        local_sin.zero_()
-        source_end = min(local_end, cos.shape[0])
-        if source_end > local_start:
-            source_slice = slice(local_start, source_end)
-            target_slice = slice(0, source_end - local_start)
-            local_cos[target_slice].copy_(cos[source_slice])
-            local_sin[target_slice].copy_(sin[source_slice])
-
-        cum_query_lens = common_attn_metadata.query_start_loc[1 : common_attn_metadata.num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs]
-        actual_seq_lengths_query, actual_seq_lengths_key = self._get_dsa_cp_seq_buffers(buffer_key)
-        num_segs = cum_query_lens.shape[0]
-        if actual_seq_lengths_query.shape[0] < num_segs:
-            raise RuntimeError(
-                "DSA-CP indexer sequence buffer is too small: "
-                f"capacity={actual_seq_lengths_query.shape[0]}, required={num_segs}."
-            )
-        local_query_lens, local_key_lens = get_cp_local_query_key_lens(
-            common_attn_metadata.query_start_loc,
-            cum_query_lens,
-            seq_lens,
-            local_start,
-            local_end,
-        )
-        actual_seq_lengths_query[:num_segs] = local_query_lens
-        actual_seq_lengths_key[:num_segs] = local_key_lens
-        return (
-            local_cos,
-            local_sin,
-            actual_seq_lengths_query[:num_segs],
-            actual_seq_lengths_key[:num_segs],
-        )
-
     def _copy_rope_to_metadata_buffers(
         self,
         cos: torch.Tensor,
@@ -1046,12 +922,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         else:
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
             block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        if self.use_dsa_cp and not self.use_pcp:
-            slot_mapping = self._build_dsa_cp_slot_mapping(
-                slot_mapping,
-                num_input_tokens,
-                buffer_key,
-            )
         self._mask_lim_slot_mapping(common_attn_metadata, slot_mapping, buffer_key)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
@@ -1063,19 +933,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         actual_seq_lengths_query = cum_query_lens
         actual_seq_lengths_key = seq_lens
-        if self.use_dsa_cp and not self.use_pcp:
-            (
-                cos,
-                sin,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
-            ) = self._build_dsa_cp_parallel_metadata(
-                common_attn_metadata,
-                cos,
-                sin,
-                buffer_key,
-            )
-        elif copy_rope:
+        if copy_rope:
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
                 sin,
@@ -1083,8 +941,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if is_pcp_sharded:
-            # Preserve the decode boundary for PCP's cache-write gather.
+        if is_pcp_sharded or self.use_dcp:
+            # PCP's gather and native DCP's fused store need the decode boundary.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,

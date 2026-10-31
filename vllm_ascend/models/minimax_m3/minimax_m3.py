@@ -1121,7 +1121,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self._enable_eagle3_aux_hidden_states = (
-            vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
+            vllm_config.speculative_config is not None and vllm_config.speculative_config.method in ("eagle3", "dspark")
         )
 
         self.vocab_size = text_config.vocab_size

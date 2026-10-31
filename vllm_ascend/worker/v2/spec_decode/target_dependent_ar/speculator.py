@@ -122,6 +122,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self._eplb_source_is_padding: torch.Tensor | None = None
+        self._eplb_dummy_run = False
         self.pcp_manager: AscendPCPManager | None = None
         self._sparse_kv_offload_metadata = SparseKVOffloadMetadata(
             enabled=get_ascend_config().sparse_kv_offload_config.enabled,
@@ -302,6 +304,34 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.prefill_cudagraph_manager.update_stream = self.update_stream
         self.decode_cudagraph_manager.update_stream = self.update_stream
 
+    def set_eplb_state(self, eplb_state: Any) -> None:
+        super().set_eplb_state(eplb_state)
+        if eplb_state.allgather_record_tensor is None:
+            return
+        # Only graph-external phase hooks update draft source validity.
+        if self._eplb_source_is_padding is None:
+            self._eplb_source_is_padding = torch.ones_like(self.input_buffers.is_padding)
+        model_state = eplb_state.model_states[self.speculative_config.draft_model_config.compute_hash()]
+        for layer in model_state.model.moe_layers:
+            layer.eplb_state.allgather_source_is_padding = self._eplb_source_is_padding
+
+    def on_prefill_begin(self, num_reqs: int) -> None:
+        super().on_prefill_begin(num_reqs)
+        source_mask = getattr(self, "_eplb_source_is_padding", None)
+        if source_mask is not None:
+            source_mask.fill_(True)
+            if not self._eplb_dummy_run and self.input_batch is not None:
+                num_tokens = self.input_batch.num_tokens_after_padding
+                source_mask[:num_tokens].copy_(self.input_batch.is_padding[:num_tokens])
+
+    def on_multi_step_decode_begin(self, num_reqs: int) -> None:
+        super().on_multi_step_decode_begin(num_reqs)
+        source_mask = getattr(self, "_eplb_source_is_padding", None)
+        if source_mask is not None:
+            source_mask.fill_(True)
+            if not self._eplb_dummy_run:
+                source_mask[:num_reqs].fill_(False)
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -328,6 +358,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         generate_draft.
         """
         self.input_batch = input_batch
+        self._eplb_dummy_run = dummy_run
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
         sync_state = None if self.replicated_pcp else dp_sync_state
@@ -379,18 +410,23 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             # Use the first executable draft attention layer as the architecture
             # discriminator and cache it for ACL graph parameter updates.
             self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
             self.attn_architecture = "MLA"
         elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
+        elif issubclass(self.attn_backend, AscendQSABackend):
+            self.attn_architecture = "QSA"
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
     def capture(self) -> None:
+        self._eplb_dummy_run = True
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -723,7 +759,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if attn_metadata is None:
             return
 
-        if self.attn_architecture in ("DSA", "SFA"):
+        # DSA/SFA manage draft state in their metadata builders; QSA has no
+        # host-side FIA fields to patch here.
+        if self.attn_architecture in ("DSA", "SFA", "QSA"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))
