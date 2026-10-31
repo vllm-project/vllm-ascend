@@ -247,6 +247,7 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
 @pytest.mark.parametrize("source_padding,expected", [([False, False, False, True], 3), ([True] * 4, 0)])
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source_padding, expected, dp_size):
+    monkeypatch.setattr("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", lambda: None)
     events = []
     state = AscendEplbLayerState()
     state.num_unpadded_tokens_tensors = [torch.tensor(4)]

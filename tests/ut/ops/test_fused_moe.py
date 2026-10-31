@@ -221,7 +221,7 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         "get_current_vllm_config",
         lambda: SimpleNamespace(
             use_v2_model_runner=False,
-            model_config=SimpleNamespace(is_deepseek_mla=False),
+            model_config=SimpleNamespace(is_deepseek_mla=False, enforce_eager=False),
         ),
     )
 
@@ -291,7 +291,7 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
         "get_current_vllm_config",
         lambda: SimpleNamespace(
             use_v2_model_runner=use_v2_model_runner,
-            model_config=SimpleNamespace(is_deepseek_mla=False),
+            model_config=SimpleNamespace(is_deepseek_mla=False, enforce_eager=False),
         ),
     )
 
@@ -2527,6 +2527,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
             hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=input_ids,
+            pcp_hidden_prepare=None,
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
@@ -2542,6 +2543,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
             hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=input_ids,
+            pcp_hidden_prepare=None,
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()
@@ -2612,7 +2614,9 @@ def test_forward_impl_gathers_sp_input_before_routed_collectives(monkeypatch):
         enqueue_gate_up_after_router=MagicMock(side_effect=enqueue_gate_up),
         forward=MagicMock(side_effect=shared_forward),
     )
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(side_effect=routed_forward))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None), forward_impl=MagicMock(side_effect=routed_forward)
+    )
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     shared_input_ready = MagicMock()
     routed_finalize_done = MagicMock()
@@ -2657,7 +2661,10 @@ def test_forward_impl_records_router_milestones(monkeypatch):
     gate_weight = torch.randn(3, 4, dtype=torch.float32)
     runner.gate = SimpleNamespace(weight_fp32=gate_weight)
     milestones = RoutedMoEMilestones()
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, milestones)))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None),
+        forward_impl=MagicMock(return_value=(routed_out, milestones)),
+    )
     prepared_shared_input = PreparedSharedExpertInput(hidden_states)
     runner.ascend_shared_experts = SimpleNamespace(
         prepare_input_before_routed=MagicMock(return_value=prepared_shared_input),
@@ -2864,7 +2871,10 @@ def test_forward_impl_skips_milestones_when_overlap_disabled(monkeypatch):
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     milestones = RoutedMoEMilestones()
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, milestones)))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None),
+        forward_impl=MagicMock(return_value=(routed_out, milestones)),
+    )
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=False,
         prepare_input_before_routed=MagicMock(return_value=PreparedSharedExpertInput(hidden_states)),
@@ -3011,7 +3021,10 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         local_dp_metadata=None,
         path=SharedExpertMLPPath.LINEAR_WRAPPER,
     )
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, milestones)))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None),
+        forward_impl=MagicMock(return_value=(routed_out, milestones)),
+    )
     runner.routed_input_transform = object()
     runner.routed_output_transform = object()
     runner.ascend_shared_experts = SimpleNamespace(
@@ -3045,6 +3058,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         hidden_states=routed_hidden_states,
         router_logits=router_logits,
         input_ids=None,
+        pcp_hidden_prepare=None,
     )
     current_stream.wait_event.assert_not_called()
     assert milestones.routed_finalize_done is current_stream.record_event.return_value
@@ -3182,7 +3196,9 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     runner._gate = gate
     runner.gate = gate
     runner.ascend_shared_experts = None
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None), forward_impl=MagicMock(return_value=routed_out)
+    )
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     monkeypatch.setattr(fused_moe_module.F, "linear", fake_linear)
 
@@ -3199,6 +3215,7 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
         hidden_states=hidden_states,
         router_logits=recomputed_logits,
         input_ids=None,
+        pcp_hidden_prepare=None,
     )
 
 
@@ -3221,7 +3238,9 @@ def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
     runner._gate = gate
     runner.gate = gate
     runner.ascend_shared_experts = None
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None), forward_impl=MagicMock(return_value=routed_out)
+    )
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     monkeypatch.setattr(
         fused_moe_module.F,
@@ -3246,6 +3265,7 @@ def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
         hidden_states=hidden_states,
         router_logits=gate_logits,
         input_ids=None,
+        pcp_hidden_prepare=None,
     )
 
 
@@ -3279,7 +3299,10 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
         prepare_input_before_routed=MagicMock(return_value=prepared_shared_input),
         forward=MagicMock(return_value=shared_out),
     )
-    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, milestones)))
+    runner.routed_experts = SimpleNamespace(
+        start_pcp_hidden_gather=MagicMock(return_value=None),
+        forward_impl=MagicMock(return_value=(routed_out, milestones)),
+    )
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
     monkeypatch.setattr(fused_moe_module.F, "linear", fake_linear)
@@ -3298,6 +3321,7 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
         hidden_states=hidden_states,
         router_logits=recomputed_logits,
         input_ids=None,
+        pcp_hidden_prepare=None,
     )
     runner.ascend_shared_experts.forward.assert_called_once_with(
         prepared_shared_input,

@@ -250,6 +250,56 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         )
         return result
 
+    def _start_main_kv_gather(
+        self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata
+    ) -> Callable[[], tuple] | None:
+        # First prototype: eager NoPE BF16 PCP prefill, TP1/PCP8/DCP1.
+        # Decode, packed/quantized caches, graph and other layouts stay on the
+        # established path. All ranks gate on the global prefill flag.
+        if (
+            not self.vllm_config.model_config.enforce_eager
+            or self.qk_rope_head_dim != 0
+            or self.enable_sparse_sfa_c8
+            or kv_no_split.dtype != torch.bfloat16
+            or kv_cache[0].dtype != torch.bfloat16
+            or get_pcp_group().world_size != 8
+            or get_tp_group().world_size != 1
+            or get_dcp_group().world_size != 1
+            or not (attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill)
+            or not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded)
+        ):
+            return None
+        local_rows = attn_metadata.num_input_tokens
+        replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
+        # Match _gather_prefill_cache_inputs' non-collective branches.
+        if slots.shape[0] <= local_rows or replicated == local_rows:
+            return None
+        pad = local_rows - kv_no_split.shape[0]
+        if pad < 0:
+            raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+        if pad:
+            kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad))
+        assert 0 <= replicated <= local_rows
+        send = kv_no_split[replicated:].contiguous()
+        gathered, work = all_gather_async(send, get_pcp_group())
+        gathered_slots = slots[: get_pcp_group().world_size * local_rows]
+        prefix = kv_no_split[:replicated]
+        if replicated:
+            rank_slots = gathered_slots.view(get_pcp_group().world_size, local_rows)
+            gathered_slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
+        logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
+
+        def finish():
+            # Explicitly retain both input views and the output until wait.
+            _ = send
+            assert work is not None
+            work.wait()
+            values = torch.cat((prefix, gathered), dim=0) if replicated else gathered
+            assert values.shape[0] == gathered_slots.numel()
+            return super(AscendSFAPCPImpl, self).exec_kv(values, cos, sin, kv_cache, gathered_slots, attn_metadata)
+
+        return finish
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,

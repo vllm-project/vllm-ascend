@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -26,10 +27,12 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
@@ -370,6 +373,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
 
+    def is_large_payload(self, bytes_per_row: int) -> bool:
+        """Use rank-invariant hidden traffic for conservative eager overlap.
+
+        This is a performance heuristic, not a correctness requirement or a
+        guarantee of speedup. Sequence-parallel hidden overlap is unsupported.
+        """
+        if self.moe_config.dp_size > 1:
+            rows = _EXTRA_CTX.max_tokens_across_dp or 0
+        else:
+            rows = _EXTRA_CTX.max_tokens_across_pcp or 0
+        return rows * bytes_per_row >= 768 * 1024
+
     def _use_ep_sequence_parallel(self) -> bool:
         """Whether MoE itself must use the EP sequence-parallel path.
 
@@ -433,12 +448,41 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pertoken_scale=pertoken_scale,
         )
 
+    def start_pcp_hidden_gather(self, hidden_states: torch.Tensor) -> Callable:
+        """Start the first DP/PCP hidden AG and finish in the normal prepare order."""
+        assert not self._use_ep_sequence_parallel()
+        if self.moe_config.dp_size > 1:
+            group = self.moe_config.dp_group
+            max_rows = _EXTRA_CTX.max_tokens_across_dp
+        else:
+            assert self.moe_config.pcp_size > 1
+            group = get_pcp_group()
+            max_rows = _EXTRA_CTX.max_tokens_across_pcp
+        local_rows = hidden_states.shape[0]
+        pad = max_rows - local_rows
+        assert pad >= 0
+        send = nn.functional.pad(hidden_states, (0, 0, 0, pad)) if pad else hidden_states
+        send = send.contiguous()
+        gathered, work = all_gather_async(send, group)
+        logger.info_once("MoE DP/PCP hidden AllGather starts before local gate.")
+
+        def finish(router_logits):
+            # Retain the send buffer until HCCL completes; no shared pending state.
+            _ = send
+            assert router_logits.shape[0] == local_rows
+            assert work is not None
+            work.wait()
+            return self._prepare_with_dp_group(hidden_states, router_logits, gathered_hidden=gathered)
+
+        return finish
+
     def _prepare_with_dp_group(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        gathered_hidden: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -459,7 +503,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             # All-gather across DP group
-            hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
+            hidden_states = (
+                self.moe_config.dp_group.all_gather(hidden_states, 0) if gathered_hidden is None else gathered_hidden
+            )
+            gathered_hidden = None
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
         if self.moe_config.pcp_size > 1:
@@ -471,9 +518,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
+            hidden_states = (
+                get_pcp_group().all_gather(hidden_states, dim=0) if gathered_hidden is None else gathered_hidden
             )
             router_logits = get_pcp_group().all_gather(
                 router_logits,

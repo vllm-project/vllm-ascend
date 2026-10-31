@@ -967,7 +967,10 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     hidden = torch.zeros(len(local), 2)
     impl.q_lora_rank = 2
     impl.preprocess_type = PreprocessType.NATIVE
-    impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=2))
+    impl.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
+        model_config=SimpleNamespace(enforce_eager=True),
+    )
     impl.g_proj = impl.layerwise_kv_cache_hook = None
     impl.has_indexer = True
     impl._is_mtp_layer = impl.skip_topk = impl.use_index_cache = False

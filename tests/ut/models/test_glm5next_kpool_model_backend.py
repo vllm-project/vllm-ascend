@@ -21,6 +21,7 @@ from vllm_ascend.attention.indexer_kpool import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.ops.mla import IndexerWrapper
 
 with patch.dict(
     "sys.modules",
@@ -537,7 +538,13 @@ def test_cann_indexer_writes_caches_before_optional_selection(
 
 @pytest.mark.parametrize("pcp_local_token_count", [2, 4])
 @pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_local_token_count, actual_tokens) -> None:
+@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("compute_topk", [False, True])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_backend_restores_pcp_keys_before_kpool_cache_write(
+    monkeypatch, pcp_local_token_count, actual_tokens, prefetch, compute_topk, graph_mode
+) -> None:
+    uses_async = prefetch and graph_mode == CUDAGraphMode.NONE
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -578,38 +585,90 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch, pcp_loc
     pcp_group = MagicMock()
     pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
     monkeypatch.setattr(backend_module, "get_pcp_group", lambda: pcp_group)
+    events = []
+    handle = MagicMock()
+
+    def gather_async(tensor, group):
+        assert group is pcp_group
+        events.append("launch")
+        result = torch.full((tensor.shape[0] * 2, tensor.shape[1]), float("nan"))
+
+        def wait():
+            events.append("wait")
+            result.copy_(torch.cat((tensor, tensor + 10)))
+
+        handle.wait.side_effect = wait
+        return result, handle
+
+    gather = MagicMock(side_effect=gather_async)
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    backend.wq_b.register_forward_hook(lambda *args: events.append("query"))
     monkeypatch.setattr(
         backend_module,
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
+            cudagraph_runtime_mode=graph_mode,
             virtual_engine=0,
         ),
     )
 
-    result = backend.forward(
+    k_hidden = torch.full((2, 3), 2.0)
+    runner = backend
+    if prefetch:
+        # Exercise the actual model-facing wrapper, not only the backend.
+        runner = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(runner)
+        runner.impl = backend
+        k_hidden = runner.prepare_pcp_hidden(k_hidden, metadata)
+        handle.wait.assert_not_called()
+    result = runner.forward(
         torch.ones(2, 3),
         torch.ones(2, 2),
-        torch.full((2, 3), 2.0),
+        k_hidden,
         metadata,
-        compute_topk=True,
+        compute_topk=compute_topk,
     )
 
-    pcp_group.all_gather.assert_called_once()
+    if uses_async:
+        gather.assert_called_once()
+        pcp_group.all_gather.assert_not_called()
+        handle.wait.assert_called_once()
+        assert events == (["launch", "query", "wait"] if compute_topk else ["launch", "wait"])
+    else:
+        pcp_group.all_gather.assert_called_once()
+        gather.assert_not_called()
     recorded_args = recorder.args
     recorded_kwargs = recorder.kwargs
     assert recorded_args is not None
     assert recorded_kwargs is not None
-    local_hidden = torch.full((actual_tokens, 3), 2.0)
-    padding = pcp_local_token_count - actual_tokens
+    expected_tokens = 2 if graph_mode == CUDAGraphMode.FULL else actual_tokens
+    local_hidden = torch.full((expected_tokens, 3), 2.0)
+    padding = pcp_local_token_count - expected_tokens
     padded_hidden = torch.nn.functional.pad(local_hidden, (0, 0, 0, padding))
     restore = metadata.pcp_hidden_restore_indices
     assert restore is not None
-    assert pcp_group.all_gather.call_args_list[0].args[0].shape[0] == pcp_local_token_count
+    gather_call = gather.call_args if uses_async else pcp_group.all_gather.call_args
+    assert gather_call.args[0].shape[0] == pcp_local_token_count
     torch.testing.assert_close(
         recorded_args[0],
         torch.cat((padded_hidden, padded_hidden + 10), dim=0)[restore],
     )
     assert recorded_args[-2] is metadata
-    assert result.shape[0] == recorded_args[1].shape[0] == actual_tokens
+    if compute_topk:
+        assert result.shape[0] == recorded_args[1].shape[0] == expected_tokens
+    else:
+        assert result is None
+
+
+def test_pcp_hidden_prefetch_leaves_non_pcp_layout_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    )
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    hidden = torch.ones(2, 3)
+    metadata = _indexer_metadata(2)
+    gather = MagicMock()
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    assert backend.prepare_pcp_hidden(hidden, metadata) is hidden
+    gather.assert_not_called()

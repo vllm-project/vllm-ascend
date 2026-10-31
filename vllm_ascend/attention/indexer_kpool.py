@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -31,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
+from vllm_ascend.distributed.utils import all_gather_async
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -71,6 +73,21 @@ class AscendIndexerKPoolMetadata:
     write_metadata: "AscendIndexerKPoolMetadata | None" = None
     pcp_hidden_restore_indices: torch.Tensor | None = None
     pcp_local_token_count: int = 0
+
+
+@dataclass
+class KPoolHiddenGather:
+    """One forward's pending PCP input, retaining the send buffer until wait."""
+
+    local_hidden: torch.Tensor
+    gathered_hidden: torch.Tensor
+    restore_indices: torch.Tensor
+    handle: torch.distributed.Work | None
+
+    def wait_and_restore(self) -> torch.Tensor:
+        if self.handle is not None:
+            self.handle.wait()
+        return torch.index_select(self.gathered_hidden, 0, self.restore_indices)
 
 
 @dataclass
@@ -605,11 +622,34 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError(f"GLM KPool cache {layer.prefix!r} is not bound to a tensor.")
         return cache
 
+    def prepare_pcp_hidden(
+        self, k_hidden_states: torch.Tensor, indexer_metadata: AscendIndexerKPoolMetadata
+    ) -> torch.Tensor | KPoolHiddenGather:
+        """Launch ordinary PCP keys before the independent MLA/indexer queries."""
+        if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE:
+            return k_hidden_states
+        restore_indices = indexer_metadata.pcp_hidden_restore_indices
+        if restore_indices is None:
+            return k_hidden_states
+        num_tokens = k_hidden_states.shape[0]
+        if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
+        k_hidden = k_hidden_states[:num_tokens]
+        padding = indexer_metadata.pcp_local_token_count - num_tokens
+        if padding < 0:
+            raise ValueError("KPool PCP keys exceed the rank-local padded token count.")
+        if padding:
+            k_hidden = F.pad(k_hidden, (0, 0, 0, padding))
+        k_hidden = k_hidden.contiguous()
+        gathered_hidden, handle = all_gather_async(k_hidden, get_pcp_group())
+        logger.info_once("KPool PCP hidden AllGather overlaps query projections.")
+        return KPoolHiddenGather(k_hidden, gathered_hidden, restore_indices, handle)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor,
+        k_hidden_states: torch.Tensor | KPoolHiddenGather,
         indexer_metadata: Any,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
@@ -626,7 +666,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
-        k_hidden = k_hidden_states[:num_tokens]
         if self._key_weight is None:
             self.process_weights_after_loading()
         assert self._key_weight is not None
@@ -641,15 +680,19 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
-        restore_indices = indexer_metadata.pcp_hidden_restore_indices
-        if restore_indices is not None:
-            padding = indexer_metadata.pcp_local_token_count - k_hidden.shape[0]
-            if padding < 0:
-                raise ValueError("KPool PCP keys exceed the rank-local padded token count.")
-            if padding:
-                k_hidden = F.pad(k_hidden, (0, 0, 0, padding))
-            gathered_hidden = get_pcp_group().all_gather(k_hidden.contiguous(), dim=0)
-            k_hidden = torch.index_select(gathered_hidden, 0, restore_indices)
+        if isinstance(k_hidden_states, KPoolHiddenGather):
+            k_hidden = k_hidden_states.wait_and_restore()
+        else:
+            k_hidden = k_hidden_states[:num_tokens]
+            restore_indices = indexer_metadata.pcp_hidden_restore_indices
+            if restore_indices is not None:
+                padding = indexer_metadata.pcp_local_token_count - k_hidden.shape[0]
+                if padding < 0:
+                    raise ValueError("KPool PCP keys exceed the rank-local padded token count.")
+                if padding:
+                    k_hidden = F.pad(k_hidden, (0, 0, 0, padding))
+                gathered_hidden = get_pcp_group().all_gather(k_hidden.contiguous(), dim=0)
+                k_hidden = torch.index_select(gathered_hidden, 0, restore_indices)
         return self._forward_cann(
             k_hidden,
             q_values,

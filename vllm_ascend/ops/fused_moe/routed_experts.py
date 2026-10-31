@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -676,12 +677,31 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def start_pcp_hidden_gather(self, hidden_states: torch.Tensor):
+        # Work handles must be consumed in the same eager invocation. A service
+        # configured for decode graphs can still overlap its eager prefill.
+        cfg = self.moe_config
+        if (
+            get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or (cfg.dp_size <= 1 and cfg.pcp_size <= 1)
+            or cfg.is_sequence_parallel
+            or getattr(self, "_ascend_moe_lora_context", None) is not None
+        ):
+            return None
+        comm = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, cfg)
+        if not isinstance(comm, AllGatherCommImpl):
+            return None
+        if not comm.prepare_finalize.is_large_payload(hidden_states.shape[-1] * hidden_states.element_size()):
+            return None
+        return comm, comm.prepare_finalize.start_pcp_hidden_gather(hidden_states)
+
     def forward_impl(
         self,
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        pcp_hidden_prepare=None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -701,13 +721,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
-        prepare_output = moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            # The SP model wrapper already shards and gathers the MoE sequence.
-            replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
-        )
+        if pcp_hidden_prepare is not None:
+            assert pcp_hidden_prepare[0] is moe_comm_method
+            prepare_output = pcp_hidden_prepare[1](router_logits)
+        else:
+            prepare_output = moe_comm_method.prepare(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                # The SP model wrapper already shards and gathers the MoE sequence.
+                replace_allreduce=self.moe_config.is_sequence_parallel,
+                quant_type=self.quant_type,
+            )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
