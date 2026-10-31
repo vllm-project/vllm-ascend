@@ -428,6 +428,7 @@ class AscendConfig:
             "multistream_dsv4_dsa_overlap": true,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
+            "enable_prefill_bnsd": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "kv_pool_range_debug": false,
@@ -577,6 +578,9 @@ class AscendConfig:
         )
     )
     enable_prefill_mc2: bool = False
+    # Eligible long cached-prefill queries use BNSD while the paged KV cache
+    # remains in its native NHD layout.
+    enable_prefill_bnsd: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     kv_pool_range_debug: bool = False
