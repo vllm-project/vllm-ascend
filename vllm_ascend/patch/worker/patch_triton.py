@@ -115,7 +115,7 @@ from vllm_ascend.ops.triton.v2.sample.thinking_budget import (  # noqa: E402
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )
-from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu  # noqa: E402
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words  # noqa: E402
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature  # noqa: E402
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs  # noqa: E402
@@ -146,7 +146,7 @@ speculator.gumbel_sample = categorical_sample
 base_speculator.gumbel_sample = categorical_sample
 dspark_speculator.gumbel_sample = categorical_sample
 sampler.gumbel_sample = categorical_sample
-topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
+topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
