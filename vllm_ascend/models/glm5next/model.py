@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
@@ -114,6 +115,45 @@ def _validate_supported_config(config: Glm5NextTextConfig) -> None:
         raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
 
 
+# Dense-MLP W8A8 fused path. npu_dequant_swiglu_quant (used by the MoE shared
+# expert) rejects a last dim > 9280 while the dense gate_up output is 24576
+# wide, so the chain is fused around npu_clipped_swiglu instead, wrapped in one
+# opaque custom op so torch.compile / ACL graph capture treat it as a node.
+def _glm5next_dense_mlp_w8a8_impl(
+    x: torch.Tensor,
+    gu_weight: torch.Tensor,
+    gu_weight_scale: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_weight_scale: torch.Tensor,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    need_unsqz = x.dim() == 3
+    if need_unsqz:
+        x = x.squeeze(dim=1)
+    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+    gate_up = torch_npu.npu_quant_matmul(
+        quantized_x, gu_weight, gu_weight_scale, pertoken_scale=pertoken_scale, bias=None, output_dtype=x.dtype
+    )
+    act = torch_npu.npu_clipped_swiglu(gate_up, dim=-1, alpha=1.0, limit=swiglu_limit, bias=0.0, interleaved=False)
+    quantized_act, act_scale = torch_npu.npu_dynamic_quant(act)
+    out = torch_npu.npu_quant_matmul(
+        quantized_act, down_weight, down_weight_scale, pertoken_scale=act_scale, bias=None, output_dtype=x.dtype
+    )
+    if need_unsqz:
+        out = out.unsqueeze(dim=1)
+    return out
+
+
+try:
+    _glm5next_dense_mlp_w8a8 = torch.library.custom_op("glm5next::dense_mlp_w8a8", mutates_args=())(
+        _glm5next_dense_mlp_w8a8_impl
+    )
+    _glm5next_dense_mlp_w8a8.register_fake(lambda x, *args: torch.empty_like(x))
+except Exception:
+    # Module re-import: the op stays reachable via torch.ops.glm5next.
+    pass
+
+
 class Glm5NextMLP(nn.Module):
     def __init__(
         self,
@@ -157,8 +197,46 @@ class Glm5NextMLP(nn.Module):
             self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
         else:
             self.act_fn = SiluAndMul()
+        # MoE shared experts are built from this class but are already fused
+        # by the MoE machinery; keep them on the stock path.
+        self._is_moe_shared_expert = prefix.endswith("shared_experts")
+        # Decided lazily on first forward: weight_scale_fp32 only exists after
+        # process_weights_after_loading.
+        self._dense_mlp_op_ok: bool | None = None
 
     def forward(self, x):
+        if self._dense_mlp_op_ok is None:
+            # AscendLinearMethod is a wrapper; the scheme is its .quant_method.
+            gu_scheme = getattr(self.gate_up_proj.quant_method, "quant_method", self.gate_up_proj.quant_method)
+            down_scheme = getattr(self.down_proj.quant_method, "quant_method", self.down_proj.quant_method)
+            self._dense_mlp_op_ok = (
+                not self._is_moe_shared_expert
+                and self.swiglu_limit is not None
+                and hasattr(torch_npu, "npu_clipped_swiglu")
+                and type(gu_scheme).__name__ == "AscendW8A8DynamicLinearMethod"
+                and type(down_scheme).__name__ == "AscendW8A8DynamicLinearMethod"
+                and hasattr(self.gate_up_proj, "weight_scale_fp32")
+                and hasattr(self.down_proj, "weight_scale_fp32")
+            )
+            print(
+                f"[glm5next] dense MLP fused clipped_swiglu op: "
+                f"{'enabled' if self._dense_mlp_op_ok else 'disabled, stock path'}"
+            )
+        if self._dense_mlp_op_ok:
+            assert self.swiglu_limit is not None
+            out = torch.ops.glm5next.dense_mlp_w8a8(
+                x,
+                self.gate_up_proj.weight,
+                self.gate_up_proj.weight_scale,
+                self.down_proj.weight,
+                self.down_proj.weight_scale,
+                self.swiglu_limit,
+            )
+            # The op returns the down-proj partial result; the TP all-reduce
+            # stays outside the op, mirroring RowParallelLinear.
+            if getattr(self.down_proj, "reduce_results", False) and getattr(self.down_proj, "tp_size", 1) > 1:
+                out = tensor_model_parallel_all_reduce(out)
+            return out
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
