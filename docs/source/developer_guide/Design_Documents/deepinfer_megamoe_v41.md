@@ -1,7 +1,7 @@
 # DeepInfer MegaMoE for DeepSeek V4.1 on Ascend 950
 
 This experimental backend runs DeepInfer's NPU `fp8_fp4_mega_moe` kernel,
-including FP8 shared experts, through the Ascend MoE runner. It is opt-in:
+including FP8 shared experts, through a V4.1-specific execution module. It is opt-in:
 
 ```json
 {"deepgemm_mega_moe": true, "enable_fused_mc2": 0}
@@ -24,17 +24,60 @@ The V4.1 NVIDIA model reuses the V4 MoE implementation.
 
 | Concern | Common contract | Ascend implementation and remaining difference |
 | --- | --- | --- |
-| Execution | One fused dispatch, expert GEMM, activation and combine launch on local tokens | Keep the existing Ascend runner and its TP1 prepare/finalize interface; bypass ordinary expert dispatch/combine. |
+| Execution | One fused dispatch, expert GEMM, activation and combine launch on local tokens | V4.1 selects `DeepGemmV41MoE`; it bypasses generic prepare/dispatch/combine/finalize and returns a local tensor. |
 | Shared experts | Kernel receives shared weights and returns routed plus shared output exactly once | Keep checkpoint registration in the existing shared module, hold a weak reference, and transfer execution ownership before post-load conversion. |
 | Routing | Global expert IDs; routing scale applies only to routed experts | Apply the model's routed factor to top-k weights before the native kernel; suppress the runner's post-output scaling. |
 | Weights | Kernel-specific layout and packed scales | Use the NPU dependency's public `transform_weights_for_mega_moe` once after loading. The reviewed CUDA implementation loads shards directly into kernel layout; direct-layout loading is a follow-up. |
 | Scratch | Cache symmetric buffers by EP group and shape | Group-owned cache; use NPU `SymmBuffer(base=...)` for target/draft sharing. The reviewed CUDA allocator API differs. |
 | Input preparation | Quantize local BF16 tokens and populate symmetric routing inputs | NPU dynamic MX quantization plus copies. CUDA's fused direct-to-buffer preparation is a remaining optimization, not implemented here. |
-| Backend selection | Explicit opt-in, unsupported configurations rejected | Ascend `additional_config` selects this adapter because the upstream CUDA selector constructs a GPU-specific expert implementation. |
+| Backend selection | Explicit opt-in, unsupported configurations rejected | V4.1 passes dedicated `runner_cls` and `routed_experts_cls` through the existing factory extension points. Ordinary Ascend runners and W4A8 execution have no DeepGEMM branch. |
 | Stream handling | Preserve execution ordering and buffer lifetime | Keep native stream dependencies; the separate MLA lifetime adjustment retires redundant same-stream registrations without a per-layer host synchronization. |
 
 The adapter deliberately retains these Ascend boundaries rather than claiming
 that the CUDA class can execute unchanged on NPU. No vLLM source patch is needed.
+
+## Alternative module boundary
+
+This implementation is an alternative to the adapter in PR #20299. The old
+adapter selected `ALLTOALL` to preserve local tokens, then intercepted W4A8
+execution. The new path is:
+
+```text
+DeepseekV41MoE construction
+  -> create_deepgemm_v41_moe
+  -> FusedMoEFactory(runner_cls=DeepGemmV41MoE,
+                     routed_experts_cls=DeepGemmV41RoutedExperts)
+
+Checkpoint loading
+  -> existing expert shard loaders and parameter names
+  -> DeepGemmV41WeightMethod.process_weights_after_loading
+  -> DeepGemmV41Experts: pack weights and acquire symmetric storage
+
+Forward
+  -> existing model gate computes FP32 logits
+  -> vllm.moe_forward graph boundary
+  -> existing Ascend router, with explicitly local input IDs
+  -> DeepGemmV41Experts.forward
+  -> quantize/copy + fp8_fp4_mega_moe -> local routed-plus-shared output
+```
+
+`DeepGemmV41MoE` inherits the upstream runner's registration and checkpoint
+interface, but overrides execution. Its forward does not call generic
+communication, independent shared experts, output scaling or TP reduction.
+The forward context consequently has no generic MoE communication method.
+Hash and vision routing keep the existing algorithms; their local input IDs
+must match local query rows and never go through a communication object.
+
+This is deliberately narrower than copying the CUDA implementation. Shared
+weights retain their existing model registration, the loader still performs
+one post-load packing pass, and activation preparation still uses the same
+quantize-then-copy operations. Neither the quantization algorithm nor the MLA
+lifetime fix changes in this refactor. Dedicated weight methods make calling
+the old quantized execution entry an explicit error.
+
+The experiment targets FULL_DECODE_ONLY with serialized target/DSpark calls.
+Other compilation modes, hot reload, overlapping microbatches and current-main
+end-to-end validation must not be inferred from standalone kernel tests.
 
 ## Dependencies and reproduction scope
 

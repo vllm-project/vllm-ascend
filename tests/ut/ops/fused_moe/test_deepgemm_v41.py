@@ -250,11 +250,11 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context):
         patch.object(backend.torch_npu, "npu_dynamic_mx_quant", return_value=(quantized, scales)),
         patch.dict(sys.modules, {"vllm_ascend.ops.fused_moe.moe_comm_method": result_module}),
     ):
-        result = adapter.apply(item, x, weights, indices)
+        result = adapter.forward(item, x, weights, indices)
     assert torch.equal(adapter.buffer.topk_weights[:2], weights * 1.5)
     assert torch.equal(adapter.buffer.topk_idx[:2], indices)
     assert torch.equal(weights, torch.full((2, 6), 0.25))
-    assert torch.equal(result.routed_out, torch.full_like(x, 2))
+    assert torch.equal(result, torch.full_like(x, 2))
     kwargs = dependency.fp8_fp4_mega_moe.call_args.kwargs
     assert kwargs["shared_l1_weights"] is adapter.shared_l1_weights
     assert kwargs["shared_l2_weights"] is adapter.shared_l2_weights
@@ -280,7 +280,7 @@ def test_large_prefill_does_not_synchronize_host(context, tokens):
             {"vllm_ascend.ops.fused_moe.moe_comm_method": SimpleNamespace(FusedExpertsResult=SimpleNamespace)},
         ),
     ):
-        adapter.apply(
+        adapter.forward(
             layer(),
             torch.ones((tokens, 256), dtype=torch.bfloat16),
             torch.ones((tokens, 6)),

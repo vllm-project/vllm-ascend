@@ -177,7 +177,11 @@ def set_ascend_forward_context(
         # models retain the original singleton implementation.
         model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
         forward_context.moe_comm_method = (
-            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+            None
+            if moe_comm_type is None
+            else model_comm_methods[moe_comm_type]
+            if model_comm_methods is not None
+            else get_moe_comm_method(moe_comm_type)
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
@@ -407,9 +411,11 @@ def select_moe_comm_method(
         return None
 
     if get_ascend_config().deepgemm_mega_moe:
-        # DeepGEMM owns EP dispatch/combine. Keep local tokens through the
-        # existing TP1 prepare/finalize path; never all-gather them first.
-        return MoECommType.ALLTOALL
+        # The V4.1 model selects a complete MegaMoE execution module.
+        # It owns EP communication and never enters the generic MoE path.
+        if vllm_config.model_config.hf_text_config.model_type != "deepseek_v41":
+            raise ValueError("deepgemm_mega_moe supports DeepSeek V4.1 only")
+        return None
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy

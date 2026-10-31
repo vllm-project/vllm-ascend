@@ -98,6 +98,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         bias_vl: torch.Tensor | None = None,
         image_sentinel_lo: int = DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID,
         select_experts_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None,
+        local_input_ids: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -118,6 +119,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+        self.local_input_ids = local_input_ids
 
     def is_fused_supported(
         self,
@@ -162,12 +164,19 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
                 input_ids = input_ids.to(torch.int64)
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
-                if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
+                if self.local_input_ids:
+                    if input_ids.numel() != router_logits.shape[0]:
+                        raise ValueError("Local MegaMoE input_ids must match the local query rows")
+                elif _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                     input_ids = prepare_finalize.all_gather_input_ids(input_ids)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
-                if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:
+                if (
+                    not self.local_input_ids
+                    and _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER
+                    and input_ids.numel() != router_logits.shape[0]
+                ):
                     # Native MoE SP chunks hidden states before MC2/All2All,
                     # while their replace-allreduce paths retain full token
                     # ids. Apply the identical TP chunk only when communication
