@@ -396,38 +396,29 @@ For block extraction, plan preview, and selection rules, see the usage notes and
 
 ### Run docs link check
 
-From the repository root, use a virtual environment with Python 3.11 or later:
+The **Docs link check** workflow checks changed Markdown files in PRs. Scheduled
+and manual runs, or PRs changing checker-related files, scan all documentation.
+
+For local checks, use a Python 3.11+ virtual environment and run from the repository root:
 
 ```bash
 python -m pip install -r docs/requirements-linkcheck.txt
+
+# Check specific files, or the full documentation directory.
+python .github/workflows/scripts/check_md_links.py docs/source/user_guide/release_notes.md --timeout 300
 python .github/workflows/scripts/check_md_links.py docs/source
-
-# Check specific Markdown files with a five-minute deadline.
-python .github/workflows/scripts/check_md_links.py \
-  docs/source/user_guide/release_notes.md --timeout 300
 ```
 
-The checker validates rendered HTTP(S) links and images, skipping code blocks,
-example addresses, and translated docs under `docs/source/zh`. Relative links and
-remote anchors are not checked. Add `--extract-only` to list links without requests.
+Add `--extract-only` to list links without making requests. The checker validates
+rendered HTTP(S) links and images, skipping code examples and `docs/source/zh`.
+Relative links and remote anchors are not checked.
 
-Link failures produce a nonzero exit code. Unresolved HTTP 429 responses are
-non-blocking warnings; those URLs remain unverified.
-Check the CI summary and logs for the URL,
-source files, and failure reason. Detailed results are in
-`docs/_build/linkcheck/output.json`; the summary is in the same directory as
-`summary.md`. Use `--report-dir` to change the output directory.
+The check log ends with all blocking errors and non-blocking warnings, including
+URLs, source files, and reasons. Blocking errors fail CI; unresolved HTTP 429
+responses are warnings and remain unverified.
 
-Defaults and exceptions are maintained in `.github/workflows/scripts/check_md_links.py`:
-`Settings` holds the checking parameters and `SKIP_DOMAINS` lists skipped hostnames.
-
-Run the CPU-only checker tests in the same virtual environment:
-
-```bash
-python -m pip install 'pytest>=8,<9'
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
-  --confcutdir=tests/ut/_tools tests/ut/_tools/test_check_md_links.py
-```
+Reports are saved as `output.json` and `summary.md` under `docs/_build/linkcheck/`
+and uploaded as CI artifacts. Use `--report-dir` to change the local output directory.
 
 ## PR testing requirements
 

@@ -349,31 +349,52 @@ def write_reports(directory: Path, links: list[Link], elapsed: float):
     counts = Counter(link.status for link in links)
     report = {"elapsed": elapsed, "counts": dict(counts), "links": [asdict(link) for link in links]}
     (directory / "output.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    failures = [link for link in links if not link.accepted]
+    warnings = [link for link in links if link.accepted and link.status == "rate_limited"]
+    outcome = (
+        f"CI result: {'FAILED' if failures else 'PASSED'} - "
+        f"{len(failures)} blocking error(s), {len(warnings)} non-blocking warning(s)."
+    )
+    checked = f"Checked {len(links)} unique URLs in {elapsed:.1f}s."
     summary = [
         "## Documentation link check",
         "",
-        f"Checked {len(links)} unique URLs in {elapsed:.1f}s.",
+        outcome,
+        "",
+        checked,
         "",
         "| Result | URLs |",
         "| --- | ---: |",
     ]
     summary.extend(f"| {status} | {count} |" for status, count in sorted(counts.items()))
-    summary.extend(
-        [
-            "",
-            "HTTP 429 results are non-blocking warnings; these URLs remain unverified. "
-            "Other unaccepted results fail the check.",
-            "",
-        ]
-    )
-    for link in links:
-        if not link.accepted or link.status == "rate_limited":
-            label = f"warning: {link.status}" if link.accepted else link.status
+    console = [
+        "",
+        "=== Documentation link check summary ===",
+        checked,
+        f"Passed: {counts['passed']}; skipped: {counts['skipped']}.",
+    ]
+    # Put blocking errors last so the runner's 'Last output' includes why CI failed.
+    for title, results in (("Non-blocking warnings", warnings), ("Blocking errors", failures)):
+        summary.extend(["", f"### {title} ({len(results)})", ""])
+        console.extend(["", f"{title} ({len(results)}):"])
+        if not results:
+            summary.append("None.")
+            console.append("  None.")
+        for link in results:
             summary.append(
-                f"- {label}: <code>{escape(link.url)}</code> — <code>{escape(link.message)}</code> "
+                f"- <code>{escape(link.url)}</code> — {link.status}: <code>{escape(link.message)}</code> "
                 f"(<code>{escape(', '.join(link.sources))}</code>)"
             )
+            console.extend(
+                [
+                    f"  {link.url}",
+                    f"    Result: {link.status} - {link.message}",
+                    f"    Sources: {', '.join(link.sources)}",
+                ]
+            )
     (directory / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    console.extend(["", outcome])
+    print("\n".join(console), flush=True)
 
 
 def parse_args():
