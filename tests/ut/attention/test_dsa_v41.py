@@ -200,26 +200,18 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
 
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("c2_group", [None, 0])
-def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2_group):
+def test_query_quantization_overlaps_compressor(monkeypatch, ratio, c2_group):
     hidden_states = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
     latent = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
     positions = torch.arange(TOKENS)
     cos, sin = torch.ones(TOKENS, 4), torch.zeros(TOKENS, 4)
     calls = []
-    original_float = torch.Tensor.float
-
-    def cast(value, *args, **kwargs):
-        result = original_float(value, *args, **kwargs)
-        if value is hidden_states:
-            calls.append("input_cast")
-        return result
 
     def project_kv(value):
         calls.append("wkv")
-        assert value.dtype == (torch.float32 if ratio == 2 else torch.bfloat16)
+        assert value is hidden_states and value.dtype == torch.bfloat16
         return latent
 
-    monkeypatch.setattr(torch.Tensor, "float", cast)
     monkeypatch.setattr(AscendDSAV41Impl, "_quantize_indexer_query", lambda *args: calls.append("query_quantization"))
     metadata_waits = []
     monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
@@ -238,9 +230,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
         def __call__(self, value):
             return project_kv(value)
 
-        wkv = staticmethod(project_kv)
-        wgate = staticmethod(lambda value: torch.zeros_like(value[:, :8]))
-        pool_projected = staticmethod(lambda *args: latent)
+        compress_native = staticmethod(lambda value, metadata: project_kv(value))
 
     attn = SimpleNamespace(
         compressor=Compressor(),
@@ -254,8 +244,6 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
 
     assert calls.count("query_quantization") == calls.count("wkv") == 1
     assert calls.index("query_quantization") < calls.index("wkv")
-    if ratio == 2:
-        assert calls.index("input_cast") < calls.index("query_quantization")
     assert metadata_waits == (
         [(dsa_v41.DeviceMetadataStage.COMPRESSOR, c2_group)] if ratio == 2 and c2_group is not None else []
     )
