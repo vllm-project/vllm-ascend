@@ -174,3 +174,7 @@ estimated_times:
   # Conservative scheduling estimate; refine after the first A5 run.
   tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py: 180
   tests/e2e/pull_request/one_card/test_glm5next_pooled_cache_write.py: 30
+  # Bootstrap estimate; refine after the first NPU run.
+  tests/e2e/pull_request/one_card/test_dflash_context_kv_pad_slots.py: 600
+  tests/e2e/pull_request/one_card/test_dflash_fia_seq_lens_cpu.py: 600
+  tests/e2e/pull_request/one_card/test_v2_input_staging.py: 600

@@ -22,7 +22,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -274,6 +274,21 @@ class ModelWithContext(nn.Module):
             # consumers; do not wait for metadata at graph entry.
             if self.device_metadata is not None:
                 self.device_metadata.finish()
+
+    def precompute_and_store_context_kv(self, *args, **kwargs):
+        # The context prefix runs before the query's forward scope. Publish
+        # the same capture/draft state for its native Ascend operators.
+        context_states = args[0] if args else kwargs["context_states"]
+        with set_forward_context(
+            None,
+            get_current_vllm_config(),
+            num_tokens=context_states.shape[0],
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        ):
+            _EXTRA_CTX.capturing = torch.npu.is_current_stream_capturing()
+            _EXTRA_CTX.is_draft_model = self.is_draft_model
+            _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
+            return self.original_model.precompute_and_store_context_kv(*args, **kwargs)
 
     def get_original_model(self):
         return self.original_model
