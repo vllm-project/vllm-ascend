@@ -1,0 +1,7 @@
+pr: 0
+entries:
+  - category: feature
+    text: >-
+      Added multi-source HCCL weight broadcasts for pipeline-partitioned RL trainers
+      when paired with vLLM ownership-based broadcast support. Each source uses
+      independent metadata caching, while older vLLM releases retain single-source behavior.

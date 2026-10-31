@@ -1,6 +1,6 @@
 # RL 权重广播多源 rank：vLLM Ascend 继承设计
 
-状态：待实现、待 NPU 验证的设计提案。本文仅新增设计文档，不代表 HCCL 多源能力已经可用。
+状态：本分支已实现 HCCL 多源适配、CPU 回归测试、示例和四卡验收入口；NPU 真机验收仍待完成。以下“下游现状”表保留设计时基线，当前实现说明见本节末。
 
 核查日期：2026-10-31（Asia/Shanghai）。
 
@@ -19,6 +19,10 @@
 工作区中的 `vllm-v0.30.0` 目录原检出提交为 `ced6857afa0ea7b2e3f0846a62e1394e90f15607`，尚无本特性。本次通过 fetch 获取最新 main 对象并读取其源码，没有切换或修改该目录的工作树。目录名称与原检出代码均不能用作本特性的支持依据。
 
 本文用“上游现状”描述已核实行为，用“下游设计”描述拟议修改；本文没有执行 GPU/NPU 功能或性能测试。
+
+实现采用两个完整 trainer adapter，按上游是否提供 `_broadcast_plan` 集中选择。现代 adapter 继承上游初始化、源计划及发送循环，只覆盖 HCCL hooks、NPU broadcast/discard；legacy adapter 保留 v0.32.0 与当前 verified main 的单源接口。两者共享 NPU 发送、同步和失败状态逻辑，避免混用两种 `_broadcast` 签名。worker 为所有配套版本提供 `src` 与 model/source 隔离缓存，保留旧单源默认值及 per-update packed 参数。
+
+新增 `examples/rl/rlhf_hccl_multi_source.py` 和 `tests/e2e/pull_request/four_card/rlhf/test_hccl_multi_source.py`；后者用 trainer ranks 0/4 到 TP2、W1/W2 两轮独立 startup-load oracle 验证。旧 vLLM 因缺少上游能力跳过多源用例；packed 真机 lane 沿用现有跨流问题的 skip，不视为已验证支持。
 
 ## 2. 目标和范围
 
@@ -404,13 +408,25 @@ packed 必须覆盖小阈值强制多 chunk、超过阈值的大张量、混合 
 
 上游 PR 提供的 A100 多源测试与示例结果仅证明其 CUDA 实现，不能算作 HCCL 验收结果。本次交付只完成源码核查、方案与文档检查；上述功能用例、模型评估和 NPU 性能测量均为实现后的验收事项。
 
-### 9.3 本次文档检查记录
+### 9.3 设计初稿文档检查记录（历史）
 
 - 新文档与设计目录索引的 Markdown lint：通过。
 - 三个 Mermaid 时序图：全部通过语法解析，完成实际渲染和图片检查。
 - `git diff --check`：通过。
 - `bash format.sh ci`：已执行，未全通过。ruff、拼写、Markdown、YAML/actionlint 等检查通过；全仓检查中的 gitleaks/check-logger 缺少 `/bin/bash`，shellcheck 未安装，check-long-functions/check-symbolic-meta 返回 9009。该结果属于当前 Windows 校验环境限制，不能记作 CI 全绿。
 - 本次修改范围为设计文档、设计目录索引与 MkDocs 导航；没有运行 NPU 功能测试。
+
+### 9.4 当前实现的验证记录
+
+Windows 本地通过源码隔离的 CPU harness 加载真实上游 base/common/engine/factory 模块，以及本分支 HCCL engine 和 packed helpers；仅替换配置、模型构建、loader、device/stream/native collective 等不可用边界。共覆盖 HCCL、packed、示例生命周期与共享 oracle 五个测试文件。该方式不等价于完整依赖环境下的 pytest 或 NPU 实测。
+
+| vLLM 配对 | 本地 CPU 结果 | 跳过项 |
+| --- | --- | --- |
+| main `06f36c12229751e749116b4cf51d4511e51df99d` | 190 passed | 2 项 legacy 专属用例 |
+| v0.32.0 | 167 passed | 25 项需要 ownership/多源接口的用例 |
+| verified main `544f182d9f0c9bfe8bd7645525951d5e3692a542` | 167 passed | 同上 |
+
+四卡真机用例与模型输出验收尚未运行；packed lane 保持 skip。PR 合并前需在包含上游 #62557 的 vLLM 配套上执行该四卡用例；只使用当前旧 verified commit 的 CI 不能验证新多源路径。
 
 ## 10. 评审决策与风险
 
