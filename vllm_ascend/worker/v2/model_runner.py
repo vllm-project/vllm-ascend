@@ -138,6 +138,34 @@ from vllm_ascend.worker.v2.utils import (
 )
 
 
+def _resolve_idx_mapping_dtype() -> torch.dtype | None:
+    """Resolve the dtype ``idx_mapping`` must be copied with for this vLLM.
+
+    The thinking-budget Triton kernel assumes ``expanded_local_pos`` is int32. It
+    is derived from ``idx_mapping`` in ``expand_idx_mapping`` before vllm#60736,
+    where the CUDA runner casts ``idx_mapping`` to int32, so Ascend has to match
+    or the kernel sees an int64 induction variable and fails to compile. After
+    vllm#60736 ``expanded_local_pos`` is allocated as int32 explicitly and the
+    CUDA runner keeps int64, so Ascend must keep the numpy dtype (int64) or
+    ``expanded_idx_mapping`` regresses to int32 and its row offsets overflow.
+
+    Returns ``None`` when the numpy dtype should be preserved.
+    """
+    try:
+        upstream_source = inspect.getsource(expand_idx_mapping)
+    except (OSError, TypeError):
+        # Source is unavailable (e.g. frozen/zipped install); stay on the
+        # behaviour that fixes the compilation failure.
+        return torch.int32
+    if "expanded_local_pos = idx_mapping.new_empty" in upstream_source:
+        return torch.int32
+    return None
+
+
+# The snapshot is fixed for the lifetime of the process, so resolve it once.
+_IDX_MAPPING_DTYPE = _resolve_idx_mapping_dtype()
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -816,7 +844,7 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device, dtype=torch.int32)
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device, dtype=_IDX_MAPPING_DTYPE)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
