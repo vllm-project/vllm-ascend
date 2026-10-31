@@ -539,7 +539,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         return v.clone()
 
     def norm_into(x, g, *, out):
-        assert out is x
+        assert (out is x) == (mode == "mixed")
         out.copy_(x * torch.sigmoid(g))
 
     attention = SimpleNamespace(
