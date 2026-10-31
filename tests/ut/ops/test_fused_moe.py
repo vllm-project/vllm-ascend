@@ -956,13 +956,14 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 @pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
 @pytest.mark.parametrize(
-    "mega_moe,quant_type,a5_support,selected_comm_type,expected_comm_type,num_tokens",
+    "mega_moe,runner_type,quant_type,a5_support,selected_comm_type,expected_comm_type,num_tokens",
     [
-        (False, QuantType.NONE, True, MoECommType.MC2, MoECommType.MC2, 128),
-        (True, QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.MC2, 128),
-        (True, QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.ALLGATHER, 129),
-        (True, QuantType.NONE, False, MoECommType.MC2, MoECommType.MC2, 128),
-        (True, QuantType.W8A8MXFP, True, MoECommType.FUSED_MC2, MoECommType.FUSED_MC2, 128),
+        (False, "draft", QuantType.NONE, True, MoECommType.MC2, MoECommType.MC2, 128),
+        (True, "draft", QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.MC2, 128),
+        (True, "draft", QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.ALLGATHER, 129),
+        (True, "generate", QuantType.NONE, True, MoECommType.FUSED_MC2, MoECommType.FUSED_MC2, 128),
+        (True, "draft", QuantType.NONE, False, MoECommType.MC2, MoECommType.MC2, 128),
+        (True, "draft", QuantType.W8A8MXFP, True, MoECommType.FUSED_MC2, MoECommType.FUSED_MC2, 128),
     ],
 )
 def test_routed_experts_forward_impl_runs_current_flow(
@@ -972,6 +973,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     v2_eplb,
     is_sequence_parallel,
     mega_moe,
+    runner_type,
     quant_type,
     a5_support,
     selected_comm_type,
@@ -1072,7 +1074,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
         "get_current_hardware_profile",
         lambda: SimpleNamespace(supports=lambda capability: a5_support),
     )
-    vllm_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(runner_type=runner_type))
     routed_experts._vllm_config = vllm_config
     monkeypatch.setattr(
         routed_experts_module,
@@ -1106,7 +1108,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
         assert result is finalized
     get_moe_comm_method.assert_called_once_with(expected_comm_type, routed_experts.moe_config)
     assert routed_experts_module._EXTRA_CTX.moe_comm_type == expected_comm_type
-    if mega_moe and quant_type == QuantType.NONE and a5_support:
+    if mega_moe and runner_type == "draft" and quant_type == QuantType.NONE and a5_support:
         select_moe_comm_method.assert_called_once_with(
             num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=QuantType.NONE
         )

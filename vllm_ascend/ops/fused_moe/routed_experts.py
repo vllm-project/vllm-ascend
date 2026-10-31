@@ -698,6 +698,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         comm_type = _EXTRA_CTX.moe_comm_type
         if (
             _EXTRA_CTX.use_mega_moe
+            and self._vllm_config.model_config.runner_type == "draft"
             and self.quant_type == QuantType.NONE
             and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
         ):
