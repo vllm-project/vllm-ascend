@@ -1,0 +1,7 @@
+pr: 20489
+entries:
+  - category: feature
+    text: >-
+      Added LayerwisePoolConnector for pool-backed prefill/decode serving,
+      reusing AscendStore layer writes, bulk reads and supported cache-layout
+      restoration through the existing CPD proxy.
