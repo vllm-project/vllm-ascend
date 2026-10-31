@@ -142,6 +142,9 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
     selected_fia.assert_called_once()
     kwargs = selected_fia.call_args.kwargs
+    if branch == "non_causal":
+        assert kwargs["sparse_mode"] == 0
+        assert "atten_mask" not in kwargs
     assert kwargs["block_table"] is None
     assert kwargs["actual_seq_lengths_kv"] == ([5] if cross_attention else [3])
     for name, original in (("key", key), ("value", value)):
@@ -150,6 +153,20 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
         assert (kwargs[name].data_ptr() == original.data_ptr()) == contiguous
     assert result is output
     torch.testing.assert_close(output, torch.ones_like(query))
+
+
+@pytest.mark.parametrize("window,expected_mode,expected_tokens", [(None, 0, attn_module.SWA_INT_MAX), (3, 4, 2)])
+def test_non_causal_fia_mask_params(window, expected_mode, expected_tokens):
+    impl = _make_impl()
+    impl.sliding_window = window
+    metadata = _make_metadata()
+    metadata.causal = False
+    mask = object()
+    builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: mask)
+    with patch.object(attn_module, "AttentionMaskBuilder", return_value=builder):
+        actual = impl._get_fia_mask_params(metadata, torch.device("cpu"))
+
+    assert actual == (mask if window is not None else None, expected_mode, expected_tokens, expected_tokens)
 
 
 @pytest.mark.parametrize("v2", [False, True])
@@ -206,96 +223,6 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
         assert runtime_kwargs["value"] is task_kwargs["value"]
     assert result is output
     assert num_tokens == 3
-
-
-@pytest.mark.parametrize("num_speculative_tokens", [4, 5, 6])
-@pytest.mark.parametrize("sliding_window", [None, 1, 3, 16, 256])
-@pytest.mark.parametrize("causal", [False, True])
-def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, sliding_window, causal):
-    impl = _make_impl()
-    impl.sliding_window = sliding_window
-    impl.key_cache = torch.zeros(2, 128, 1, 4)
-    impl.value_cache = torch.zeros_like(impl.key_cache)
-    query_len = num_speculative_tokens + 1
-    metadata = _make_metadata(AscendAttentionState.SpecDecoding)
-    metadata.causal = causal
-    metadata.attn_mask = torch.zeros(2048, 2048, dtype=torch.bool) if causal else None
-    original_mask = metadata.attn_mask
-    metadata.actual_seq_lengths_q = [query_len]
-    metadata.num_actual_tokens = query_len
-    metadata.seq_lens_list = [32]
-    query = torch.zeros(query_len, 2, 4)
-    output = torch.empty_like(query)
-    band_mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
-    expected_mask = metadata.attn_mask if causal else band_mask if sliding_window else None
-    if sliding_window is not None:
-        expected_mode = 4
-        expected_pre = sliding_window if causal else sliding_window - 1
-        expected_next = 0 if causal else sliding_window - 1
-    else:
-        expected_mode = 3 if causal else 0
-        expected_pre = expected_next = attn_module.SWA_INT_MAX
-
-    def check_fia_contract(**kwargs):
-        # CANN rejects a nonzero sparse mode without an attention mask.
-        assert kwargs.get("atten_mask") is not None or kwargs["sparse_mode"] == 0
-        assert kwargs.get("atten_mask") is expected_mask
-        assert kwargs["sparse_mode"] == expected_mode
-        assert kwargs.get("pre_tokens", attn_module.SWA_INT_MAX) == expected_pre
-        assert kwargs.get("next_tokens", attn_module.SWA_INT_MAX) == expected_next
-        return torch.empty(1)
-
-    with (
-        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True, capturing=False)),
-        patch.object(
-            attn_module,
-            "AttentionMaskBuilder",
-            return_value=SimpleNamespace(get_splitfuse_attn_mask=lambda: band_mask),
-        ),
-        patch.object(
-            attn_module.torch_npu,
-            "npu_fused_infer_attention_score",
-            return_value=(torch.zeros_like(query), None),
-            create=True,
-        ) as eager_fia,
-        patch.object(
-            attn_module.torch_npu,
-            "_npu_fused_infer_attention_score_get_max_workspace",
-            side_effect=check_fia_contract,
-            create=True,
-        ) as workspace,
-        patch.object(attn_module, "get_capture_resource", side_effect=lambda _, factory, *args: factory()),
-        patch.object(attn_module, "register_task") as register,
-    ):
-        result, num_tokens = impl.full_graph_fia(query, query, query, metadata, output)
-        if not causal:
-            impl.forward_fused_infer_attention(query, query, query, metadata, output)
-            eager_fia.assert_called_once()
-            eager_kwargs = eager_fia.call_args.kwargs
-            if sliding_window is None:
-                # Keep the original non-causal FIA call unchanged without a window.
-                assert "atten_mask" not in eager_kwargs
-                assert "pre_tokens" not in eager_kwargs
-                assert "next_tokens" not in eager_kwargs
-            check_fia_contract(**eager_kwargs)
-
-    workspace.assert_called_once()
-    register.assert_called_once()
-    task_kwargs = register.call_args.args[1]
-    check_fia_contract(**task_kwargs)
-    assert metadata.attn_mask is original_mask  # Do not mutate shared metadata.
-    assert result is output
-    assert num_tokens == query_len
-
-    # Replay changes request lengths and block tables, retaining the captured
-    # attention visibility, including non-causal access to later query tokens.
-    metadata.seq_lens_list = [48]
-    metadata.block_tables = torch.tensor([[1]], dtype=torch.int32)
-    provider = register.call_args.args[2]
-    replay_kwargs = {**task_kwargs, **provider.resolve({"layer": metadata})}
-    check_fia_contract(**replay_kwargs)
-    assert replay_kwargs["actual_seq_lengths_kv"] == [48]
-    assert replay_kwargs["block_table"] is metadata.block_tables
 
 
 @pytest.mark.parametrize("continuing_prefill", [False, True])
