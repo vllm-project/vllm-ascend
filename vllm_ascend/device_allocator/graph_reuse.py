@@ -144,7 +144,7 @@ def graph_resource_signature(config: VllmConfig, runner: Any, groups: tuple, own
     )
     params = acl_graph.get_graph_params()
     legacy_tensors = _tensor_records(params, "attention_graph_params")
-    legacy_handles = ()
+    legacy_handles: tuple = ()
     if params is not None:
         if owners is not None:
             owners.extend(
@@ -195,7 +195,7 @@ class SleepGraphReuse:
         self.signature: tuple | None = None
         self.resource_owners: tuple = ()
         self.level: int | None = None
-        self.reason = "not_slept"
+        self.reason: str | None = "not_slept"
         self.cycles = 0
         self.reuses = 0
         self.recaptures = 0
