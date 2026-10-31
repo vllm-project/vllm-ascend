@@ -20,6 +20,7 @@ import importlib.util
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
+    from vllm.config import VllmConfig
     from vllm.config.engram import EngramConfig, model_has_engram_layers
 
     def verify_model_config(self, model_config) -> None:
@@ -43,3 +44,21 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
 
     EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config
+
+    _original_resolve_engram = VllmConfig._resolve_and_verify_engram_config
+
+    def resolve_engram_config(self) -> None:
+        """Keep Qwen host offload opt-in before upstream creates defaults."""
+        model = self.model_config
+        spec = self.speculative_config
+        if spec is not None and model is spec.draft_model_config:
+            model = spec.target_model_config
+        if (
+            self.engram_config is None
+            and model is not None
+            and model.architecture in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        ):
+            self.engram_config = EngramConfig(cpu_offload=False)
+        _original_resolve_engram(self)
+
+    VllmConfig._resolve_and_verify_engram_config = resolve_engram_config
