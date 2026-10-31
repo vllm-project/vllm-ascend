@@ -94,7 +94,7 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
         4,
         1,
     )
-    expected = eligible and not batched_a5
+    expected = eligible and device_type != AscendDeviceType.A5 and not batched_a5
     assert tiled.call_count == int(expected)
     assert batched.call_count == int(batched_a5)
     assert tiled.call_count + scalar.call_count + batched.call_count == 1

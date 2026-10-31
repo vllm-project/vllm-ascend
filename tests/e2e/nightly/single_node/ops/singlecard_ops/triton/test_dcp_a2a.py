@@ -548,6 +548,10 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     + [(r, 512, 16, 4, 2, torch.bfloat16) for r in (4, 8, 16)]
     + [(r, d, 16, 4, 1, dtype) for r, d in ((4, 96), (16, 512), (8, 256)) for dtype in (torch.float16, torch.float32)],
 )
+@pytest.mark.skipif(
+    get_ascend_device_type() == AscendDeviceType.A5,
+    reason="Rank-tiled DCP combine is not supported on A5",
+)
 @torch.inference_mode()
 def test_rank_tiled_combine_fp64_reference(
     monkeypatch, ranks, head_dim, num_tokens, local_heads, local_stride, local_dtype

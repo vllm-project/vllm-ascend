@@ -459,7 +459,8 @@ def fused_dcp_lse_combine(
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
     min_rows = max(triton.cdiv(4 * vector_cores, max(dcp_size, 1)), triton.cdiv(vector_cores, tiles_per_head))
     rank_tiled = (
-        recv.dtype == torch.bfloat16
+        not is_950()
+        and recv.dtype == torch.bfloat16
         and 4 <= dcp_size <= 16
         and dcp_size >= 2 * tiles_per_head
         and scatter_dim == 1
