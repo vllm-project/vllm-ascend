@@ -29,7 +29,8 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.engram_config import LEGACY_ENGRAM_KEYS, ResolvedEngramConfig, resolve_engram_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -358,7 +359,8 @@ class EplbConfig:
 
         logger.info(
             "Dynamic EPLB is %s and convert moe's weights to list is %s",
-            self.dynamic_eplb, self.convert_weight_to_list,
+            self.dynamic_eplb,
+            self.convert_weight_to_list,
         )
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
@@ -452,7 +454,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
-            "multistream_engram_overlap": true,
+            "engram_config": {"enabled": false, "backend": "uva", "overlap": null},
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -595,13 +597,8 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
-    # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
-    # FULL graphs wait on descriptor-specific external events at consumers.
-    # Default to overlap on A5 only; explicit settings override this policy.
-    multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
-    )
+    # Read-only policy derived from Ascend switches and the native placement config.
+    engram_config: ResolvedEngramConfig = dataclasses.field(default_factory=ResolvedEngramConfig)
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
@@ -711,16 +708,6 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
-        engram_config = getattr(vc, "engram_config", None)
-        if (
-            engram_config is not None
-            and not engram_config.dp_shared_memory
-            and vc.use_v2_model_runner
-            and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
-        ):
-            # DP-dummy ranks have no hash work in MRV2. Share host tables
-            # across DP and PCP peers to avoid per-step lookup collectives.
-            engram_config.dp_shared_memory = True
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
@@ -1818,7 +1805,7 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
 
 
-def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
+def init_ascend_config(vllm_config: VllmConfig, *, engram_config: ResolvedEngramConfig | None = None) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
@@ -1859,6 +1846,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     ):
         return _ASCEND_CONFIG
 
+    if engram_config is None:
+        engram_config = resolve_engram_config(vllm_config)
+
     # Pre-construct sub-configs that need precedence resolution or vllm_config.
     sched = SchedulerConfig.from_additional_config(additional_config)
     sparse_kv = SparseKVOffloadConfig.from_additional_config(
@@ -1873,6 +1863,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
     _NON_USER_INPUT_KEYS = {
+        # Ascend Engram switches are normalized before schema construction.
+        "engram_config",
+        *LEGACY_ENGRAM_KEYS,
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
@@ -1933,6 +1926,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
 
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
+        engram_config=engram_config,
         sparse_kv_offload_config=sparse_kv,
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
