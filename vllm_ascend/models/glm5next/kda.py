@@ -9,6 +9,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -25,6 +26,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+import vllm_ascend.envs as envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -92,7 +94,7 @@ class PCPRowParallelLinear(RowParallelLinear):
         self.tp_group = pcp_group
         self.update_param_tp_status()
 
-    def forward(self, input_):
+    def forward(self, input_, pcp_output_indices=None):
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -100,7 +102,10 @@ class PCPRowParallelLinear(RowParallelLinear):
         bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
         output = self.quant_method.apply(self, input_parallel, bias)
         if self.reduce_results and self.tp_size > 1:
-            output = self.tp_group.all_reduce(output)
+            if pcp_output_indices is not None:
+                output = self.tp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
+                output = self.tp_group.all_reduce(output)
         if not self.return_bias:
             return output
         return output, self.bias if self.skip_bias_add else None
@@ -462,14 +467,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             layer_name=self.prefix,
         )
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        output = self.o_proj(core_attn_out)[0]
+        use_pcp_reduce_scatter = (
+            has_pcp_prefill
+            and isinstance(self.o_proj, PCPRowParallelLinear)
+            and envs.VLLM_ASCEND_KDA_PCP_REDUCE_SCATTER
+        )
         if has_pcp_prefill:
             assert pcp_context is not None
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
-            local_start = self.pcp_rank * local_num_tokens
-            local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
-            output = output[local_indices]
+        if use_pcp_reduce_scatter:
+            logger.info_once("KDA PCP output uses packed ReduceScatter.")
+            output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
+        else:
+            output = self.o_proj(core_attn_out)[0]
+            if has_pcp_prefill:
+                local_start = self.pcp_rank * local_num_tokens
+                local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+                output = output[local_indices]
         return output
 
     @eager_break_during_capture

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -440,6 +442,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
+        self._pcp_hidden_early_enabled = (
+            envs.VLLM_ASCEND_PCP_MOE_HIDDEN_EARLY
+            and vllm_config.model_config.enforce_eager
+            and vllm_config.lora_config is None
+            and vllm_config.speculative_config is None
+            and not ascend_config.enable_force_eplb
+        )
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
@@ -701,12 +710,41 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def start_pcp_hidden_gather(self, hidden_states: torch.Tensor):
+        # Gate only on rank-invariant configuration and global token count.
+        # The first prototype deliberately excludes decode and small batches.
+        cfg = self.moe_config
+        if (
+            not self._pcp_hidden_early_enabled
+            or cfg.tp_size != 1
+            or cfg.dp_size != 1
+            or cfg.pcp_size != 8
+            or cfg.ep_size != 8
+            or cfg.is_sequence_parallel
+            or cfg.num_experts != 288
+            or cfg.experts_per_token != 8
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[-1] != 4096
+            or _EXTRA_CTX.max_tokens_across_pcp < 1024
+            or _EXTRA_CTX.in_profile_run
+            or self.dynamic_eplb
+            or self.mix_placement
+            or self.tid2eid is not None
+            or getattr(self, "_ascend_moe_lora_context", None) is not None
+        ):
+            return None
+        comm = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, cfg)
+        if not isinstance(comm, AllGatherCommImpl):
+            return None
+        return comm, comm.prepare_finalize.start_pcp_hidden_gather(hidden_states)
+
     def forward_impl(
         self,
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        pcp_hidden_prepare=None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -725,13 +763,48 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        prepare_output = moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            # The SP model wrapper already shards and gathers the MoE sequence.
-            replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+        if pcp_hidden_prepare is not None:
+            assert pcp_hidden_prepare[0] is moe_comm_method
+        # Small batches retain the original path: the 8-rank microbenchmark
+        # found packing overhead dominates at decode sizes.
+        use_local_topk = (
+            envs.VLLM_ASCEND_PCP_LOCAL_TOPK
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.pcp_size == 8
+            and self.moe_config.dp_size == 1
+            and get_tensor_model_parallel_world_size() == 1
+            and not self.moe_config.is_sequence_parallel
+            and not enable_force_load_balance
+            and not get_ascend_config().enable_force_eplb
+            and not self.dynamic_eplb
+            and self.log2phy is None
+            and not self.mix_placement
+            and lora_context is None
+            and input_ids is None
+            and router_logits.shape[1] == 288
+            and self.router is not None
+            and type(self.router).__name__ == "AscendFusedTopKRouter"
+            and self.router.top_k == 8
+            and self.router.scoring_func == "sigmoid"
+            and _EXTRA_CTX.max_tokens_across_pcp >= 1024
         )
+        if use_local_topk:
+            logger.info_once("PCP local complete TopK enabled for large prefill batches.")
+            prepare_output, topk_weights, topk_ids = moe_comm_method.prepare_finalize.prepare_local_topk(
+                hidden_states,
+                router_logits,
+                self._select_experts,
+                pending=pcp_hidden_prepare[1] if pcp_hidden_prepare is not None else None,
+            )
+        elif pcp_hidden_prepare is not None:
+            prepare_output = pcp_hidden_prepare[1](router_logits)
+        else:
+            prepare_output = moe_comm_method.prepare(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                replace_allreduce=self.moe_config.is_sequence_parallel,
+                quant_type=self.quant_type,
+            )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
@@ -739,12 +812,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if not use_local_topk:
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

@@ -913,6 +913,8 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     num_decode_tokens, cache_mode, rope_dim, num_input_tokens
 ):
     impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
+    # This fixture bypasses __init__; retain the default synchronous path.
+    impl.enable_main_kv_async = False
     impl.is_pcp_decode_sharded = False
     impl.qk_rope_head_dim = rope_dim
     impl.kv_lora_rank = 3

@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.indexer_kpool import KPoolHiddenGather
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
@@ -97,11 +98,20 @@ class IndexerWrapper(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
+    def prepare_pcp_hidden(
+        self, hidden_states: torch.Tensor, indexer_metadata: AttentionMetadata
+    ) -> torch.Tensor | KPoolHiddenGather:
+        """Let pooled indexers launch key communication before SFA queries."""
+        prepare = getattr(self.impl, "prepare_pcp_hidden", None)
+        if prepare is None:
+            return hidden_states
+        return prepare(hidden_states, indexer_metadata)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor,
+        k_hidden_states: torch.Tensor | KPoolHiddenGather,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
         attn_q_gather_handle: torch.distributed.Work | None = None,

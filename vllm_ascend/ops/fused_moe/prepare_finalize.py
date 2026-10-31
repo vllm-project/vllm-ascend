@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -26,10 +27,12 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
@@ -432,6 +435,79 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             padded_hidden_states_shape=None,
             pertoken_scale=pertoken_scale,
         )
+
+    def prepare_local_topk(self, hidden_states, router_logits, select_experts, pending=None):
+        """Select complete expert routes per local PCP row before gathering them."""
+        if pending is not None:
+            return pending(router_logits, select_experts)
+        self.num_tokens_pcp = hidden_states.shape[0]
+        pad_size = _EXTRA_CTX.max_tokens_across_pcp - self.num_tokens_pcp
+        if pad_size > 0:
+            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+        # Keep the same rank-major hidden layout and collective order as prepare.
+        global_hidden = get_pcp_group().all_gather(hidden_states, dim=0)
+        weights, ids = select_experts(hidden_states, router_logits, False)
+        # Every supported expert ID is exactly representable in FP32.
+        packed = torch.cat((weights, ids.to(torch.float32)), dim=-1).contiguous()
+        packed = get_pcp_group().all_gather(packed, dim=0)
+        k = weights.shape[1]
+        output = MoEPrepareOutput(
+            hidden_states=global_hidden,
+            router_logits=router_logits,
+            mc2_mask=None,
+            padded_hidden_states_shape=None,
+            pertoken_scale=None,
+        )
+        return output, packed[:, :k].contiguous(), packed[:, k:].to(torch.int32)
+
+    def start_pcp_hidden_gather(self, hidden_states: torch.Tensor) -> Callable:
+        """Launch hidden AG; finish after gate, before the unchanged logits AG."""
+        assert self.moe_config.dp_size == 1 and self.moe_config.pcp_size == 8
+        assert not self._use_ep_sequence_parallel()
+        local_rows = hidden_states.shape[0]
+        pad = _EXTRA_CTX.max_tokens_across_pcp - local_rows
+        assert pad >= 0
+        send = nn.functional.pad(hidden_states, (0, 0, 0, pad)) if pad else hidden_states
+        send = send.contiguous()
+        gathered, work = all_gather_async(send, get_pcp_group())
+        logger.info_once("MoE PCP hidden AllGather starts before local gate.")
+
+        def finish(router_logits, select_experts=None):
+            # Retain the send buffer until HCCL completes; no shared pending state.
+            _ = send
+            assert router_logits.shape[0] == local_rows
+            if pad:
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad))
+            if select_experts is not None:
+                # Select local complete routes while the earlier hidden AG runs.
+                weights, ids = select_experts(send, router_logits, False)
+                packed = torch.cat((weights, ids.to(torch.float32)), dim=-1).contiguous()
+            assert work is not None
+            work.wait()
+            if select_experts is not None:
+                packed = get_pcp_group().all_gather(packed, dim=0)
+                k = weights.shape[1]
+                self.num_tokens_pcp = local_rows
+                output = MoEPrepareOutput(
+                    hidden_states=gathered,
+                    router_logits=router_logits,
+                    mc2_mask=None,
+                    padded_hidden_states_shape=None,
+                    pertoken_scale=None,
+                )
+                return output, packed[:, :k].contiguous(), packed[:, k:].to(torch.int32)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
+            self.num_tokens_pcp = local_rows
+            return MoEPrepareOutput(
+                hidden_states=gathered,
+                router_logits=router_logits,
+                mc2_mask=None,
+                padded_hidden_states_shape=None,
+                pertoken_scale=None,
+            )
+
+        return finish
 
     def _prepare_with_dp_group(
         self,

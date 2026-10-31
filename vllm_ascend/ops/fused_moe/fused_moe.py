@@ -500,12 +500,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         with self._sequence_parallel_context():
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
+                pcp_hidden_prepare = (
+                    self.routed_experts.start_pcp_hidden_gather(hidden_states)
+                    if self.is_internal_router and input_ids is None
+                    else None
+                )
                 if self.is_internal_router:
                     router_logits = self._compute_router_logits(hidden_states, router_logits)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
+                    pcp_hidden_prepare=pcp_hidden_prepare,
                 )
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
@@ -513,6 +519,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 PreparedSharedExpertInput(shared_hidden_states, is_gathered=True)
                 if shared_input_is_gathered
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
+            )
+            # Preserve any shared-input collectives before starting hidden AG.
+            pcp_hidden_prepare = (
+                self.routed_experts.start_pcp_hidden_gather(hidden_states)
+                if self.is_internal_router and input_ids is None
+                else None
             )
             router_logits, shared_input_ready, router_output_ready, submitted_gate_up = (
                 self._prepare_router_and_milestones(
@@ -525,6 +537,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                pcp_hidden_prepare=pcp_hidden_prepare,
             )
             assert isinstance(milestones, RoutedMoEMilestones)
             milestones.shared_input_ready = shared_input_ready

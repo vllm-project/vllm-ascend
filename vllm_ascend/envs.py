@@ -29,6 +29,20 @@ from typing import Any
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental PCP prefill optimizations. All default to 0 (disabled),
+    # accept 0/1, and are non-sensitive. Only the exact value "1" enables them.
+    # Overlap main KV AllGather with Q projection (eager BF16 NoPE TP1/PCP8/DCP1).
+    "VLLM_ASCEND_PCP_MAIN_KV_ASYNC": lambda: os.getenv("VLLM_ASCEND_PCP_MAIN_KV_ASYNC", "0") == "1",
+    # Overlap ordinary PCP KPool hidden AllGather with query projections; eager only.
+    "VLLM_ASCEND_PCP_KPOOL_ASYNC": lambda: os.getenv("VLLM_ASCEND_PCP_KPOOL_ASYNC", "0") == "1",
+    # Start MoE hidden AllGather before gate (eager BF16 TP1/PCP8/DP1/EP8,
+    # hidden width 4096, 288 experts / Top8, global maximum local rows >= 1024).
+    "VLLM_ASCEND_PCP_MOE_HIDDEN_EARLY": lambda: os.getenv("VLLM_ASCEND_PCP_MOE_HIDDEN_EARLY", "0") == "1",
+    # Gather complete local Top8 routes instead of 288 logits for large PCP batches.
+    # TP1/PCP8/DP1, sigmoid router, no LoRA/dynamic expert remapping/forced balance.
+    "VLLM_ASCEND_PCP_LOCAL_TOPK": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_TOPK", "0") == "1",
+    # Replace KDA PCP prefill output AllReduce + slicing with packed ReduceScatter.
+    "VLLM_ASCEND_KDA_PCP_REDUCE_SCATTER": lambda: os.getenv("VLLM_ASCEND_KDA_PCP_REDUCE_SCATTER", "0") == "1",
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

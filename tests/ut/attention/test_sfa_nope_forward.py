@@ -194,6 +194,11 @@ class _RecordingIndexer:
         return self.indices
 
 
+class _PrefetchRecordingIndexer(_RecordingIndexer):
+    def prepare_pcp_hidden(self, hidden, metadata):
+        return hidden
+
+
 def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
 
@@ -269,7 +274,10 @@ def _reference_sparse_attention(**kwargs):
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize("empty_rope_handle", [False, True])
 @pytest.mark.parametrize("enable_c8", [False, True])
-def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, empty_rope_handle, enable_c8) -> None:
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
+    graph_mode, empty_rope_handle, enable_c8, prefetch
+) -> None:
     torch.manual_seed(7)
     num_tokens = 3
     padded_tokens = 4
@@ -322,7 +330,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     fused_qkv = _Linear(fused_weight)
     gate_proj = _Linear(gate_weight)
     output_proj = _Linear(output_weight)
-    indexer = _RecordingIndexer(indices)
+    indexer = (_PrefetchRecordingIndexer if prefetch else _RecordingIndexer)(indices)
     indexer_metadata = SimpleNamespace(
         block_table=torch.tensor([[7, 6], [4, 5]], dtype=torch.int32),
         slot_mapping=torch.full_like(slot_mapping, -1),
@@ -406,6 +414,23 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             o_proj=output_proj,
         )
     impl.W_UK_T, impl.W_UV = uk_weight, uv_weight
+
+    def prepare_hidden(hidden, metadata):
+        assert metadata is indexer_metadata
+        # BF16 stores main KV here; packed C8 defers its cache write.
+        if not enable_c8:
+            assert not torch.equal(kv_cache[0], initial_cache)
+        return hidden.clone()
+
+    indexer.prepare_pcp_hidden = MagicMock(side_effect=prepare_hidden)
+    project_query = impl._q_proj_and_k_up_proj
+
+    def project_after_launch(q_c):
+        if prefetch:
+            indexer.prepare_pcp_hidden.assert_called_once()
+        return project_query(q_c)
+
+    impl._q_proj_and_k_up_proj = project_after_launch
     assert not impl.supports_dense_mha_prefill
     output = torch.full((padded_tokens, output_dim), 123.0)
 
@@ -452,6 +477,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             metadata,
             output=output,
         )
+    assert indexer.prepare_pcp_hidden.call_count == int(prefetch)
 
     real_hidden = hidden_states[:num_tokens]
     # Graph mode projects the full padded batch; preserve its FP32 rounding
