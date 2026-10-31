@@ -11,6 +11,7 @@
 estimated_times:
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
+  tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
@@ -130,7 +131,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/_310p/test_vl_model_310p.py: 330
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 250
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 290
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 1360
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 1060
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 1230
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210

@@ -96,7 +96,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - --additional_config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": false, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
+      - '{"enable_flashcomm1": true, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 

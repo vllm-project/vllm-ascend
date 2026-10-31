@@ -30,7 +30,6 @@ else:
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
-_TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 
 
 def _is_configured(value: object) -> bool:
@@ -43,16 +42,6 @@ def _additional(vllm_config: VllmConfig, key: str) -> object:
     if not _is_configured(extra):
         return None
     return extra.get(key) if isinstance(extra, dict) else getattr(extra, key, None)
-
-
-def _is_enabled(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in _TRUTHY_STRINGS
-    if isinstance(value, int):
-        return value == 1
-    return False
 
 
 def _architectures(model_config: object) -> list[str]:
@@ -95,11 +84,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
-    # V2 MTP draft pads the forward to the DP-wide request count, while eager
-    # attention metadata keeps this rank's request count. DSA-CP rejects that
-    # split once the hidden states outgrow the TP-aligned metadata.
-    if _is_enabled(_additional(vllm_config, "enable_dsa_cp")):
-        reasons.append("enable_dsa_cp")
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
@@ -130,7 +114,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * pooling KV (``runner_type="pooling"``)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
-    * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding

@@ -1,8 +1,10 @@
+import gc
 import json
 import os
 import tempfile
+import weakref
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -10,6 +12,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.model_loader.reload import layerwise
 from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
@@ -289,6 +292,66 @@ class TestAscendModelSlimConfig(TestBase):
             expert_id=0,
             return_success=True,
         )
+
+    def test_modelslim_moe_weight_loader_binds_to_owning_layer(self):
+        class MoELayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+                self.calls.append(weight_name)
+                return True
+
+        MoELayer.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+        layer = MoELayer()
+        mapped_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
+
+        # vLLM's sanitize_layer_refs can only drop the layer reference when the
+        # attribute is a bound method of that same layer.
+        self.assertIsInstance(mapped_loader, MethodType)
+        self.assertIs(mapped_loader.__self__, layer)
+        self.assertIs(mapped_loader.supports_moe_loading, True)
+        # The remaining `functools.wraps` metadata must also survive the copy.
+        self.assertEqual(mapped_loader.__name__, "weight_loader")
+        self.assertEqual(mapped_loader.__module__, MoELayer.weight_loader.__module__)
+        # `functools.wraps` would store the bound method back in `__wrapped__`.
+        self.assertFalse(hasattr(mapped_loader, "__wrapped__"))
+
+        param = torch.nn.Parameter(torch.empty(1))
+        result = mapped_loader(
+            param=param,
+            loaded_weight=torch.empty(1),
+            weight_name="model.layers.0.mlp.experts.w2_scale_bias",
+            shard_id="w2",
+            expert_id=0,
+            return_success=True,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(layer.calls, ["model.layers.0.mlp.experts.w2_scale"])
+
+    def test_modelslim_moe_weight_loader_does_not_retain_layer_via_reload_metadata(self):
+        class Expert(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.empty(1024, dtype=torch.int8), requires_grad=False)
+                self.weight_loader = _make_modelslim_moe_weight_loader(self._load_weight)
+                self.weight.weight_loader = self.weight_loader
+
+            def _load_weight(self, *args, **kwargs):
+                return None
+
+        layer = Expert()
+        layer_ref = weakref.ref(layer)
+        weight_ref = weakref.ref(layer.weight)
+        layerwise.record_metadata_for_reloading(layer)
+
+        del layer
+        gc.collect()
+
+        self.assertIsNone(layer_ref())
+        self.assertIsNone(weight_ref())
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
         c8_config = AscendModelSlimConfig(
