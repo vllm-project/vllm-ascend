@@ -1,5 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
+from math import lcm
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+MLA_KERNEL_BLOCK_SIZE = 128
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -146,7 +148,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-        return [128]
+        return [MLA_KERNEL_BLOCK_SIZE]
 
 
 class AscendMLAAttention(MLAAttention):
@@ -319,6 +321,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
+        self.chunk_alignment = self.determine_chunk_alignment(vllm_config)
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
@@ -445,8 +448,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
 
     @staticmethod
+    def determine_chunk_alignment(vllm_config: VllmConfig) -> int:
+        # GatherPa starts reads at kernel-block boundaries even when the
+        # scheduler's configured block size differs from the kernel block size.
+        return lcm(vllm_config.cache_config.block_size, MLA_KERNEL_BLOCK_SIZE)
+
+    @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-        return ascend_chunked_prefill_workspace_size(vllm_config)
+        chunk_alignment = AscendMLAMetadataBuilder.determine_chunk_alignment(vllm_config)
+        return max(
+            ascend_chunked_prefill_workspace_size(vllm_config),
+            vllm_config.scheduler_config.max_num_seqs * chunk_alignment,
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -720,15 +733,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
         workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
         self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
-        self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
+        self.max_context_chunk = round_down(self.max_context_chunk, self.chunk_alignment)
 
         if self.max_context_chunk <= 0:
             raise ValueError(
                 "MLA chunked prefill workspace is too small for one aligned chunk per request: "
                 f"workspace_size={workspace_size}, "
                 f"num_prefills_with_context={num_prefills_with_context_cpu}, "
-                f"block_size={self.block_size}, "
-                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+                f"chunk_alignment={self.chunk_alignment}, "
+                f"minimum_workspace_size={num_prefills_with_context_cpu * self.chunk_alignment}."
             )
         self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
         chunk_starts = (
