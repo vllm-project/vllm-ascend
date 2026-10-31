@@ -1866,6 +1866,15 @@ class TestAscendMLAImpl(TestBase):
         vllm_config.cache_config.cache_dtype = "float16"
         init_ascend_config(vllm_config)
 
+        # enable_dcp() in vllm_ascend.attention.utils reads the global vLLM
+        # config and is lru_cached; on fresh xdist workers neither the config
+        # nor the cache is populated, so mock it like TestAscendMLABackend does.
+        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=vllm_config)
+        self.utils_patcher.start()
+        from vllm_ascend.attention.utils import enable_dcp
+
+        enable_dcp.cache_clear()
+
         num_heads = 256
         head_size = 1024
         scale = 0.1

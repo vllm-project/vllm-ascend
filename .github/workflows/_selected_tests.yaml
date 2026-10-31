@@ -137,6 +137,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uv
+          pip install "slipcover>=1.0.18" pytest-xdist diff-cover
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -414,6 +415,25 @@ jobs:
           path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Generate Cobertura XML from coverage data
+        run: |
+          python -m slipcover --merge ./tests/coverage.json \
+            --xml --out ./tests/coverage.xml
+
+      - name: Check coverage on new code
+        run: |
+          pip install diff-cover
+          diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
+            --fail-under=80 \
+            --markdown-report ./tests/diff_coverage.md
+
+      - name: Upload diff coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ./tests/diff_coverage.md
 
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}

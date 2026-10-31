@@ -821,3 +821,44 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
+
+  # Post-coverage comment for same-repo PRs. Runs inside the pull_request run
+  # where the GITHUB_TOKEN has pull-requests: write permission (a fork PR's
+  # token is read-only, so fork PRs are handled separately by
+  # .github/workflows/post_fork_coverage_comment.yaml via pull_request_target).
+  # This job only downloads the diff-coverage markdown produced by the cpu-ut
+  # job in this very same run and posts it as a PR comment.
+  post-coverage-comment:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: cpu-ut
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+      contents: read
+    steps:
+      - name: Download diff coverage report
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-report*
+          merge-multiple: true
+          run-id: ${{ github.run_id }}
+          path: ./coverage-report
+
+      - name: Locate diff coverage markdown
+        run: |
+          f=$(find ./coverage-report -type f -name diff_coverage.md | head -1)
+          if [ -z "$f" ]; then
+            echo "::warning::diff_coverage.md not found in downloaded artifacts"
+            exit 0
+          fi
+          cp "$f" ./diff_coverage.md
+          echo "diff coverage report: $f"
+
+      - name: Post diff coverage as PR comment
+        if: ${{ hashFiles('./diff_coverage.md') != '' }}
+        uses: thollander/actions-comment-pull-request@v2.5.0
+        with:
+          filePath: ./diff_coverage.md
+          pr_number: ${{ github.event.number }}
+          comment_tag: ./tests/diff-coverage # 用于后续更新同一条评论
