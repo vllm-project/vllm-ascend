@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.compilation import decorators
 from vllm.config.compilation import DynamicShapesType
 
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
+from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM, DeepseekV41Model
 
 
 @pytest.mark.parametrize("num_tokens", [384, 1024])
@@ -39,3 +42,51 @@ def test_backbone_marks_embedding_token_dimension_dynamic(monkeypatch, num_token
 
     for tensor in (ids, positions, embeddings):
         assert tensor._dynamo_dynamic_indices == {0}
+
+
+@pytest.mark.parametrize("replay_enabled", [False, True])
+@pytest.mark.parametrize("captured_engram", [False, True])
+def test_replay_uses_runtime_rows_and_preserves_compiled_entry(replay_enabled, captured_engram):
+    """Replay after warmup must trim rows without disabling subsequent compiled calls."""
+    seen_rows = []
+
+    def run_layers(hidden, *unused):
+        seen_rows.append(hidden.shape[0])
+        return (hidden + 1,)
+
+    replay = AscendDecoderReplayLayers(2, run_layers, [])
+    replay.context_factory = nullcontext
+    ids = torch.arange(4)
+    hidden = ids.float().view(-1, 1)
+
+    def run_python(input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs):
+        return replay(inputs_embeds, None, positions)[0]
+
+    def run_compiled(input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs):
+        # Model the cached full-batch program, which no longer reads replay.rows.
+        return run_layers(inputs_embeds)[0]
+
+    backbone = MagicMock(side_effect=run_compiled)
+    backbone.forward.side_effect = run_python
+    backbone.decoder_replay_layers = replay if replay_enabled else None
+    backbone.captured_engram_inputs.return_value = nullcontext({})
+    model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.model = backbone
+    kwargs = {"engram_query_start_loc": torch.tensor([0, 4])} if captured_engram else {}
+
+    def forward():
+        return model.forward(ids, ids, inputs_embeds=hidden, **kwargs)
+
+    assert forward()[:, 0].tolist() == [1, 2, 3, 4]
+    for indices, expected in (([2, 3], [0, 0, 3, 4]), ([], [0, 0, 0, 0])):
+        replay.rows = torch.tensor(indices, dtype=torch.int64)
+        replay.num_actual_rows = len(indices)
+        output = forward()
+        assert output[:, 0].tolist() == (expected if replay_enabled else [1, 2, 3, 4])
+
+    replay.rows = None
+    assert forward()[:, 0].tolist() == [1, 2, 3, 4]
+    assert seen_rows == ([4, 2, 0, 4] if replay_enabled else [4, 4, 4, 4])
+    assert backbone.call_count == (2 if replay_enabled else 4)
+    assert backbone.forward.call_count == (2 if replay_enabled else 0)
