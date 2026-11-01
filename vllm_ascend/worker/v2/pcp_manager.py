@@ -141,6 +141,10 @@ class AscendPCPManager(PCPManager):
         # same global padded length.
         self._sampling_hidden_restored = False
 
+    def bind_config(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
+
     @property
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""

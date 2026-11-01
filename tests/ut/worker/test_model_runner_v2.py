@@ -1339,7 +1339,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    runner.pcp_manager.bind_config.assert_called_once_with(runner.vllm_config)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 

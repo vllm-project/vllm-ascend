@@ -266,7 +266,11 @@ class SparseMLAMetadataState:
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
-        table_rows = max([vllm_config.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # PCP represents each prefill with two rank-local request chunks.
+            max_num_reqs *= 2
+        table_rows = max([max_num_reqs + 1, *capture_sizes])
         self.block_table_buffer = torch.empty(table_rows, table_width, dtype=torch.int32, device=device)
         if self.use_smla:
             config = vllm_config.model_config.hf_text_config
