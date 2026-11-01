@@ -31,18 +31,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
+from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import MODEL_CASES, pytest_model_cases
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
-    MODEL_CASES,
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
+from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 CASE = MODEL_CASES[0]
-MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMax/MiniMax-M3")
 ORACLE_CASES = MODEL_CASES
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
@@ -52,7 +51,7 @@ PACKED_BUFFER_HEADROOM_BYTES = 128 * 2**20
 
 @pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
 def test_model_matrix_separates_model_and_transport_coverage(backend):
-    parameters = utils.pytest_model_cases(backend)
+    parameters = pytest_model_cases(backend)
     representative = next(case for case in MODEL_CASES if case.model == "Qwen/Qwen3.5-35B-A3B")
     expected = {(representative.id, False), (representative.id, True)}
     if backend == "npu_ipc":
@@ -68,40 +67,7 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
 
 def test_model_matrix_rejects_unknown_backend():
     with pytest.raises(ValueError, match="Unsupported weight transfer backend"):
-        utils.pytest_model_cases("unknown")
-
-
-def _checkpoint_source(model, case):
-    # Only supply num_experts when the case does not override an expert field.
-    # Otherwise an incorrect fallback could pass by reading this default.
-    overrides = (
-        case.hf_overrides.get(case.meta_config_attribute, {}) if case.meta_config_attribute else case.hf_overrides
-    )
-    meta_config = PretrainedConfig()
-    if not any(name in overrides for name in ("n_routed_experts", "num_local_experts", "num_experts")):
-        meta_config.num_experts = 8
-    config = (
-        PretrainedConfig(**{case.meta_config_attribute: meta_config}) if case.meta_config_attribute else meta_config
-    )
-    with (
-        patch.object(utils.AutoConfig, "from_pretrained", return_value=config),
-        patch.object(utils.AutoModelForCausalLM, "from_config", return_value=model),
-    ):
-        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
-    assert source._num_experts == 8
-    return source
-
-
-def _router_meta_model(layer_index):
-    model = torch.nn.Module()
-    parent = model
-    for component in ("model", "layers", str(layer_index), "mlp"):
-        child = torch.nn.Module()
-        parent.add_module(component, child)
-        parent = child
-    gate = torch.nn.Linear(16, 8, bias=False, device="meta")
-    parent.add_module("gate", gate)
-    return model, gate
+        pytest_model_cases("unknown")
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:
@@ -302,7 +268,7 @@ def test_checkpoint_source_buffer_metadata(
     contract regardless of how a Transformers version registers it.
     """
     case = next(case for case in MODEL_CASES if case.model == model_name)
-    model, gate = _router_meta_model(layer_index)
+    model, gate = router_meta_model(layer_index)
     for name, shape, dtype, persistent in buffers:
         gate.register_buffer(name, torch.empty(shape, dtype=dtype, device="meta"), persistent=persistent)
     # Runtime-only floating/complex buffers must never enter the payload.
@@ -310,7 +276,7 @@ def test_checkpoint_source_buffer_metadata(
     model.register_buffer("complex_runtime", torch.empty(8, dtype=torch.complex64, device="meta"), persistent=False)
 
     unchanged_baseline_metadata = {f"{checkpoint_gate}.weight": ((8, 16), torch.bfloat16), **legacy_buffers}
-    source = _checkpoint_source(model, case)
+    source = checkpoint_source(model, case)
     actual = {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()}
     assert actual == unchanged_baseline_metadata | added_buffers
     weights = dict(source)
@@ -319,22 +285,6 @@ def test_checkpoint_source_buffer_metadata(
     table = source._make_tensor("synthetic.tid2eid", (16, 2), torch.int64)
     assert torch.all((table >= 0) & (table < source._num_experts))
     assert torch.all(table[:, 0] != table[:, 1])
-
-
-def test_minimax_checkpoint_source_includes_parameter_router_bias():
-    """Keep the name mapping valid if HF represents the bias as a parameter."""
-    model, gate = _router_meta_model(3)
-    gate.register_parameter(
-        "e_score_correction_bias", torch.nn.Parameter(torch.empty(8, dtype=torch.float32, device="meta"))
-    )
-    source = _checkpoint_source(model, MINIMAX_M3_CASE)
-    prefix = "language_model.model.layers.3.block_sparse_moe"
-    expected = {
-        f"{prefix}.gate.weight": ((8, 16), torch.bfloat16),
-        f"{prefix}.e_score_correction_bias": ((8,), torch.bfloat16),
-    }
-    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()} == expected
-    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in source} == expected
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
@@ -374,48 +324,3 @@ def test_packed_buffer_size_uses_largest_tensor_bytes(dtype, tensor_bytes, expec
     assert utils.packed_buffer_size_for(source) == expected_capacity
     source.metadata.assert_called_once_with()
     source.__iter__.assert_not_called()
-
-
-def test_minimax_checkpoint_source_splits_fused_projections():
-    model = MagicMock()
-    model.named_parameters.return_value = [
-        ("model.layers.0.mlp.gate_up_proj.weight", torch.empty((12, 16), device="meta")),
-        ("model.layers.3.mlp.shared_experts.gate_up_proj.weight", torch.empty((12, 16), device="meta")),
-        ("model.layers.3.mlp.experts.gate_up_proj", torch.empty((2, 12, 16), device="meta")),
-    ]
-    model.named_buffers.return_value = []
-    model.state_dict.return_value = {}
-    source = _checkpoint_source(model, MINIMAX_M3_CASE)
-    actual = {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()}
-    expected_names = {
-        "language_model.model.layers.0.mlp.gate_proj.weight",
-        "language_model.model.layers.0.mlp.up_proj.weight",
-        "language_model.model.layers.3.block_sparse_moe.shared_experts.gate_proj.weight",
-        "language_model.model.layers.3.block_sparse_moe.shared_experts.up_proj.weight",
-        *{
-            f"language_model.model.layers.3.block_sparse_moe.experts.{expert}.{shard}.weight"
-            for expert in range(2)
-            for shard in ("w1", "w3")
-        },
-    }
-    assert actual == {name: ((6, 16), torch.bfloat16) for name in expected_names}
-
-
-def test_glm53flash_case_configuration():
-    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
-    assert case.meta_model_factory is utils.build_glm53flash_meta_model
-    assert case.meta_config_attribute == "text_config"
-    assert not case.trust_remote_code
-    assert not case.full_transfer_matrix
-    assert dict(case.server_env) == {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    assert case.model == "ZhipuAI/GLM-5.3-Flash"
-    assert case.hf_overrides["architectures"] == ["Glm5NextForCausalLM"]
-    assert case.hf_overrides["quantization_config"] is None
-    text_config = case.hf_overrides["text_config"]
-    assert text_config["num_hidden_layers"] == 4
-    assert text_config["n_routed_experts"] == 8
-    assert text_config["num_nextn_predict_layers"] == 0
-    assert text_config["layer_types"] == ["linear_attention"] * 3 + ["deepseek_sparse_attention"]
-    assert text_config["mlp_layer_types"] == ["dense"] * 3 + ["sparse"]
-    assert text_config["linear_attn_config"]["kda_layers"] == [0, 1, 2]
-    assert text_config["linear_attn_config"]["full_attn_layers"] == [3]

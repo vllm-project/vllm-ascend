@@ -9,12 +9,12 @@ import pytest
 import torch
 from transformers import Glm5NextConfig
 
-from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import initialize_tensor
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import MODEL_CASES, FixedRandomWeightSource
+from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM53_FLASH_CASE, build_meta_model, initialize_tensor
+from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import FixedRandomWeightSource
 
 
 def test_checkpoint_metadata_covers_the_reduced_model():
-    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    case = GLM53_FLASH_CASE
     config = Glm5NextConfig(text_config={"index_kpool": 4, **case.hf_overrides["text_config"]})
     with patch(
         "tests.e2e.pull_request.rlhf.weight_transfer_test_utils.AutoConfig.from_pretrained", return_value=config
@@ -72,3 +72,23 @@ def test_synthetic_initialization_is_bounded(name, expected):
     assert result is tensor
     assert torch.isfinite(result).all()
     torch.testing.assert_close(result, torch.full_like(result, expected))
+
+
+def test_glm53flash_case_configuration():
+    case = GLM53_FLASH_CASE
+    assert case.meta_model_factory is build_meta_model
+    assert case.meta_config_attribute == "text_config"
+    assert not case.trust_remote_code
+    assert not case.full_transfer_matrix
+    assert dict(case.server_env) == {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    assert case.model == "ZhipuAI/GLM-5.3-Flash"
+    assert case.hf_overrides["architectures"] == ["Glm5NextForCausalLM"]
+    assert case.hf_overrides["quantization_config"] is None
+    text_config = case.hf_overrides["text_config"]
+    assert text_config["num_hidden_layers"] == 4
+    assert text_config["n_routed_experts"] == 8
+    assert text_config["num_nextn_predict_layers"] == 0
+    assert text_config["layer_types"] == ["linear_attention"] * 3 + ["deepseek_sparse_attention"]
+    assert text_config["mlp_layer_types"] == ["dense"] * 3 + ["sparse"]
+    assert text_config["linear_attn_config"]["kda_layers"] == [0, 1, 2]
+    assert text_config["linear_attn_config"]["full_attn_layers"] == [3]

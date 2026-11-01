@@ -5,6 +5,8 @@
 import torch
 from transformers import AutoModel, PretrainedConfig
 
+from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+
 
 def build_meta_model(config: PretrainedConfig) -> torch.nn.Module:
     """Enumerate native HF text weights in the published checkpoint layout.
@@ -60,3 +62,43 @@ def initialize_tensor(name: str, tensor: torch.Tensor) -> torch.Tensor:
     if name.endswith("bias"):
         return tensor.zero_()
     return tensor.mul_(0.5)
+
+
+GLM53_FLASH_CASE = WeightUpdateModelCase(
+    id="glm-5.3-flash-kda-sfa-mhc",
+    model="ZhipuAI/GLM-5.3-Flash",
+    hf_overrides={
+        "architectures": ["Glm5NextForCausalLM"],
+        "quantization_config": None,
+        "text_config": {
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            "num_nextn_predict_layers": 0,
+            "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
+            "mlp_layer_types": ["dense"] * 3 + ["sparse"],
+            "indexer_types": ["full"] * 4,
+            "linear_attn_config": {
+                "num_heads": 64,
+                "head_dim": 128,
+                "gate_lower_bound": -5.0,
+                "short_conv_kernel_size": 4,
+                "kda_layers": [0, 1, 2],
+                "full_attn_layers": [3],
+            },
+        },
+    },
+    meta_config_attribute="text_config",
+    trust_remote_code=False,
+    meta_model_factory=build_meta_model,
+    tensor_initializer=initialize_tensor,
+    server_env=(("VLLM_USE_V2_MODEL_RUNNER", "0"),),
+    extra_server_args=(
+        "--block-size",
+        "128",
+        "--max-num-seqs",
+        "1",
+        "--max-num-batched-tokens",
+        "512",
+        "--no-enable-prefix-caching",
+    ),
+)

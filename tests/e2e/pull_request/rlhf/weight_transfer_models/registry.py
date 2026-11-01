@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+"""Explicit model matrix and backend-aware pytest parameter selection."""
+
+from typing import Any
+
+from tests.e2e.pull_request.rlhf.weight_transfer_models.deepseek import DEEPSEEK_V4_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM53_FLASH_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_M3_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN35_CASE
+
+MODEL_CASES = (QWEN35_CASE, DEEPSEEK_V4_CASE, GLM53_FLASH_CASE, MINIMAX_M3_CASE)
+
+
+def pytest_model_cases(backend: str) -> list[Any]:
+    """Select model lanes and full transport coverage on a representative."""
+    import pytest
+
+    if backend not in ("npu_ipc", "hccl"):
+        raise ValueError(f"Unsupported weight transfer backend: {backend}")
+    return [
+        pytest.param(
+            case,
+            packed,
+            id=f"{'packed' if packed else 'unpacked'}-{case.id}",
+            marks=pytest.mark.e2e_model(case.model),
+        )
+        for packed in (False, True)
+        for case in MODEL_CASES
+        if (backend == "npu_ipc" and not packed) or case.full_transfer_matrix
+    ]

@@ -35,15 +35,15 @@ from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactor
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import pytest_model_cases
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
-    WeightUpdateModelCase,
     assert_weight_update_matches_reference,
     generation_signature,
     live_update_serve_args,
     packed_buffer_size_for,
-    pytest_model_cases,
     reference_signature,
     register_engines_once,
     wait_for_free_device_memory,
