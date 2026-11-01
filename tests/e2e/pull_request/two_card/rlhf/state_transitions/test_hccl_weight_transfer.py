@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Two-card HCCL live weight-update regression tests using Qwen3.5 and GLM-5.1.
+"""Two-card HCCL live weight-update regression tests using Qwen3.5.
 
 NPU 0 hosts the inference worker and NPU 1 deterministically generates every
 parameter of the layer-reduced model. Names and shapes come from a meta-device

@@ -43,7 +43,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 
 CASE = MODEL_CASES[0]
 MINIMAX_M3_CASE = next(case for case in MODEL_CASES if case.model == "MiniMax/MiniMax-M3")
-ORACLE_CASES = (CASE, MINIMAX_M3_CASE)
+ORACLE_CASES = MODEL_CASES
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
 PACKED_BUFFER_FLOOR_BYTES = 2**30
@@ -57,9 +57,6 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
     expected = {(representative.id, False), (representative.id, True)}
     if backend == "npu_ipc":
         expected |= {(case.id, False) for case in MODEL_CASES}
-
-    if backend == "hccl":
-        expected |= {(case.id, False) for case in MODEL_CASES if case.hccl_unpacked}
 
     assert {(case.id, packed) for param in parameters for case, packed in [param.values]} == expected
     assert len(parameters) == len(expected)
@@ -124,13 +121,16 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
 
 
 @pytest.mark.parametrize("case", ORACLE_CASES, ids=lambda case: case.id)
-def test_reference_and_lane_differ_only_in_the_load_path(case):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
+def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_size, backend):
     lane = _flag_map(
         live_update_serve_args(
             case,
-            backend="hccl",
+            backend=backend,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            tensor_parallel_size=tensor_parallel_size,
         )
     )
     reference = _flag_map(
@@ -138,18 +138,22 @@ def test_reference_and_lane_differ_only_in_the_load_path(case):
             case,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            tensor_parallel_size=tensor_parallel_size,
         )
     )
 
     # The lane starts dummy and transfers live; the reference loads W at startup
     # under the case's own model name and tokenizer.
     assert lane.pop("--load-format") == "dummy"
-    assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
-    assert reference.pop("--tokenizer") == case.model
+    assert lane.pop("--weight-transfer-config") == f'{{"backend": "{backend}"}}'
+    assert reference.pop("--tokenizer") == (case.tokenizer or case.model)
+    if case.tokenizer is not None:
+        assert lane.pop("--tokenizer") == case.tokenizer
     assert reference.pop("--served-model-name") == case.model
     assert "--load-format" not in reference
 
     assert lane == reference
+    assert lane["--tensor-parallel-size"] == str(tensor_parallel_size)
 
 
 def test_reference_and_lane_share_the_measurement_conditions():
@@ -206,7 +210,8 @@ class _FakeServer:
         return MagicMock()
 
 
-def test_reference_signature_starts_one_server_per_measurement_conditions(reference_cache):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+def test_reference_signature_starts_one_server_per_measurement_conditions(reference_cache, tensor_parallel_size):
     """Lanes that share model + memory budget + TP must reuse one startup.
 
     The reference never depends on the transport or on the packed flag, so paying
@@ -227,7 +232,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             CASE,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=1,
+            tensor_parallel_size=tensor_parallel_size,
             device_index=0,
         )
         second = reference_signature(
@@ -235,7 +240,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             CASE,
             port=PORT + 1,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=1,
+            tensor_parallel_size=tensor_parallel_size,
             device_index=0,
         )
         # A different memory budget is a different measurement condition.
@@ -244,7 +249,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             CASE,
             port=PORT + 2,
             gpu_memory_utilization=0.45,
-            tensor_parallel_size=1,
+            tensor_parallel_size=tensor_parallel_size,
             device_index=0,
         )
 
@@ -253,7 +258,8 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert len(_FakeServer.instances) == 2
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
-    assert mock_wait.call_count == 2
+    assert mock_wait.call_count == 2 * tensor_parallel_size
+    assert [call.args[0] for call in mock_wait.call_args_list] == list(range(tensor_parallel_size)) * 2
 
 
 @pytest.mark.parametrize(
@@ -267,15 +273,6 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             {},
             {},
             id="qwen3.5-unchanged",
-        ),
-        pytest.param(
-            "zai-org/GLM-5.1",
-            3,
-            "model.layers.3.mlp.gate",
-            (("e_score_correction_bias", (8,), torch.float32, True),),
-            {},
-            {"model.layers.3.mlp.gate.e_score_correction_bias": ((8,), torch.float32)},
-            id="glm-5.1-fp32-router-bias",
         ),
         pytest.param(
             "kylesayrs/DeepSeek-V4-Flash-bf16",
@@ -404,3 +401,18 @@ def test_minimax_checkpoint_source_splits_fused_projections():
         },
     }
     assert actual == {name: ((6, 16), torch.bfloat16) for name in expected_names}
+
+
+def test_glm53flash_source_uses_published_metadata():
+    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    with patch.object(utils.AutoConfig, "from_pretrained") as config_loader:
+        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    config_loader.assert_not_called()
+    assert len(source.metadata()) == 132
+    assert all(meta.dtype == torch.bfloat16 for meta in source.metadata())
+    assert not case.full_transfer_matrix
+    assert dict(case.server_env) == {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    assert case.tokenizer == "ZhipuAI/GLM-5.3-Flash"
+    with patch.object(torch.npu, "manual_seed"):
+        tensor = source._make_tensor("model.layers.0.self_attn.dt_bias", (64,))
+    torch.testing.assert_close(tensor, torch.full((64,), -2.0, dtype=torch.bfloat16))

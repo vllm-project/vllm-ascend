@@ -1,0 +1,36 @@
+{
+  "model": "ZhipuAI/GLM-5.3-Flash",
+  "source": "https://www.modelscope.cn/models/ZhipuAI/GLM-5.3-Flash/resolve/master/",
+  "downloaded_on": "2026-10-13",
+  "original_config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+  "safetensors_index_sha256": "3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05",
+  "header_shards": [
+    "model-00001-of-00062.safetensors",
+    "model-00002-of-00062.safetensors",
+    "model-00003-of-00062.safetensors",
+    "model-00017-of-00062.safetensors",
+    "model-00031-of-00062.safetensors",
+    "model-00032-of-00062.safetensors",
+    "model-00062-of-00062.safetensors"
+  ],
+  "parameter_count": 132,
+  "transformations": [
+    "text-only Glm5NextForCausalLM",
+    "first 4 layers",
+    "first 8 routed experts",
+    "MTP disabled",
+    "synthetic BF16 parameters; FP8 quantization/scales omitted",
+    "model.language_model. renamed to model.",
+    "router gate weight and correction bias expert dimension reduced from 288 to 8"
+  ],
+  "tokenizer_files": [
+    {
+      "path": "tokenizer.json",
+      "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "sha256": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc"
+    }
+  ]
+}
