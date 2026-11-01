@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -96,6 +97,7 @@ from .engram.embedding import (
 )
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
+from .engram.npu import EngramLayerLookupPlan, gather_dequantize_engram_layers
 from .indexer import DeepseekV41Indexer
 
 
@@ -1091,6 +1093,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # Ascend SWA slot metadata (see engram/hash_state.py).
             swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
+            # Fused multi-layer gather state. The plan is built lazily on the
+            # first real preparation, once weights and UVA tables exist.
+            self._engram_fused_plan: EngramLayerLookupPlan | None = None
+            self._engram_fused_plan_built = False
+            self._engram_stage: torch.Tensor | None = None
+            self._engram_stage_ptrs: torch.Tensor | None = None
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
@@ -1106,6 +1114,83 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
+
+    def _build_engram_fused_plan(self, tables) -> EngramLayerLookupPlan | None:
+        """Plan for gathering every Engram layer in a single kernel launch.
+
+        One constexpr-specialized kernel serves all layers only when they share
+        head geometry, rank head offset and storage mode. TP1 tables already
+        write straight into the graph buffers, DP-sharded hashes change the row
+        layout, and CPU tables cannot feed a device gather: all keep the
+        per-layer path.
+        """
+        first = tables[0]
+        if first.tp_size == 1 or first.dp_size != 1:
+            return None
+        layer_plans = []
+        for table in tables:
+            if (
+                table.tp_size != first.tp_size
+                or table.dp_size != first.dp_size
+                or table.part_n_hash_cols != first.part_n_hash_cols
+                or table.dim != first.dim
+                or table.head_start != first.head_start
+            ):
+                return None
+            pointers = table.fused_layer_plan()
+            if pointers is None:
+                return None
+            layer_plans.append(pointers)
+        mxfp8 = layer_plans[0].mxfp8
+        quantized = layer_plans[0].scales is not None
+        if any(p.mxfp8 != mxfp8 or (p.scales is not None) != quantized for p in layer_plans):
+            return None
+        device = layer_plans[0].codes.device
+        max_chunks = max(pointers.codes.numel() for pointers in layer_plans)
+        codes_ptrs = torch.zeros((len(tables), max_chunks), dtype=torch.int64, device=device)
+        for slot, pointers in enumerate(layer_plans):
+            # Shorter tables leave zero (never dereferenced) padding: a chunk
+            # slot is only read for rows inside that layer's vocab range.
+            codes_ptrs[slot, : pointers.codes.numel()] = pointers.codes
+        scales_ptrs = None
+        if quantized:
+            scales_ptrs = torch.zeros((len(tables), max_chunks), dtype=torch.int64, device=device)
+            for slot, pointers in enumerate(layer_plans):
+                scales_ptrs[slot, : pointers.scales.numel()] = pointers.scales
+        return EngramLayerLookupPlan(
+            codes_ptrs,
+            scales_ptrs,
+            torch.tensor([t.vocab_start_idx for t in tables], dtype=torch.int64, device=device),
+            torch.tensor([t.vocab_end_idx for t in tables], dtype=torch.int64, device=device),
+            head_start=first.head_start,
+            local_heads=first.part_n_hash_cols,
+            dim=first.dim,
+            quantized=quantized,
+            mxfp8=mxfp8,
+        )
+
+    def _launch_fused_engram_gather(self, plan, gathered, output_tokens) -> None:
+        """One kernel writes every layer's rank shard into the staging buffer.
+
+        The staging buffer only ever has its first ``tokens`` rows written and
+        read (the per-layer all_gather consumes exactly that view), so it needs
+        no initialization; capacity grows if a larger token bucket shows up.
+        """
+        stage = self._engram_stage
+        if stage is None or stage.shape[1] < output_tokens:
+            device = gathered.device
+            stage = torch.empty(
+                (plan.codes_ptrs.shape[0], output_tokens, plan.local_heads, plan.dim),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self._engram_stage = stage
+            self._engram_stage_ptrs = torch.tensor(
+                [stage[slot].data_ptr() for slot in range(stage.shape[0])],
+                dtype=torch.int64,
+                device=device,
+            )
+        gather_dequantize_engram_layers(plan, self._engram_stage_ptrs, gathered)
 
     def prepare_engram(
         self,
@@ -1215,6 +1300,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
             gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
+            fused_plan = None
+            if output_buffers is not None and output_tokens is not None and not self.engram_dp_shared_memory:
+                if not self._engram_fused_plan_built:
+                    self._engram_fused_plan = self._build_engram_fused_plan(tables)
+                    self._engram_fused_plan_built = True
+                fused_plan = self._engram_fused_plan
+            if fused_plan is not None:
+                self._launch_fused_engram_gather(fused_plan, gathered, output_tokens)
             for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
                 if direct:
@@ -1225,6 +1318,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     )
                     target[count:output_tokens].zero_()
                     lookups[layer_id] = target
+                elif fused_plan is not None:
+                    count = hashes.shape[0]
+                    # The fused launch already wrote this rank's head shard for
+                    # every layer; assemble the full width and land it in the
+                    # replay buffer.
+                    shard = self._engram_stage[slot, :count].view(count, table.part_n_hash_cols, table.dim)
+                    values = tensor_model_parallel_all_gather(shard, dim=1).flatten(1)
+                    output_buffers[layer_id][:count].copy_(values)
+                    output_buffers[layer_id][count:output_tokens].zero_()
+                    lookups[layer_id] = output_buffers[layer_id]
                 else:
                     values = table.embed_gathered(gathered[:, slot], hashes.shape[0]).flatten(1)
                     if output_buffers is None:

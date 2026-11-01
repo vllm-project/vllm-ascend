@@ -14,7 +14,7 @@ storage and lookup; upstream rank selection and hash gathering are reused:
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 import torch
 import torch.distributed as dist
@@ -33,7 +33,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
 from .npu import (
+    CHUNK_ROWS,
     HostUvaBuffer,
+    SCALE_GROUP,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
@@ -46,6 +48,19 @@ from .parallel import (
     get_engram_dp_group,
     get_engram_dp_size,
 )
+
+
+class EngramLayerPointers(NamedTuple):
+    """Device pointer table one layer contributes to a fused multi-layer gather.
+
+    Slots follow the ``HostUvaBuffer`` chunking: slot ``c`` addresses rows
+    ``[c * CHUNK_ROWS, (c + 1) * CHUNK_ROWS)`` of this layer's table, whatever
+    backs it (registered host memory or a device weight tensor).
+    """
+
+    codes: torch.Tensor  # [chunks] int64 device addresses
+    scales: torch.Tensor | None  # same layout, None for BF16 storage
+    mxfp8: bool
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
@@ -400,6 +415,44 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:
             _torch_lookup(self, indices, out)
+
+
+    def fused_layer_plan(self) -> EngramLayerPointers | None:
+        """Pointer tables this layer contributes to a fused gather, or None.
+
+        Covers registered host tables and device weights; CPU tables (tests,
+        bring-up) keep the per-layer path.
+        """
+        if self._codes_uva is not None:
+            codes_uva = cast(HostUvaBuffer, self._codes_uva)
+            scales_uva = cast(HostUvaBuffer, self._scales_uva) if self._scales_uva is not None else None
+            return EngramLayerPointers(
+                codes_uva.ptrs,
+                scales_uva.ptrs if scales_uva is not None else None,
+                codes_uva.tensor.dtype == torch.float8_e4m3fn,
+            )
+        weight = self.weight
+        if weight.device.type == "cpu" or weight.is_meta:
+            return None
+        rows = self.vocab_end_idx - self.vocab_start_idx
+        chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
+        row_bytes = self.dim * weight.element_size()
+        codes = torch.tensor(
+            [weight.data_ptr() + chunk * CHUNK_ROWS * row_bytes for chunk in range(chunks)],
+            dtype=torch.int64,
+            device=weight.device,
+        )
+        scales = self.weight_scale_inv
+        if scales is None:
+            scale_ptrs = None
+        else:
+            scale_row_bytes = (self.dim // SCALE_GROUP) * scales.element_size()
+            scale_ptrs = torch.tensor(
+                [scales.data_ptr() + chunk * CHUNK_ROWS * scale_row_bytes for chunk in range(chunks)],
+                dtype=torch.int64,
+                device=scales.device,
+            )
+        return EngramLayerPointers(codes, scale_ptrs, weight.dtype == torch.float8_e4m3fn)
 
 
 def _torch_lookup(embed: AscendParallelEngramEmbedding, indices, out) -> None:
