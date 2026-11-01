@@ -165,7 +165,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     git clone https://github.com/MinghuasLab/flash-attention-npu.git /tmp/flash-attention-npu && \
     cd /tmp/flash-attention-npu && \
-    git checkout 9c9f00648fa150e84228a9b757990485fc670df3 && \
+    git checkout 2e5320494cb474365bacaf42c94abf0c7de0affc && \
     git submodule update --init --recursive && \
     source /usr/local/Ascend/cann/set_env.sh && \
     python3 setup.py install && \
