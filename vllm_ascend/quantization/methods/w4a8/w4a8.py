@@ -142,8 +142,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
-        if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > 16:
-            raise ValueError("The current weight does not support moe part tp>16.")
+        if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
+            raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
 
         try:
             device_group = get_mc2_group().device_group
@@ -164,7 +164,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_output_size = hidden_sizes
         else:
             w13_output_size = intermediate_size_per_partition
-            w2_output_size = hidden_sizes // 2
+            w2_output_size = hidden_sizes // _INT4_VALUES_PER_BYTE
         param_dict["w13_weight"] = torch.empty(num_experts, w13_output_size, hidden_sizes, dtype=torch.int8)
         param_dict["w2_weight"] = torch.empty(
             num_experts, w2_output_size, intermediate_size_per_partition, dtype=torch.int8
@@ -206,7 +206,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         param_dict["w13_scale_bias"] = torch.empty(
             num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
         )
-        param_dict["w2_scale_bias"] = torch.empty(num_experts, hidden_sizes, 16 // self.tp_size, dtype=torch.float32)
+        param_dict["w2_scale_bias"] = torch.empty(
+            num_experts, hidden_sizes, _MODELSLIM_SCALE_BIAS_PARTITIONS // self.tp_size, dtype=torch.float32
+        )
         return param_dict
 
     def apply(
@@ -279,8 +281,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def _pack_to_int32(self, weight: torch.Tensor):
         # pack 4 int8(int4*2) to int32, because in pytorch, we need to use int32 to represent int4
-        assert weight.shape[-1] % 4 == 0, (
-            f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
+        packed_bytes_per_int32 = _INT4_VALUES_PER_INT32 // _INT4_VALUES_PER_BYTE
+        assert weight.shape[-1] % packed_bytes_per_int32 == 0, (
+            f"the last dim of weight needs to be divided by {packed_bytes_per_int32} but got shape {weight.shape}"
         )
         return weight.view(torch.int32).contiguous()
 
@@ -293,14 +296,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def _pack_int4_to_int8(self, weight: torch.Tensor) -> torch.Tensor:
         shape = weight.shape
-        weight = weight.reshape(-1, 2)
+        weight = weight.reshape(-1, _INT4_VALUES_PER_BYTE)
         weight0 = weight[:, :1]
         weight1 = weight[:, 1:]
         weight1_4 = torch.bitwise_left_shift(weight1, 4)
         weight2_4 = weight0 & 0b00001111
         weight_add = torch.bitwise_or(weight1_4, weight2_4)
         # The clone() call is used to break the view chain
-        return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
+        return weight_add.reshape(shape[:-1] + (shape[-1] // _INT4_VALUES_PER_BYTE,)).clone()
 
     def process_weights_after_loading(self, layer):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
