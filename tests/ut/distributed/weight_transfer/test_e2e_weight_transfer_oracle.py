@@ -157,7 +157,7 @@ def test_reference_and_lane_share_the_measurement_conditions():
     compilation_config = lane["--compilation-config"]
     assert isinstance(compilation_config, str)
     assert compilation_config.startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
-    # The one-card lane sleeps level 2 before every transfer, which only hands
+    # The IPC lane sleeps level 2 before every transfer, which only hands
     # HBM back while the engine's weights and KV cache live in the CaMem pool.
     # Both builders enable it so the reference is a startup load under the very
     # same allocation pool instead of a differently-allocated one; the reference
@@ -390,3 +390,56 @@ def test_servers_share_environment_and_wait_for_all_devices(backend, tp):
             assert server_factory.call_args.kwargs["env_dict"] == env
         server_factory.return_value.__exit__.assert_called_once()
     assert env == {"ASCEND_RT_VISIBLE_DEVICES": "6,7" if tp == 2 else "6"}
+
+
+@pytest.mark.parametrize(
+    ("visible", "device_index", "world_size", "expected"),
+    [
+        (None, 0, 2, "0,1"),
+        (None, 6, 1, "6"),
+        ("4,5", 0, 2, "4,5"),
+        ("4,5", 0, 1, "4"),
+        ("4,5", 1, 1, "5"),
+        ("6,2,7,3", 1, 2, "2,7"),
+        (" 4, 5 ", 0, 2, "4,5"),
+    ],
+)
+def test_server_visibility_maps_parent_logical_devices(monkeypatch, visible, device_index, world_size, expected):
+    if visible is None:
+        monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible)
+    assert common.server_visible_devices(device_index, world_size) == expected
+
+
+@pytest.mark.parametrize(
+    ("visible", "device_index", "world_size"),
+    [("4,5", 1, 2), ("4,4", 0, 2), ("", 0, 1), ("4,x", 0, 2), ("4,5", -1, 1), ("4,5", 0, 0)],
+)
+def test_server_visibility_rejects_invalid_selection(monkeypatch, visible, device_index, world_size):
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible)
+    with pytest.raises(ValueError):
+        common.server_visible_devices(device_index, world_size)
+
+
+@pytest.mark.parametrize(
+    ("device_index", "env"),
+    [(1, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}), (0, {"ASCEND_RT_VISIBLE_DEVICES": "4,5"})],
+    ids=["logical-device", "physical-visibility"],
+)
+def test_reference_cache_separates_device_selection(reference_cache, device_index, env):
+    with (
+        patch("tests.e2e.conftest.RemoteOpenAIServer", _FakeServer),
+        patch.object(utils, "fixed_startup_checkpoint", MagicMock()),
+        patch.object(utils, "wait_for_free_device_memory"),
+        patch.object(utils, "generation_signature", side_effect=[[("first", ())], [("second", ())]]) as generate,
+    ):
+        kwargs = dict(port=PORT, gpu_memory_utilization=GPU_MEMORY_UTILIZATION, tensor_parallel_size=2)
+        first = reference_signature(
+            MagicMock(), CASE, device_index=0, env_dict={"ASCEND_RT_VISIBLE_DEVICES": "0,1"}, **kwargs
+        )
+        second = reference_signature(MagicMock(), CASE, device_index=device_index, env_dict=env, **kwargs)
+        repeated = reference_signature(MagicMock(), CASE, device_index=device_index, env_dict=env.copy(), **kwargs)
+    assert first != second
+    assert second == repeated
+    assert generate.call_count == 2

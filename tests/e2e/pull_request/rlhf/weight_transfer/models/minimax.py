@@ -50,9 +50,9 @@ def minimax_m3_checkpoint_name(name: str) -> str:
     return name
 
 
-# The default 0.75 HBM budget leaves too little room for M3's 18.73-GiB FIA
-# graph workspace after KV-cache allocation. This four-layer, 1024-token test
-# only needs a small cache; keep startup and live-update servers identical.
+# Reserve HBM for M3's FIA graph workspace rather than sizing the KV cache
+# from the memory-utilization fraction. The four-layer, 1024-token test only
+# needs a small cache; keep startup and live-update servers identical.
 MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
 
 

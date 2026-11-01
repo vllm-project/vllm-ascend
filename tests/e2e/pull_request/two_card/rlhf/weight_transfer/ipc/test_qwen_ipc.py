@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Qwen NPU_IPC weight-transfer coverage, scheduled and timed independently."""
+"""Qwen IPC weight-transfer coverage, scheduled and timed independently."""
 
 import pytest
 

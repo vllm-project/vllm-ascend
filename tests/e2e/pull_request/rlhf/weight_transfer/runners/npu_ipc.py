@@ -25,6 +25,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.runners.common import (
     UPDATE_ROUNDS,
     UPDATE_TIMEOUT,
     post_control,
+    server_visible_devices,
     weight_transfer_servers,
 )
 from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
@@ -40,12 +41,8 @@ INFERENCE_WORLD_SIZE = 2
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
 GPU_MEMORY_UTILIZATION = 0.45
-# First of the two consecutive inference/trainer cards, as an absolute
-# device index inside the container: the harness hands the server
-# `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
-# is the first card CI uses; a shared host can select an idle card pair by
-# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
-# unset, so the pytest process's logical indices equal the physical ones).
+# First parent-process logical device; child-server visibility is mapped to
+# physical IDs through the parent's ASCEND_RT_VISIBLE_DEVICES, when present.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
@@ -87,7 +84,7 @@ def _ipc_trainer_peer(_local_rank: int, case: WeightUpdateModelCase, packed: boo
 
 
 def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    if torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
+    if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
         pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
@@ -100,9 +97,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": ",".join(
-            str(INFERENCE_DEVICE_INDEX + rank) for rank in range(INFERENCE_WORLD_SIZE)
-        ),
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 
     with weight_transfer_servers(

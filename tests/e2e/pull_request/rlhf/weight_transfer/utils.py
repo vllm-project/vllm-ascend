@@ -459,10 +459,11 @@ def wait_for_free_device_memory(
         time.sleep(5)
 
 
-# Reference signatures are a property of (model, memory budget, tensor-parallel
-# size) — never of the transport or of the packed flag — so the lanes of one
-# case share a single startup-load server.
-_REFERENCE_SIGNATURES: dict[tuple[str, float, int], list[tuple[str, tuple[float, ...]]]] = {}
+# Reuse a startup reference only for the same model, memory, TP, logical device
+# and effective child-server environment. Transport and packing do not affect it.
+_REFERENCE_SIGNATURES: dict[
+    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
+] = {}
 
 
 def reference_signature(
@@ -486,7 +487,13 @@ def reference_signature(
     """
     from tests.e2e.conftest import RemoteOpenAIServer
 
-    cache_key = (case.id, gpu_memory_utilization, tensor_parallel_size)
+    cache_key = (
+        case.id,
+        gpu_memory_utilization,
+        tensor_parallel_size,
+        device_index,
+        tuple(sorted((env_dict or {}).items())),
+    )
     cached = _REFERENCE_SIGNATURES.get(cache_key)
     if cached is not None:
         return cached

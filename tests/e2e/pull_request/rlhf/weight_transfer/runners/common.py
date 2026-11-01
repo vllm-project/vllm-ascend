@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared server lifecycle and control requests for weight-transfer E2Es."""
 
+import os
 from contextlib import contextmanager
 
 import requests
@@ -20,6 +21,23 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
 UPDATE_TIMEOUT = 300
 CONTROL_TIMEOUT = 60
 UPDATE_ROUNDS = 2
+
+
+def server_visible_devices(device_index: int, world_size: int) -> str:
+    """Map consecutive parent logical devices to child-server physical IDs."""
+    if device_index < 0 or world_size < 1:
+        raise ValueError("Device index must be non-negative and world size must be positive")
+    visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    if visible is None:
+        return ",".join(str(index) for index in range(device_index, device_index + world_size))
+    devices = [device.strip() for device in visible.split(",")]
+    if any(not device.isdecimal() for device in devices) or len(set(devices)) != len(devices):
+        raise ValueError(f"Invalid ASCEND_RT_VISIBLE_DEVICES: {visible!r}; expected distinct numeric device IDs")
+    if device_index + world_size > len(devices):
+        raise ValueError(
+            f"Logical devices [{device_index}, {device_index + world_size}) exceed parent visibility {visible!r}"
+        )
+    return ",".join(devices[device_index : device_index + world_size])
 
 
 def post_control(server: RemoteOpenAIServer, route: str, *, json=None, params=None, timeout=CONTROL_TIMEOUT):

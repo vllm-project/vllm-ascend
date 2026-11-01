@@ -22,6 +22,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.runners.common import (
     UPDATE_ROUNDS,
     UPDATE_TIMEOUT,
     post_control,
+    server_visible_devices,
     weight_transfer_servers,
 )
 from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
@@ -34,12 +35,8 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
 )
 
 INFERENCE_WORLD_SIZE = 1
-# Card the inference server runs on, as an absolute device index inside the
-# container: the harness hands the server `ASCEND_RT_VISIBLE_DEVICES` explicitly,
-# so this is a physical chip. The trainer sits next to it. The default is the
-# first card pair CI uses; a shared host can point a lane at idle cards by
-# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
-# unset, so the pytest process's logical indices equal the physical ones).
+# Parent logical devices: inference on the first, trainer on the next.
+# Child-server physical visibility is resolved from the parent environment.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 GPU_MEMORY_UTILIZATION = 0.75
@@ -50,7 +47,7 @@ def _log(message: str) -> None:
 
 
 def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    if torch.npu.device_count() < 2:
+    if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
@@ -61,7 +58,7 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 
     with weight_transfer_servers(
