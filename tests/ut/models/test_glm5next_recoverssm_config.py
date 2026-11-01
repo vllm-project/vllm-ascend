@@ -18,7 +18,10 @@ def make_config():
         ),
         mamba_config=SimpleNamespace(enable_stochastic_rounding=False),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            tensor_parallel_size=1,
         ),
         kv_transfer_config=None,
     )
@@ -63,8 +66,8 @@ def test_initialization_requires_speculative_decoding():
     [
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=1 and PCP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=1 and PCP=1"),
+        ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
+        ("parallel_config", "prefill_context_parallel_size", 2, "prefill producer"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
         (None, "kv_transfer_config", SimpleNamespace(kv_connector="AscendStoreConnector"), "requires Mooncake"),
     ],
@@ -75,6 +78,34 @@ def test_initialization_rejects_unsupported_execution(section, field, value, mes
     with pytest.raises(ValueError, match=message):
         validate_glm_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("pcp_size", [2, 8])
+def test_pcp_recoverssm_producer_uses_existing_head_sharding(connector, pcp_size):
+    config = make_config()
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role="kv_producer")
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("role", ["kv_consumer", "kv_both"])
+def test_pcp_recoverssm_remains_disabled_on_decode_consumer(role):
+    config = make_config()
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role=role)
+    with pytest.raises(ValueError, match="prefill producer"):
+        validate_glm_recoverssm(config)
+
+
+def test_recoverssm_producer_rejects_combined_tp_pcp():
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = 2
+    config.parallel_config.prefill_context_parallel_size = 4
+    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role="kv_producer")
+    with pytest.raises(ValueError, match="TP=1"):
+        validate_glm_recoverssm(config)
 
 
 def test_other_models_and_disabled_switch_keep_upstream_validation(monkeypatch):

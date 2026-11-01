@@ -61,6 +61,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
             )
         with _disable_upstream_graph_staging(self):
             metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
+        metadata.pcp_context = getattr(m, "pcp_context", None)
         self._build_conv_metadata(m, metadata, num_decode_draft_tokens_cpu)
         return metadata
 

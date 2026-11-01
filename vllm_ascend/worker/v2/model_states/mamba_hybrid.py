@@ -380,6 +380,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
             local_metadata.update(global_metadata)
             self.attn_metadata = local_metadata
+            if self.recoverssm is not None:
+                self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
             return local_metadata
 
         self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(

@@ -965,8 +965,11 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding and does not support pipeline
-parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Stochastic rounding must be disabled.
+parallelism (PP) or decode context parallelism (DCP). Stochastic rounding must
+be disabled. A Mooncake prefill producer may enable `--use-replayssm` with
+TP=1 and PCP>1. SFA continues to use PCP while KDA shards heads over the same
+group as its effective TP group. The decode consumer retains PCP=1;
+combined TP>1/PCP>1 remains unsupported.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,
