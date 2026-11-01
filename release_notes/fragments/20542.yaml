@@ -1,0 +1,4 @@
+pr: 20542
+entries:
+  - category: performance
+    text: Reduced MRV2 request-admission CPU overhead by tracking contiguous UVA fallback writes with a prefix bound.
