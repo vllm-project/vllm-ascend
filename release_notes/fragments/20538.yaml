@@ -1,0 +1,5 @@
+pr: 20538
+entries:
+    - category: bugfix
+       text: KV Pool store setup is now deferred for sparse-indexer models (e.g. GLM-5.x SFA) on fabric-memory Mooncake and device_sdma Memcache deployments, matching the existing compressed-
+    model lazy-init behavior.
