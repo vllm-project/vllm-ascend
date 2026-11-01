@@ -169,8 +169,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             None,
         )
         # The upstream validator accepts None (dense retention) and returns
-        # early, so probing the function is enough -- no value gate.
-        if validate_retention_interval is not None:
+        # early, so probing the function is enough -- no value gate. It does
+        # divide by ``scheduler_block_size`` though, which the engine always
+        # supplies (see the factory below) but direct construction and tests may
+        # leave as None; skip the check there instead of dividing by None.
+        if validate_retention_interval is not None and self.scheduler_block_size is not None:
             validate_retention_interval(
                 self.retention_interval,
                 self.scheduler_block_size,

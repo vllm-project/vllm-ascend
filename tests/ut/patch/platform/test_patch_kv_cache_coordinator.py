@@ -390,6 +390,17 @@ def test_retention_interval_comes_from_kv_cache_config(monkeypatch):
     assert coordinator.retention_interval == 0
 
 
+def test_validation_skipped_when_block_size_is_unknown(monkeypatch):
+    """Direct construction may leave ``scheduler_block_size`` unset.
+
+    The upstream validator divides by it, so calling it with a non-None
+    retention interval and an unknown block size would raise ``TypeError``.
+    """
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=4096)
+    assert coordinator.scheduler_block_size is None
+    assert coordinator.retention_interval == 4096
+
+
 def test_lookup_forwards_retention_interval_to_managers():
     """Holding the value on the coordinator is not enough.
 
