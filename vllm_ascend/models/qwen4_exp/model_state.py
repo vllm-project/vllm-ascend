@@ -14,6 +14,10 @@
 
 """Ascend V2 model-runner state for Qwen4Exp."""
 
+from __future__ import annotations
+
+from typing import Any
+
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
@@ -35,6 +39,27 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     attention metadata and stores it on the state for FULL aclgraph replay
     (``update_full_graph_params`` reads ``model_state.attn_metadata``).
     """
+
+    _skip_spec_cpu_length_sync: bool
+
+    def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
+        """Bind length consumers once, after target and draft KV initialization."""
+        from vllm_ascend.models.qwen4_exp.cpu_length_sync import can_skip_qwen_cpu_length_sync
+
+        self._skip_spec_cpu_length_sync = False
+        if not can_skip_qwen_cpu_length_sync(runner):
+            return
+        stream = getattr(runner, "num_computed_tokens_stream", None)
+        if stream is None or not callable(getattr(stream, "synchronize", None)):
+            return
+        # Retire any profiling/previous-initialization copy before dropping
+        # both its producer and consumer. This runs once, never per token.
+        stream.synchronize()
+        self._skip_spec_cpu_length_sync = True
+
+    def can_skip_spec_cpu_length_sync(self) -> bool:
+        """Keep the D2H producer and consumer on the same stable decision."""
+        return getattr(self, "_skip_spec_cpu_length_sync", False) is True
 
     def __init__(
         self,
