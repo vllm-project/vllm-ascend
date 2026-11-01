@@ -44,3 +44,18 @@ def test_uva_prefix_and_sparse_npu(monkeypatch):
     output = buf.uva().clone()
     torch.npu.synchronize()
     torch.testing.assert_close(output.cpu(), buf._cpu)
+
+
+@pytest.mark.parametrize("source", ["numpy", "tensor"])
+@pytest.mark.parametrize("column", [slice(None), 0])
+def test_uva_multidimensional_prefix_and_contiguous_range(monkeypatch, source, column):
+    monkeypatch.setattr(patch_uva, "is_uva_available", lambda: False)
+    buf = patch_uva.UvaBufferWrapper((16, 3), torch.int64)
+    view = buf.np if source == "numpy" else buf.cpu
+    view[:5, column] = 2
+    view[9:13, :] = 7
+    output = buf.uva().clone()
+    torch.npu.synchronize()
+    torch.testing.assert_close(output.cpu(), buf._cpu)
+    assert not buf._modified_indices
+    assert buf._dirty_prefix_end == 0

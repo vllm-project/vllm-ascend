@@ -97,3 +97,38 @@ def test_real_uva_does_not_track(buffer):
     assert buffer.uva(4).tolist() == [3] * 4
     assert not buffer._modified_indices
     assert buffer._dirty_prefix_end == 0
+
+
+@pytest.mark.parametrize("view", ["np", "cpu"])
+@pytest.mark.parametrize("column", [slice(None), 0])
+def test_multidimensional_prefix(buffer, monkeypatch, view, column):
+    buffer._cpu = torch.zeros((16, 3), dtype=torch.int64)
+    buffer._np = buffer._cpu.numpy()
+    buffer._uva = torch.zeros_like(buffer._cpu)
+
+    def unexpected(*args):
+        pytest.fail("multidimensional prefix must not enumerate rows")
+
+    monkeypatch.setattr(patch_uva, "get_row_indices_from_key", unexpected)
+    getattr(buffer, view)[:5, column] = 7
+    assert buffer._dirty_prefix_end == 5
+    torch.testing.assert_close(buffer.uva(), buffer._cpu)
+
+
+@pytest.mark.parametrize("prefix", [0, 4])
+def test_nonzero_contiguous_range_avoids_indexed_copy(buffer, monkeypatch, prefix):
+    def unexpected(*args):
+        pytest.fail("contiguous rows must not use indexed copy or re-pin")
+
+    monkeypatch.setattr(torch.Tensor, "pin_memory", unexpected)
+    buffer._uva.fill_(-1)
+    if prefix:
+        buffer.np[:prefix] = 3
+    buffer.np[8:12] = 9
+    actual = buffer.uva()
+    assert actual[8:12].tolist() == [9] * 4
+    assert actual[4:8].tolist() == [-1] * 4
+    if prefix:
+        assert actual[:prefix].tolist() == [3] * prefix
+    assert buffer._dirty_prefix_end == 0
+    assert not buffer._modified_indices
