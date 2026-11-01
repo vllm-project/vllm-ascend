@@ -11,22 +11,6 @@ import torch
 from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import ASSETS, initialize_tensor, load_parameter_metadata
 
 
-def test_reduced_config_keeps_hybrid_attention_and_moe():
-    original = json.loads((ASSETS / "config.original.json").read_text(encoding="utf-8"))["text_config"]
-    reduced = json.loads((ASSETS / "config.json").read_text(encoding="utf-8"))
-    assert reduced["architectures"] == ["Glm5NextForCausalLM"]
-    assert reduced["num_hidden_layers"] == 4
-    assert reduced["num_nextn_predict_layers"] == 0
-    assert reduced["n_routed_experts"] == reduced["num_experts_per_tok"] == 8
-    for key in ("layer_types", "mlp_layer_types", "indexer_types"):
-        assert reduced[key] == original[key][:4]
-    assert reduced["linear_attn_config"]["kda_layers"] == [0, 1, 2]
-    assert reduced["linear_attn_config"]["full_attn_layers"] == [3]
-    for key in ("hidden_size", "vocab_size", "moe_intermediate_size", "kv_lora_rank", "q_lora_rank", "mhc", "hc_mult"):
-        assert reduced[key] == original[key]
-    assert "quantization_config" not in reduced
-
-
 def test_checkpoint_metadata_covers_the_reduced_model():
     parameters = load_parameter_metadata(ASSETS / "parameter_metadata.json")
     shapes = {name: shape for name, shape, _ in parameters}

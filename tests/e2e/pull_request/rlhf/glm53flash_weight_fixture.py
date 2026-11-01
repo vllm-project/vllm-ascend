@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offline checkpoint metadata and bounded synthetic GLM-5.3-Flash weights.
+"""Checkpoint metadata and bounded synthetic GLM-5.3-Flash weights.
 
 The shapes come from published safetensors headers, not a served-model parameter
 enumeration. This keeps the startup-load oracle independent of runtime fusion.
+Adapted from PR #19828, commit b979486b166647b2317fedfe1f18ac3d4279d124.
+The metadata retains four text layers and eight experts, removes FP8 scales,
+and changes the published model.language_model prefix to model.
 No checkpoint tensor data or Transformers remote model code is needed.
 """
 

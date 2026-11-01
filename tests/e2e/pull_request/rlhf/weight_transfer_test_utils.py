@@ -52,7 +52,6 @@ class WeightUpdateModelCase:
     parameter_metadata_file: Path | None = None
     tensor_initializer: Callable[[str, torch.Tensor], torch.Tensor] | None = None
     server_env: tuple[tuple[str, str], ...] = ()
-    tokenizer: str | None = None
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -252,14 +251,32 @@ MODEL_CASES = (
     ),
     WeightUpdateModelCase(
         id="glm-5.3-flash-kda-sfa-mhc",
-        model=str(GLM53FLASH_ASSETS.resolve()),
-        hf_overrides={},
-        # Transformers cannot enumerate this architecture; use the published
-        # checkpoint headers reduced to four text layers and eight experts.
+        model="ZhipuAI/GLM-5.3-Flash",
+        hf_overrides={
+            "architectures": ["Glm5NextForCausalLM"],
+            "quantization_config": None,
+            "text_config": {
+                "num_hidden_layers": 4,
+                "n_routed_experts": 8,
+                "num_nextn_predict_layers": 0,
+                "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
+                "mlp_layer_types": ["dense"] * 3 + ["sparse"],
+                "indexer_types": ["full"] * 4,
+                "linear_attn_config": {
+                    "num_heads": 64,
+                    "head_dim": 128,
+                    "gate_lower_bound": -5.0,
+                    "short_conv_kernel_size": 4,
+                    "kda_layers": [0, 1, 2],
+                    "full_attn_layers": [3],
+                },
+            },
+        },
+        # AutoModelForCausalLM has no GLM-5.3 text entry. Keep checkpoint-header
+        # metadata for the reduced model independently of vLLM runtime fusion.
         parameter_metadata_file=GLM53FLASH_ASSETS / "parameter_metadata.json",
         tensor_initializer=initialize_glm53flash_tensor,
         server_env=(("VLLM_USE_V2_MODEL_RUNNER", "0"),),
-        tokenizer="ZhipuAI/GLM-5.3-Flash",
         extra_server_args=(
             "--block-size",
             "128",
@@ -599,9 +616,7 @@ class FixedRandomWeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        local_config = Path(self._case.model) / "config.json"
-        config_path = local_config if local_config.is_file() else hf_hub_download(self._case.model, "config.json")
-        shutil.copyfile(config_path, target / "config.json")
+        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
@@ -661,7 +676,6 @@ def _common_serve_args(
         "--additional-config",
         '{"weight_nz_mode": 0}',
         *case.server_args(),
-        *(["--tokenizer", case.tokenizer] if case.tokenizer else []),
     ]
 
 
@@ -703,7 +717,7 @@ def reference_serve_args(
     """
     return [
         "--tokenizer",
-        case.tokenizer or case.model,
+        case.model,
         "--served-model-name",
         case.model,
         *_common_serve_args(
