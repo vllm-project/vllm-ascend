@@ -60,19 +60,19 @@ def build_kpool_mha_plan(common, device: torch.device) -> KPoolMHAPlan | None:
     queries = [end - begin for begin, end in zip(starts, starts[1:])]
     max_query, max_key = max(queries), max(lengths)
     if (
-        min(queries) < MIN_MHA_QUERY_ROWS
-        or min(queries) != max_query
-        or min(lengths) != max_key
-        or any(not query <= length <= MAX_MHA_KV_QUERY_RATIO * query for query, length in zip(queries, lengths))
+        min(queries) <= 0
+        or max_query < MIN_MHA_QUERY_ROWS
+        or any(length < query for query, length in zip(queries, lengths))
+        or sum(lengths) > MAX_MHA_KV_QUERY_RATIO * common.num_actual_tokens
         or max_key > MAX_MHA_KEY_LENGTH
         or sum(lengths) > MAX_MHA_KEY_ROWS
         or common.num_reqs * max_query * max_key > MAX_MHA_MASK_ELEMENTS
     ):
         return None
-    visible = torch.zeros((common.num_reqs, max_query), dtype=torch.int32, device="cpu")
+    visible: list[torch.Tensor] = []
     key_ends: list[int] = []
     for request, (query, length) in enumerate(zip(queries, lengths)):
-        visible[request, :query] = torch.arange(length - query + 1, length + 1, dtype=torch.int32, device="cpu")
+        visible.append(torch.arange(length - query + 1, length + 1, dtype=torch.int32, device="cpu"))
         key_ends.append((key_ends[-1] if key_ends else 0) + length)
     return KPoolMHAPlan(
         common.num_actual_tokens,
@@ -82,7 +82,7 @@ def build_kpool_mha_plan(common, device: torch.device) -> KPoolMHAPlan | None:
         tuple(key_ends),
         max_query,
         max_key,
-        _copy_plan_tensor(visible.flatten(), device),
+        _copy_plan_tensor(torch.cat(visible), device),
     )
 
 

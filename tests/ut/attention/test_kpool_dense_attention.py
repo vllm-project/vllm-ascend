@@ -11,8 +11,6 @@ from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPImpl
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
-
 from vllm_ascend.attention.kpool_dense_attention import (
     can_execute_projected_kpool_attention,
     execute_kpool_hybrid_attention,
@@ -21,30 +19,38 @@ from vllm_ascend.attention.kpool_dense_attention import (
     supports_projected_kpool_attention,
 )
 from vllm_ascend.attention.kpool_query_plan import build_kpool_mha_plan, build_kpool_query_plan
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
 
 
-def test_projected_mha_preserves_c8_pages_request_boundaries_and_causal_selection():
-    queries, lengths = [1024, 1024], [1137, 1137]
+@pytest.mark.parametrize("queries,lengths", [([1024, 1024], [1137, 1137]), ([1024, 2048], [1137, 2177])])
+def test_projected_mha_preserves_c8_pages_request_boundaries_and_causal_selection(queries, lengths):
+    starts = [0, *torch.tensor(queries).cumsum(0).tolist()]
     common = SimpleNamespace(
-        num_reqs=2,
-        num_actual_tokens=2048,
-        query_start_loc_cpu=torch.tensor([0, 1024, 2048]),
+        num_reqs=len(queries),
+        num_actual_tokens=sum(queries),
+        query_start_loc_cpu=torch.tensor(starts),
         seq_lens_cpu_upper_bound=torch.tensor(lengths),
-        is_prefilling=torch.ones(2, dtype=torch.bool),
+        is_prefilling=torch.ones(len(queries), dtype=torch.bool),
     )
     plan = build_kpool_mha_plan(common, torch.device("cpu"))
     assert plan is not None
-    cache = torch.zeros(18, 128, 1, 528, dtype=torch.int8)
-    cache[..., :512] = torch.arange(1, 19, dtype=torch.int8)[:, None, None, None]
-    scales = torch.ones(18, 128, 1, 4)
-    cache[..., 512:] = scales.view(torch.int8)
+    counts = [(n + 127) // 128 for n in lengths]
+    pages = sum(counts)
+    cache = torch.zeros(pages, 128, 1, 528, dtype=torch.int8)
+    cache[..., :512] = torch.arange(1, pages + 1, dtype=torch.int8)[:, None, None, None]
+    cache[..., 512:] = torch.ones(pages, 128, 1, 4).view(torch.int8)
     before = cache.clone()
-    table = torch.arange(17, -1, -1, dtype=torch.int32).view(2, 9)
+    table = torch.full((len(queries), max(counts)), -1, dtype=torch.int32)
+    ids = torch.arange(pages - 1, -1, -1, dtype=torch.int32)
+    cursor = 0
+    for i, count in enumerate(counts):
+        table[i, :count] = ids[cursor : cursor + count]
+        cursor += count
     metadata = SimpleNamespace(block_size=128, block_table=table)
     assert can_execute_projected_kpool_attention(cache, metadata, plan)
     assert not can_execute_projected_kpool_attention(cache.float(), metadata, plan)
-    query = torch.randn(2048, 8, 256, dtype=torch.bfloat16)
-    indices = torch.full((2048, 1, 2051), -1, dtype=torch.int32)
+    query = torch.randn(sum(queries), 8, 256, dtype=torch.bfloat16)
+    indices = torch.full((sum(queries), 1, 2051), -1, dtype=torch.int32)
     indices[:, 0, 0] = 0
     indices[:, 0, 1] = plan.visible_key_lengths - 1
     indices[:, 0, 2] = plan.visible_key_lengths
@@ -52,39 +58,75 @@ def test_projected_mha_preserves_c8_pages_request_boundaries_and_causal_selectio
     weight_v = torch.zeros(8, 512, 256, dtype=torch.bfloat16)
     weight_k[:, :, :256] = torch.eye(256, dtype=torch.bfloat16)
     weight_v[:, 256:, :] = torch.eye(256, dtype=torch.bfloat16)
-    expected_latent = torch.cat([cache[table[i].long(), ..., :512].flatten(0, 2)[:length] for i, length in enumerate(lengths)])
+    expected_latent = torch.cat(
+        [
+            cache[table[i, :count].long(), ..., :512].flatten(0, 2)[:length]
+            for i, (count, length) in enumerate(zip(counts, lengths))
+        ]
+    )
+    calls = 0
 
     def attention(q, key, value, heads, **kwargs):
-        assert q is query and heads == 8
-        assert kwargs["actual_seq_qlen"] == [1024, 2048]
-        assert kwargs["actual_seq_kvlen"] == [1137, 2274]
-        expected = expected_latent[:, None, :256].expand(-1, 8, -1).bfloat16()
+        nonlocal calls
+        request = calls
+        calls += 1
+        qs, qe = starts[request : request + 2]
+        ks = 0 if request == 0 else plan.key_ends[request - 1]
+        ke = plan.key_ends[request]
+        torch.testing.assert_close(q, query[qs:qe])
+        assert heads == 8
+        assert kwargs["actual_seq_qlen"] == [queries[request]] and kwargs["actual_seq_kvlen"] == [lengths[request]]
+        expected = expected_latent[ks:ke, None, :256].expand(-1, 8, -1).bfloat16()
         torch.testing.assert_close(key, expected)
         torch.testing.assert_close(value, expected)
         mask = kwargs["atten_mask"]
-        assert mask.shape == (2, 1, 1024, 1137)
+        assert mask.shape == (queries[request], lengths[request])
         expected_mask = torch.ones_like(mask)
-        for request in range(2):
-            expected_mask[request, 0, :, 0] = False
-            rows = torch.arange(1024)
-            expected_mask[request, 0, rows, plan.visible_key_lengths[request * 1024 : (request + 1) * 1024] - 1] = False
+        expected_mask[:, 0] = False
+        expected_mask[torch.arange(qe - qs), plan.visible_key_lengths[qs:qe] - 1] = False
         assert torch.equal(mask, expected_mask)
         return (q + 1,)
 
     with patch("vllm_ascend.attention.kpool_dense_attention.torch_npu.npu_fusion_attention", side_effect=attention):
         actual = execute_projected_kpool_attention(query, cache, indices, metadata, plan, weight_k, weight_v, 0.0625)
+    assert calls == len(queries)
     torch.testing.assert_close(actual, query + 1)
     assert torch.equal(cache, before)
 
 
-@pytest.mark.parametrize("pcp,dcp,nope,v_dim,supported", [(1, 1, 256, 256, True), (8, 1, 256, 256, False), (1, 2, 256, 256, False), (1, 1, 192, 256, False), (1, 1, 256, 128, False)])
+@pytest.mark.parametrize(
+    "pcp,dcp,nope,v_dim,supported",
+    [
+        (1, 1, 256, 256, True),
+        (8, 1, 256, 256, False),
+        (1, 2, 256, 256, False),
+        (1, 1, 192, 256, False),
+        (1, 1, 256, 128, False),
+    ],
+)
 def test_projected_mha_gate_keeps_parallel_and_other_geometry_on_sfa(pcp, dcp, nope, v_dim, supported):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="int8"),
-        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(num_attention_heads=64, kv_lora_rank=512, qk_rope_head_dim=0, qk_nope_head_dim=nope, v_head_dim=v_dim, index_topk=2048, index_kpool=4)),
-        parallel_config=SimpleNamespace(tensor_parallel_size=8, prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(
+                num_attention_heads=64,
+                kv_lora_rank=512,
+                qk_rope_head_dim=0,
+                qk_nope_head_dim=nope,
+                v_head_dim=v_dim,
+                index_topk=2048,
+                index_kpool=4,
+            ),
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8, prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp
+        ),
     )
-    with patch("vllm_ascend.attention.kpool_dense_attention.get_current_hardware_profile", return_value=SimpleNamespace(supports=lambda _: True)):
+    with patch(
+        "vllm_ascend.attention.kpool_dense_attention.get_current_hardware_profile",
+        return_value=SimpleNamespace(supports=lambda _: True),
+    ):
         assert supports_projected_kpool_attention(config) == supported
 
 
@@ -262,14 +304,20 @@ def test_projected_mha_dispatch_preserves_cache_and_indexer_work(impl_cls, graph
     impl._is_mtp_layer = False
     impl.W_UK_T = impl.W_UV = torch.ones(1, 2, 2)
     hidden = torch.ones(3, 2)
-    metadata = SimpleNamespace(cos=None, sin=None, num_actual_tokens=3, num_input_tokens=3,
-        slot_mapping=torch.arange(3), prefill_mha=object())
+    metadata = SimpleNamespace(
+        cos=None, sin=None, num_actual_tokens=3, num_input_tokens=3, slot_mapping=torch.arange(3), prefill_mha=object()
+    )
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
-    impl._get_parallel_forward_context = MagicMock(return_value=SimpleNamespace(
-        actual_seq_lengths_query=torch.tensor([3]), actual_seq_lengths_key=torch.tensor([3]),
-        kv_slot_mapping=metadata.slot_mapping, topk_num_tokens=3))
+    impl._get_parallel_forward_context = MagicMock(
+        return_value=SimpleNamespace(
+            actual_seq_lengths_query=torch.tensor([3]),
+            actual_seq_lengths_key=torch.tensor([3]),
+            kv_slot_mapping=metadata.slot_mapping,
+            topk_num_tokens=3,
+        )
+    )
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(3, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(3, 2)))
@@ -282,7 +330,11 @@ def test_projected_mha_dispatch_preserves_cache_and_indexer_work(impl_cls, graph
     impl._v_up_proj = MagicMock(return_value=torch.full((3, 2), 9.0))
     impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
     with (
-        patch.object(sparse_mla, "get_forward_context", return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL if graph else CUDAGraphMode.NONE)),
+        patch.object(
+            sparse_mla,
+            "get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL if graph else CUDAGraphMode.NONE),
+        ),
         patch.object(sparse_mla, "can_execute_projected_kpool_attention", return_value=True),
         patch.object(sparse_mla, "execute_projected_kpool_attention", return_value=torch.full((3, 1, 2), 5.0)) as mha,
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),

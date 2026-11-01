@@ -44,8 +44,7 @@ def can_execute_projected_kpool_attention(cache: torch.Tensor, metadata: Any, pl
         and cache.is_contiguous()
         and metadata.block_size == DENSE_KERNEL_BLOCK_SIZE
         and metadata.block_table.shape[0] == len(plan.key_lengths)
-        and metadata.block_table.shape[1]
-        >= (plan.max_key_len + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
+        and metadata.block_table.shape[1] >= (plan.max_key_len + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
     )
 
 
@@ -71,26 +70,33 @@ def execute_projected_kpool_attention(
     expanded = latent[None].expand(DENSE_LOCAL_HEADS, -1, -1)
     key = torch.bmm(expanded, key_weight.transpose(1, 2)).transpose(0, 1).contiguous()
     value = torch.bmm(expanded, value_weight).transpose(0, 1).contiguous()
-    slots = indices[:, 0]
-    slots = torch.where((slots >= 0) & (slots < plan.visible_key_lengths[:, None]), slots, plan.max_key_len).long()
-    mask = torch.ones((slots.shape[0], plan.max_key_len + 1), dtype=torch.int32, device=query.device)
-    mask.scatter_(1, slots, 0)
-    mask = mask[:, : plan.max_key_len].bool().contiguous()
-    mask = mask.view(len(plan.query_lengths), 1, plan.max_query_len, plan.max_key_len)
-    # FAS supports the projected 256-dim TND geometry; FIA's TND ABI does not.
-    return torch_npu.npu_fusion_attention(
-        query,
-        key,
-        value,
-        DENSE_LOCAL_HEADS,
-        input_layout="TND",
-        atten_mask=mask,
-        scale=scale,
-        keep_prob=1.0,
-        sparse_mode=0,
-        actual_seq_qlen=list(plan.query_ends),
-        actual_seq_kvlen=list(plan.key_ends),
-    )[0]
+    outputs: list[torch.Tensor] = []
+    query_start, key_start = 0, 0
+    # Request-local TND masks avoid padding incompatible ragged mask shapes.
+    for query_end, key_end, length in zip(plan.query_ends, plan.key_ends, plan.key_lengths):
+        slots = indices[query_start:query_end, 0]
+        visible = plan.visible_key_lengths[query_start:query_end, None]
+        slots = torch.where((slots >= 0) & (slots < visible), slots, length).long()
+        mask = torch.ones((slots.shape[0], length + 1), dtype=torch.int32, device=query.device)
+        mask.scatter_(1, slots, 0)
+        mask = mask[:, :length].bool().contiguous()
+        outputs.append(
+            torch_npu.npu_fusion_attention(
+                query[query_start:query_end],
+                key[key_start:key_end],
+                value[key_start:key_end],
+                DENSE_LOCAL_HEADS,
+                input_layout="TND",
+                atten_mask=mask,
+                scale=scale,
+                keep_prob=1.0,
+                sparse_mode=0,
+                actual_seq_qlen=[query_end - query_start],
+                actual_seq_kvlen=[length],
+            )[0]
+        )
+        query_start, key_start = query_end, key_end
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs)
 
 
 def supports_dense_kpool_attention(config: VllmConfig) -> bool:
