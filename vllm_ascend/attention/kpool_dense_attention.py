@@ -8,7 +8,12 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 
-from vllm_ascend.attention.kpool_query_plan import DENSE_KERNEL_BLOCK_SIZE, DENSE_SELECTION_BUDGET, KPoolQueryPlan
+from vllm_ascend.attention.kpool_query_plan import (
+    DENSE_KERNEL_BLOCK_SIZE,
+    DENSE_SELECTION_BUDGET,
+    KPoolMHAPlan,
+    KPoolQueryPlan,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 DENSE_LATENT_DIM = 512
@@ -17,9 +22,82 @@ DENSE_TP_SIZE = 8
 C8_PACKED_DIM = 528
 C8_SCALE_TILE = 128
 FIA_COMPAT_ROPE_DIM = 64
+MHA_HEAD_DIM = 256
+KPOOL_EXPANSION_TAIL = 3
+
+
+def supports_projected_kpool_attention(config: VllmConfig) -> bool:
+    model = getattr(config.model_config, "hf_text_config", None)
+    return bool(
+        _supports_c8_kpool_attention(config, HardwareCapability.KPOOL_C8_PROJECTED_MHA)
+        and getattr(model, "qk_nope_head_dim", None) == MHA_HEAD_DIM
+        and getattr(model, "v_head_dim", None) == MHA_HEAD_DIM
+        and getattr(model, "index_kpool", None) == KPOOL_EXPANSION_TAIL + 1
+    )
+
+
+def can_execute_projected_kpool_attention(cache: torch.Tensor, metadata: Any, plan: KPoolMHAPlan) -> bool:
+    return bool(
+        cache.dtype == torch.int8
+        and cache.ndim == 4
+        and cache.shape[2:] == (1, C8_PACKED_DIM)
+        and cache.is_contiguous()
+        and metadata.block_size == DENSE_KERNEL_BLOCK_SIZE
+        and metadata.block_table.shape[0] == len(plan.key_lengths)
+        and metadata.block_table.shape[1]
+        >= (plan.max_key_len + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
+    )
+
+
+def execute_projected_kpool_attention(
+    query: torch.Tensor,
+    cache: torch.Tensor,
+    indices: torch.Tensor,
+    metadata: Any,
+    plan: KPoolMHAPlan,
+    key_weight: torch.Tensor,
+    value_weight: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    cache = cache.view(-1, DENSE_KERNEL_BLOCK_SIZE, 1, C8_PACKED_DIM)
+    gathered = []
+    for request, length in enumerate(plan.key_lengths):
+        pages = (length + DENSE_KERNEL_BLOCK_SIZE - 1) // DENSE_KERNEL_BLOCK_SIZE
+        packed = torch.index_select(cache, 0, metadata.block_table[request, :pages].long())
+        scales = packed[..., DENSE_LATENT_DIM:].contiguous().view(torch.float32).repeat_interleave(C8_SCALE_TILE, -1)
+        latent = (packed[..., :DENSE_LATENT_DIM].float() * scales).bfloat16().view(-1, DENSE_LATENT_DIM)
+        gathered.append(latent[:length])
+    latent = gathered[0] if len(gathered) == 1 else torch.cat(gathered)
+    expanded = latent[None].expand(DENSE_LOCAL_HEADS, -1, -1)
+    key = torch.bmm(expanded, key_weight.transpose(1, 2)).transpose(0, 1).contiguous()
+    value = torch.bmm(expanded, value_weight).transpose(0, 1).contiguous()
+    slots = indices[:, 0]
+    slots = torch.where((slots >= 0) & (slots < plan.visible_key_lengths[:, None]), slots, plan.max_key_len).long()
+    mask = torch.ones((slots.shape[0], plan.max_key_len + 1), dtype=torch.int32, device=query.device)
+    mask.scatter_(1, slots, 0)
+    mask = mask[:, : plan.max_key_len].bool().contiguous()
+    mask = mask.view(len(plan.query_lengths), 1, plan.max_query_len, plan.max_key_len)
+    # FAS supports the projected 256-dim TND geometry; FIA's TND ABI does not.
+    return torch_npu.npu_fusion_attention(
+        query,
+        key,
+        value,
+        DENSE_LOCAL_HEADS,
+        input_layout="TND",
+        atten_mask=mask,
+        scale=scale,
+        keep_prob=1.0,
+        sparse_mode=0,
+        actual_seq_qlen=list(plan.query_ends),
+        actual_seq_kvlen=list(plan.key_ends),
+    )[0]
 
 
 def supports_dense_kpool_attention(config: VllmConfig) -> bool:
+    return _supports_c8_kpool_attention(config, HardwareCapability.KPOOL_C8_DENSE_PREFIX)
+
+
+def _supports_c8_kpool_attention(config: VllmConfig, capability: HardwareCapability) -> bool:
     model = getattr(config.model_config, "hf_text_config", None)
     parallel = config.parallel_config
     return bool(
@@ -32,7 +110,7 @@ def supports_dense_kpool_attention(config: VllmConfig) -> bool:
         and getattr(model, "kv_lora_rank", None) == DENSE_LATENT_DIM
         and getattr(model, "qk_rope_head_dim", None) == 0
         and getattr(model, "index_topk", None) == DENSE_SELECTION_BUDGET
-        and get_current_hardware_profile().supports(HardwareCapability.KPOOL_C8_DENSE_PREFIX)
+        and get_current_hardware_profile().supports(capability)
     )
 
 

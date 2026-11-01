@@ -11,6 +11,79 @@ MIN_DENSE_PREFIX_ROWS = 1024
 MAX_HYBRID_QUERY_ROWS = 8192
 DENSE_KERNEL_BLOCK_SIZE = 128
 DENSE_SELECTION_BUDGET = 2048
+MAX_MHA_KEY_ROWS = 32768
+MAX_MHA_KEY_LENGTH = 16384
+MIN_MHA_QUERY_ROWS = 1024
+MAX_MHA_KV_QUERY_RATIO = 2
+MAX_MHA_MASK_ELEMENTS = 128 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class KPoolMHAPlan:
+    num_tokens: int
+    query_lengths: tuple[int, ...]
+    query_ends: tuple[int, ...]
+    key_lengths: tuple[int, ...]
+    key_ends: tuple[int, ...]
+    max_query_len: int
+    max_key_len: int
+    visible_key_lengths: torch.Tensor
+
+
+def build_kpool_mha_plan(common, device: torch.device) -> KPoolMHAPlan | None:
+    lengths = getattr(common, "seq_lens_cpu_upper_bound", None)
+    prefilling = getattr(common, "is_prefilling", None)
+    starts = common.query_start_loc_cpu
+    if (
+        lengths is None
+        or prefilling is None
+        or starts.device.type != "cpu"
+        or lengths.device.type != "cpu"
+        or prefilling.device.type != "cpu"
+        or getattr(common, "causal", True) is not True
+        or getattr(common, "mm_req_doc_ranges", None)
+        or prefilling.numel() < common.num_reqs
+        or not prefilling[: common.num_reqs].all()
+    ):
+        return None
+    starts = starts[: common.num_reqs + 1].tolist()
+    lengths = lengths[: common.num_reqs].tolist()
+    if (
+        len(starts) != common.num_reqs + 1
+        or len(lengths) != common.num_reqs
+        or not lengths
+        or starts[0] != 0
+        or starts[-1] != common.num_actual_tokens
+        or common.num_actual_tokens > MAX_HYBRID_QUERY_ROWS
+    ):
+        return None
+    queries = [end - begin for begin, end in zip(starts, starts[1:])]
+    max_query, max_key = max(queries), max(lengths)
+    if (
+        min(queries) < MIN_MHA_QUERY_ROWS
+        or min(queries) != max_query
+        or min(lengths) != max_key
+        or any(not query <= length <= MAX_MHA_KV_QUERY_RATIO * query for query, length in zip(queries, lengths))
+        or max_key > MAX_MHA_KEY_LENGTH
+        or sum(lengths) > MAX_MHA_KEY_ROWS
+        or common.num_reqs * max_query * max_key > MAX_MHA_MASK_ELEMENTS
+    ):
+        return None
+    visible = torch.zeros((common.num_reqs, max_query), dtype=torch.int32, device="cpu")
+    key_ends: list[int] = []
+    for request, (query, length) in enumerate(zip(queries, lengths)):
+        visible[request, :query] = torch.arange(length - query + 1, length + 1, dtype=torch.int32, device="cpu")
+        key_ends.append((key_ends[-1] if key_ends else 0) + length)
+    return KPoolMHAPlan(
+        common.num_actual_tokens,
+        tuple(queries),
+        tuple(starts[1:]),
+        tuple(lengths),
+        tuple(key_ends),
+        max_query,
+        max_key,
+        _copy_plan_tensor(visible.flatten(), device),
+    )
 
 
 @dataclass(frozen=True)

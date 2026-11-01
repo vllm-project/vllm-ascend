@@ -7,7 +7,42 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.attention.kpool_query_plan import build_kpool_query_plan
+from vllm_ascend.attention.kpool_query_plan import build_kpool_mha_plan, build_kpool_query_plan
+
+
+@pytest.mark.parametrize(
+    "queries,lengths,eligible",
+    [
+        ([1024], [1024], True),
+        ([8192], [16384], True),
+        ([4096, 4096], [4096, 4096], True),
+        ([4095, 4095], [4095, 4095], True),
+        ([4096, 2048], [4096, 4096], False),
+        ([2048, 2048], [2048, 4096], False),
+        ([1023], [1023], False),
+        ([8193], [8193], False),
+        ([2048], [8192], False),
+        ([4096], [4095], False),
+    ],
+)
+def test_mha_plan_uses_exact_prefill_bounds_and_bounded_shapes(queries, lengths, eligible):
+    common = SimpleNamespace(
+        num_reqs=len(queries),
+        num_actual_tokens=sum(queries),
+        query_start_loc_cpu=torch.tensor([0, *torch.tensor(queries).cumsum(0).tolist()]),
+        seq_lens_cpu_upper_bound=torch.tensor(lengths),
+        is_prefilling=torch.ones(len(queries), dtype=torch.bool),
+    )
+    with patch.object(torch.Tensor, "cpu", side_effect=AssertionError("unexpected D2H")):
+        plan = build_kpool_mha_plan(common, torch.device("cpu"))
+    assert (plan is not None) == eligible
+    if plan is not None:
+        assert plan.query_ends == tuple(common.query_start_loc_cpu[1:].tolist())
+        assert plan.key_ends == tuple(torch.tensor(lengths).cumsum(0).tolist())
+        expected = torch.cat([torch.arange(k - q + 1, k + 1) for q, k in zip(queries, lengths)])
+        torch.testing.assert_close(plan.visible_key_lengths, expected.int())
+    common.is_prefilling[0] = False
+    assert build_kpool_mha_plan(common, torch.device("cpu")) is None
 
 
 @pytest.mark.parametrize(

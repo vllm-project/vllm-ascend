@@ -121,6 +121,8 @@ class HardwareCapability(Enum):
     IRQ_CPU_RESERVATION = auto()
     # Bounded INT8 latent dequantization plus floating FIA for NoPE prefixes.
     KPOOL_C8_DENSE_PREFIX = auto()
+    # Project C8 latent KV to BF16 256-dim K/V for masked FAS prefill.
+    KPOOL_C8_PROJECTED_MHA = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
@@ -281,6 +283,7 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.KPOOL_C8_DENSE_PREFIX,
+    HardwareCapability.KPOOL_C8_PROJECTED_MHA,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
