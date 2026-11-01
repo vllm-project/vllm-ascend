@@ -330,16 +330,8 @@ def test_shared_tables_fall_back_without_local_peers(monkeypatch, size):
     from vllm_ascend.models.qwen4_exp import ple_embedding
 
     group = None if size is None else SimpleNamespace(world_size=size)
-    monkeypatch.setattr(
-        ple_embedding,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
-    )
+    monkeypatch.setattr(ple_embedding, "get_current_vllm_config", lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)))
     monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
-
-    def stub_init(self, *args, **kwargs):
-        torch.nn.Module.__init__(self)
-
-    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", stub_init)
+    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self))
     obj = AscendPLEHostEmbedding()
     assert obj._shared_group is None
