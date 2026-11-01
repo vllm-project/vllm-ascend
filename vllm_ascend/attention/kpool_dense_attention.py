@@ -106,8 +106,10 @@ def supports_dense_kpool_attention(config: VllmConfig) -> bool:
 def _supports_c8_kpool_attention(config: VllmConfig, capability: HardwareCapability) -> bool:
     model = getattr(config.model_config, "hf_text_config", None)
     parallel = config.parallel_config
+    kv_transfer = config.kv_transfer_config
     return bool(
-        getattr(config.cache_config, "cache_dtype", None) == "int8"
+        (kv_transfer is None or not kv_transfer.is_kv_consumer)
+        and getattr(config.cache_config, "cache_dtype", None) == "int8"
         and getattr(config.model_config, "dtype", None) == torch.bfloat16
         and getattr(parallel, "tensor_parallel_size", None) == DENSE_TP_SIZE
         and parallel.prefill_context_parallel_size == 1

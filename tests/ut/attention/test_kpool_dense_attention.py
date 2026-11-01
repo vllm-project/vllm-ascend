@@ -104,8 +104,10 @@ def test_projected_mha_preserves_c8_pages_request_boundaries_and_causal_selectio
         (1, 1, 256, 128, False),
     ],
 )
-def test_projected_mha_gate_keeps_parallel_and_other_geometry_on_sfa(pcp, dcp, nope, v_dim, supported):
+@pytest.mark.parametrize("role", [None, "producer", "consumer", "both"])
+def test_projected_mha_gate_keeps_parallel_and_other_geometry_on_sfa(pcp, dcp, nope, v_dim, supported, role):
     config = SimpleNamespace(
+        kv_transfer_config=None if role is None else SimpleNamespace(is_kv_consumer=role in ("consumer", "both")),
         cache_config=SimpleNamespace(cache_dtype="int8"),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -127,7 +129,7 @@ def test_projected_mha_gate_keeps_parallel_and_other_geometry_on_sfa(pcp, dcp, n
         "vllm_ascend.attention.kpool_dense_attention.get_current_hardware_profile",
         return_value=SimpleNamespace(supports=lambda _: True),
     ):
-        assert supports_projected_kpool_attention(config) == supported
+        assert supports_projected_kpool_attention(config) == (supported and role in (None, "producer"))
 
 
 def test_dense_prefix_dequantizes_pages_and_restores_ragged_rows():
@@ -253,11 +255,16 @@ def test_whole_full_visible_batch_needs_no_sparse_attention():
     sparse.assert_not_called()
 
 
-@pytest.mark.parametrize("variant", ["supported", "fp8", "pcp", "dcp", "tp1", "rope", "hardware"])
+@pytest.mark.parametrize(
+    "variant", ["supported", "producer", "consumer", "fp8", "pcp", "dcp", "tp1", "rope", "hardware"]
+)
 def test_dense_attention_admission_is_limited_to_validated_contract(variant):
     model = SimpleNamespace(num_attention_heads=64, kv_lora_rank=512, qk_rope_head_dim=0, index_topk=2048)
     parallel = SimpleNamespace(tensor_parallel_size=8, prefill_context_parallel_size=1, decode_context_parallel_size=1)
     config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=variant == "consumer")
+        if variant in ("producer", "consumer")
+        else None,
         cache_config=SimpleNamespace(cache_dtype="fp8" if variant == "fp8" else "int8"),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=model),
         parallel_config=parallel,
@@ -272,7 +279,7 @@ def test_dense_attention_admission_is_limited_to_validated_contract(variant):
         model.qk_rope_head_dim = 64
     with patch("vllm_ascend.attention.kpool_dense_attention.get_current_hardware_profile") as profile:
         profile.return_value.supports.return_value = variant != "hardware"
-        assert supports_dense_kpool_attention(config) is (variant == "supported")
+        assert supports_dense_kpool_attention(config) is (variant in ("supported", "producer"))
 
 
 def test_mha_query_projection_does_not_absorb_key_weights():

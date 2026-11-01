@@ -129,6 +129,8 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = compress_ratio
         self.topk_tokens = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "index_topk", None)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        kv_transfer = vllm_config.kv_transfer_config
+        self.plan_prefill_queries = kv_transfer is None or not kv_transfer.is_kv_consumer
         self.plan_dense_attention = supports_dense_kpool_attention(vllm_config)
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
@@ -217,12 +219,19 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         plan_queries = kwargs.pop("_plan_queries", True)
         del common_prefix_len, fast_build
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
+        prefilling = getattr(common_attn_metadata, "is_prefilling", None)
         # MTP decode capture can call the ordinary builder with runtime mode NONE.
         if (
             plan_queries
+            and self.plan_prefill_queries
             and self.pcp_size == 1
             and not graph_capture
             and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
+            and common_attn_metadata.num_reqs > 0
+            and prefilling is not None
+            and prefilling.device.type == "cpu"
+            and prefilling.numel() >= common_attn_metadata.num_reqs
+            and prefilling[: common_attn_metadata.num_reqs].all()
             and not torch.npu.is_current_stream_capturing()
         ):
             metadata.query_plan = build_kpool_query_plan(
