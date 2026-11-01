@@ -14,3 +14,7 @@ entries:
     text: >-
       Avoid unmapping an already-released CaMem physical allocation when tensors
       are deleted while sleeping, including shutdown after a failed wake.
+  - category: bugfix
+    text: >-
+      Keep worker resource cleanup retryable after a shutdown error, while
+      making the sleep backend close operation idempotent.
