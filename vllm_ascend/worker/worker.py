@@ -410,9 +410,6 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
-        if getattr(self, "_sleep_backend_shutdown_started", False):
-            return
-        self._sleep_backend_shutdown_started = True
         if backend := getattr(self, "sleep_mode_backend", None):
             backend.close()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
