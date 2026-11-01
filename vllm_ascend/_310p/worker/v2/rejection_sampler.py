@@ -86,10 +86,9 @@ class RejectionSampler310V2(RejectionSampler):
         sampled_cpu = sampled.detach().to("cpu")
         row_indices: list[int] = []
         token_ids: list[int] = []
+        cu_num_generated_tokens = [0]
         for req_idx in range(num_reqs):
             n = int(num_sampled_np[req_idx])
-            if n <= 0:
-                continue
             start = int(cu_num_logits_np[req_idx])
             for pos in range(n):
                 tok = int(sampled_cpu[req_idx, pos].item())
@@ -97,12 +96,15 @@ class RejectionSampler310V2(RejectionSampler):
                     break
                 row_indices.append(start + pos)
                 token_ids.append(tok)
+            cu_num_generated_tokens.append(len(token_ids))
         if not token_ids:
             return None
         rows = torch.tensor(row_indices, device=logits.device, dtype=torch.int64)
         tokens = torch.tensor(token_ids, device=logits.device, dtype=torch.int32)
         raw = torch.log_softmax(logits.index_select(0, rows), dim=-1, dtype=torch.float32)
-        return gather_logprobs(raw, max_num_logprobs, tokens)
+        return gather_logprobs(raw, max_num_logprobs, tokens)._replace(
+            cu_num_generated_tokens=cu_num_generated_tokens,
+        )
 
     def __call__(
         self,
@@ -114,11 +116,15 @@ class RejectionSampler310V2(RejectionSampler):
         num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        input_ids = getattr(input_batch, "input_ids", None)
+        logits_indices = getattr(input_batch, "logits_indices", None)
+        if input_ids is not None and logits_indices is not None:
+            input_ids = input_ids[logits_indices]
         processed = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
-            input_ids=getattr(input_batch, "input_ids", None),
+            input_ids=input_ids,
             expanded_local_pos=getattr(input_batch, "expanded_local_pos", None),
         )
 
