@@ -837,7 +837,8 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
     }
 
 
-def test_v2_zeroer_covers_each_mla_component_view():
+@pytest.mark.parametrize("wrap_slot", [False, True])
+def test_v2_zeroer_covers_each_mla_component_view(wrap_slot):
     raw = torch.zeros(2 * 488448, dtype=torch.uint8)
     typed_raw = raw.view(torch.bfloat16)
     nope = torch.as_strided(
@@ -858,6 +859,7 @@ def test_v2_zeroer_covers_each_mla_component_view():
         dtype=torch.bfloat16,
         page_size_padded=488448,
     )
+    binding = [(nope, rope)] if wrap_slot else (nope, rope)
     zeroer = AscendV2KVBlockZeroer(
         torch.device("cpu"),
         attn_groups_iter=[
@@ -869,7 +871,7 @@ def test_v2_zeroer_covers_each_mla_component_view():
             )
         ],
         kernel_block_sizes=[128],
-        static_forward_context={"layer": SimpleNamespace(kv_cache=(nope, rope))},
+        static_forward_context={"layer": SimpleNamespace(kv_cache=binding)},
         num_blocks=2,
         cache_dtype="auto",
     )
@@ -879,7 +881,8 @@ def test_v2_zeroer_covers_each_mla_component_view():
     assert all(zeroer._meta[-1] == 3 for zeroer in zeroer._zeroers)
 
 
-def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
+@pytest.mark.parametrize("wrap_slot", [False, True])
+def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch, wrap_slot):
     heads, k_dim, v_dim, block = 2, 64, 64, 512
     num_blocks = 3
     k_bytes = heads * block * k_dim
@@ -889,6 +892,7 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
     pitch = k_bytes + ks_bytes + v_bytes + vs_bytes + 256
     raw = torch.full((128 + num_blocks * pitch + 128,), 37, dtype=torch.int8)
     views = mxfp_paged_cache_views(raw[128:-128], num_blocks, heads, k_dim, v_dim, block, page_stride_bytes=pitch)
+    binding = [views] if wrap_slot else views
     spec = mxfp_cache_spec(_plain_full_attention_spec())
     zeroer = AscendV2KVBlockZeroer(
         torch.device("cpu"),
@@ -901,7 +905,7 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
             )
         ],
         kernel_block_sizes=[512],
-        static_forward_context={"attn": SimpleNamespace(kv_cache=views)},
+        static_forward_context={"attn": SimpleNamespace(kv_cache=binding)},
         num_blocks=num_blocks,
         cache_dtype="mxfp8",
     )
