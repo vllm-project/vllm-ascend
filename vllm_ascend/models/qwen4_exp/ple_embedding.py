@@ -56,10 +56,12 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
         if self._shared_group is None:
             self._host_table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device)
             tensor = self._host_table.tensor
+            assert tensor is not None
             tensor.zero_()
         else:
             self._host_table = SharedUvaBuffer((num_embeddings, embedding_dim), dtype, device, self._shared_group)
             tensor = self._host_table.tensor
+            assert tensor is not None
             if self._shared_group.rank_in_group == 0:
                 tensor.zero_()
             dist.barrier(group=self._shared_group.cpu_group)
