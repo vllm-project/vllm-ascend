@@ -558,26 +558,28 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::BuildCandidateMask(const QLIV2Common
     LocalTensor<float> candPairs2 = candBuf_.Get<float>()[innerS1Idx * candBlocks * 2];
     int32_t lo = CountGE(candPairs2, candBlocks, static_cast<float>(tileBlockBase));
     int32_t hi = CountGE(candPairs2, candBlocks, static_cast<float>(tileBlockBase + tileBlkNum));
-    LocalTensor<float> blkIdxF = tmp[4096];     // [tileBlkNum]
-    LocalTensor<float> acc = tmp[4352];         // [tileBlkNum]
-    LocalTensor<float> diff = tmp[4608];        // [tileBlkNum]
-    Cast(blkIdxF, globalTopkIndice_, RoundMode::CAST_NONE, tileBlkNum);
-    PipeBarrier<PIPE_V>();
-    Adds(blkIdxF, blkIdxF, static_cast<float>(tileBlockBase), tileBlkNum);
-    PipeBarrier<PIPE_V>();
-    Duplicate(acc.ReinterpretCast<int32_t>(), QLIV2ServiceVec::POS_INF_F32, tileBlkNum);
-    PipeBarrier<PIPE_V>();
     // 降序排序下: 值 >= base+tileBlkNum 占 [0, hi), 落在 tile 内的候选占 [hi, lo), < base (含 -1 pad) 占 [lo, ...)
+    // 注：原来这里先用 Cast+Adds 造 tile 块号向量、再逐候选 |块号-候选| 取 min（每候选 3 条向量指令），
+    // 现改为下面的块级命中位图，块号向量与整条距离链删除。
+    // 块级命中位图：先用一次 Duplicate 全置 1（候选外），再把落在本 tile 内的候选块号
+    // （排序后落在 [hi, lo) 区间，块号必在 [tileBlockBase, tileBlockBase+tileBlkNum)）标量置 0。
+    // 替代原来"逐候选 Adds→VecAbs→VecMinPair"的距离链：那里每个候选要 3 条向量指令 + 3 次流水 drain，
+    // 本 shape 每 tile 约 32 个候选 → 约 96 次 drain；改为 1 次 Duplicate + N 次标量写 + 1 次 S_V 围栏。
+    // （v220 的 ReduceMin 是整张量归约到 1 个最小值，不能做"每 8 个候选取 min"，故不走 2D 归约路线。）
+    // 用 float 存 0.0f/1.0f（不能存 int32 的 0/1 再 ReinterpretCast —— 1 会变成 1.4e-45 的 denormal）
+    LocalTensor<float> blkHit = tmp[8192];   // [tileBlkNum]：0.0f=候选内, 1.0f=候选外
+    Duplicate(blkHit, 1.0f, tileBlkNum);
+    PipeBarrier<PIPE_V>();
+    // 标量写不受 PipeBarrier<PIPE_V> 围栏（设计文档 P2 铁律），必须显式 V→S / S→V
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     for (int32_t j = hi; j < lo; j++) {
-        float v = candPairs2.GetValue(2 * j);
-        Adds(diff, blkIdxF, -v, tileBlkNum);
-        PipeBarrier<PIPE_V>();
-        VecAbs(diff, diff, tileBlkNum);
-        VecMinPair(acc, acc, diff, tileBlkNum);
+        int32_t candBlk = static_cast<int32_t>(candPairs2.GetValue(2 * j));
+        blkHit.SetValue(candBlk - tileBlockBase, 0.0f);
     }
-    // 距离 0 → 候选块; Brcb 展开到位置级; 距离 clamp 到 1 得 isOut (0/1)
+    SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
+    // 位图展开到位置级（每块 candidate_block_size 个位置），语义与原来的"距离 clamp 到 1"一致
     LocalTensor<float> posDist = tmp[12288]; // candInt 已释放, 可复用
-    Brcb(posDist, acc, tileBlkNum / 8, {1, 8});
+    Brcb(posDist, blkHit, tileBlkNum / 8, {1, 8});
     PipeBarrier<PIPE_V>();
     VecMinsScalar(posDist, posDist, 1.0f, s2BaseSize_);
     PipeBarrier<PIPE_V>();
