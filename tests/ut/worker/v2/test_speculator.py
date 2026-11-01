@@ -17,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -628,6 +629,7 @@ def test_capture_multi_step_captures_decode():
     speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 3
+    speculator._eplb_source_is_padding = torch.zeros(8, dtype=torch.bool)
     with (
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
@@ -639,6 +641,7 @@ def test_capture_multi_step_captures_decode():
         ),
     ):
         speculator.capture()
+    assert speculator._eplb_source_is_padding.all()
     speculator.prefill_cudagraph_manager.capture.assert_called_once()
     speculator.decode_cudagraph_manager.capture.assert_called_once()
 
@@ -848,3 +851,47 @@ def test_update_decode_attn_metadata_mla_with_dcp():
     assert update_kwargs["cp_kv_cache_interleave_size"] == 1
 
     assert torch.equal(metadata.seq_lens_cpu, expected)
+
+
+def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.input_buffers = SimpleNamespace(is_padding=torch.zeros(8, dtype=torch.bool))
+    speculator._eplb_source_is_padding = None
+    speculator._eplb_dummy_run = False
+    speculator.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace(compute_hash=lambda: "draft"))
+    layer_state = SimpleNamespace()
+    state = SimpleNamespace(
+        allgather_record_tensor=torch.tensor(-1),
+        model_states={
+            "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
+        },
+    )
+    speculator.set_eplb_state(state)
+    mask = layer_state.allgather_source_is_padding
+    speculator.set_eplb_state(state)
+    assert layer_state.allgather_source_is_padding is mask
+    assert mask.all()
+    # A restored PCP view may retain a longer backing mask with valid tail
+    # rows; only the actual prefill extent belongs to this forward.
+    speculator.input_batch = SimpleNamespace(
+        num_tokens_after_padding=4, is_padding=torch.tensor([False, True, False, False, False, False])
+    )
+    speculator.on_prefill_begin(1)
+    assert mask.tolist() == [False, True, False, False, True, True, True, True]
+    # Even when captured _prepare_eplb_forward fills a padded count, source
+    # validity keeps graph padding out of each SP shard.
+    gathered = torch.cat(
+        [
+            make_allgather_mask(2, torch.tensor(4), torch.tensor(True), is_padding=mask, tp_size=2, tp_rank=rank)
+            for rank in range(2)
+        ]
+    )
+    assert gathered.tolist() == [True, False, True, True]
+    for dummy, num_reqs in ((False, 3), (True, 4), (False, 1)):
+        speculator._eplb_dummy_run = dummy
+        speculator.on_multi_step_decode_begin(num_reqs)
+        assert layer_state.allgather_source_is_padding is mask
+        assert int((~mask).sum()) == (0 if dummy else num_reqs)
+    speculator._eplb_dummy_run = True
+    speculator.on_prefill_begin(1)
+    assert mask.all()
