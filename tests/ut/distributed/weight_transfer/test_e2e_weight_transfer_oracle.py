@@ -146,9 +146,7 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
     # under the case's own model name and tokenizer.
     assert lane.pop("--load-format") == "dummy"
     assert lane.pop("--weight-transfer-config") == f'{{"backend": "{backend}"}}'
-    assert reference.pop("--tokenizer") == (case.tokenizer or case.model)
-    if case.tokenizer is not None:
-        assert lane.pop("--tokenizer") == case.tokenizer
+    assert reference.pop("--tokenizer") == case.model
     assert reference.pop("--served-model-name") == case.model
     assert "--load-format" not in reference
 
@@ -412,7 +410,17 @@ def test_glm53flash_source_uses_published_metadata():
     assert all(meta.dtype == torch.bfloat16 for meta in source.metadata())
     assert not case.full_transfer_matrix
     assert dict(case.server_env) == {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    assert case.tokenizer == "ZhipuAI/GLM-5.3-Flash"
+    assert case.model == "ZhipuAI/GLM-5.3-Flash"
+    assert case.hf_overrides["architectures"] == ["Glm5NextForCausalLM"]
+    assert case.hf_overrides["quantization_config"] is None
+    text_config = case.hf_overrides["text_config"]
+    assert text_config["num_hidden_layers"] == 4
+    assert text_config["n_routed_experts"] == 8
+    assert text_config["num_nextn_predict_layers"] == 0
+    assert text_config["layer_types"] == ["linear_attention"] * 3 + ["deepseek_sparse_attention"]
+    assert text_config["mlp_layer_types"] == ["dense"] * 3 + ["sparse"]
+    assert text_config["linear_attn_config"]["kda_layers"] == [0, 1, 2]
+    assert text_config["linear_attn_config"]["full_attn_layers"] == [3]
     with patch.object(torch.npu, "manual_seed"):
         tensor = source._make_tensor("model.layers.0.self_attn.dt_bias", (64,))
     torch.testing.assert_close(tensor, torch.full((64,), -2.0, dtype=torch.bfloat16))
