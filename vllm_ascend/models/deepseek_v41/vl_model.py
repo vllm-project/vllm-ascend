@@ -213,8 +213,8 @@ class AscendDeepseekV41ForCausalLM(
         # length to the vocabulary embedding that performs PCP token exchange.
         self.language_model.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
 
-    def prepare_engram_graph_inputs(self, padded_tokens=None):
-        return self.language_model.prepare_engram_graph_inputs(padded_tokens)
+    def prepare_engram_graph_inputs(self, padded_tokens=None, *, cg_mode=None):
+        return self.language_model.prepare_engram_graph_inputs(padded_tokens, cg_mode=cg_mode)
 
     def get_model_state_cls(self):
         # The registry selects this wrapper even for text-only serving.

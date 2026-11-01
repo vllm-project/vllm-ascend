@@ -11,6 +11,7 @@ from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
+from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
 from vllm_ascend.ops.triton import engram_lookback
 
 
@@ -56,6 +57,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: calls.append(("retain", stream.name)))
     monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: context_available[0])
     monkeypatch.setattr(model_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(model_mod, "is_breakable_cudagraph_enabled", lambda: False)
     return calls, context, aux, context_available
 
 
@@ -67,6 +69,7 @@ def make_model():
     model._engram_input_buffers, model._engram_prepare_stream = None, None
     model._engram_capture_stream, model._engram_capture_events = None, None
     model._engram_graph_events = {}
+    model._engram_piecewise_events = {}
     model._engram_max_tokens = 8
     model._mtp_hidden_buffer = None
     model.decoder_replay_layers = None
@@ -76,6 +79,15 @@ def make_model():
         SimpleNamespace(engram=SimpleNamespace(embed_tokens=SimpleNamespace(n_hash_cols=4, dim=2))) for _ in range(3)
     ]
     return model
+
+
+@pytest.mark.parametrize("mode", [None, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_registry_wrapper_forwards_capture_mode_to_language_model(mode):
+    language_model = SimpleNamespace(prepare_engram_graph_inputs=Mock(return_value={"binding": True}))
+    wrapper = SimpleNamespace(language_model=language_model)
+    result = AscendDeepseekV41ForCausalLM.prepare_engram_graph_inputs(wrapper, 4, cg_mode=mode)
+    assert result == {"binding": True}
+    language_model.prepare_engram_graph_inputs.assert_called_once_with(4, cg_mode=mode)
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
@@ -139,6 +151,115 @@ def test_non_overlappable_modes_stay_synchronous(runtime, mode):
     assert model._engram_prepare_stream is None
     assert "engram_pending" not in result and "engram_mask_ready_event" not in result
     assert "engram_graph_events" not in result
+
+
+def test_piecewise_events_are_stable_and_separate_from_full(runtime, monkeypatch):
+    monkeypatch.setattr(model_mod, "is_breakable_cudagraph_enabled", lambda: True)
+    model = make_model()
+    first = model.prepare_engram_graph_inputs(4, cg_mode=CUDAGraphMode.PIECEWISE)
+    repeated = model.prepare_engram_graph_inputs(4, cg_mode=CUDAGraphMode.PIECEWISE)
+    other = model.prepare_engram_graph_inputs(8, cg_mode=CUDAGraphMode.PIECEWISE)
+    assert first["engram_pending"] is repeated["engram_pending"]
+    assert first["engram_pending"] is not other["engram_pending"]
+    assert first["engram_lookups"] is other["engram_lookups"]
+    assert "engram_mask_ready_event" not in first
+    assert "engram_graph_events" not in first
+    assert not model._engram_graph_events
+
+
+def test_piecewise_disabled_overlap_has_no_event_bindings(runtime, monkeypatch):
+    monkeypatch.setattr(model_mod, "is_breakable_cudagraph_enabled", lambda: True)
+    model = make_model()
+    model._engram_overlap_enabled = False
+    binding = model.prepare_engram_graph_inputs(4, cg_mode=CUDAGraphMode.PIECEWISE)
+    assert "engram_pending" not in binding
+    assert not model._engram_piecewise_events
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_piecewise_forward_hashes_before_prefetch_and_reuses_rows(runtime, monkeypatch, overlap):
+    calls, _, _, _ = runtime
+    monkeypatch.setattr(model_mod, "is_breakable_cudagraph_enabled", lambda: True)
+    model = make_model()
+    model._engram_overlap_enabled = overlap
+    model.engram_hash = Mock(use_slot_cache=False, lookback_depth=2)
+    model.engram_hash.ensure_cache.return_value = True
+
+    def hash_rows(ids, positions, query, dead, *args):
+        assert torch.npu.current_stream().name == "main"
+        calls.append(("hash",))
+        return torch.where(dead[:, None, None], -1, ids[:, None, None]).expand(-1, 2, 4).clone()
+
+    model.engram_hash.side_effect = hash_rows
+
+    def lookup(hashes, *, output_buffers, ready_events=None, output_tokens):
+        assert torch.npu.current_stream().name == ("aux" if overlap else "main")
+        calls.append(("lookup",))
+        for slot, layer in enumerate((1, 2)):
+            output_buffers[layer][:output_tokens].copy_(hashes[:, slot, :1].expand(-1, 8))
+            if ready_events is not None:
+                ready_events[layer].record(torch.npu.current_stream())
+
+    model.lookup_engram = Mock(side_effect=lookup)
+    model.prepare_engram = Mock(side_effect=AssertionError("combined producer"))
+    window = torch.full((2, 2), -1, dtype=torch.int32)
+    query = torch.zeros(3, dtype=torch.int32)
+    valid = torch.zeros(1, dtype=torch.int32)
+    first = None
+    for value, count in ((0, 0), (3, 4), (9, 2), (0, 0), (5, 4)):
+        query.copy_(torch.tensor([0, count, count]))
+        valid.fill_(count)
+        binding = model.piecewise_engram_inputs(torch.full((4,), value), torch.arange(4), window, query, valid)
+        expected = torch.where(torch.arange(4) < count, value, -1)
+        torch.testing.assert_close(binding["engram_lookups"][1][:4, 0], expected.bfloat16())
+        torch.testing.assert_close(binding["engram_mask"], torch.arange(4) < count)
+        assert "engram_mask_ready_event" not in binding
+        if first is not None:
+            assert binding["engram_lookups"] is first["engram_lookups"]
+            assert binding.get("engram_pending") is first.get("engram_pending")
+        first = binding
+    assert [call[0] for call in calls if call[0] in ("hash", "lookup")] == ["hash", "lookup"] * 5
+    assert model.lookup_engram.call_count == model.engram_hash.call_count == 5
+
+
+def test_piecewise_prefetch_failure_joins_auxiliary_stream(runtime, monkeypatch):
+    calls, _, _, _ = runtime
+    monkeypatch.setattr(model_mod, "is_breakable_cudagraph_enabled", lambda: True)
+    model = make_model()
+    model.lookup_engram = Mock(side_effect=RuntimeError("lookup failed"))
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        model.start_engram_prefetch(torch.zeros(4, 2, 4), {}, {}, 4)
+    assert calls[-1] == ("join", "aux")
+
+
+@pytest.mark.parametrize("mode,capturing", [(CUDAGraphMode.FULL, False), (CUDAGraphMode.NONE, True)])
+def test_full_capture_keeps_its_producer_when_upstream_passes_none(runtime, monkeypatch, mode, capturing):
+    _, context, _, available = runtime
+    available[0] = True
+    context.cudagraph_runtime_mode = mode
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
+    calls = []
+
+    @contextmanager
+    def full_inputs(*args):
+        calls.append("full producer")
+        yield {"engram_lookups": "full rows"}
+
+    model = Mock(return_value="hidden")
+    model.captured_engram_inputs = full_inputs
+    model.piecewise_engram_inputs = Mock(side_effect=AssertionError("piecewise producer"))
+    wrapper = SimpleNamespace(model=model, supports_engram_graph_producer=True)
+    result = model_mod.AscendDeepseekV41LLMForCausalLM.forward(
+        wrapper,
+        torch.ones(4),
+        torch.arange(4),
+        engram_query_start_loc=torch.zeros(3),
+        engram_valid_token_count=torch.zeros(1),
+    )
+    assert result == "hidden"
+    assert calls == ["full producer"]
+    assert model.call_args.kwargs["engram_lookups"] == "full rows"
+    model.piecewise_engram_inputs.assert_not_called()
 
 
 def test_dummy_steps_zero_buffers_and_skip_hashing(runtime):
@@ -285,7 +406,12 @@ def make_state(model, monkeypatch):
         state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
     )
     state = object.__new__(state_mod.EngramModelState)
-    state.vllm_config = SimpleNamespace()
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    state._engram_piecewise_inputs = None
+    state._engram_pcp_inputs = {}
     state.max_num_reqs, state.device = 4, torch.device("cpu")
     state.rope_state = None
     state.supports_mm_inputs = False
@@ -366,6 +492,7 @@ def test_graph_producer_stages_fixed_coordinates_without_external_submission(run
     query = torch.full((5,), -99, dtype=torch.int32)
     valid = torch.tensor([-99], dtype=torch.int32)
     state._engram_graph_inputs = dict(engram_query_start_loc=query, engram_valid_token_count=valid)
+    state._engram_piecewise_inputs = state._engram_graph_inputs
     model.prepare_engram_inputs = Mock(side_effect=AssertionError("graph-external producer"))
     model.prime_engram_v2_graph_inputs = Mock(side_effect=AssertionError("external event"))
     batch = SimpleNamespace(

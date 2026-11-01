@@ -1,0 +1,5 @@
+pr: 20252
+entries:
+  - category: feature
+    text: Added DeepSeek V4.1 Engram support with breakable PIECEWISE ACL graphs in model runner v2, including captured hashes, overlapped lookup, runtime metadata selection, and captured attention projections without context parallelism.
+    model: deepseek-v4.1

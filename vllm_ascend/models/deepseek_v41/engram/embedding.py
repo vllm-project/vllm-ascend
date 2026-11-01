@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -356,8 +357,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         return out[:, : self.n_hash_cols]
 
     @staticmethod
+    @eager_break_during_capture
     def wait_lookup(done, external: bool = False) -> None:
-        """Make the current stream wait for an asynchronous table lookup."""
+        """Wait at the consumer, outside PIECEWISE segments like upstream.
+
+        An ordinary event recorded by the next batch's producer must be read
+        again on replay, not baked into the captured graph. FULL keeps its
+        existing captured ExternalEvent wait/reset protocol.
+        """
         stream = torch.npu.current_stream()
         if external:
             done.wait(stream)

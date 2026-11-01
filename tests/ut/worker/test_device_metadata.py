@@ -404,6 +404,23 @@ def test_eager_lifecycle(state):
     assert state.executor.calls == ["submit", "wait", "release"]
 
 
+def test_piecewise_joins_unused_metadata_before_manager_cleanup(state):
+    from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+
+    model_state = EngramModelState.__new__(EngramModelState)
+    model_state.device_metadata = state
+    # No attention consumer waits in this dummy path. The Engram eager boundary
+    # must join it on capture and on subsequent replays, before buffer reuse.
+    for _ in range(3):
+        state.executor.calls.clear()
+        prepare(state, Builder())
+        state.begin_forward()  # Existing ModelWithContext does not re-submit.
+        assert state.executor.calls == ["submit"]
+        model_state._finish_piecewise_metadata()
+        state.finish()  # The generic wrapper / runner cleanup is now a no-op.
+        assert state.executor.calls == ["submit", "wait", "release"]
+
+
 def test_graph_producers_only_run_inside_forward_not_runtime_prepare(state):
     with execution(state):
         prepare(state, Builder(), full=True)

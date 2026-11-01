@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
@@ -13,6 +14,69 @@ from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedI
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL, CUDAGraphMode.NONE])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_piecewise_boundary_preserves_full_and_legacy_routes(monkeypatch, mode, enabled):
+    calls = []
+    impl = SimpleNamespace(
+        forward=lambda *args: calls.append("wide"),
+        forward_piecewise=lambda *args: calls.append("narrow"),
+    )
+    attn = SimpleNamespace(v41_impl=impl, piecewise_projections=enabled)
+    context = SimpleNamespace(no_compile_layers={"layer": attn}, cudagraph_runtime_mode=mode, attn_metadata={})
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: context)
+    dsa_v41.dsa_v41_forward(torch.zeros(4, 8), torch.empty(4, 8), "layer")
+    assert calls == (["narrow"] if enabled and mode == CUDAGraphMode.PIECEWISE else ["wide"])
+
+
+@torch.inference_mode()
+def test_piecewise_projections_use_current_metadata_and_clear_padding(monkeypatch):
+    """Reuse graph inputs across changing requests; do not retain dummy metadata."""
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(has_long_context=False, is_index_source=False, is_kv_source=False)
+    impl.multistream_dsv4_dsa_overlap = False
+    impl._get_layer_metadata = lambda metadata: metadata["layer"]
+    impl._prepare_indexer_inputs = lambda *args: None
+    impl._quantize_indexer_query = lambda *args: None
+    writes = []
+    impl._write_swa_cache = lambda attn, metadata, values: writes.append(values.clone())
+    monkeypatch.setattr(
+        AscendDSAV41Impl, "_apply_rotary", staticmethod(lambda attn, value, cos, sin, **kw: value.add_(cos))
+    )
+    impl._attend = lambda attn, hidden, metadata, q, qr, prepared: (
+        hidden.new_empty((0, 2, 2)) if metadata.swa.num_actual_tokens == 0 else q
+    )
+    impl._project_output = lambda attn, values, hidden, metadata, projected: projected.copy_(values.flatten(1))
+    attn = SimpleNamespace(
+        v41_impl=impl,
+        head_dim=2,
+        rotary_emb=SimpleNamespace(layername="rope"),
+        q_norm=torch.nn.Identity(),
+        kv_norm=torch.nn.Identity(),
+        wq_a=torch.nn.Identity(),
+        wq_b=torch.nn.Identity(),
+        wkv=lambda x: x[:, :2].clone(),
+    )
+    context = SimpleNamespace(no_compile_layers={"layer": attn})
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: context)
+    output = torch.empty(4, 4)
+    address = output.data_ptr()
+    for count, offset in [(4, 2), (1, 7), (0, 0), (3, 11)]:
+        hidden = torch.arange(16, dtype=torch.float32).view(4, 4)
+        expected = hidden.clone() + offset
+        expected[count:].zero_()
+        context.attn_metadata = {
+            "layer": SimpleNamespace(
+                swa=SimpleNamespace(num_actual_tokens=count),
+                rope=lambda name, n, offset=offset: (offset, 0),
+            )
+        }
+        assert impl.forward_piecewise(attn, hidden, output, "layer") is output
+        assert output.data_ptr() == address
+        torch.testing.assert_close(output, expected)
+    assert [x.shape[0] for x in writes] == [4, 1, 3]
 
 
 @pytest.mark.parametrize("otp_enabled,pcp_sharding", [(False, None), (False, False), (True, False), (False, True)])
