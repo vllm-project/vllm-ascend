@@ -2493,6 +2493,40 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_keys, queried)
         self.assertEqual(worker._step_load_keys, set(queried))
 
+    def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
+        operations = {"eq": 0, "hash": 0}
+
+        class CountedKey(str):
+            def __eq__(self, other: object) -> bool:
+                operations["eq"] += 1
+                return str.__eq__(self, other)
+
+            def __hash__(self) -> int:
+                operations["hash"] += 1
+                return str.__hash__(self)
+
+        count = 128
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request([f"h{index}" for index in range(count)])
+        worker._make_layerwise_full_key = lambda group, block_hash: CountedKey(f"full@{group}@{block_hash}")
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in range(1000, 1000 + count)]
+        refreshed = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in range(2000, 2000 + count)]
+        worker.m_store.batch_get_key_info.side_effect = [before, refreshed]
+        worker.m_store.batch_add_lease.return_value = [0] * count
+        operations["eq"] = operations["hash"] = 0
+
+        self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
+        lookup_work = sum(operations.values())
+
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), list(range(2000, 2000 + count)))
+        self.assertEqual(request.load_keys, [f"full@0@h{index}" for index in range(count)])
+        self.assertEqual(worker._step_load_keys, set(request.load_keys))
+        self.assertEqual(worker.m_store.batch_get_key_info.call_count, 2)
+        worker.m_store.batch_add_lease.assert_called_once()
+        # Bound key operations rather than elapsed time or implementation details;
+        # a separate linear scan for every refreshed block must fail this guard.
+        self.assertLessEqual(lookup_work, 16 * count)
+
     def test_layerwise_lease_refresh_keeps_sparse_success_indices(self):
         worker = self._make_gva_worker()
         request = self._make_multi_block_gva_request(["h0", "h1", "h2"])

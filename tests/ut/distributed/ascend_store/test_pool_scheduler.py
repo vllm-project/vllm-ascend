@@ -1087,6 +1087,50 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     assert list(scheduler._unfinished_requests) == unfinished_ids
 
 
+def test_connector_metadata_filter_has_linear_key_lookup_work():
+    operations = {"eq": 0, "hash": 0}
+
+    class CountedRequestId(str):
+        def __eq__(self, other: object) -> bool:
+            operations["eq"] += 1
+            return str.__eq__(self, other)
+
+        def __hash__(self) -> int:
+            operations["hash"] += 1
+            return str.__hash__(self)
+
+    count = 128
+    request_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
+    # Equal, distinct strings avoid identity shortcuts during membership checks.
+    cached_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
+    pending_ids = ["pending-b", "pending-a"]
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler.touch_sending_mamba_blocks = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=cached_ids),
+    )
+    operations["eq"] = operations["hash"] = 0
+
+    metadata = scheduler.build_connector_meta(output)
+    lookup_work = sum(operations.values())
+
+    assert [request.req_id for request in metadata.requests] == pending_ids
+    assert [call.args[0] for call in scheduler._process_async_load_request.call_args_list] == pending_ids
+    # Allow incidental linear bookkeeping without relying on a container type
+    # or wall-clock threshold. Repeated prefix scans exceed this generous bound.
+    assert lookup_work <= 16 * (count + len(pending_ids))
+
+
 class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
