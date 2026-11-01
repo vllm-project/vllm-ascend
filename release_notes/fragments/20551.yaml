@@ -1,0 +1,5 @@
+pr: 20551
+entries:
+  - category: feature
+    text: Enabled --use-replayssm on TP=1, PCP>1 GLM-5.3-Flash Mooncake prefill producers. Decode consumers retain PCP=1.
+    model: glm-5.3-flash
