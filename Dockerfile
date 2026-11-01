@@ -153,7 +153,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     git checkout 2e5320494cb474365bacaf42c94abf0c7de0affc && \
     git submodule update --init --recursive && \
     source /usr/local/Ascend/cann/set_env.sh && \
-    python3 setup.py install && \
+    FLASH_ATTN_BUILD_NPU=910 python3 setup.py install && \
     cd /workspace && \
     rm -rf /tmp/flash-attention-npu
 
