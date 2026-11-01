@@ -808,9 +808,10 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
-        request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
+        scheduled_request_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
+        scheduled_request_ids.update(cached_reqs.req_ids)
         for request_id, (request, block_ids) in self._unfinished_requests.items():
-            if request_id not in request_ids and request_id not in cached_reqs.req_ids:
+            if request_id not in scheduled_request_ids:
                 req_meta = self._process_async_load_request(request_id, request, block_ids)
                 if req_meta is not None:
                     self.touch_sending_mamba_blocks(req_meta)

@@ -1052,6 +1052,41 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
 
 
+@pytest.mark.parametrize(
+    ("unfinished_ids", "new_ids", "cached_ids", "expected_ids"),
+    [
+        (["b", "new", "cached", "both", "a"], [], [], ["b", "new", "cached", "both", "a"]),
+        (["b", "new", "cached", "both", "a"], ["new", "new", "both"], ["cached", "cached", "both"], ["b", "a"]),
+        (["b", "new", "cached", "both", "a"], ["a"], [], ["b", "new", "cached", "both"]),
+        (["b", "new", "cached", "both", "a"], [], ["b"], ["new", "cached", "both", "a"]),
+        ([], ["new", "new"], ["cached", "new"], []),
+    ],
+)
+def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_new_request = MagicMock(return_value=None)
+    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler.touch_sending_mamba_blocks = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[SimpleNamespace(req_id=req_id) for req_id in new_ids],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=cached_ids),
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert [request.req_id for request in metadata.requests] == expected_ids
+    assert [call.args[0] for call in scheduler._process_async_load_request.call_args_list] == expected_ids
+    assert list(scheduler._unfinished_requests) == unfinished_ids
+
+
 class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
