@@ -29,6 +29,10 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import ASSETS as GLM53FLASH_ASSETS
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import initialize_tensor as initialize_glm53flash_tensor
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import load_parameter_metadata
+
 
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
@@ -45,10 +49,12 @@ class WeightUpdateModelCase:
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
+    parameter_metadata_file: Path | None = None
+    tensor_initializer: Callable[[str, torch.Tensor], torch.Tensor] | None = None
+    server_env: tuple[tuple[str, str], ...] = ()
+    tokenizer: str | None = None
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
-    # Additional unpacked HCCL coverage for models omitted from one-card CI.
-    hccl_unpacked: bool = False
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -75,7 +81,7 @@ class WeightUpdateModelCase:
         ]
 
 
-# Qwen and GLM reduce only layer count. DeepSeek keeps the first four
+# Qwen reduces only layer count. DeepSeek keeps the first four
 # compress-ratio entries and reduces experts to fit the single-NPU IPC path;
 # its original top-6 routing remains unchanged and valid with eight experts.
 _DSV4_SELF_ATTN_RENAMES = (
@@ -245,25 +251,24 @@ MODEL_CASES = (
         ),
     ),
     WeightUpdateModelCase(
-        id="glm-5.1-sfa-derived-kv",
-        model="ZhipuAI/GLM-5.1",
-        hccl_unpacked=True,
-        hf_overrides={
-            "num_hidden_layers": 4,
-            # NPU IPC co-locates the trainer payload with the server on one
-            # chip, so 256 experts x 24 GiB of weights cannot fit alongside the
-            # reload headroom on a 64 GiB device. Mirror the DeepSeek case's
-            # single-chip IPC budget by keeping only the first 8 experts.
-            "n_routed_experts": 8,
-        },
-        # No skip_reason left. The "SFA runtime-weight refresh" this case used to
-        # wait for is not a prerequisite: the state that *is* weight-derived (the
-        # KPool indexer's FP32 _wk/_gate/_norm copies, SFA's W_UK_T/W_UV) is
-        # re-derived by the layerwise reload, which finalizes deferred attention
-        # layers through process_weights_after_loading. The level-2 half is fixed
-        # by owning SFA/MLA runtime state as non-persistent buffers: the LI C8
-        # Hadamard matrices, the DCP remap order/sentinel, the DeepSeek-V4 DSA RoPE
-        # tables and the interleaved RoPE tables the MLA/SFA rope lookups read.
+        id="glm-5.3-flash-kda-sfa-mhc",
+        model=str(GLM53FLASH_ASSETS.resolve()),
+        hf_overrides={},
+        # Transformers cannot enumerate this architecture; use the published
+        # checkpoint headers reduced to four text layers and eight experts.
+        parameter_metadata_file=GLM53FLASH_ASSETS / "parameter_metadata.json",
+        tensor_initializer=initialize_glm53flash_tensor,
+        server_env=(("VLLM_USE_V2_MODEL_RUNNER", "0"),),
+        tokenizer="ZhipuAI/GLM-5.3-Flash",
+        extra_server_args=(
+            "--block-size",
+            "128",
+            "--max-num-seqs",
+            "1",
+            "--max-num-batched-tokens",
+            "512",
+            "--no-enable-prefix-caching",
+        ),
     ),
     WeightUpdateModelCase(
         id="minimax-m3-sparse-moe-layout",
@@ -371,9 +376,7 @@ def pytest_model_cases(backend: str) -> list[Any]:
         )
         for packed in (False, True)
         for case in MODEL_CASES
-        if (backend == "npu_ipc" and not packed)
-        or case.full_transfer_matrix
-        or (backend == "hccl" and not packed and case.hccl_unpacked)
+        if (backend == "npu_ipc" and not packed) or case.full_transfer_matrix
     ]
 
 
@@ -452,6 +455,12 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
+        if case.parameter_metadata_file is not None:
+            self._case = case
+            self._parameters = load_parameter_metadata(case.parameter_metadata_file)
+            self._device = device
+            self._num_experts = 0  # The static BF16 fixture has no integer tables.
+            return
         config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
@@ -546,6 +555,9 @@ class FixedRandomWeightSource(WeightSource):
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)
         tensor = torch.empty(shape, dtype=dtype, device=self._device)
+        if self._case.tensor_initializer is not None:
+            tensor.uniform_(-0.02, 0.02)
+            return self._case.tensor_initializer(name, tensor)
         if name.endswith("norm.weight"):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)
@@ -587,7 +599,9 @@ class FixedRandomWeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        local_config = Path(self._case.model) / "config.json"
+        config_path = local_config if local_config.is_file() else hf_hub_download(self._case.model, "config.json")
+        shutil.copyfile(config_path, target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
@@ -628,7 +642,7 @@ def _common_serve_args(
         "bfloat16",
         "--compilation-config",
         FULL_DECODE_ONLY_CONFIG,
-        # The one-card NPU IPC lane is a same-chip deployment: the co-located
+        # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
         # trainer only gets the HBM it needs once the rollout engine sleeps, so
         # the lane releases the engine with a level-2 sleep before every
         # transfer. That requires the CaMem pool, and both builders enable it so
@@ -647,6 +661,7 @@ def _common_serve_args(
         "--additional-config",
         '{"weight_nz_mode": 0}',
         *case.server_args(),
+        *(["--tokenizer", case.tokenizer] if case.tokenizer else []),
     ]
 
 
@@ -688,7 +703,7 @@ def reference_serve_args(
     """
     return [
         "--tokenizer",
-        case.model,
+        case.tokenizer or case.model,
         "--served-model-name",
         case.model,
         *_common_serve_args(
@@ -778,7 +793,8 @@ def reference_signature(
     if cached is not None:
         return cached
 
-    wait_for_free_device_memory(device_index, gpu_memory_utilization)
+    for rank in range(tensor_parallel_size):
+        wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
     with (
         fixed_startup_checkpoint(source) as checkpoint_dir,
         RemoteOpenAIServer(
