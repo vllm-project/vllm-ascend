@@ -32,13 +32,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
-from tests.e2e.pull_request.rlhf.weight_transfer_models.deepseek import DEEPSEEK_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import MODEL_CASES, pytest_model_cases
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+from tests.e2e.pull_request.rlhf.weight_transfer import utils
+from tests.e2e.pull_request.rlhf.weight_transfer.models.deepseek import DEEPSEEK_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer.models.glm import GLM_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer.models.qwen import QWEN_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer.models.registry import MODEL_CASES, pytest_model_cases
+from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
@@ -262,6 +262,15 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             {"model.layers.0.mlp.gate.tid2eid": ((16, 2), torch.int64)},
             {},
             id="deepseek-v4-integer-table",
+        ),
+        pytest.param(
+            "ZhipuAI/GLM-5.1",
+            3,
+            "model.layers.3.mlp.gate",
+            (("e_score_correction_bias", (8,), torch.float32, True),),
+            {},
+            {"model.layers.3.mlp.gate.e_score_correction_bias": ((8,), torch.float32)},
+            id="glm-5.1-fp32-router-bias",
         ),
         pytest.param(
             "MiniMax/MiniMax-M3",

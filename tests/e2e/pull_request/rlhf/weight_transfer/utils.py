@@ -27,7 +27,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
 
 
 def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
@@ -170,11 +170,7 @@ class FixedRandomWeightSource(WeightSource):
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = (
-                case.meta_model_factory(meta_config)
-                if case.meta_model_factory is not None
-                else AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
-            )
+            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
         persistent_state_names = set(meta_model.state_dict())
 
         # Apply the namespace prefix before expanding fused tensors, then map
@@ -263,9 +259,6 @@ class FixedRandomWeightSource(WeightSource):
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)
         tensor = torch.empty(shape, dtype=dtype, device=self._device)
-        if self._case.tensor_initializer is not None:
-            tensor.uniform_(-0.02, 0.02)
-            return self._case.tensor_initializer(name, tensor)
         if name.endswith("norm.weight"):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)

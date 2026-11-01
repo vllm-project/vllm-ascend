@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN35_CASE
-from tests.e2e.pull_request.rlhf.weight_transfer_runners import common
+from tests.e2e.pull_request.rlhf.weight_transfer.models.qwen import QWEN35_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer.runners import common
 
 
 @pytest.mark.parametrize(("backend", "tp"), [("npu_ipc", 2), ("hccl", 1)])

@@ -5,10 +5,10 @@
 
 import pytest
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import pytest_model_cases
-from tests.e2e.pull_request.rlhf.weight_transfer_runners.npu_ipc import run_npu_ipc_weight_transfer_transaction
+from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer.models.registry import pytest_model_cases
+from tests.e2e.pull_request.rlhf.weight_transfer.runners.npu_ipc import run_npu_ipc_weight_transfer_transaction
 
 
 @pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc", model_cases=MINIMAX_CASES))

@@ -8,8 +8,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import torch
-
 
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
@@ -26,8 +24,6 @@ class WeightUpdateModelCase:
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
-    meta_model_factory: Callable[[Any], torch.nn.Module] | None = None
-    tensor_initializer: Callable[[str, torch.Tensor], torch.Tensor] | None = None
     server_env: tuple[tuple[str, str], ...] = ()
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False

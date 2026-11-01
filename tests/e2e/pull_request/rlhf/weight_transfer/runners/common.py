@@ -8,8 +8,8 @@ import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
     FixedRandomWeightSource,
     generation_signature,
     live_update_serve_args,

@@ -5,7 +5,7 @@
 
 import regex as re
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
 
 _DSV4_SELF_ATTN_RENAMES = (
     # Descriptive HF names -> the compact names the checkpoint/loader expect.

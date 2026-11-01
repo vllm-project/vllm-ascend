@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import torch
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_M3_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_M3_CASE
 from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 
