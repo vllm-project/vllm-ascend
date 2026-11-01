@@ -532,7 +532,7 @@ __aicore__ inline void VFComputeData(const LocalTensor<U>& xQuantLocal,  const L
             xLocalAddr = xOriginLocalAddr + i * xCurColNumAlign;
             invScaleLocalAddr = invScaleOriginLocalAddr + i * scaleCurColNumAlign;
             xQuantLocalAddr = xQuantOriginLocalAddr + i * xQuantCurColNumAlign;
-            for (uint16_t i = 0; i < loopCount; i++) {
+            for (uint16_t j = 0; j < loopCount; j++) {
                 maskXQuant0B32 = UpdateMask<float>(remainingCols);
                 maskXQuant1B32 = UpdateMask<float>(remainingCols);
                 maskXQuant2B32 = UpdateMask<float>(remainingCols);

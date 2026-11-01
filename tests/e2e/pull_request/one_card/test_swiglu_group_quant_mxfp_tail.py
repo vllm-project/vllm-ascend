@@ -12,7 +12,7 @@ from vllm_ascend.utils import bootstrap_custom_op_env
 
 @pytest.fixture(scope="module", autouse=True)
 def load_custom_ops():
-    if "950" not in torch.npu.get_device_name(0):
+    if not torch.npu.is_available() or "950" not in torch.npu.get_device_name(0):
         pytest.skip("MXFP group quantization requires Ascend 950")
     bootstrap_custom_op_env()
     importlib.import_module("vllm_ascend.vllm_ascend_C")
