@@ -42,6 +42,8 @@ pytestmark = pytest.mark.usefixtures("keypool_kernels")
 
 @pytest.fixture
 def keypool_kernels(monkeypatch):
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+
     def metadata(common, buffers, tokens, *_, **kwargs):
         n = common.num_reqs
         keys = "positions slot_mapping seq_lens raw_seq_lens query_start_loc cum_query_lens start_pos pool_tail"
@@ -687,7 +689,7 @@ def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels,
         metadata = builder.build_for_drafting(common, 1)
     elif mode == "stream_capture":
         with (
-            patch("torch.npu.is_current_stream_capturing", return_value=True),
+            patch.object(torch.npu, "is_current_stream_capturing", return_value=True),
             patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError),
         ):
             metadata = builder.build(0, common)
@@ -722,7 +724,7 @@ def test_query_routing_is_limited_to_pure_prefills_outside_kv_consumers(keypool_
     common.is_prefilling = flags[phase]
     eligible = phase == "prefill" and role in (None, "producer")
     with (
-        patch("torch.npu.is_current_stream_capturing", return_value=False) as capturing,
+        patch.object(torch.npu, "is_current_stream_capturing", return_value=False) as capturing,
         patch.object(torch.Tensor, "cpu", side_effect=AssertionError("unexpected D2H")),
     ):
         metadata = _builder(config).build(0, common)
