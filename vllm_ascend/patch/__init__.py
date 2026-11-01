@@ -620,7 +620,28 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 19. File: platform/patch_qwen4_exp_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.config.Qwen4ExpForConditionalGenerationConfig.verify_and_update_config`
+#    Why:
+#       Upstream configuration validation rejects Qwen4-Exp models that combine
+#       PLE layers with pipeline parallelism, although the Ascend implementation
+#       assigns PLE state and cache ownership per PP stage and supports this
+#       configuration. The validation therefore prevents a supported PP service
+#       from starting.
+#    How:
+#       For PP configurations with PLE enabled, temporarily hide `ple_layer_ids`
+#       while running the upstream validator, then restore the original layer
+#       IDs in a `finally` block. DBO or micro-batched configurations still use
+#       upstream validation unchanged because that combination is unsupported.
+#    Related PR (if no, explain why):
+#       No upstream PR currently covers the Ascend-specific stage-local PLE
+#       implementation.
+#    Future Plan:
+#       Remove this patch when upstream Qwen4-Exp configuration validation
+#       supports PLE with pipeline-parallel, stage-local ownership.
+#
+# ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -681,7 +702,7 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 21. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -742,7 +763,7 @@
 #       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
 #       pinned.
 #
-# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
+# ** 22. File: platform/patch_swa_bounded_replay.py (V1 resume)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
 #   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
@@ -772,7 +793,7 @@
 #       Remove this patch once upstream carries the replay start on the V1
 #       resume path as well, i.e. once `CachedRequestData` declares the field.
 #
-# ** 21. File: platform/patch_torch_accelerator.py**
+# ** 23. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -792,7 +813,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 22. File: platform/patch_tool_choice_none_content.py**
+# ** 24. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -808,7 +829,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 23. File: platform/patch_use_v2_model_runner.py**
+# ** 25. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:

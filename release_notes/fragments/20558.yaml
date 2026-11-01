@@ -1,0 +1,5 @@
+pr: 20558
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.8 Flash Next MTP draft QSA projection selection under pipeline parallelism, restoring speculative-token acceptance on Ascend.
+    model: Qwen3.8 Flash Next
