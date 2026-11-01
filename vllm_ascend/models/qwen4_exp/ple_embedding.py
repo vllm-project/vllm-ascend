@@ -29,8 +29,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
                 self._shared_group = group
             else:
                 logger.info(
-                    "PLE dp_shared_memory requested but no local DP peers; "
-                    "falling back to private host tables."
+                    "PLE dp_shared_memory requested but no local DP peers; falling back to private host tables."
                 )
         try:
             super().__init__(*args, **kwargs)
