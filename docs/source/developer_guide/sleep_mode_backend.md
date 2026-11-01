@@ -44,6 +44,8 @@ HCCL suspend/resume, durable checkpoints or selective discard. All upstream
 preservation capability methods remain conservatively false. The legacy adapter
 retains the previous lifecycle ordering. A backend `close()` never wakes
 discarded weights or destroys borrowed allocator / process-group resources.
+Backend close is idempotent; worker shutdown retains the existing cleanup
+behavior so a failed profiler, transfer or runner teardown can be retried.
 
 CaMem marks a successfully released physical handle empty while retaining its
 virtual reservation. Deleting a sleeping tensor then releases only its virtual
