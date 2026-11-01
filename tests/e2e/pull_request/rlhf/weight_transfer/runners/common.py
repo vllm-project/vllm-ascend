@@ -44,7 +44,6 @@ def weight_transfer_servers(
     The reference server must release every TP device before the live-update
     server starts. Both use the case's environment and the same generated W.
     """
-    env_dict = {**dict(case.server_env), **env_dict}
     reference = reference_signature(
         source,
         case,

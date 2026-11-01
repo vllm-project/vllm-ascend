@@ -24,7 +24,6 @@ class WeightUpdateModelCase:
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
-    server_env: tuple[tuple[str, str], ...] = ()
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
