@@ -36,7 +36,6 @@ from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import pytest_model_cases
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
@@ -73,12 +72,9 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     return response
 
 
-@pytest.mark.skipif(
-    torch.npu.device_count() < 2,
-    reason="HCCL weight transfer e2e test requires at least 2 NPUs.",
-)
-@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl"))
-def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+    if torch.npu.device_count() < 2:
+        pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
     if packed:

@@ -33,6 +33,10 @@ import pytest
 import torch
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
+from tests.e2e.pull_request.rlhf.weight_transfer_models.deepseek import DEEPSEEK_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN_CASES
 from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import MODEL_CASES, pytest_model_cases
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     live_update_serve_args,
@@ -68,6 +72,18 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
 def test_model_matrix_rejects_unknown_backend():
     with pytest.raises(ValueError, match="Unsupported weight transfer backend"):
         pytest_model_cases("unknown")
+
+
+@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
+@pytest.mark.parametrize(
+    "model_cases",
+    [QWEN_CASES, GLM_CASES, MINIMAX_CASES, DEEPSEEK_CASES],
+    ids=["qwen", "glm", "minimax", "deepseek"],
+)
+def test_family_selection_preserves_parameters_and_markers(backend, model_cases):
+    expected = [parameter for parameter in pytest_model_cases(backend) if parameter.values[0] in model_cases]
+    actual = pytest_model_cases(backend, model_cases=model_cases)
+    assert actual == expected
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:

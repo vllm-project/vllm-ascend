@@ -102,3 +102,6 @@ DEEPSEEK_V4_CASE = WeightUpdateModelCase(
         "lane has an open problem with the model as well"
     ),
 )
+
+
+DEEPSEEK_CASES = (DEEPSEEK_V4_CASE,)

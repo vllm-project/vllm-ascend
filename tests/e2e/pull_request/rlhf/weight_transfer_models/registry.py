@@ -5,15 +5,16 @@
 
 from typing import Any
 
-from tests.e2e.pull_request.rlhf.weight_transfer_models.deepseek import DEEPSEEK_V4_CASE
-from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM53_FLASH_CASE
-from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_M3_CASE
-from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN35_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer_models.deepseek import DEEPSEEK_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.glm import GLM_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.rlhf.weight_transfer_models.qwen import QWEN_CASES
 
-MODEL_CASES = (QWEN35_CASE, DEEPSEEK_V4_CASE, GLM53_FLASH_CASE, MINIMAX_M3_CASE)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES, *MINIMAX_CASES)
 
 
-def pytest_model_cases(backend: str) -> list[Any]:
+def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
     """Select model lanes and full transport coverage on a representative."""
     import pytest
 
@@ -27,6 +28,6 @@ def pytest_model_cases(backend: str) -> list[Any]:
             marks=pytest.mark.e2e_model(case.model),
         )
         for packed in (False, True)
-        for case in MODEL_CASES
+        for case in model_cases
         if (backend == "npu_ipc" and not packed) or case.full_transfer_matrix
     ]

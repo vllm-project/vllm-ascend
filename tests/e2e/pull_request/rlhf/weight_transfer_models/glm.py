@@ -102,3 +102,6 @@ GLM53_FLASH_CASE = WeightUpdateModelCase(
         "--no-enable-prefix-caching",
     ),
 )
+
+
+GLM_CASES = (GLM53_FLASH_CASE,)

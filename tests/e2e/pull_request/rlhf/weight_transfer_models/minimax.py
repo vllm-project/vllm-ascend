@@ -84,3 +84,6 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
     split_fused_mlp=True,
     extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
 )
+
+
+MINIMAX_CASES = (MINIMAX_M3_CASE,)

@@ -27,3 +27,6 @@ QWEN35_CASE = WeightUpdateModelCase(
     meta_config_attribute="text_config",
     checkpoint_model_prefix="model.language_model.",
 )
+
+
+QWEN_CASES = (QWEN35_CASE,)

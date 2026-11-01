@@ -48,7 +48,6 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer_models.registry import pytest_model_cases
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
@@ -119,12 +118,9 @@ def _ipc_trainer_peer(_local_rank: int, case: WeightUpdateModelCase, packed: boo
         dist.destroy_process_group()
 
 
-@pytest.mark.skipif(
-    torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE,
-    reason="NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.",
-)
-@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc"))
-def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+    if torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
+        pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
     if packed:
