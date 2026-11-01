@@ -141,6 +141,8 @@ def _load_patch_distributed_module():
     vllm_module: Any = ModuleType("vllm")
     vllm_distributed: Any = ModuleType("vllm.distributed")
     parallel_state_module: Any = ModuleType("vllm.distributed.parallel_state")
+    vllm_distributed_utils: Any = ModuleType("vllm.distributed.utils")
+    vllm_distributed_utils.get_cpu_distributed_timeout_or_none = lambda: None
 
     class BaseGroupCoordinator:
         pass
@@ -166,6 +168,7 @@ def _load_patch_distributed_module():
     shm_broadcast_module.MessageQueue = MessageQueue
 
     vllm_distributed.parallel_state = parallel_state_module
+    vllm_distributed.utils = vllm_distributed_utils
     vllm_distributed.destroy_distributed_environment = destroy_distributed_environment
     vllm_module.distributed = vllm_distributed
 
@@ -198,6 +201,7 @@ def _load_patch_distributed_module():
         "vllm": vllm_module,
         "vllm.distributed": vllm_distributed,
         "vllm.distributed.parallel_state": parallel_state_module,
+        "vllm.distributed.utils": vllm_distributed_utils,
         "vllm.distributed.device_communicators.shm_broadcast": shm_broadcast_module,
         "vllm_ascend": vllm_ascend_module,
         "vllm_ascend.patch": vllm_ascend_patch,
