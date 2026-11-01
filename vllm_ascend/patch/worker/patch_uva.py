@@ -89,8 +89,9 @@ class MonitoredNumPyArray:
     def __setitem__(self, key, value):
         self._array[key] = value
         dim_size = self._array.shape[0]
-        if self._prefix_callback is not None and isinstance(key, slice):
-            start, stop, step = key.indices(dim_size)
+        slice_key = key[0] if isinstance(key, tuple) and key else key
+        if self._prefix_callback is not None and isinstance(slice_key, slice):
+            start, stop, step = slice_key.indices(dim_size)
             if start == 0 and step == 1:
                 self._prefix_callback(stop)
                 return
@@ -116,8 +117,9 @@ class MonitoredTorchTensor:
     def __setitem__(self, key, value):
         self._tensor[key] = value
         dim_size = self._tensor.size(0)
-        if self._prefix_callback is not None and isinstance(key, slice):
-            start, stop, step = key.indices(dim_size)
+        slice_key = key[0] if isinstance(key, tuple) and key else key
+        if self._prefix_callback is not None and isinstance(slice_key, slice):
+            start, stop, step = slice_key.indices(dim_size)
             if start == 0 and step == 1:
                 self._prefix_callback(stop)
                 return
@@ -208,10 +210,13 @@ class UvaBufferWrapper:
         dirty_rows = sorted(row for row in self._modified_indices if row >= prefix_end)
         if dirty_rows:
             n_dirty = len(dirty_rows)
-            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
-                # Individual row marks can also cover a contiguous prefix.
+            start_row = dirty_rows[0]
+            if dirty_rows[-1] - start_row == n_dirty - 1:
+                # Individual row marks can cover any contiguous range.
                 # Slice copy_ preserves the pinned source for async DMA.
-                _int64_storage(self._uva[:n_dirty]).copy_(_int64_storage(self._cpu[:n_dirty]), non_blocking=True)
+                _int64_storage(self._uva[start_row : start_row + n_dirty]).copy_(
+                    _int64_storage(self._cpu[start_row : start_row + n_dirty]), non_blocking=True
+                )
             else:
                 # Sparse modification pattern — fall back to indexed copy.
                 # Explicitly re-pin the CPU source so that non_blocking is
