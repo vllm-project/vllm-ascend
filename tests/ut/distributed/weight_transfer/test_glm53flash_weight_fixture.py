@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU checks for the offline Flash fixture's architecture and payload contract."""
+"""CPU checks for native GLM-5.3-Flash checkpoint metadata and initialization."""
 
-import json
 import math
+from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import Glm5NextConfig
 
-from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import ASSETS, initialize_tensor, load_parameter_metadata
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import initialize_tensor
+from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import MODEL_CASES, FixedRandomWeightSource
 
 
 def test_checkpoint_metadata_covers_the_reduced_model():
-    parameters = load_parameter_metadata(ASSETS / "parameter_metadata.json")
+    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    config = Glm5NextConfig(text_config={"index_kpool": 4, **case.hf_overrides["text_config"]})
+    with patch(
+        "tests.e2e.pull_request.rlhf.weight_transfer_test_utils.AutoConfig.from_pretrained", return_value=config
+    ):
+        source = FixedRandomWeightSource(case, torch.device("cpu"))
+    parameters = [(meta.name, meta.shape, meta.dtype) for meta in source.metadata()]
     shapes = {name: shape for name, shape, _ in parameters}
     assert len(shapes) == 132
     assert shapes["model.embed_tokens.weight"] == shapes["lm_head.weight"] == (154880, 4096)
@@ -33,7 +41,11 @@ def test_checkpoint_metadata_covers_the_reduced_model():
             for expert in range(8):
                 for projection in ("gate", "up", "down"):
                     assert f"model.layers.3.mlp.experts.{expert}.{projection}_proj.weight" in shapes
-    assert all(dtype == torch.bfloat16 for _, _, dtype in parameters)
+    # Native persistent correction bias retains FP32, like M3. Parameters use BF16.
+    assert {name for name, _, dtype in parameters if dtype == torch.float32} == {
+        "model.layers.3.mlp.gate.e_score_correction_bias"
+    }
+    assert all(dtype in (torch.bfloat16, torch.float32) for _, _, dtype in parameters)
     assert not any("weight_scale" in name or "visual" in name or "layers.4." in name for name in shapes)
     assert not any("experts.8." in name or "language_model" in name for name in shapes)
     # Production widths remain, but the single-card test payload is under 5 GiB.
@@ -60,11 +72,3 @@ def test_synthetic_initialization_is_bounded(name, expected):
     assert result is tensor
     assert torch.isfinite(result).all()
     torch.testing.assert_close(result, torch.full_like(result, expected))
-
-
-@pytest.mark.parametrize("entries", [[], [{"name": "x", "shape": [1]}] * 2, [{"name": "x", "shape": [0]}]])
-def test_invalid_metadata_fails_before_transfer(tmp_path, entries):
-    path = tmp_path / "metadata.json"
-    path.write_text(json.dumps(entries), encoding="utf-8")
-    with pytest.raises(ValueError):
-        load_parameter_metadata(path)

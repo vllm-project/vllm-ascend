@@ -29,9 +29,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import ASSETS as GLM53FLASH_ASSETS
+from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import build_meta_model as build_glm53flash_meta_model
 from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import initialize_tensor as initialize_glm53flash_tensor
-from tests.e2e.pull_request.rlhf.glm53flash_weight_fixture import load_parameter_metadata
 
 
 @dataclass(frozen=True)
@@ -49,7 +48,7 @@ class WeightUpdateModelCase:
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
-    parameter_metadata_file: Path | None = None
+    meta_model_factory: Callable[[Any], torch.nn.Module] | None = None
     tensor_initializer: Callable[[str, torch.Tensor], torch.Tensor] | None = None
     server_env: tuple[tuple[str, str], ...] = ()
     # One representative model covers both backends and packing modes.
@@ -272,9 +271,9 @@ MODEL_CASES = (
                 },
             },
         },
-        # AutoModelForCausalLM has no GLM-5.3 text entry. Keep checkpoint-header
-        # metadata for the reduced model independently of vLLM runtime fusion.
-        parameter_metadata_file=GLM53FLASH_ASSETS / "parameter_metadata.json",
+        meta_config_attribute="text_config",
+        trust_remote_code=False,
+        meta_model_factory=build_glm53flash_meta_model,
         tensor_initializer=initialize_glm53flash_tensor,
         server_env=(("VLLM_USE_V2_MODEL_RUNNER", "0"),),
         extra_server_args=(
@@ -472,18 +471,16 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        if case.parameter_metadata_file is not None:
-            self._case = case
-            self._parameters = load_parameter_metadata(case.parameter_metadata_file)
-            self._device = device
-            self._num_experts = 0  # The static BF16 fixture has no integer tables.
-            return
         config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
+            meta_model = (
+                case.meta_model_factory(meta_config)
+                if case.meta_model_factory is not None
+                else AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
+            )
         persistent_state_names = set(meta_model.state_dict())
 
         # Apply the namespace prefix before expanding fused tensors, then map

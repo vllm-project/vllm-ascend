@@ -1,35 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checkpoint metadata and bounded synthetic GLM-5.3-Flash weights.
-
-The shapes come from published safetensors headers, not a served-model parameter
-enumeration. This keeps the startup-load oracle independent of runtime fusion.
-Adapted from PR #19828, commit b979486b166647b2317fedfe1f18ac3d4279d124.
-The metadata retains four text layers and eight experts, removes FP8 scales,
-and changes the published model.language_model prefix to model.
-No checkpoint tensor data or Transformers remote model code is needed.
-"""
-
-import json
-from pathlib import Path
+"""Checkpoint-facing meta model and synthetic GLM-5.3-Flash initialization."""
 
 import torch
+from transformers import AutoModel, PretrainedConfig
 
-ASSETS = Path(__file__).with_name("glm53flash_assets")
 
+def build_meta_model(config: PretrainedConfig) -> torch.nn.Module:
+    """Enumerate native HF text weights in the published checkpoint layout.
 
-def load_parameter_metadata(path: Path) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
-    entries = json.loads(path.read_text(encoding="utf-8"))
-    names = [entry["name"] for entry in entries]
-    if not entries or len(names) != len(set(names)):
-        raise ValueError("GLM-5.3-Flash checkpoint metadata must be nonempty with unique names")
-    parameters = []
-    for entry in entries:
-        shape = tuple(entry["shape"])
-        if not shape or any(not isinstance(dim, int) or dim <= 0 for dim in shape):
-            raise ValueError(f"Invalid checkpoint shape for {entry['name']}: {shape}")
-        parameters.append((entry["name"], shape, torch.bfloat16))
-    return parameters
+    AutoModelForCausalLM has no GLM-5.3 text entry, so attach a metadata-only
+    LM head to AutoModel's text backbone. Normalize mHC/forget-gate namespaces
+    and split the fused KDA convolution into checkpoint q/k/v modules. This
+    adapter is only constructed on meta; its forward pass is never used.
+    Routed experts are expanded by the shared weight source as for other cases.
+    """
+    model = torch.nn.Module()
+    model.model = AutoModel.from_config(config, trust_remote_code=False)
+    model.lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+    for layer in model.model.layers:
+        for branch in ("attn", "ffn"):
+            connection = getattr(layer, f"{branch}_hc")
+            for name, parameter in connection.named_parameters():
+                layer.register_parameter(f"hc_{branch}_{name}", parameter)
+            delattr(layer, f"{branch}_hc")
+        attention = layer.self_attn
+        if hasattr(attention, "forget_gate"):
+            for name, module in attention.forget_gate.named_children():
+                attention.add_module(name, module)
+            for name, parameter in attention.forget_gate.named_parameters(recurse=False):
+                attention.register_parameter(name, parameter)
+            del attention.forget_gate
+            for projection, weight in zip(("q", "k", "v"), attention.conv1d.weight.chunk(3, dim=0), strict=True):
+                convolution = torch.nn.Module()
+                convolution.register_parameter("weight", torch.nn.Parameter(weight))
+                attention.add_module(f"{projection}_conv1d", convolution)
+            del attention.conv1d
+    return model
 
 
 def initialize_tensor(name: str, tensor: torch.Tensor) -> torch.Tensor:

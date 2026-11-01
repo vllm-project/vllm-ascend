@@ -401,13 +401,11 @@ def test_minimax_checkpoint_source_splits_fused_projections():
     assert actual == {name: ((6, 16), torch.bfloat16) for name in expected_names}
 
 
-def test_glm53flash_source_uses_published_metadata():
+def test_glm53flash_case_configuration():
     case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
-    with patch.object(utils.AutoConfig, "from_pretrained") as config_loader:
-        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
-    config_loader.assert_not_called()
-    assert len(source.metadata()) == 132
-    assert all(meta.dtype == torch.bfloat16 for meta in source.metadata())
+    assert case.meta_model_factory is utils.build_glm53flash_meta_model
+    assert case.meta_config_attribute == "text_config"
+    assert not case.trust_remote_code
     assert not case.full_transfer_matrix
     assert dict(case.server_env) == {"VLLM_USE_V2_MODEL_RUNNER": "0"}
     assert case.model == "ZhipuAI/GLM-5.3-Flash"
@@ -421,6 +419,3 @@ def test_glm53flash_source_uses_published_metadata():
     assert text_config["mlp_layer_types"] == ["dense"] * 3 + ["sparse"]
     assert text_config["linear_attn_config"]["kda_layers"] == [0, 1, 2]
     assert text_config["linear_attn_config"]["full_attn_layers"] == [3]
-    with patch.object(torch.npu, "manual_seed"):
-        tensor = source._make_tensor("model.layers.0.self_attn.dt_bias", (64,))
-    torch.testing.assert_close(tensor, torch.full((64,), -2.0, dtype=torch.bfloat16))
