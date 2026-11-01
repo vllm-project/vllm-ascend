@@ -8,6 +8,13 @@ AscendStore 将模型计算产生的 KV 缓存保存到外部存储，让后续�
 
 ![AscendStore v1 总体职责：Connector 直接装配 Scheduler 与 Worker，业务层组合基础设施并调用 Backend](../../assets/ascendstore_v1/architecture_layers.svg)
 
+| 设计选择 | 直接作用 |
+| --- | --- |
+| 业务准备与传输执行分离，Bulk / Layerwise 共用业务流程 | 选块、归属和结果处理复用，传输粒度与时序独立组织 |
+| 绑定时推导稳定布局，运行时批量求值 | 复用分区、段模板与层偏移，减少请求期间的布局准备 |
+| 按统一几何规则合并传输段 | 保持对象内容与边界，减少 Backend 传输描述符 |
+| 沿既有身份推进过滤、传输和完成，分别管理业务状态与资源释放 | 减少归属重建，让异步与失败路径保留完整的结果和资源交接 |
+
 Connector 在 Scheduler 和 Worker 进程中分别实例化。查询与缓存控制通过独立 RPC 交接；Scheduler 经 vLLM Connector 元数据下发 Load / Store 命令，Worker 向框架交回 Load 完成与失败信息，并向 Scheduler 交回需要归还的 Store 源引用回执。KV 字节经 Backend 传输。
 
 资源所有权与调用关系分开：Service / Transfer 使用 Backend，Resources 保留客户端、注册句柄及对象会话，直到业务排空并确认内存安全后才释放。
